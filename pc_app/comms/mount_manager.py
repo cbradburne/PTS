@@ -51,6 +51,13 @@ log = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_MS  = 1000
 HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
 
+# Idle probe: if no ACK-tracked command has been sent for this long, send a
+# read-only GET_CONFIG to each connected mount.  GET_CONFIG IS ack-tracked, so
+# it exercises the PC→hub command path and lets the bridge detect (and recover
+# from) a wedge even when the user isn't operating the system — instead of the
+# wedge only surfacing the next time the user presses a button.
+IDLE_PROBE_INTERVAL_S  = 3.0
+
 
 @dataclass
 class MountState_:
@@ -459,6 +466,15 @@ class MountManager(QObject):
             return
 
         self._send(pkt_ping(MOUNT_BROADCAST))
+
+        # Idle probe — keep the OUT pipe exercised so a wedge is detected while
+        # the system sits unattended, not only when the user next acts.  Only
+        # fires when no tracked command has gone out recently, so it adds nothing
+        # during active operation.  GET_CONFIG is read-only and ack-tracked.
+        if self._bridge.seconds_since_tracked_tx() >= IDLE_PROBE_INTERVAL_S:
+            for mid, st in self._states.items():
+                if st.connected:
+                    self.send_get_config(mid)
 
         now_ms = time.monotonic() * 1000
         for mid, st in self._states.items():

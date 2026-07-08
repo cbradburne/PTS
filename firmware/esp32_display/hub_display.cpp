@@ -2709,7 +2709,9 @@ static void lvgl_task_fn(void *arg) {
                 } else {
                     // Home / status screen — refresh tile dot colours.
                     for (int i = 0; i < 5; i++) {
-                        if (!cam_is_look_at(i) || !_tile_slot[i][0]) continue;
+                        // Never repaint slots for an offline camera — its _slots
+                        // data may be stale and would show phantom saved-position dots.
+                        if (!_cam[i].connected || !cam_is_look_at(i) || !_tile_slot[i][0]) continue;
                         const TileSlots &sl = _slots[i];
                         for (int s = 0; s < 10; s++) {
                             uint16_t bit = (uint16_t)(1u << s);
@@ -2780,7 +2782,23 @@ void hub_display_init(hub_send_fn_t send_cb) {
 }
 
 void hub_ui_tick() {
-    // lv_timer_handler() driven by lvgl_task_fn — nothing to do here
+    // lv_timer_handler() is driven by lvgl_task_fn — no LVGL work here.
+    //
+    // Staleness sweep: a cam tile is only ever cleared by SET_DISCONNECTED from
+    // the hub, but that message is sent once and can be lost (this side drops it
+    // if the LVGL mutex is busy >100 ms; the hub forgets its state on reboot).
+    // A lost clear used to latch a phantom "connected" tile forever — the ghost
+    // cam3 0 dBm/JOGGING bug.  Self-heal instead: mounts stream STATUS →
+    // UPDATE_CAM many times per second while genuinely connected, so any tile
+    // not refreshed within 5 s is stale and gets cleared locally.
+    static uint32_t _last_stale_check_ms = 0;
+    uint32_t now = millis();
+    if (now - _last_stale_check_ms < 1000) return;
+    _last_stale_check_ms = now;
+    for (int i = 0; i < 5; i++) {
+        if (_cam[i].connected && now - _cam[i].last_seen_ms > 5000)
+            hub_ui_set_disconnected(i + 1);
+    }
 }
 
 void hub_ui_update_cam(uint8_t mount_id,
@@ -2789,34 +2807,58 @@ void hub_ui_update_cam(uint8_t mount_id,
     int i = mount_id - 1;
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
 
-    bool look_at_changed = (_cam[i].flags & FLAG_LOOK_AT_MODE) != (flags & FLAG_LOOK_AT_MODE);
-    _cam[i].connected = true;
-    _cam[i].state     = state;
-    _cam[i].flags     = flags;
-    _cam[i].rssi      = rssi;
+    // Snapshot old values before overwriting — used to gate LVGL calls so we
+    // only touch the render tree when something actually changed.  When the
+    // mount is idle for hours this drops from ~10 LVGL calls/STATUS to zero.
+    bool    was_connected   = _cam[i].connected;
+    uint8_t old_state       = _cam[i].state;
+    uint8_t old_flags       = _cam[i].flags;
+    int8_t  old_rssi        = _cam[i].rssi;
+    bool look_at_changed    = (old_flags & FLAG_LOOK_AT_MODE) != (flags & FLAG_LOOK_AT_MODE);
 
-    bool moving = (state == STATE_JOGGING || state == STATE_MOVING_TO_POS ||
-                   state == STATE_FINDING_LIMITS);
-    lv_obj_set_style_border_color(_tile_obj[i],
-        lv_color_hex(moving ? C_ORANGE : C_GREEN_LIT), 0);
-    lv_obj_set_style_border_width(_tile_obj[i], 2, 0);
+    _cam[i].connected    = true;
+    _cam[i].state        = state;
+    _cam[i].flags        = flags;
+    _cam[i].rssi         = rssi;
+    _cam[i].last_seen_ms = millis();   // feeds the staleness sweep in hub_ui_tick()
 
-    lv_obj_set_style_bg_color(_tile_dot[i], lv_color_hex(C_GREEN_LIT), 0);
-    lv_label_set_text(_tile_cstat[i], "CONNECTED");
-    lv_obj_set_style_text_color(_tile_cstat[i], lv_color_hex(C_GREEN_LIT), 0);
+    bool state_changed = !was_connected || (old_state != state) || (old_flags != flags);
+    bool rssi_changed  = !was_connected || (old_rssi  != rssi);
 
-    lv_label_set_text(_tile_state[i], state_name(state));
-    lv_obj_set_style_text_color(_tile_state[i],
-        lv_color_hex(state == STATE_ERROR    ? C_RED_LIT  :
-                     state >= STATE_JOGGING  ? C_ORANGE   : C_DIM), 0);
+    // First connect: set all static "CONNECTED" elements once.
+    if (!was_connected) {
+        lv_obj_set_style_bg_color(_tile_dot[i], lv_color_hex(C_GREEN_LIT), 0);
+        lv_label_set_text(_tile_cstat[i], "CONNECTED");
+        lv_obj_set_style_text_color(_tile_cstat[i], lv_color_hex(C_GREEN_LIT), 0);
+    }
 
-    // RSSI — colour-coded: green ≥-65, amber -65→-75, red <-75
-    char rssi_buf[12];
-    snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm", (int)rssi);
-    lv_label_set_text(_tile_rssi[i], rssi_buf);
-    uint32_t rssi_col = (rssi >= -65) ? C_GREEN_LIT :
-                        (rssi >= -75) ? C_ORANGE    : C_RED_LIT;
-    lv_obj_set_style_text_color(_tile_rssi[i], lv_color_hex(rssi_col), 0);
+    // State / motion — only update border and label when state or flags change.
+    if (state_changed) {
+        bool moving = (state == STATE_JOGGING || state == STATE_MOVING_TO_POS ||
+                       state == STATE_FINDING_LIMITS);
+        lv_obj_set_style_border_color(_tile_obj[i],
+            lv_color_hex(moving ? C_ORANGE : C_GREEN_LIT), 0);
+        lv_obj_set_style_border_width(_tile_obj[i], 2, 0);
+        lv_label_set_text(_tile_state[i], state_name(state));
+        lv_obj_set_style_text_color(_tile_state[i],
+            lv_color_hex(state == STATE_ERROR   ? C_RED_LIT :
+                         state >= STATE_JOGGING ? C_ORANGE  : C_DIM), 0);
+    }
+
+    // RSSI — only update text when value changed; only update colour when
+    // threshold band changes (green/amber/red).
+    if (rssi_changed) {
+        char rssi_buf[12];
+        snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm", (int)rssi);
+        lv_label_set_text(_tile_rssi[i], rssi_buf);
+
+        uint32_t rssi_col     = (rssi     >= -65) ? C_GREEN_LIT :
+                                (rssi     >= -75) ? C_ORANGE    : C_RED_LIT;
+        uint32_t old_rssi_col = (old_rssi >= -65) ? C_GREEN_LIT :
+                                (old_rssi >= -75) ? C_ORANGE    : C_RED_LIT;
+        if (!was_connected || rssi_col != old_rssi_col)
+            lv_obj_set_style_text_color(_tile_rssi[i], lv_color_hex(rssi_col), 0);
+    }
 
     // Restore look-at arrow state from limit flags on power-on / reconnect.
     // Only acts when the arrow is in the unknown-idle state (-1) so it never
@@ -2842,6 +2884,10 @@ void hub_ui_update_cam(uint8_t mount_id,
 void hub_ui_set_disconnected(uint8_t mount_id) {
     if (mount_id < 1 || mount_id > 5) return;
     int i = mount_id - 1;
+    // Idempotence gate: the hub re-sends SET_DISCONNECTED for offline mounts
+    // every 5 s (reconciliation sweep) — skip the LVGL re-render when the tile
+    // is already showing OFFLINE.
+    if (!_cam[i].connected) return;
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
 
     _cam[i].connected = false;
@@ -2864,6 +2910,14 @@ void hub_ui_set_disconnected(uint8_t mount_id) {
     for (int s = 0; s < 10; s++)
         lv_obj_set_style_bg_color(_tile_slot[i][s], lv_color_hex(C_SLOT_EMPTY), 0);
 
+    // Clear the stale slot DATA and flags too — not just the visual tiles.
+    // Otherwise a periodic re-render (the look-at flash keys on cam_is_look_at(),
+    // which reads _cam[i].flags) repaints phantom saved-position dots from this
+    // leftover data for a camera that's been offline for months.  Both are
+    // repopulated by hub_ui_update_cam() the moment the mount reconnects.
+    _slots[i]     = {};
+    _cam[i].flags = 0;
+
     // If the detail screen for this camera is currently displayed, return to
     // the main status screen — there is nothing useful to show for an offline mount.
     if (lv_scr_act() == _scr_detail && _detail_cam == (uint8_t)i) {
@@ -2884,6 +2938,14 @@ void hub_ui_set_disconnected(uint8_t mount_id) {
 void hub_ui_update_preset(uint8_t mount_id, uint8_t pt_preset, uint8_t sz_preset) {
     if (mount_id < 1 || mount_id > 5) return;
     int i = mount_id - 1;
+    // Ignore preset updates for a camera we don't believe is connected.  The hub
+    // emits disp_update_preset() on every JOG (incl. to the PC's default-selected
+    // mount), so without this gate a jog aimed at an offline camera leaves a
+    // phantom dial value that never clears (SET_DISCONNECTED is only sent for
+    // cameras that were previously seen).  A real camera is marked connected by
+    // hub_ui_update_cam() before its presets arrive, so this never suppresses a
+    // legitimate update.
+    if (!_cam[i].connected) return;
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
     _cam[i].pt_preset = pt_preset;
     _cam[i].sl_preset = sz_preset;
@@ -2900,11 +2962,22 @@ void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
                          uint16_t slot_at, uint8_t target_slot, uint8_t state) {
     if (mount_id < 1 || mount_id > 5) return;
     int i = mount_id - 1;
+    // Same gate as hub_ui_update_preset(): ignore slot data for a camera we
+    // don't believe is connected, so stray/stale frames can't paint phantom
+    // saved-position dots that outlive the (idempotence-gated) disconnect.
+    // A real camera is always marked connected by hub_ui_update_cam() first —
+    // the hub sends UPDATE_CAM before UPDATE_SLOTS from the same STATUS packet.
+    if (!_cam[i].connected) return;
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
 
-    // Detect look-at move completion and jogging before overwriting state.
-    bool la          = cam_is_look_at(i);
-    uint8_t old_state = _slots[i].state;
+    // Snapshot old slot values before overwriting.
+    bool     la        = cam_is_look_at(i);
+    uint16_t old_occ   = _slots[i].slot_occupied;
+    uint16_t old_at    = _slots[i].slot_at;
+    uint8_t  old_tgt   = _slots[i].target_slot;
+    uint8_t  old_state = _slots[i].state;
+    bool slots_changed = (slot_occupied != old_occ || slot_at != old_at ||
+                          target_slot   != old_tgt || state   != old_state);
     _slots[i] = { slot_occupied, slot_at, target_slot, state };
 
     if (la) {
@@ -2922,41 +2995,42 @@ void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
             _la_refresh_pending = true;
         }
     }
-    for (int s = 0; s < 10; s++) {
-        uint16_t bit = (uint16_t)(1u << s);
-        lv_color_t col;
-        // In LA mode: green = currently tracked subject; slots 8-9 = ◀/▶ arrow dots.
-        // In normal mode: green = physically at that stored position (slot_at).
-        bool is_active = la ? (s < 8 && s == (int)_active_la_subject[i])
-                            : ((slot_at & bit) && (slot_occupied & bit));
-        if (la && s >= 8) {
-            // Arrow dots — reflect look-at move direction state.
-            int8_t arr = _la_arrow_state[i];
-            bool arr_moving = (arr == 0 && s == 8) || (arr == 1 && s == 9);
-            bool arr_done   = (arr == 2 && s == 8) || (arr == 3 && s == 9);
-            col = lv_color_hex(arr_moving ? (_la_flash_on ? C_SLOT_TGT : C_SLOT_EMPTY) :
-                               arr_done   ? C_SLOT_AT  : C_SLOT_EMPTY);
-        } else if (target_slot != 0xFF && s == (int)target_slot &&
-                state == STATE_MOVING_TO_POS)
-            col = lv_color_hex(C_SLOT_TGT);
-        else if (is_active)
-            col = lv_color_hex(C_SLOT_AT);
-        else if (slot_occupied & bit)
-            col = lv_color_hex(C_SLOT_OCC);
-        else
-            col = lv_color_hex(C_SLOT_EMPTY);
-        lv_obj_set_style_bg_color(_tile_slot[i][s], col, 0);
+    // Only push LVGL updates when slot data actually changed.  When the mount
+    // is idle for hours these values are constant, reducing LVGL work from
+    // ~40 calls/STATUS to zero and preventing progressive heap fragmentation.
+    if (slots_changed) {
+        for (int s = 0; s < 10; s++) {
+            uint16_t bit = (uint16_t)(1u << s);
+            lv_color_t col;
+            // In LA mode: green = currently tracked subject; slots 8-9 = ◀/▶ arrow dots.
+            // In normal mode: green = physically at that stored position (slot_at).
+            bool is_active = la ? (s < 8 && s == (int)_active_la_subject[i])
+                                : ((slot_at & bit) && (slot_occupied & bit));
+            if (la && s >= 8) {
+                // Arrow dots — reflect look-at move direction state.
+                int8_t arr = _la_arrow_state[i];
+                bool arr_moving = (arr == 0 && s == 8) || (arr == 1 && s == 9);
+                bool arr_done   = (arr == 2 && s == 8) || (arr == 3 && s == 9);
+                col = lv_color_hex(arr_moving ? (_la_flash_on ? C_SLOT_TGT : C_SLOT_EMPTY) :
+                                   arr_done   ? C_SLOT_AT  : C_SLOT_EMPTY);
+            } else if (target_slot != 0xFF && s == (int)target_slot &&
+                    state == STATE_MOVING_TO_POS)
+                col = lv_color_hex(C_SLOT_TGT);
+            else if (is_active)
+                col = lv_color_hex(C_SLOT_AT);
+            else if (slot_occupied & bit)
+                col = lv_color_hex(C_SLOT_OCC);
+            else
+                col = lv_color_hex(C_SLOT_EMPTY);
+            lv_obj_set_style_bg_color(_tile_slot[i][s], col, 0);
+        }
+
+        // Refresh the detail screen only when slot data changed.  Calling
+        // refresh_detail_slots() unconditionally at 50 Hz was the primary cause
+        // of progressive ESP32 heap fragmentation that froze the UI after hours.
+        if (_scr_detail && _detail_cam == (int)i)
+            refresh_detail_slots();
     }
-    // Refresh the detail screen if it's showing this mount — it's a lightweight
-    // per-mount update.  The positions screen is NOT refreshed here: calling
-    // refresh_positions_slots() (350 LVGL style calls) on every STATUS packet
-    // (50×/s) causes ~200 ms lv_timer_handler frames that block loop() mutex
-    // waits and create a multi-second UART backlog.  Subject border updates on
-    // the positions screen are handled by the _la_refresh_pending deferred flag
-    // (set by hub_ui_notify_look_at_status), which the LVGL task picks up on
-    // its next tick with a targeted, minimal refresh.
-    if (_scr_detail && _detail_cam == (int)i)
-        refresh_detail_slots();
 
     xSemaphoreGive(_lvgl_mux);
 }

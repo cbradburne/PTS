@@ -5,19 +5,21 @@ Run with:
     python main.py
 """
 
-# pip install -r requirements.txt
-# opt/homebrew/bin/python3 -m pip install -r requirements.txt
-
-# python3 -m pip install opencv-python
+# python3 -m pip install -r requirements.txt
+# python3 -m pip install opencv-contrib-python
 # python3 -m pip install ultralytics
 
-# source '/Users/col/New CC v2/bin/activate' 
-# python3 "/Users/col/New CC v2/pc_app/main.py"
+# python -m pip install -r requirements.txt
+# python -m pip install opencv-contrib-python
+# python -m pip install ultralytics
+# python -m pip install --force-reinstall opencv-contrib-python
 
 from __future__ import annotations
 
 import sys
 import logging
+import logging.handlers
+from pathlib import Path
 
 # cv2 must be imported before pygame to avoid duplicate SDL2 library warnings
 # on macOS — both packages bundle libSDL2 and the first one loaded wins.
@@ -33,10 +35,26 @@ from config.position_store import PositionStore
 from motion.joystick import JoystickHandler
 from ui.main_window import MainWindow
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-)
+# ── Logging: console + rotating file ────────────────────────────────────────
+# The file persists comms diagnostics (HEALTH lines + the WEDGE host/hub verdict)
+# so a wedge that happens unattended/overnight survives terminal scrollback.
+# Temporary diagnostic scaffolding — once the USB wedge is root-caused this can
+# revert to a plain console-only basicConfig.
+_LOG_FMT = "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s"
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    _log_dir = Path(__file__).resolve().parent / "logs"
+    _log_dir.mkdir(exist_ok=True)
+    # 10 MB × 10 files ≈ a couple of weeks of 24/7 logs — enough to catch a
+    # sporadic wedge — and utf-8 so the →/←/— glyphs write cleanly on Windows.
+    _log_handlers.append(logging.handlers.RotatingFileHandler(
+        _log_dir / "comms.log", maxBytes=10 * 1024 * 1024, backupCount=10,
+        encoding="utf-8"))
+except OSError as e:
+    # A logging-setup failure must never stop the app launching.
+    print(f"WARNING: could not open log file: {e}", file=sys.stderr)
+
+logging.basicConfig(level=logging.INFO, format=_LOG_FMT, handlers=_log_handlers)
 log = logging.getLogger(__name__)
 
 def main() -> None:

@@ -3,7 +3,7 @@
   "bridge_mode": "serial",
   "bridge_host": "192.168.4.1",
   "bridge_tcp_port": 7777,
-  "bridge_port": "/dev/cu.usbmodem101",
+  "bridge_port": "COM10",
   "joystick_deadzone": 0.08,
   "mounts": {
     "1": {

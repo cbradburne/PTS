@@ -30,6 +30,7 @@ from PyQt6.QtGui import QColor, QPalette, QPaintEvent, QPainter
 
 from .rotary_dial import RotaryDial
 from config.position_store import PositionStore
+from ui import virtual_keyboard
 
 
 # ---------------------------------------------------------------------------
@@ -59,12 +60,15 @@ class WrappingButton(QPushButton):
 # Camera colour palette
 # ---------------------------------------------------------------------------
 
+# row_bg = the per-camera row strip.  Kept brighter than the original near-black
+# tints so an active (online) camera's strip reads more vividly against the
+# overlay-dimmed offline rows — while staying darker than btn_bg below it.
 CAM_COLORS = {
-    1: {"row_bg": "#0D1F0F", "btn_bg": "#1B3A1D", "btn_text": "#A5D6A7", "accent": QColor("#4CAF50")},
-    2: {"row_bg": "#0D1A2B", "btn_bg": "#1A2E45", "btn_text": "#90CAF9", "accent": QColor("#4A7DA8")},
-    3: {"row_bg": "#1E1800", "btn_bg": "#332B00", "btn_text": "#D4B800", "accent": QColor("#A89200")},
-    4: {"row_bg": "#001A17", "btn_bg": "#002E2A", "btn_text": "#80CBC4", "accent": QColor("#00796B")},
-    5: {"row_bg": "#1A0B27", "btn_bg": "#2E1040", "btn_text": "#CE93D8", "accent": QColor("#8B44A8")},
+    1: {"row_bg": "#112B16", "btn_bg": "#1B3A1D", "btn_text": "#A5D6A7", "accent": QColor("#4CAF50")},
+    2: {"row_bg": "#112338", "btn_bg": "#1A2E45", "btn_text": "#90CAF9", "accent": QColor("#4A7DA8")},
+    3: {"row_bg": "#2A2200", "btn_bg": "#332B00", "btn_text": "#D4B800", "accent": QColor("#A89200")},
+    4: {"row_bg": "#00231F", "btn_bg": "#002E2A", "btn_text": "#80CBC4", "accent": QColor("#00796B")},
+    5: {"row_bg": "#230F34", "btn_bg": "#2E1040", "btn_text": "#CE93D8", "accent": QColor("#8B44A8")},
 }
 
 BORDER_EMPTY          = "#4A4A4A"
@@ -588,11 +592,13 @@ class PositionGrid(QWidget):
 
     def _edit_label(self, mount_id: int, slot: int, occupied: bool) -> None:
         cur = self._store.get_label(mount_id, slot)
-        text, ok = QInputDialog.getText(
+        # Touchscreen-only PC: get_text() shows the on-screen keyboard for the
+        # dialog and closes it as soon as it commits (OK / Enter / Return).
+        text, ok = virtual_keyboard.get_text(
             self, "Edit Label",
             f"Label for Camera {mount_id}, Position {slot + 1}:\n"
             f"(Clear to delete slot)",
-            text=cur if occupied else "")
+            cur if occupied else "")
         if not ok:
             return
         if text.strip() == "" and occupied:

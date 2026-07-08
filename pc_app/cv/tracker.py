@@ -134,6 +134,17 @@ class PersonDetector:
 # Tracker — OpenCV CSRT correlation tracker
 # ---------------------------------------------------------------------------
 
+def _attr_exists(dotted: str) -> bool:
+    """Return True if the dotted attribute path exists on cv2."""
+    obj = cv2
+    try:
+        for part in dotted.split(".")[1:]:
+            obj = getattr(obj, part)
+        return True
+    except AttributeError:
+        return False
+
+
 _CSRT_FACTORIES = [
     ("cv2.legacy.TrackerCSRT_create", lambda: cv2.legacy.TrackerCSRT_create()),
     ("cv2.TrackerCSRT.create",        lambda: cv2.TrackerCSRT.create()),
@@ -170,18 +181,32 @@ class Tracker:
         for name, factory in _CSRT_FACTORIES:
             try:
                 candidate = factory()
-                if candidate.init(frame, bbox):
+                result = candidate.init(frame, bbox)
+                # OpenCV ≤4.7: init() returns bool.  OpenCV ≥4.8: init() returns
+                # None (C++ void).  Treat None as success — exception = failure.
+                if result is not False:
                     self._tracker = candidate
                     self._active  = True
-                    log.debug(f"Correlation tracker: {name}")
+                    log.debug(f"Correlation tracker started: {name}")
                     break
-            except (AttributeError, Exception):
-                pass
+                else:
+                    log.warning(f"Tracker init returned False: {name} bbox={bbox}")
+            except AttributeError:
+                log.debug(f"Tracker not present in this OpenCV build: {name}")
+            except Exception as exc:
+                log.warning(f"Tracker init error: {name}: {type(exc).__name__}: {exc}")
 
         if not self._active:
+            # Probe what is actually available to help diagnose the failure.
+            _available = [s for s in [
+                "cv2.legacy", "cv2.legacy.TrackerCSRT_create",
+                "cv2.legacy.TrackerKCF_create", "cv2.TrackerCSRT", "cv2.TrackerKCF",
+            ] if _attr_exists(s)]
             log.error(
                 "All correlation tracker constructors failed. "
-                "Install:  pip install opencv-contrib-python"
+                "Available cv2 tracker symbols: %s. "
+                "If empty: pip uninstall opencv-python && pip install opencv-contrib-python",
+                _available or ["(none)"],
             )
 
         self._frame_h, self._frame_w = frame.shape[:2]

@@ -37,7 +37,7 @@
 // ---------------------------------------------------------------------------
 
 // Must match the MOUNT_ID flashed into this mount's ESP32
-#define THIS_MOUNT_ID  4
+#define THIS_MOUNT_ID  1
 
 #define ESP_SERIAL      Serial6    // Teensy 4.1: TX=24, RX=25
 #define ESP_SERIAL_BAUD 115200

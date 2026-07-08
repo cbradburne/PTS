@@ -23,12 +23,13 @@ typedef void (*hub_send_fn_t)(uint8_t mount_id, CmdType cmd,
 
 // ---- Per-camera status ----
 struct CamStatus {
-    bool    connected  = false;
-    int8_t  rssi       = 0;
-    uint8_t state      = 0;
-    uint8_t flags      = 0;
-    uint8_t pt_preset  = 0;   // active PT preset 1-4, 0 = disconnected
-    uint8_t sl_preset  = 0;   // active SL preset 1-4, 0 = disconnected
+    bool     connected    = false;
+    int8_t   rssi         = 0;
+    uint8_t  state        = 0;
+    uint8_t  flags        = 0;
+    uint8_t  pt_preset    = 0;   // active PT preset 1-4, 0 = disconnected
+    uint8_t  sl_preset    = 0;   // active SL preset 1-4, 0 = disconnected
+    uint32_t last_seen_ms = 0;   // millis() of last UPDATE_CAM — staleness sweep
 };
 
 // ---- Per-tile slot state ----

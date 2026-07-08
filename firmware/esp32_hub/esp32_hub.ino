@@ -22,6 +22,12 @@
  * Arduino IDE board settings for THIS board (XIAO ESP32S3):
  *   Board            : XIAO_ESP32S3
  *   USB CDC On Boot  : Enabled
+ *   USB Mode         : USB-OTG (TinyUSB)   ← REQUIRED for Serial.enableReboot(false),
+ *                      which stops the PC from resetting the hub when it reopens the
+ *                      port.  The default "Hardware CDC and JTAG" mode CANNOT do this.
+ *                      NOTE: TinyUSB mode disables esptool auto-reset — to reflash, hold
+ *                      BOOT, tap RESET, release, then upload.  The USB VID/PID also
+ *                      changes, so Windows may assign a new COM port (update the PC config).
  *
  * Requires libraries:
  *   mathieucarbou/ESPAsyncWebServer  (ESP-IDF v5 compatible fork)
@@ -33,9 +39,26 @@
 #include <esp_now.h>
 #include <freertos/queue.h>
 #include <ESPAsyncWebServer.h>
+#include <esp_task_wdt.h>
+#include <esp_system.h>   // esp_reset_reason()
 #include "../shared/disp_uart.h"
 #include "web_app.h"
 #include "hub_types.h"   // RelayMsg — must be last so it follows all other includes
+
+// ---------------------------------------------------------------------------
+// Required Arduino board settings — enforced at compile time
+// ---------------------------------------------------------------------------
+// 'Serial' must be the native USB CDC (so the PC↔hub USB link works at all) AND
+// in TinyUSB mode (so Serial.enableReboot(false) exists — the fix that stops the
+// PC from resetting the hub when it reopens the port).  Without these, the build
+// either fails cryptically ("HardwareSerial has no member setTxTimeoutMs",
+// because Serial falls back to UART0) or silently flashes the DTR-reset bug back.
+#if !ARDUINO_USB_CDC_ON_BOOT
+  #error "Tools -> 'USB CDC On Boot' must be ENABLED (otherwise Serial is UART0, not USB)."
+#endif
+#if ARDUINO_USB_MODE != 0
+  #error "Tools -> 'USB Mode' must be 'USB-OTG (TinyUSB)' (required for Serial.enableReboot(false))."
+#endif
 
 // ---------------------------------------------------------------------------
 // Configuration — edit before flashing
@@ -44,13 +67,20 @@
 #define AP_SSID      "CamMount"
 #define AP_PASSWORD  "camctrl123"
 #define AP_CHANNEL   1
+
+// Static soft-AP network config.  Clients (phone/tablet/laptop over WS/TCP)
+// connect to AP_IP — this is the hub's address on its own WiFi network.
+// (The directly-wired PC uses USB serial, so it's unaffected by this.)
+static const IPAddress AP_IP     (169, 254, 22, 22);
+static const IPAddress AP_GATEWAY(169, 254, 22, 22);   // the AP is its own gateway
+static const IPAddress AP_SUBNET (255, 255,  0,  0);
 #define TCP_PORT     7777
 #define MAX_CLIENTS  4
 
 static const uint8_t MOUNT_MACS[NUM_MOUNTS][6] = {
     { 0x44, 0x1b, 0xf6, 0x86, 0x1e, 0x90 },   // Mount 1        44:1B:F6:86:1E:90
     { 0x44, 0x1b, 0xf6, 0x86, 0x22, 0xB4 },   // Mount 2        44:1B:F6:86:22:B4
-    { 0x3c, 0x0f, 0x02, 0xc0, 0x1d, 0xc8 },   // Mount 3        3C:0F:02:C0:1D:C8   // Home 1C:DB:D4:7B:57:94
+    { 0x3c, 0x0f, 0x02, 0xc0, 0x1d, 0xc8 },   // Mount 3        3C:0F:02:C0:1D:C8   // Home 0x1c, 0xdb, 0xd4, 0x7b, 0x57, 0x94  // work 0x3c, 0x0f, 0x02, 0xc0, 0x1d, 0xc8
     { 0x1c, 0xdb, 0xd4, 0x7b, 0x58, 0x30 },   // Mount 4        1C:DB:D4:7B:58:30
     { 0x3c, 0x0f, 0x02, 0xc0, 0x24, 0x30 },   // Mount 5        3C:0F:02:C0:24:30
 };
@@ -161,6 +191,14 @@ static void refresh_espnow_peer(uint8_t idx) {
 
 static volatile uint8_t _espnow_fails[NUM_MOUNTS]          = {};
 static volatile bool    _espnow_need_refresh[NUM_MOUNTS]    = {};
+// Set when the PC sends CMD_HUB_REINIT_ESPNOW; actioned in loop().  A full
+// esp_now deinit/init clears a hub→mount send wedge that peer-refresh can't
+// (what a power cycle does), without rebooting the hub.
+static volatile bool    _espnow_need_full_reinit           = false;
+// Set when the PC sends CMD_HUB_RESTART; actioned in loop().  Full esp_restart()
+// — the escalation when the esp_now reinit doesn't clear the wedge (the wedge
+// lives below the ESP-NOW layer; only a full reboot has ever cleared it).
+static volatile bool    _need_full_restart                 = false;
 
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
     const uint8_t *mac_addr = info->des_addr;
@@ -179,6 +217,8 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
 }
 
 static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &pkt);
+static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
+                           uint8_t state, uint8_t flags);
 
 #define RELAY_QUEUE_DEPTH 32
 static QueueHandle_t _relay_queue;
@@ -191,6 +231,17 @@ static QueueHandle_t _ws_rx_queue;
 
 static int8_t    _mount_rssi[NUM_MOUNTS]      = {};
 static uint32_t  _mount_last_seen[NUM_MOUNTS] = {};
+
+// ---- Ghost STATUS-frame guard ----
+// After long uptime the WiFi RX path can deliver corrupt/"ghost" frames whose
+// source matches a mount MAC but whose RSSI reads exactly 0 — the cause of the
+// phantom "camera N connected, 0 dBm, jogging" on the display.  A real ESP-NOW
+// reception is essentially always negative, so rssi==0 is a safe ghost signature.
+// Toggle to 0 to A/B test the guard (the capture still logs ghosts either way).
+// Declared here (before process_status_for_display) so both the #if and the
+// counter are in scope at the use site.
+#define HUB_DROP_GHOST_RSSI0  1
+static uint32_t  _ghost_rx_drops = 0;   // STATUS frames dropped as ghosts (rssi==0)
 
 // Last known look-at move direction per mount (-1=none, 0=min/◀, 1=max/▶).
 // Set when any client sends CMD_START_LOOK_AT_MOVE; broadcast to all clients.
@@ -424,13 +475,39 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
     if (pkt.payload_len < 2)       return;   // need at least state + flags
     if (msg.src_idx >= NUM_MOUNTS) return;
 
-    uint8_t mount_id    = msg.src_idx + 1;
-    bool    was_offline = (_mount_last_seen[msg.src_idx] == 0);
+    uint8_t mount_id = msg.src_idx + 1;
+
+    // ── Ghost-frame guard ────────────────────────────────────────────────
+    // After long uptime the WiFi RX path can deliver corrupt frames whose
+    // source matches a mount MAC but whose RSSI reads exactly 0 — the cause of
+    // the phantom "camera N connected, 0 dBm, jogging" on the display.  Capture
+    // every occurrence (rate-limited, per mount) for the PC log, then drop it so
+    // it can never mark a mount connected.  Guard is a toggle for A/B testing;
+    // the capture fires either way.
+    if (msg.rssi == 0) {
+        _ghost_rx_drops++;
+        static uint32_t _last_ghost_evt_ms[NUM_MOUNTS] = {};
+        uint32_t nowm = millis();
+        if (nowm - _last_ghost_evt_ms[msg.src_idx] > 2000) {
+            _last_ghost_evt_ms[msg.src_idx] = nowm;
+            send_hub_event(1 /*ghost*/, mount_id, msg.rssi,
+                           pkt.payload[0], pkt.payload[1]);
+        }
+#if HUB_DROP_GHOST_RSSI0
+        return;   // drop — never reaches the display
+#endif
+    }
+
+    bool was_offline = (_mount_last_seen[msg.src_idx] == 0);
 
     _mount_rssi[msg.src_idx]      = msg.rssi;
     _mount_last_seen[msg.src_idx] = millis();
 
     if (was_offline) {
+        // Real connect transition — log it so the PC can compare a genuine
+        // connect (real negative RSSI, IDLE state) against a ghost.
+        send_hub_event(0 /*connect*/, mount_id, msg.rssi,
+                       pkt.payload[0], pkt.payload[1]);
         refresh_espnow_peer(msg.src_idx);
         ui_send_to_mount(mount_id, CMD_GET_STATE, nullptr, 0);
     }
@@ -542,8 +619,101 @@ static void on_ws_event(AsyncWebSocket *server, AsyncWebSocketClient *client,
     }
 }
 
+#define HW_WDT_TIMEOUT_MS  30000   // hardware watchdog — reset if loop stalls
+
 const uint32_t HEARTBEAT_MS = 2000;   // 2 s — well within mount's 5 s timeout
 uint32_t last_hb = 0;
+
+// ---- USB wedge diagnostic ----
+// Monotonic counts of bytes / complete packets the hub has read from the PC
+// over USB Serial.  Reported to the PC once a second so it can tell host-side
+// from hub-side stalls (see send_usb_diag / the read loop).
+static uint32_t _usb_rx_bytes      = 0;
+static uint32_t _usb_rx_pkts       = 0;
+static uint32_t _last_usb_diag_ms  = 0;
+#define USB_DIAG_INTERVAL_MS  1000
+static uint16_t _usb_diag_seq      = 0;
+// Captured once at boot — tells the PC WHY the hub last reset (poweron / panic /
+// brownout / watchdog).  Reported in every diag; the PC reads it when it sees
+// the rx counters reset (i.e. the hub rebooted).
+static uint8_t  _reset_reason      = 0;
+
+// Send the USB-RX counters to the PC over Serial ONLY.  Deliberately bypasses
+// broadcast_to_all()/_ws so TCP and WebSocket clients are untouched — this is a
+// point-to-point diagnostic for the directly-wired PC.
+static void send_usb_diag() {
+    // 13 bytes: rx_bytes(u32) + rx_pkts(u32) + reset_reason(1) + ghost_drops(u32).
+    // The trailing ghost-drops field is backward-compatible — older PC builds
+    // read only the first 9 bytes.
+    uint8_t payload[13];
+    payload[0] = (_usb_rx_bytes >> 24) & 0xFF;
+    payload[1] = (_usb_rx_bytes >> 16) & 0xFF;
+    payload[2] = (_usb_rx_bytes >>  8) & 0xFF;
+    payload[3] =  _usb_rx_bytes        & 0xFF;
+    payload[4] = (_usb_rx_pkts  >> 24) & 0xFF;
+    payload[5] = (_usb_rx_pkts  >> 16) & 0xFF;
+    payload[6] = (_usb_rx_pkts  >>  8) & 0xFF;
+    payload[7] =  _usb_rx_pkts         & 0xFF;
+    payload[8] = _reset_reason;        // why the hub last booted (esp_reset_reason)
+    payload[9]  = (_ghost_rx_drops >> 24) & 0xFF;
+    payload[10] = (_ghost_rx_drops >> 16) & 0xFF;
+    payload[11] = (_ghost_rx_drops >>  8) & 0xFF;
+    payload[12] =  _ghost_rx_drops        & 0xFF;
+    uint8_t buf[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(buf, 0xFE /*hub sentinel mount_id*/, ++_usb_diag_seq,
+                              CMD_HUB_DIAG, payload, 13);
+    Serial.write(buf, n);
+}
+
+// Send a one-shot hub event to the PC over Serial ONLY (point-to-point, like
+// send_usb_diag — never TCP/WS).  Used to capture mount connect transitions and
+// dropped ghost frames in the PC log so the phantom-camera cause can be pinned.
+//   kind: 0 = mount came online (real connect)   1 = ghost frame dropped (rssi==0)
+static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
+                           uint8_t state, uint8_t flags) {
+    uint32_t up = millis() / 1000UL;
+    uint8_t p[9];
+    p[0] = kind;
+    p[1] = mount_id;
+    p[2] = (uint8_t)rssi;
+    p[3] = state;
+    p[4] = flags;
+    p[5] = (up >> 24) & 0xFF;
+    p[6] = (up >> 16) & 0xFF;
+    p[7] = (up >>  8) & 0xFF;
+    p[8] =  up        & 0xFF;
+    uint8_t buf[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq,
+                              CMD_HUB_EVENT, p, 9);
+    Serial.write(buf, n);
+}
+
+// Full ESP-NOW reinit — tears down and rebuilds the whole ESP-NOW stack and all
+// mount peers.  This is what a hub power cycle does and is the confirmed cure for
+// the hub→mount send wedge that peer-refresh alone cannot clear.  Mirrors the
+// AMOLED's espnow_full_reinit().  Runs from loop() (never a callback), so the
+// deinit/init is safe.  WiFi AP / TCP / WS are untouched.
+static void hub_espnow_full_reinit() {
+    Serial.println("[ESP-NOW] PC-requested full reinit — start");
+    esp_now_deinit();
+    delay(50);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[ESP-NOW] reinit FAILED — will retry on next request");
+        return;
+    }
+    esp_now_register_recv_cb(on_espnow_recv);
+    esp_now_register_send_cb(on_espnow_sent);
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        esp_now_peer_info_t peer = {};
+        memcpy(peer.peer_addr, MOUNT_MACS[i], 6);
+        peer.channel = AP_CHANNEL;
+        peer.ifidx   = WIFI_IF_AP;
+        peer.encrypt = false;
+        esp_now_add_peer(&peer);
+        _espnow_fails[i] = 0;
+    }
+    Serial.println("[ESP-NOW] PC-requested full reinit — done");
+}
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -551,9 +721,32 @@ uint32_t last_hb = 0;
 
 void setup() {
     Serial.begin(921600);
+    // Make USB CDC TX non-blocking.  Default timeout is 100 ms — if the PC app
+    // stops draining the port (Python thread stall, GIL contention, etc.) every
+    // Serial.write() in broadcast_to_all() blocks for 100 ms.  The 32-deep relay
+    // queue then takes 3+ seconds to drain, stalling loop() and making both the
+    // hub-display joystick AND the PC joystick unresponsive until the PC is
+    // restarted.  With timeout=0 writes return immediately when the buffer is full
+    // — STATUS packets may be dropped but loop() never stalls.
+    Serial.setTxTimeoutMs(0);
+
+    // Ignore the host's DTR/RTS so the PC reopening COM3 can't reset the hub.
+    // That host-triggered reset (reset reason USB) was the root of the comms
+    // "wedge": a reconnect reopened the port → reset the hub → re-enumerate →
+    // reopen → reset … an 80×/night reboot loop.  enableReboot() exists ONLY on
+    // the TinyUSB USBCDC class, so this REQUIRES board setting
+    //   Tools → USB Mode → "USB-OTG (TinyUSB)"   (ARDUINO_USB_MODE == 0).
+    // The S3's default Hardware-CDC-and-JTAG port has no way to disable it.
+    // Guarded so the sketch still compiles in either USB mode (no-op in HWCDC).
+#if ARDUINO_USB_CDC_ON_BOOT && (ARDUINO_USB_MODE == 0)
+    Serial.enableReboot(false);
+#endif
+
     pkt_parser_init(&_serial_parser);
     memset(_la_dir, -1, sizeof(_la_dir));
+    _reset_reason = (uint8_t)esp_reset_reason();   // why this boot happened
     Serial.println("\n=== ESP32 Camera Mount Hub (XIAO) ===");
+    Serial.printf("Reset reason: %d\n", (int)_reset_reason);
 
     // Display UART — start before anything else so the display gets updates
     // as soon as the hub is ready.
@@ -561,6 +754,9 @@ void setup() {
 
     // --- WiFi Access Point ---
     WiFi.mode(WIFI_AP);
+    // softAPConfig() MUST be called before softAP() to take effect.
+    if (!WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET))
+        Serial.println("WARNING: softAPConfig failed — AP will use the default IP");
     WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
     esp_wifi_set_ps(WIFI_PS_NONE);
     Serial.printf("AP  SSID : %s\n", AP_SSID);
@@ -602,12 +798,34 @@ void setup() {
     _ws.onEvent(on_ws_event);
     _http_server.addHandler(&_ws);
     _http_server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
-        req->send_P(200, "text/html", WEB_APP_HTML);
+        // Serve via the (const uint8_t*, len) overload, NOT the const char* one.
+        // In ESP_Async_WebServer 3.10.3, send(int,const char*,const char*) builds
+        // an AsyncBasicResponse whose ctor does `String _content = content;` — one
+        // contiguous ~112 KB heap copy.  On the XIAO S3's fragmented internal heap
+        // (WiFi + ESP-NOW + AsyncTCP all resident) that allocation fails, _content
+        // stays empty, and the reply ships as 200 / Content-Length: 0 (white page).
+        // (The deprecated send_P forwards to the same copying path — same failure.)
+        // The uint8_t*/len overload routes to AsyncProgmemResponse, which holds the
+        // flash pointer and streams it in small buffers — no large allocation.
+        // sizeof-1 = the literal's length (the raw string has no interior NULs).
+        req->send(200, "text/html", (const uint8_t *)WEB_APP_HTML, sizeof(WEB_APP_HTML) - 1);
     });
     _http_server.begin();
     Serial.println("Ready.");
 
-    esp_wifi_set_max_tx_power(78); 
+    esp_wifi_set_max_tx_power(78);
+
+    // Hardware watchdog — resets the chip if loop() stalls for > 30 s
+    // (e.g. AsyncTCP deadlock, ESP-NOW stack hang, lwIP timeout).
+    // trigger_panic = true so the timeout actually RESETS the chip; with false
+    // it only logs and never recovers — defeating the point of the watchdog.
+    esp_task_wdt_config_t twdt_cfg = {
+        .timeout_ms     = HW_WDT_TIMEOUT_MS,
+        .idle_core_mask = 0,
+        .trigger_panic  = true,
+    };
+    esp_task_wdt_reconfigure(&twdt_cfg);
+    esp_task_wdt_add(NULL);
 }
 
 void send_heartbeat() {
@@ -628,8 +846,23 @@ void send_heartbeat() {
 // ---------------------------------------------------------------------------
 
 void loop() {
+    esp_task_wdt_reset();
 
     uint32_t now = millis();
+
+    // ---- Full hub restart (PC escalation when the reinit didn't clear it) ----
+    if (_need_full_restart) {
+        Serial.println("[HUB] PC-requested full restart (esp_restart)");
+        Serial.flush();
+        delay(50);          // let the message and any queued USB TX drain
+        esp_restart();
+    }
+
+    // ---- ESP-NOW full reinit (requested by the PC when it detects a wedge) ----
+    if (_espnow_need_full_reinit) {
+        _espnow_need_full_reinit = false;
+        hub_espnow_full_reinit();
+    }
 
     // ---- ESP-NOW peer refresh (triggered by consecutive send failures) ----
     for (int i = 0; i < NUM_MOUNTS; i++) {
@@ -662,8 +895,10 @@ void loop() {
         if (!placed) { incoming.stop(); Serial.println("Max TCP clients reached"); }
         
         for (int i = 0; i < NUM_MOUNTS; i++) {
-            // If we have seen this mount before, tell it to send its state
             if (_mount_last_seen[i] > 0) {
+                // Refresh ESP-NOW peer before querying — clears any stale send
+                // state that may have accumulated while the PC was disconnected.
+                refresh_espnow_peer(i);
                 ui_send_to_mount(i + 1, CMD_GET_STATE, nullptr, 0);
             }
         }
@@ -686,9 +921,28 @@ void loop() {
 
     // ---- USB Serial → mounts ----
     while (Serial.available()) {
+        _usb_rx_bytes++;                       // diag: bytes actually read from the PC
         ParsedPacket pkt;
-        if (pkt_feed(&_serial_parser, (uint8_t)Serial.read(), &pkt))
-            forward_to_mounts(pkt);
+        if (pkt_feed(&_serial_parser, (uint8_t)Serial.read(), &pkt)) {
+            _usb_rx_pkts++;                     // diag: complete packets framed from the PC
+            if (pkt.cmd == CMD_HUB_REINIT_ESPNOW) {
+                _espnow_need_full_reinit = true;  // hub-targeted; actioned in loop(), not forwarded
+            } else if (pkt.cmd == CMD_HUB_RESTART) {
+                _need_full_restart = true;        // hub-targeted; actioned in loop(), not forwarded
+            } else {
+                forward_to_mounts(pkt);
+            }
+        }
+    }
+
+    // ---- USB wedge diagnostic → PC over Serial ONLY (not TCP/WS) ----
+    // Reports how many bytes/packets the hub has actually received from the PC.
+    // During a PC↔hub USB wedge the PC can compare: if these keep climbing while
+    // its own commands go unacked, the stall is hub-side; if they freeze while
+    // the PC is still sending, the bytes never arrive — a host-side OUT halt.
+    if (now - _last_usb_diag_ms >= USB_DIAG_INTERVAL_MS) {
+        _last_usb_diag_ms = now;
+        send_usb_diag();
     }
 
     // ---- WebSocket RX → mounts (drained here, not in AsyncTCP callback) ----
@@ -805,6 +1059,22 @@ void loop() {
             _mount_last_seen[i] = 0;
             disp_set_disconnected(i + 1);
         }
+    }
+
+    // ---- Display reconciliation sweep ----
+    // The transition above sends SET_DISCONNECTED exactly once, but the display
+    // can silently drop it (its handler bails if the LVGL mutex is busy >100 ms),
+    // and after a hub reboot _mount_last_seen[] is zeroed so the hub forgets which
+    // tiles it lit.  Either way the display latches a phantom "connected" cam
+    // forever (the ghost cam3 0 dBm/JOGGING bug).  Reconcile: periodically re-send
+    // SET_DISCONNECTED for every mount the hub considers offline, so a stale tile
+    // always clears within one sweep regardless of how it got latched.
+    static uint32_t _last_disc_sweep_ms = 0;
+    if (now - _last_disc_sweep_ms >= 5000) {
+        _last_disc_sweep_ms = now;
+        for (int i = 0; i < NUM_MOUNTS; i++)
+            if (_mount_last_seen[i] == 0)
+                disp_set_disconnected(i + 1);
     }
 
     // ---- Periodic client count → display ----

@@ -37,6 +37,7 @@ from .widgets.position_grid import (
 from .widgets.estop_button import EStopButton
 from .widgets.nudge_overlay import NudgeOverlay
 from .dialogs.config_dialog import ConfigDialog
+from . import virtual_keyboard
 from comms.bridge import Bridge
 from comms.mount_manager import MountManager
 from comms.protocol import MountState, MountFlag, Axis
@@ -276,7 +277,8 @@ class MainWindow(QMainWindow):
         self._build()
         self._connect_signals()
         self._connect_bridge()
-        self.showMaximized()
+        #self.showMaximized()
+        self.showFullScreen()
 
     # ------------------------------------------------------------------
     # Build
@@ -745,10 +747,12 @@ class MainWindow(QMainWindow):
 
     def _rename_cam(self, mount_id: int) -> None:
         current = self._config.mount_label(mount_id)
-        text, ok = QInputDialog.getText(
+        # Touchscreen-only PC: get_text() shows the on-screen keyboard while the
+        # dialog is up and closes it as soon as it commits (OK / Enter / Return).
+        text, ok = virtual_keyboard.get_text(
             self, "Rename Camera",
             f"Label for Camera {mount_id}:",
-            text=current
+            current
         )
         if ok:
             self._config.mount(mount_id).label = text.strip()
@@ -1329,8 +1333,14 @@ class MainWindow(QMainWindow):
             label = cfg.bridge_port or "serial"
         self._conn_label.setText(f"Hub: {label} (reconnected)")
         self._conn_label.setStyleSheet("color:#FFA726; font-size:10px;")
-        log.info("Bridge auto-reconnected — requesting state from all mounts")
-        for mid in range(1, 6):
+        # Only re-query mounts that are actually present.  Querying absent mounts
+        # produces GET_CONFIG commands that never ACK, which the bridge's wedge
+        # detector then mistakes for a wedged link — causing an endless
+        # reconnect loop when fewer than all 5 mounts are connected.
+        present = [mid for mid in range(1, 6) if self._mm.state(mid).connected]
+        log.info("Bridge auto-reconnected — requesting state from connected mounts: %s",
+                 present or "none")
+        for mid in present:
             self._mm.send_get_config(mid)
 
 

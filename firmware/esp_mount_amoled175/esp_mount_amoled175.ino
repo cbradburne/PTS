@@ -38,6 +38,7 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_task_wdt.h>
 #include <Wire.h>
 #include "../shared/protocol.h"
 #include "ui_types.h"   // ArcStrip struct — must be included before Arduino auto-prototypes
@@ -46,7 +47,7 @@
 // Configuration — set per-unit before flashing
 // ---------------------------------------------------------------------------
 
-#define MOUNT_ID    4        // 1-5, unique per mount
+#define MOUNT_ID    1        // 1-5, unique per mount
 #define HUB_CHANNEL 1        // must match AP_CHANNEL in esp32_hub.ino
 
 static const uint8_t HUB_MAC[6] = { 0x76, 0x4d, 0xbd, 0x81, 0x11, 0x04 };   // AP MAC of the hub
@@ -85,6 +86,8 @@ static const uint8_t HUB_MAC[6] = { 0x76, 0x4d, 0xbd, 0x81, 0x11, 0x04 };   // A
 
 #define WATCHDOG_MS           10000
 #define HUB_TIMEOUT_MS         5000
+#define HW_WDT_TIMEOUT_MS     30000          // hardware watchdog — reset if loop stalls
+#define ESPNOW_RESTART_MS     (2UL*60UL*1000UL) // restart after 2 min with no hub contact
 #define STATUS_HEARTBEAT_MS    5000
 #define TEENSY_PROBE_MS        2000
 #define TOUCH_POLL_MS            50
@@ -233,16 +236,24 @@ static PacketParser _teensy_parser;
 
 static uint16_t _tx_seq              = 0;
 static uint32_t _last_hub_rx_ms      = 0;
+// Last ESP-NOW send to the hub that the radio ACKed.  If this stays fresh while
+// _last_hub_rx_ms goes stale, the link is one-way (we can send, can't receive) —
+// a HUB-side wedge that restarting THIS chip can't fix.  Gates the esp_restart
+// below so the mount doesn't pointlessly reboot-loop (and blink the camera) for
+// a fault that lives on the hub; the hub gets recovered from the PC instead.
+static volatile uint32_t _last_espnow_tx_ok_ms = 0;
 static bool     _watchdog_fired      = false;
 static uint32_t _last_teensy_st_ms   = 0;
 static uint32_t _last_heartbeat_ms   = 0;
 static int8_t   _last_rssi           = 0;
 static uint32_t _last_rssi_update_ms = 0;
+static uint32_t _loop_count          = 0;   // increments every loop — proves loop() is alive
+static uint32_t _last_diag_update_ms = 0;
 
 static uint8_t _tx_buf[PKT_BUF_SIZE + 4];
-static uint8_t _espnow_consec_fails   = 0;   // consecutive send failures → peer refresh
-static uint8_t _espnow_refresh_count  = 0;   // peer del/add cycles since last full reinit
-static volatile bool _espnow_need_reinit = false; // set in callback, actioned in loop()
+static volatile uint8_t _espnow_consec_fails   = 0;   // consecutive send failures → peer refresh
+static volatile uint8_t _espnow_refresh_count  = 0;   // peer del/add cycles since last full reinit
+static volatile bool    _espnow_need_reinit    = false; // set in callback, actioned in loop()
 
 // ---------------------------------------------------------------------------
 // Colours
@@ -292,6 +303,9 @@ static lv_obj_t *_ring         = nullptr;   // status ring
 static lv_obj_t *_lbl_num      = nullptr;   // "1"–"5" in 48pt
 static lv_obj_t *_lbl_state    = nullptr;
 static lv_obj_t *_lbl_rssi     = nullptr;
+// On-screen ESP-NOW diagnostics — readable at the pole (or via a phone photo)
+// during a wedge, so the mount-side state is visible without a serial console.
+static lv_obj_t *_lbl_diag     = nullptr;
 
 // Arc strips (not full dials — just arc + dots + label)
 static ArcStrip _pt_strip = {};
@@ -417,6 +431,7 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
     if (s == ESP_NOW_SEND_SUCCESS) {
         _espnow_consec_fails  = 0;
         _espnow_refresh_count = 0;
+        _last_espnow_tx_ok_ms = millis();   // our send side is alive
     } else {
         Serial.printf("ESP-NOW send failed (%d)\n", (int)s);
         // After several consecutive failures the ESP-NOW stack internally marks
@@ -814,6 +829,15 @@ static void ui_build() {
     lv_obj_set_style_text_color(_lbl_rssi, COL_DIM, 0);
     lv_obj_align(_lbl_rssi, LV_ALIGN_CENTER, 0, 58);
 
+    // ESP-NOW diagnostic line (low, wide part of the circle).  Compact so it
+    // reads in a photo: RX/TX ages in s, consec send-fails F, peer-refreshes R,
+    // and the loop counter # (must be changing — confirms loop() isn't frozen).
+    _lbl_diag = lv_label_create(scr);
+    lv_label_set_text(_lbl_diag, "");
+    lv_obj_set_style_text_font(_lbl_diag, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(_lbl_diag, COL_DIM, 0);
+    lv_obj_align(_lbl_diag, LV_ALIGN_CENTER, 0, 175);
+
     /* ── Slot circles ────────────────────────────────────────────────────── */
     for (int i = 0; i < 10; i++) {
         int col  = i % 5;
@@ -1008,13 +1032,26 @@ void setup() {
 
     pkt_parser_init(&_espnow_parser);
     pkt_parser_init(&_teensy_parser);
-    _last_hub_rx_ms = millis();
+    _last_hub_rx_ms       = millis();
+    _last_espnow_tx_ok_ms = millis();
 
     Serial.printf("Mount MAC : %s\n", WiFi.macAddress().c_str());
     Serial.printf("Hub   MAC : %02x:%02x:%02x:%02x:%02x:%02x\n",
         HUB_MAC[0],HUB_MAC[1],HUB_MAC[2],
         HUB_MAC[3],HUB_MAC[4],HUB_MAC[5]);
     Serial.println("*** Add this mount MAC to hub MOUNT_MACS[] ***");
+
+    // Hardware watchdog — resets the chip if loop() stalls for > 30 s
+    // (e.g. QSPI deadlock, ESP-NOW stack hang, heap corruption).
+    // trigger_panic = true so the timeout actually RESETS the chip; with false
+    // it only logs and never recovers — defeating the point of the watchdog.
+    esp_task_wdt_config_t twdt_cfg = {
+        .timeout_ms     = HW_WDT_TIMEOUT_MS,
+        .idle_core_mask = 0,
+        .trigger_panic  = true,
+    };
+    esp_task_wdt_reconfigure(&twdt_cfg);
+    esp_task_wdt_add(NULL);
 
     delay(100);
     send_status_heartbeat();
@@ -1037,6 +1074,9 @@ static inline void drain_teensy_serial() {
 }
 
 void loop() {
+    esp_task_wdt_reset();
+    _loop_count++;
+
     // ── Teensy serial — drain BEFORE rendering so commands are never stale
     drain_teensy_serial();
 
@@ -1079,6 +1119,20 @@ void loop() {
         if (hub_ok) _watchdog_fired = false;
     }
 
+    // Restart the chip only when the mount is TRULY isolated — i.e. we can
+    // neither receive from the hub NOR successfully send to it for the full
+    // window.  If our sends are still being ACKed (TX fresh) while RX is stale,
+    // the link is one-way: a HUB-side send wedge that restarting THIS chip does
+    // not fix (confirmed 2026-06-16 — a fresh-booted mount still couldn't
+    // receive).  Restarting then only reboot-loops and blinks the camera, so we
+    // hold off and let the hub be recovered from the PC (CMD_HUB_RESTART).
+    bool rx_stale = (millis() - _last_hub_rx_ms       > ESPNOW_RESTART_MS);
+    bool tx_stale = (millis() - _last_espnow_tx_ok_ms > ESPNOW_RESTART_MS);
+    if (!hub_ok && rx_stale && tx_stale) {
+        Serial.println("[ESPNOW] Mount isolated (no RX or TX) — restarting chip to recover stack");
+        esp_restart();
+    }
+
     // ── Watchdog ─────────────────────────────────────────────────────────
     if (!_watchdog_fired && (millis() - _last_hub_rx_ms > WATCHDOG_MS)) {
         _watchdog_fired = true;
@@ -1110,6 +1164,18 @@ void loop() {
         } else {
             lv_label_set_text(_lbl_rssi, "");
         }
+    }
+
+    // ── ESP-NOW diagnostic line (every 500 ms) ───────────────────────────
+    if (_lbl_diag && (now - _last_diag_update_ms >= 500)) {
+        _last_diag_update_ms = now;
+        char dbuf[48];
+        snprintf(dbuf, sizeof(dbuf), "RX%lus TX%lus F%d R%d #%lu",
+                 (unsigned long)((now - _last_hub_rx_ms)       / 1000),
+                 (unsigned long)((now - _last_espnow_tx_ok_ms) / 1000),
+                 (int)_espnow_consec_fails, (int)_espnow_refresh_count,
+                 (unsigned long)_loop_count);
+        lv_label_set_text(_lbl_diag, dbuf);
     }
 
     // ── Heartbeat ────────────────────────────────────────────────────────
