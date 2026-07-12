@@ -200,13 +200,21 @@ static volatile bool    _espnow_need_full_reinit           = false;
 // lives below the ESP-NOW layer; only a full reboot has ever cleared it).
 static volatile bool    _need_full_restart                 = false;
 
+// Uninterrupted send-FAIL run per mount (0 = last send succeeded).  Unlike
+// _espnow_fails (which resets each time it triggers a peer refresh), this one
+// only resets on SUCCESS — it is the raw signal the autonomous wedge detector
+// reads in loop().  Capped at 255.
+static volatile uint8_t _espnow_fail_run[NUM_MOUNTS] = {};
+
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
     const uint8_t *mac_addr = info->des_addr;
     for (int i = 0; i < NUM_MOUNTS; i++) {
         if (memcmp(mac_addr, MOUNT_MACS[i], 6) != 0) continue;
         if (status == ESP_NOW_SEND_SUCCESS) {
-            _espnow_fails[i] = 0;
+            _espnow_fails[i]    = 0;
+            _espnow_fail_run[i] = 0;
         } else {
+            if (_espnow_fail_run[i] < 255) _espnow_fail_run[i]++;
             if (++_espnow_fails[i] >= ESPNOW_MAX_CONSEC_FAILS) {
                 _espnow_fails[i]          = 0;
                 _espnow_need_refresh[i]   = true;  // handled safely in loop()
@@ -248,6 +256,52 @@ static uint32_t  _ghost_rx_drops = 0;   // STATUS frames dropped as ghosts (rssi
 static int8_t    _la_dir[NUM_MOUNTS];   // initialised to -1 in setup()
 static uint16_t  _la_dir_seq = 0;       // sequence counter for hub-injected CMD_LA_MOVE_DIR packets
 #define MOUNT_TIMEOUT_MS  3000
+
+// ---------------------------------------------------------------------------
+// Autonomous self-recovery — no PC required
+// ---------------------------------------------------------------------------
+// The hub→mount send wedge (WiFi-driver TX path dies for one mount after long
+// uptime) was previously detected and recovered ONLY by the PC app via
+// CMD_HUB_REINIT_ESPNOW / CMD_HUB_RESTART.  A hub running with just the hub
+// display stayed wedged until someone power-cycled it.  The hub can see the
+// wedge itself: sends to a mount FAIL continuously (send callback) while that
+// mount's STATUS keeps ARRIVING (RX fine, so the mount is powered and in
+// range).  Ladder: reinit ESP-NOW, then esp_restart() — field data (Jun 2026
+// logs) shows reinit alone cures ~15% and a restart cures the rest.
+//
+// The PC app's escalation is unchanged and acts as a backstop: with a PC
+// attached its reinit typically fires first (~3 s); the hub's own restart at
+// 25 s beats the PC's 35 s escalation.  Both share the reinit cooldown stamp.
+
+#include "esp_attr.h"
+
+#define SELF_WEDGE_ALIVE_MS      7000UL   // "mount is alive" = STATUS within this (AMOLED heartbeats every 5 s)
+#define SELF_WEDGE_MIN_FAILS     2        // uninterrupted send fails before the wedge clock starts
+#define SELF_REINIT_AFTER_MS     6000UL   // wedge age → full ESP-NOW reinit
+#define SELF_REINIT_COOLDOWN_MS  30000UL  // min gap between reinits (PC- or self-triggered)
+#define SELF_RESTART_AFTER_MS    25000UL  // wedge age → esp_restart()
+#define SELF_RESTART_MAX_STREAK  3        // boot-loop guard: max consecutive self-restarts
+#define HEALTHY_CLEAR_MS         600000UL // 10 min wedge-free clears the restart streak
+
+// Proactive maintenance restart: every long-uptime pathology seen so far
+// (TX wedge, ghost RX frames) is cured by a reboot and develops after ~12 h.
+// Restart deliberately at 8 h uptime — but only when nothing is happening:
+// no client command for 20 min AND every connected mount reports IDLE.
+#define MAINT_RESTART_UPTIME_MS  (8UL * 3600UL * 1000UL)
+#define MAINT_RESTART_IDLE_MS    (20UL * 60UL * 1000UL)
+
+// Survives esp_restart() (not power-on/brownout): consecutive self-restart
+// count, so a wedge that reappears instantly after every reboot can't create
+// an infinite ~40 s boot loop.  Cleared after 10 min wedge-free, or on any
+// non-software reset.
+RTC_NOINIT_ATTR static uint32_t _self_restart_streak;
+
+static uint32_t _tx_wedge_since_ms[NUM_MOUNTS] = {};  // 0 = no wedge clock running
+static uint32_t _last_reinit_ms       = 0;   // stamped by hub_espnow_full_reinit()
+static uint32_t _last_wedge_ms        = 0;   // last time any wedge clock was active
+static uint32_t _last_client_cmd_ms   = 0;   // last command from any client (TCP/WS/serial/display)
+static uint8_t  _mount_last_state[NUM_MOUNTS];  // last STATUS state byte (0xFF = unknown)
+static bool     _restart_block_logged = false;  // rate-limits the streak-exceeded log line
 
 // Rate-limit CMD_STATUS broadcasts to WebSocket clients.
 // The XIAO ESP32S3 shares one radio between WiFi AP and ESP-NOW.  While the
@@ -369,6 +423,7 @@ static void intercept_la_move_dir(uint8_t mount_id, uint8_t dir) {
 }
 
 static void forward_to_mounts(const ParsedPacket &pkt) {
+    _last_client_cmd_ms = millis();   // any client traffic defers the maintenance restart
     uint8_t  raw[PKT_BUF_SIZE + 4];
     uint16_t raw_len = build_packet(raw, pkt.mount_id, pkt.seq, pkt.cmd,
                                     pkt.payload, pkt.payload_len);
@@ -518,6 +573,8 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
     uint8_t state = pkt.payload[0];
     uint8_t flags = pkt.payload[1];
 
+    _mount_last_state[msg.src_idx] = state;   // read by the maintenance-restart idle check
+
     disp_update_cam(mount_id, state, flags, msg.rssi);
 
     if (pkt.payload_len >= 4 && state != STATE_JOGGING) {
@@ -570,6 +627,7 @@ static void dispatch_disp_msg(uint8_t type, uint8_t len, const uint8_t *d) {
         CmdType cmd      = (CmdType)d[1];
         uint8_t plen     = d[2];
         if (len >= 3 + plen) {
+            _last_client_cmd_ms = millis();   // display touch counts as client activity
             ui_send_to_mount(mount_id, cmd, d + 3, plen);
             // Intercept START_LOOK_AT_MOVE from the display board — same
             // notification path as TCP/WebSocket clients (see forward_to_mounts).
@@ -694,7 +752,8 @@ static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
 // AMOLED's espnow_full_reinit().  Runs from loop() (never a callback), so the
 // deinit/init is safe.  WiFi AP / TCP / WS are untouched.
 static void hub_espnow_full_reinit() {
-    Serial.println("[ESP-NOW] PC-requested full reinit — start");
+    _last_reinit_ms = millis();   // shared cooldown stamp: PC- and self-triggered
+    Serial.println("[ESP-NOW] Full reinit — start");
     esp_now_deinit();
     delay(50);
     if (esp_now_init() != ESP_OK) {
@@ -744,9 +803,15 @@ void setup() {
 
     pkt_parser_init(&_serial_parser);
     memset(_la_dir, -1, sizeof(_la_dir));
+    memset(_mount_last_state, 0xFF, sizeof(_mount_last_state));
     _reset_reason = (uint8_t)esp_reset_reason();   // why this boot happened
+    // RTC_NOINIT memory is undefined after power-on/brownout and only
+    // meaningful across software resets — zero the self-restart streak on any
+    // non-software boot.
+    if (esp_reset_reason() != ESP_RST_SW) _self_restart_streak = 0;
     Serial.println("\n=== ESP32 Camera Mount Hub (XIAO) ===");
-    Serial.printf("Reset reason: %d\n", (int)_reset_reason);
+    Serial.printf("Reset reason: %d  (self-restart streak: %lu)\n",
+                  (int)_reset_reason, (unsigned long)_self_restart_streak);
 
     // Display UART — start before anything else so the display gets updates
     // as soon as the hub is ready.
@@ -842,6 +907,107 @@ void send_heartbeat() {
 }
 
 // ---------------------------------------------------------------------------
+// Autonomous self-recovery checks  (called from loop() every ~500 ms)
+// ---------------------------------------------------------------------------
+
+// Detect the hub→mount TX wedge and run the reinit→restart ladder without
+// needing the PC.  Signature: sends to a mount FAIL back-to-back while its
+// STATUS keeps arriving.  The 2 s heartbeat guarantees the fail counter moves
+// even with no client traffic.
+static void check_self_recovery(uint32_t now) {
+    // A wedge-free 10 minutes clears the boot-loop streak.
+    if (_self_restart_streak && now >= HEALTHY_CLEAR_MS &&
+            (now - _last_wedge_ms) >= HEALTHY_CLEAR_MS) {
+        Serial.printf("[SELF] 10 min wedge-free — clearing self-restart streak (%lu)\n",
+                      (unsigned long)_self_restart_streak);
+        _self_restart_streak = 0;
+    }
+
+    uint32_t worst_age = 0;
+    int      worst_i   = -1;
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        bool alive   = _mount_last_seen[i] &&
+                       (now - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS);
+        bool failing = _espnow_fail_run[i] >= SELF_WEDGE_MIN_FAILS;
+        if (alive && failing) {
+            if (!_tx_wedge_since_ms[i]) {
+                _tx_wedge_since_ms[i] = now ? now : 1;
+                Serial.printf("[SELF] TX wedge suspected on mount %d "
+                              "(sends failing, STATUS still arriving)\n", i + 1);
+            }
+            _last_wedge_ms = now;
+            uint32_t age = now - _tx_wedge_since_ms[i];
+            if (age >= worst_age) { worst_age = age; worst_i = i; }
+        } else if (_tx_wedge_since_ms[i]) {
+            Serial.printf("[SELF] TX wedge cleared on mount %d after %lu ms\n",
+                          i + 1, (unsigned long)(now - _tx_wedge_since_ms[i]));
+            _tx_wedge_since_ms[i]  = 0;
+            _restart_block_logged  = false;
+        }
+    }
+    if (worst_i < 0) return;
+
+    uint32_t wsec = worst_age / 1000UL;
+    uint8_t  wsec8 = (wsec > 255) ? 255 : (uint8_t)wsec;
+
+    // Stage 1: full ESP-NOW reinit (shared cooldown with the PC-commanded path,
+    // so with a PC attached its ~3 s reinit suppresses a duplicate here).
+    if (worst_age >= SELF_REINIT_AFTER_MS &&
+            (now - _last_reinit_ms) >= SELF_REINIT_COOLDOWN_MS) {
+        Serial.printf("[SELF] Wedge on mount %d for %lu ms — full ESP-NOW reinit\n",
+                      worst_i + 1, (unsigned long)worst_age);
+        send_hub_event(2, (uint8_t)(worst_i + 1), 0, wsec8, _espnow_fail_run[worst_i]);
+        hub_espnow_full_reinit();
+        return;
+    }
+
+    // Stage 2: the reinit didn't clear it — restart the whole hub (the only
+    // confirmed cure; the wedge lives below the ESP-NOW layer).  25 s beats the
+    // PC app's 35 s escalation, so this fires first even with a PC attached.
+    if (worst_age >= SELF_RESTART_AFTER_MS) {
+        if (_self_restart_streak >= SELF_RESTART_MAX_STREAK) {
+            if (!_restart_block_logged) {
+                _restart_block_logged = true;
+                Serial.printf("[SELF] Wedge persists but self-restart streak = %lu — "
+                              "further self-restarts disabled until 10 min healthy "
+                              "(power cycle if stuck)\n",
+                              (unsigned long)_self_restart_streak);
+            }
+            return;
+        }
+        Serial.printf("[SELF] Wedge on mount %d for %lu ms despite reinit — "
+                      "restarting hub\n", worst_i + 1, (unsigned long)worst_age);
+        send_hub_event(3, (uint8_t)(worst_i + 1), 0, wsec8, 0);
+        _self_restart_streak++;
+        Serial.flush();
+        delay(50);
+        esp_restart();
+    }
+}
+
+// Proactive maintenance restart: after MAINT_RESTART_UPTIME_MS, restart the
+// hub the moment the system is quiet — no client command for 20 min and every
+// connected mount IDLE.  Keeps uptime permanently below the ~12 h mark where
+// the WiFi-driver pathologies (TX wedge, ghost RX frames) start appearing.
+// Mounts ride through it: the hub is back well inside their 10 s E-STOP window.
+static void check_maintenance_restart(uint32_t now) {
+    if (now < MAINT_RESTART_UPTIME_MS) return;
+    if (_last_client_cmd_ms && (now - _last_client_cmd_ms) < MAINT_RESTART_IDLE_MS) return;
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        bool connected = _mount_last_seen[i] &&
+                         (now - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS);
+        if (connected && _mount_last_state[i] != STATE_IDLE) return;   // something's moving
+    }
+    Serial.printf("[SELF] Maintenance restart at %lu h uptime (system idle) — "
+                  "keeping the WiFi driver fresh\n",
+                  (unsigned long)(now / 3600000UL));
+    send_hub_event(4, 0, 0, (uint8_t)(now / 3600000UL), 0);
+    Serial.flush();
+    delay(50);
+    esp_restart();
+}
+
+// ---------------------------------------------------------------------------
 // Loop
 // ---------------------------------------------------------------------------
 
@@ -872,6 +1038,14 @@ void loop() {
                           i + 1, ESPNOW_MAX_CONSEC_FAILS);
             refresh_espnow_peer(i);
         }
+    }
+
+    // ---- Autonomous self-recovery (wedge ladder + maintenance restart) ----
+    static uint32_t last_self_check = 0;
+    if (now - last_self_check >= 500) {
+        last_self_check = now;
+        check_self_recovery(now);
+        check_maintenance_restart(now);
     }
 
     if (now - last_hb >= HEARTBEAT_MS) {

@@ -554,10 +554,16 @@ class Bridge:
     }
 
     def _note_hub_event(self, pkt: Packet) -> None:
-        """Log a hub event (Cmd.HUB_EVENT): a mount connect transition or a
-        dropped ghost STATUS frame.  This is the capture that pins down the
-        phantom-camera cause — a real connect shows a negative RSSI and IDLE
-        state; a ghost shows rssi=0 (and often a bogus state) at long uptime."""
+        """Log a hub event (Cmd.HUB_EVENT).
+
+        kind 0: mount online (real connect — negative RSSI, real state)
+        kind 1: ghost STATUS frame dropped (rssi==0 phantom-camera guard)
+        kind 2: hub ran an AUTONOMOUS ESP-NOW reinit (wedge; state=wedge secs,
+                flags=send-fail run)
+        kind 3: hub is about to AUTONOMOUSLY RESTART (wedge persisted;
+                state=wedge secs) — expect a brief disconnect + HUB REBOOTED
+        kind 4: hub is about to do a MAINTENANCE restart (state=uptime hours)
+        """
         if pkt.cmd != Cmd.HUB_EVENT or len(pkt.payload) < 9:
             return
         kind   = pkt.payload[0]
@@ -566,13 +572,26 @@ class Bridge:
         state  = pkt.payload[3]
         flags  = pkt.payload[4]
         uptime = int.from_bytes(pkt.payload[5:9], "big")
-        sname  = self._STATE_NAMES.get(state, f"0x{state:02X}")
         hrs    = uptime / 3600.0
         if kind == 1:
+            sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.warning("HUB EVENT: GHOST frame dropped — mount=%d rssi=%d dBm "
                         "state=%s flags=0x%02X | hub uptime %.1fh (%ds) | total ghost drops=%d",
                         mount, rssi, sname, flags, hrs, uptime, self._hub_ghost_drops)
+        elif kind == 2:
+            log.warning("HUB EVENT: hub SELF-REINIT of ESP-NOW — TX wedge on mount %d "
+                        "for %ds (fail run %d) | hub uptime %.1fh",
+                        mount, state, flags, hrs)
+        elif kind == 3:
+            log.warning("HUB EVENT: hub SELF-RESTART imminent — TX wedge on mount %d "
+                        "persisted %ds despite reinit | hub uptime %.1fh "
+                        "(brief disconnect expected)",
+                        mount, state, hrs)
+        elif kind == 4:
+            log.info("HUB EVENT: hub MAINTENANCE RESTART at %dh uptime (system idle) "
+                     "— brief disconnect expected", state)
         else:
+            sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "
                      "| hub uptime %.1fh (%ds)",
                      mount, rssi, sname, flags, hrs, uptime)

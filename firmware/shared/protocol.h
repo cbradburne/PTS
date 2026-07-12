@@ -123,8 +123,14 @@ typedef enum : uint8_t {
                                    // the power cycle that's the only confirmed cure.  Hub-consumed.
     CMD_HUB_EVENT         = 0x98,  // hub→USB-PC only: notable hub event for the PC log.  9-byte
                                    // payload: kind(1)+mount_id(1)+rssi(1)+state(1)+flags(1)+uptime_s(u32).
-                                   // kind: 0 = mount came online (real connect), 1 = ghost STATUS
-                                   // frame dropped (rssi==0, the phantom "cam connected 0 dBm" cause).
+                                   // kind 0 = mount came online (real connect; rssi/state/flags real)
+                                   // kind 1 = ghost STATUS frame dropped (rssi==0 phantom-cam guard)
+                                   // kind 2 = autonomous ESP-NOW reinit (wedge; state=wedge secs,
+                                   //          flags=consecutive send-fail run on that mount)
+                                   // kind 3 = autonomous hub restart imminent (wedge persisted;
+                                   //          state=wedge secs)
+                                   // kind 4 = maintenance restart imminent (long uptime + idle;
+                                   //          state=uptime hours)
                                    // Diagnostic only; sent ONLY over Serial, never TCP/WS.
 } CmdType;
 
