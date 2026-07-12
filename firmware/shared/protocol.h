@@ -2,6 +2,17 @@
 /*
  * Shared packet protocol for camera mount controller.
  *
+ * ── SINGLE SOURCE OF TRUTH ──────────────────────────────────────────────────
+ * This header is the canonical protocol definition.  Two other sources mirror
+ * parts of it and are VERIFIED AGAINST IT by tools/check_protocol.py (run
+ * automatically by the pre-commit hook in .githooks/):
+ *   - pc_app/comms/protocol.py           (Python enums + encoders/decoders)
+ *   - firmware/esp32_hub/web_app.h       (JS constants inside the web app)
+ * firmware/teensy41_mount/protocol.h is a one-line shim including this file.
+ * When you change the protocol: edit HERE first, then update the mirrors —
+ * the checker will list exactly what is missing or mismatched.
+ * ────────────────────────────────────────────────────────────────────────────
+ *
  * Packet format:
  *   [0xAA][0x55][LEN:u8][MOUNT_ID:u8][SEQ_HI:u8][SEQ_LO:u8][CMD:u8][PAYLOAD...][CRC_HI:u8][CRC_LO:u8]
  *
@@ -42,10 +53,6 @@
 // Wire layout per subject record: valid(1) + name(16) + x_mm(4f) + y_mm(4f) + z_mm(4f) = 29 bytes
 #define SUBJECT_RECORD_LEN      29
 #define SUBJECT_LIST_PAYLOAD_LEN  (MAX_SUBJECTS * SUBJECT_RECORD_LEN)   // 232
-
-#define MOUNT_STATE_CONNECTED 1
-#define MOUNT_STATE_MOVING    2
-#define FLAG_PAN_SPEED_HIGH   0x01
 
 // ---------------------------------------------------------------------------
 // Commands

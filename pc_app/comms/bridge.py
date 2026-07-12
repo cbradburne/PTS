@@ -550,7 +550,7 @@ class Bridge:
     # Mount state names for the hub-event log (mirrors MountState).
     _STATE_NAMES = {
         0: "IDLE", 1: "JOGGING", 2: "MOVING", 3: "FINDING_LIMITS",
-        4: "ERROR", 5: "LOOK_AT_MOVE", 6: "CALIBRATING",
+        4: "ERROR", 5: "LOOK_AT_MOVE", 6: "CALIBRATING", 7: "LOOK_AT_PRE_AIM",
     }
 
     def _note_hub_event(self, pkt: Packet) -> None:

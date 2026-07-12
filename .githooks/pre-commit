@@ -1,0 +1,21 @@
+#!/bin/sh
+# Pre-commit gate: protocol single-source-of-truth check.
+#
+# firmware/shared/protocol.h is canonical; pc_app/comms/protocol.py and the JS
+# constants in firmware/esp32_hub/web_app.h are verified mirrors, and
+# firmware/teensy41_mount/protocol.h must remain a shim.  Any drift blocks the
+# commit with an exact description of what is out of sync.
+#
+# Enabled by:  git config core.hooksPath .githooks
+# Bypass in an emergency with:  git commit --no-verify
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+python3 tools/check_protocol.py
+status=$?
+if [ $status -ne 0 ]; then
+    echo ""
+    echo "Commit blocked: protocol sources are out of sync (details above)."
+    echo "Fix the mismatch, or bypass once with: git commit --no-verify"
+fi
+exit $status

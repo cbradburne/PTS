@@ -132,6 +132,10 @@ class MountState(IntEnum):
     ERROR               = 4
     LOOK_AT_MOVE        = 5   # v2: slider moving, pan/tilt tracking subject
     CALIBRATING_SUBJECT = 6   # v2: 2-point subject calibration in progress
+    LOOK_AT_PRE_AIM     = 7   # v2: pre-aiming pan/tilt before slider starts
+    # NOTE: keep in sync with MountState in firmware/shared/protocol.h — a
+    # value missing here makes decode_status() raise and the PC app silently
+    # drop every STATUS packet the mount sends while in that state.
 
 
 class CalibPrompt(IntEnum):
