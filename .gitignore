@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# PC app runtime logs (rotate to ~10 MB each — never commit)
+pc_app/logs/
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
+# Arduino build output (if arduino-cli is ever used in-tree)
+build/
+*.bin.tmp

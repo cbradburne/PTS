@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "PC App (PyQt6)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["pc_app/main.py"],
+      "port": null
+    },
+    {
+      "name": "Web App Preview",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8080", "--directory", "/Users/col/New CC v2/preview"],
+      "port": 8080
+    }
+  ]
+}

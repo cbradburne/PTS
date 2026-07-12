@@ -1,0 +1,6 @@
+PyQt6>=6.6.0
+pyserial>=3.5
+pygame>=2.5.0
+opencv-contrib-python>=4.9.0   # contrib build includes CSRT tracker
+numpy>=1.26.0
+ultralytics>=8.0.0             # YOLOv8 person detection (downloads ~6 MB model on first run)

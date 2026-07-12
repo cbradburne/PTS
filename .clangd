@@ -1,0 +1,17 @@
+---
+# Suppress clang diagnostics for Arduino/Teensy firmware files.
+# These files require the Arduino toolchain to compile — clang does not have
+# access to Arduino.h, Teensy headers, or the TeensyStep4/TMCStepper libraries,
+# so it produces false-positive "file not found" and "undeclared identifier"
+# errors that are not real build issues.
+If:
+  PathMatch: firmware/.*\.(ino|cpp|h)
+CompileFlags:
+  Add:
+    - -w          # suppress all warnings
+Diagnostics:
+  Suppress:
+    - pp_file_not_found
+    - unknown_typename
+    - undeclared_var_use
+    - incomplete_type
