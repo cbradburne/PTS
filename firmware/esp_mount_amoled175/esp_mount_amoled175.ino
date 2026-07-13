@@ -44,15 +44,76 @@
 #include "ui_types.h"   // ArcStrip struct — must be included before Arduino auto-prototypes
 
 // ---------------------------------------------------------------------------
-// Configuration — set per-unit before flashing
+// Configuration — RUNTIME, set from the on-screen SETUP (no per-unit flashing)
 // ---------------------------------------------------------------------------
+// Mount ID and the paired hub(s) live in NVS; one binary serves every mount.
+//
+//   Enter setup : touch & hold the screen ~1.5 s (auto-entered when unpaired)
+//   Flow        : tap CAM 1-5  →  scan lists hubs (SSID/MAC/signal)  →  tap
+//                 your hub  →  SAVE  →  mount restarts paired.
+//
+// The hub needs no action: it learns this mount's MAC from the first packet
+// (pairing rules in esp32_hub.ino).  Multiple hubs (e.g. home + work) can be
+// paired; at boot — and whenever the active hub goes silent — the mount scans
+// for any known hub and follows it, including onto a changed WiFi channel.
 
-#define MOUNT_ID    1        // 1-5, unique per mount
-#define HUB_CHANNEL 1        // must match AP_CHANNEL in esp32_hub.ino
+#include <Preferences.h>
 
-static const uint8_t HUB_MAC[6] = { 0x76, 0x4d, 0xbd, 0x81, 0x11, 0x04 };   // AP MAC of the hub
-// Home hub 0x76, 0x4d, 0xbd, 0x81, 0x11, 0x30
-// Work hub 0x76, 0x4d, 0xbd, 0x81, 0x11, 0x04
+#define HUB_SSID_PREFIX  "CamMount"   // scan filter — must match the hub's AP_SSID
+#define MAX_KNOWN_HUBS   4
+
+struct KnownHub {
+    uint8_t mac[6];       // hub softAP BSSID == its ESP-NOW address
+    uint8_t channel;      // last known channel (self-heals via rescan)
+    char    ssid[17];
+};
+
+struct MountCfg {
+    uint8_t  magic;       // CFG_MAGIC when valid
+    uint8_t  mount_id;    // 1-5
+    uint8_t  n_hubs;      // entries used in hubs[]
+    uint8_t  last_hub;    // index of the hub currently in use
+    KnownHub hubs[MAX_KNOWN_HUBS];
+};
+#define CFG_MAGIC 0xC3
+
+static MountCfg    _cfg = {};
+static Preferences _mount_prefs;
+static bool        _cfg_valid   = false;
+static uint8_t     _mount_id    = 0;      // runtime mount ID (0 = unpaired)
+static uint8_t     _hub_mac[6]  = {};     // active hub ESP-NOW address
+static uint8_t     _hub_channel = 1;
+static bool        _setup_active = false; // SETUP screen is showing (declared
+                                          // early: gates main/level touch zones)
+
+static void cfg_apply_active_hub() {
+    const KnownHub &h = _cfg.hubs[_cfg.last_hub];
+    memcpy(_hub_mac, h.mac, 6);
+    _hub_channel = h.channel;
+}
+
+static void cfg_save() {
+    _mount_prefs.begin("mcfg", false);
+    _mount_prefs.putBytes("cfg", &_cfg, sizeof(_cfg));
+    _mount_prefs.end();
+}
+
+static void cfg_load() {
+    _mount_prefs.begin("mcfg", false);
+    size_t n = _mount_prefs.getBytes("cfg", &_cfg, sizeof(_cfg));
+    _mount_prefs.end();
+    _cfg_valid = (n == sizeof(_cfg) && _cfg.magic == CFG_MAGIC &&
+                  _cfg.mount_id >= 1 && _cfg.mount_id <= 5 &&
+                  _cfg.n_hubs >= 1 && _cfg.n_hubs <= MAX_KNOWN_HUBS &&
+                  _cfg.last_hub < _cfg.n_hubs);
+    if (_cfg_valid) {
+        _mount_id = _cfg.mount_id;
+        cfg_apply_active_hub();
+    } else {
+        memset(&_cfg, 0, sizeof(_cfg));
+        _mount_id = 0;
+    }
+}
 
 
 // ---------------------------------------------------------------------------
@@ -164,6 +225,11 @@ static volatile bool  _touch_irq = false;
 static TouchDrvCSTXXX _touch;
 static int16_t        _touch_x[5], _touch_y[5];
 
+// Touch-hold detector (opens SETUP): stamped by the LVGL touch callback when a
+// press begins, cleared on release; loop() opens setup after SETUP_HOLD_MS.
+static volatile uint32_t _press_started_ms = 0;
+#define SETUP_HOLD_MS  1500UL
+
 // ---------------------------------------------------------------------------
 // IMU — QMI8658 (shares I2C bus with touch, addr 0x6B)
 // ---------------------------------------------------------------------------
@@ -188,6 +254,7 @@ static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                                 _touch.getSupportTouchPoint());
     if (n > 0) {
         _last_touch_ms = millis();
+        if (!last_pressed) _press_started_ms = millis();   // press began — hold detector
         last_pt.x    = (lv_coord_t)_touch_x[0];
         last_pt.y    = (lv_coord_t)_touch_y[0];
         last_pressed = true;
@@ -195,6 +262,7 @@ static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
         data->point  = last_pt;
     } else {
         last_pressed = false;
+        _press_started_ms = 0;                             // released
         data->state  = LV_INDEV_STATE_RELEASED;
     }
 }
@@ -254,6 +322,9 @@ static uint8_t _tx_buf[PKT_BUF_SIZE + 4];
 static volatile uint8_t _espnow_consec_fails   = 0;   // consecutive send failures → peer refresh
 static volatile uint8_t _espnow_refresh_count  = 0;   // peer del/add cycles since last full reinit
 static volatile bool    _espnow_need_reinit    = false; // set in callback, actioned in loop()
+static volatile bool    _espnow_need_refresh   = false; // peer del/add requested, actioned in loop()
+                                                        // (esp_now_*() must not run in the WiFi-task
+                                                        // send callback — it can corrupt the stack)
 
 // ---------------------------------------------------------------------------
 // Colours
@@ -376,20 +447,21 @@ static const lv_coord_t SLOT2_CX[5] = { 141, 187, 233, 279, 325 };
 // ---------------------------------------------------------------------------
 
 static void send_to_hub(CmdType cmd, const uint8_t *payload, uint8_t plen) {
-    uint16_t n = build_packet(_tx_buf, MOUNT_ID, ++_tx_seq, cmd, payload, plen);
-    esp_now_send(HUB_MAC, _tx_buf, n);
+    if (!_cfg_valid) return;   // unpaired — no hub to send to
+    uint16_t n = build_packet(_tx_buf, _mount_id, ++_tx_seq, cmd, payload, plen);
+    esp_now_send(_hub_mac, _tx_buf, n);
 }
 
 static void send_estop_to_teensy() {
     uint8_t buf[PKT_BUF_SIZE + 4];
-    uint16_t n = build_packet(buf, MOUNT_ID, ++_tx_seq, CMD_E_STOP, nullptr, 0);
+    uint16_t n = build_packet(buf, _mount_id, ++_tx_seq, CMD_E_STOP, nullptr, 0);
     Serial1.write(buf, n);
 }
 
 static void send_preset_to_teensy(uint8_t group, uint8_t preset) {
     uint8_t payload[2] = { group, preset };
     uint8_t buf[PKT_BUF_SIZE + 4];
-    uint16_t n = build_packet(buf, MOUNT_ID, ++_tx_seq,
+    uint16_t n = build_packet(buf, _mount_id, ++_tx_seq,
                               CMD_SET_ACTIVE_PRESET, payload, 2);
     Serial1.write(buf, n);
 }
@@ -447,14 +519,9 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
                 _espnow_need_reinit = true;
                 Serial.println("ESP-NOW full reinit requested");
             } else {
-                esp_now_del_peer(HUB_MAC);
-                esp_now_peer_info_t peer = {};
-                memcpy(peer.peer_addr, HUB_MAC, 6);
-                peer.channel = HUB_CHANNEL;
-                peer.ifidx   = WIFI_IF_STA;
-                peer.encrypt = false;
-                esp_now_add_peer(&peer);
-                Serial.printf("ESP-NOW hub peer refreshed (%d/3)\n", (int)_espnow_refresh_count);
+                // Peer del/add must NOT run here either (WiFi-task context) —
+                // flag it for loop(), same as the full reinit.
+                _espnow_need_refresh = true;
             }
         }
     }
@@ -466,7 +533,22 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
 // (hundreds of failed sends) doesn't permanently corrupt the send side.
 // ---------------------------------------------------------------------------
 
+// Register (or re-register) the active hub as the sole ESP-NOW peer.
+// Called from loop()/setup() only — never from a WiFi-task callback.
+static void espnow_peer_refresh() {
+    if (!_cfg_valid) return;
+    esp_now_del_peer(_hub_mac);
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, _hub_mac, 6);
+    peer.channel = _hub_channel;
+    peer.ifidx   = WIFI_IF_STA;
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
+    Serial.printf("ESP-NOW hub peer refreshed (%d/3)\n", (int)_espnow_refresh_count);
+}
+
 static void espnow_full_reinit() {
+    if (!_cfg_valid) return;   // nothing to rebuild toward while unpaired
     Serial.println("[ESP-NOW] Full stack reinit start");
     esp_now_deinit();
     delay(100);
@@ -479,13 +561,14 @@ static void espnow_full_reinit() {
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);
     esp_now_peer_info_t peer = {};
-    memcpy(peer.peer_addr, HUB_MAC, 6);
-    peer.channel = HUB_CHANNEL;
+    memcpy(peer.peer_addr, _hub_mac, 6);
+    peer.channel = _hub_channel;
     peer.ifidx   = WIFI_IF_STA;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
     _espnow_consec_fails  = 0;
     _espnow_refresh_count = 0;
+    _espnow_need_refresh  = false;
     Serial.println("[ESP-NOW] Full stack reinit done");
 }
 
@@ -496,10 +579,10 @@ static void espnow_full_reinit() {
 static void ui_update();  // forward declaration
 
 static void handle_hub_packet(const ParsedPacket &pkt) {
-    if (pkt.mount_id != MOUNT_ID && pkt.mount_id != MOUNT_BROADCAST) return;
+    if (pkt.mount_id != _mount_id && pkt.mount_id != MOUNT_BROADCAST) return;
     _last_hub_rx_ms = millis();
     uint8_t ack[PKT_BUF_SIZE + 4];
-    esp_now_send(HUB_MAC, ack, build_ack(ack, MOUNT_ID, ++_tx_seq, pkt.seq));
+    esp_now_send(_hub_mac, ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
     uint8_t fwd[PKT_BUF_SIZE + 4];
     Serial1.write(fwd, build_packet(fwd, pkt.mount_id, pkt.seq,
                                     pkt.cmd, pkt.payload, pkt.payload_len));
@@ -532,10 +615,11 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
             ui_update();
         }
     }
+    if (!_cfg_valid) return;   // unpaired — don't forward Teensy traffic anywhere
     uint8_t fwd[PKT_BUF_SIZE + 4];
-    esp_now_send(HUB_MAC, fwd, build_packet(fwd, MOUNT_ID, pkt.seq,
-                                            pkt.cmd, pkt.payload,
-                                            pkt.payload_len));
+    esp_now_send(_hub_mac, fwd, build_packet(fwd, _mount_id, pkt.seq,
+                                             pkt.cmd, pkt.payload,
+                                             pkt.payload_len));
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +790,7 @@ static void build_level_screen() {
     lv_obj_remove_flag(back, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(back, [](lv_event_t *) {
+        if (_setup_active) return;   // hold-gesture switched to SETUP mid-press
         _level_active = false;
         lv_scr_load(_main_scr);
     }, LV_EVENT_CLICKED, nullptr);
@@ -768,6 +853,378 @@ static void update_level_screen() {
 }
 
 // ---------------------------------------------------------------------------
+// SETUP screen — pairing without recompiling
+// ---------------------------------------------------------------------------
+// Entered by touch & hold (~1.5 s) on any screen, or automatically at boot
+// when unpaired.  Flow: tap CAM 1-5 → scan lists hubs (SSID + MAC + signal)
+// → tap a hub (auto-selected when only one is found) → SAVE → restart paired.
+// The WiFi scan gives everything ESP-NOW needs: the hub's AP BSSID is its
+// ESP-NOW address and the scan result carries the channel.
+
+static lv_obj_t *_setup_scr        = nullptr;
+static lv_obj_t *_setup_id_btn[5]  = {};
+static lv_obj_t *_setup_hub_btn[MAX_KNOWN_HUBS] = {};
+static lv_obj_t *_setup_hub_lbl[MAX_KNOWN_HUBS] = {};
+static lv_obj_t *_setup_scan_lbl   = nullptr;   // label inside the scan button
+static lv_obj_t *_setup_save_btn   = nullptr;
+static lv_obj_t *_setup_save_lbl   = nullptr;
+static lv_obj_t *_setup_status     = nullptr;   // current pairing / result line
+static uint8_t   _setup_sel_id     = 0;         // 1-5; 0 = not chosen yet
+static int8_t    _setup_sel_hub    = -1;        // index into _scan_hub[]
+static bool      _scan_running     = false;
+static uint8_t   _scan_n           = 0;
+static KnownHub  _scan_hub[MAX_KNOWN_HUBS];
+static int16_t   _scan_rssi[MAX_KNOWN_HUBS];
+
+#define COL_SETUP_SEL   lv_color_hex(0x2E7D32)   // selected button fill
+#define COL_SETUP_BTN   lv_color_hex(0x1E1E1E)   // idle button fill
+
+static void setup_refresh_widgets() {
+    // Mount-ID buttons: selected one filled with accent-green
+    for (int i = 0; i < 5; i++) {
+        lv_obj_set_style_bg_color(_setup_id_btn[i],
+            (_setup_sel_id == i + 1) ? COL_SETUP_SEL : COL_SETUP_BTN, 0);
+    }
+    // Hub rows: selected row green border
+    for (int i = 0; i < MAX_KNOWN_HUBS; i++) {
+        if (i < _scan_n) {
+            char row[48];
+            snprintf(row, sizeof(row), "%s  %02X:%02X  %d dB%s",
+                     _scan_hub[i].ssid,
+                     _scan_hub[i].mac[4], _scan_hub[i].mac[5],
+                     (int)_scan_rssi[i],
+                     (_setup_sel_hub == i) ? "  <" : "");
+            lv_label_set_text(_setup_hub_lbl[i], row);
+            lv_obj_remove_flag(_setup_hub_btn[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_border_color(_setup_hub_btn[i],
+                (_setup_sel_hub == i) ? COL_SETUP_SEL : lv_color_hex(0x383838), 0);
+        } else {
+            lv_obj_add_flag(_setup_hub_btn[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    // SAVE enabled only with both choices made
+    bool ready = (_setup_sel_id >= 1) && (_setup_sel_hub >= 0);
+    lv_obj_set_style_bg_color(_setup_save_btn,
+        ready ? COL_SETUP_SEL : COL_SETUP_BTN, 0);
+    lv_obj_set_style_text_color(_setup_save_lbl,
+        ready ? COL_TEXT : COL_DIM, 0);
+}
+
+static void setup_show_status(const char *txt) {
+    if (_setup_status) lv_label_set_text(_setup_status, txt);
+}
+
+static bool _reacq_scanning = false;   // background known-hub scan (see loop)
+
+static void setup_start_scan() {
+    if (_scan_running) return;
+    _reacq_scanning = false;   // setup takes over the scan hardware
+    _scan_running  = true;
+    _scan_n        = 0;
+    _setup_sel_hub = -1;
+    lv_label_set_text(_setup_scan_lbl, "SCANNING...");
+    setup_show_status("Searching for hubs...");
+    setup_refresh_widgets();
+    WiFi.scanDelete();
+    WiFi.scanNetworks(true /*async*/, false /*no hidden*/);
+}
+
+// Poll the async scan from loop(); populate the hub rows when it completes.
+static void setup_poll_scan() {
+    if (!_scan_running) return;
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return;
+    _scan_running = false;
+    lv_label_set_text(_setup_scan_lbl, "SCAN AGAIN");
+
+    _scan_n = 0;
+    for (int i = 0; i < n; i++) {
+        String ssid = WiFi.SSID(i);
+        if (!ssid.startsWith(HUB_SSID_PREFIX)) continue;
+        int16_t rssi = (int16_t)WiFi.RSSI(i);
+        // Insert sorted by signal strength, strongest first
+        if (_scan_n >= MAX_KNOWN_HUBS && rssi <= _scan_rssi[MAX_KNOWN_HUBS - 1])
+            continue;   // list full and this one is weaker than everything held
+        int pos = _scan_n < MAX_KNOWN_HUBS ? _scan_n : MAX_KNOWN_HUBS - 1;
+        while (pos > 0 && rssi > _scan_rssi[pos - 1]) pos--;
+        if (pos >= MAX_KNOWN_HUBS) continue;
+        for (int k = (int)((_scan_n < MAX_KNOWN_HUBS ? _scan_n : MAX_KNOWN_HUBS - 1)); k > pos; k--) {
+            _scan_hub[k]  = _scan_hub[k - 1];
+            _scan_rssi[k] = _scan_rssi[k - 1];
+        }
+        memcpy(_scan_hub[pos].mac, WiFi.BSSID(i), 6);
+        _scan_hub[pos].channel = (uint8_t)WiFi.channel(i);
+        strncpy(_scan_hub[pos].ssid, ssid.c_str(), 16);
+        _scan_hub[pos].ssid[16] = '\0';
+        _scan_rssi[pos] = rssi;
+        if (_scan_n < MAX_KNOWN_HUBS) _scan_n++;
+    }
+    WiFi.scanDelete();
+    // The scan wanders across channels — go back to the active hub's channel
+    // so a paired mount stays reachable while the user looks at the list.
+    if (_cfg_valid)
+        esp_wifi_set_channel(_hub_channel, WIFI_SECOND_CHAN_NONE);
+
+    if (_scan_n == 0) {
+        setup_show_status("No hubs found — is the hub powered?");
+    } else {
+        if (_scan_n == 1) _setup_sel_hub = 0;   // only one — preselect it
+        char s[40];
+        snprintf(s, sizeof(s), "%d hub%s found — tap to choose",
+                 (int)_scan_n, _scan_n == 1 ? "" : "s");
+        setup_show_status(s);
+    }
+    setup_refresh_widgets();
+}
+
+// SAVE: merge the chosen hub into the known-hubs list, persist, restart.
+static void setup_apply_save() {
+    if (_setup_sel_id < 1 || _setup_sel_hub < 0) return;
+    const KnownHub &sel = _scan_hub[_setup_sel_hub];
+
+    _cfg.magic    = CFG_MAGIC;
+    _cfg.mount_id = _setup_sel_id;
+    int8_t found = -1;
+    for (uint8_t i = 0; i < _cfg.n_hubs; i++)
+        if (memcmp(_cfg.hubs[i].mac, sel.mac, 6) == 0) { found = (int8_t)i; break; }
+    if (found >= 0) {
+        _cfg.hubs[found] = sel;              // refresh channel/ssid
+        _cfg.last_hub    = (uint8_t)found;
+    } else if (_cfg.n_hubs < MAX_KNOWN_HUBS) {
+        _cfg.hubs[_cfg.n_hubs] = sel;
+        _cfg.last_hub = _cfg.n_hubs;
+        _cfg.n_hubs++;
+    } else {
+        _cfg.hubs[MAX_KNOWN_HUBS - 1] = sel; // full — replace the last entry
+        _cfg.last_hub = MAX_KNOWN_HUBS - 1;
+    }
+    cfg_save();
+
+    setup_show_status("Saved — restarting...");
+    lv_refr_now(NULL);          // force the message onto the panel
+    delay(800);
+    esp_restart();              // boot clean as the new identity
+}
+
+static void setup_enter() {
+    if (_setup_active) return;
+    _setup_active  = true;
+    _level_active  = false;
+    _setup_sel_id  = _mount_id;          // preselect current identity
+    _setup_sel_hub = -1;
+    _scan_n        = 0;
+    set_dim(false);
+    char cur[44];
+    if (_cfg_valid)
+        snprintf(cur, sizeof(cur), "Now: CAM %d > %s %02X:%02X",
+                 _mount_id, _cfg.hubs[_cfg.last_hub].ssid,
+                 _hub_mac[4], _hub_mac[5]);
+    else
+        snprintf(cur, sizeof(cur), "UNPAIRED — pick ID, then a hub");
+    lv_scr_load(_setup_scr);
+    setup_show_status(cur);
+    setup_refresh_widgets();
+    setup_start_scan();                  // user came here to pair — scan now
+}
+
+static void setup_exit() {
+    _setup_active = false;
+    lv_scr_load(_main_scr);
+}
+
+// ---------------------------------------------------------------------------
+// Hub reacquire — roaming between known hubs + channel self-healing
+// ---------------------------------------------------------------------------
+// When paired but the hub has been silent for a while (moved site? hub changed
+// channel? this hub off, the other one on?), scan for ANY known hub and follow
+// the strongest one found.  Runs only outside SETUP; scanning is safe here
+// because the hub is silent anyway.
+
+#define REACQ_SILENT_MS  20000UL   // hub silence before we start scanning
+#define REACQ_PERIOD_MS  30000UL   // min gap between reacquire scans
+
+static uint32_t _reacq_last_ms = 0;
+
+static void hub_reacquire_poll() {
+    if (!_cfg_valid || _setup_active || _scan_running) { _reacq_scanning = false; return; }
+
+    uint32_t nowm = millis();
+    if (!_reacq_scanning) {
+        if ((nowm - _last_hub_rx_ms) > REACQ_SILENT_MS &&
+                (nowm - _reacq_last_ms) > REACQ_PERIOD_MS) {
+            _reacq_last_ms  = nowm;
+            _reacq_scanning = true;
+            Serial.println("[REACQ] Hub silent — scanning for known hubs");
+            WiFi.scanDelete();
+            WiFi.scanNetworks(true /*async*/, false);
+        }
+        return;
+    }
+
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return;
+    _reacq_scanning = false;
+
+    int8_t  best   = -1;
+    int16_t bestdb = -32768;
+    uint8_t bestch = 0;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *bssid = WiFi.BSSID(i);
+        for (uint8_t k = 0; k < _cfg.n_hubs; k++) {
+            if (memcmp(bssid, _cfg.hubs[k].mac, 6) != 0) continue;
+            if ((int16_t)WiFi.RSSI(i) > bestdb) {
+                bestdb = (int16_t)WiFi.RSSI(i);
+                best   = (int8_t)k;
+                bestch = (uint8_t)WiFi.channel(i);
+            }
+        }
+    }
+    WiFi.scanDelete();
+
+    if (best >= 0) {
+        bool hub_changed = (best != (int8_t)_cfg.last_hub);
+        bool ch_changed  = (bestch != _cfg.hubs[best].channel);
+        if (hub_changed || ch_changed) {
+            _cfg.hubs[best].channel = bestch;
+            _cfg.last_hub           = (uint8_t)best;
+            cfg_save();
+            cfg_apply_active_hub();
+            Serial.printf("[REACQ] Following hub \"%s\" %02X:%02X on ch %d (%d dB)%s\n",
+                          _cfg.hubs[best].ssid, _hub_mac[4], _hub_mac[5],
+                          (int)bestch, (int)bestdb,
+                          hub_changed ? " — switched hub" : " — channel changed");
+        } else {
+            Serial.println("[REACQ] Known hub visible on stored channel — waiting");
+        }
+    }
+    // Scanning wandered off-channel — always come back to the active hub.
+    esp_wifi_set_channel(_hub_channel, WIFI_SECOND_CHAN_NONE);
+    espnow_peer_refresh();
+}
+
+static void setup_build() {
+    _setup_scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(_setup_scr, COL_BG, 0);
+    lv_obj_set_style_bg_opa(_setup_scr, LV_OPA_COVER, 0);
+
+    lv_obj_t *title = lv_label_create(_setup_scr);
+    lv_label_set_text(title, "SETUP");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, COL_ACCENT, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 34);
+
+    // This mount's own MAC — needed by nobody (pairing is automatic) but
+    // invaluable when supporting someone else's build over the phone.
+    lv_obj_t *own = lv_label_create(_setup_scr);
+    char ownbuf[24];
+    uint8_t mymac[6]; WiFi.macAddress(mymac);
+    snprintf(ownbuf, sizeof(ownbuf), "this: %02X:%02X:%02X:%02X:%02X:%02X",
+             mymac[0], mymac[1], mymac[2], mymac[3], mymac[4], mymac[5]);
+    lv_label_set_text(own, ownbuf);
+    lv_obj_set_style_text_font(own, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(own, COL_DIM, 0);
+    lv_obj_align(own, LV_ALIGN_TOP_MID, 0, 58);
+
+    // ── Mount-ID row: five 56 px round buttons ──────────────────────────
+    lv_obj_t *idlbl = lv_label_create(_setup_scr);
+    lv_label_set_text(idlbl, "CAMERA");
+    lv_obj_set_style_text_font(idlbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(idlbl, COL_DIM, 0);
+    lv_obj_set_pos(idlbl, 60, 86);
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *b = lv_obj_create(_setup_scr);
+        lv_obj_set_size(b, 56, 56);
+        lv_obj_set_pos(b, 60 + i * 70, 104);
+        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(b, COL_SETUP_BTN, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(MOUNT_ACCENT_HEX[i]), 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        char nb[2] = { (char)('1' + i), 0 };
+        lv_obj_t *nl = lv_label_create(b);
+        lv_label_set_text(nl, nb);
+        lv_obj_set_style_text_font(nl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(nl, COL_TEXT, 0);
+        lv_obj_center(nl);
+        lv_obj_add_event_cb(b, [](lv_event_t *e) {
+            _setup_sel_id = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+            setup_refresh_widgets();
+        }, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1));
+        _setup_id_btn[i] = b;
+    }
+
+    // ── Hub result rows ──────────────────────────────────────────────────
+    for (int i = 0; i < MAX_KNOWN_HUBS; i++) {
+        lv_obj_t *r = lv_obj_create(_setup_scr);
+        lv_obj_set_size(r, 320, 36);
+        lv_obj_set_pos(r, 73, 176 + i * 42);
+        lv_obj_set_style_radius(r, 8, 0);
+        lv_obj_set_style_bg_color(r, COL_SETUP_BTN, 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(r, lv_color_hex(0x383838), 0);
+        lv_obj_set_style_border_width(r, 2, 0);
+        lv_obj_set_style_pad_all(r, 0, 0);
+        lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(r, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN));
+        lv_obj_t *l = lv_label_create(r);
+        lv_label_set_text(l, "");
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(l, COL_TEXT, 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(r, [](lv_event_t *e) {
+            _setup_sel_hub = (int8_t)(intptr_t)lv_event_get_user_data(e);
+            setup_refresh_widgets();
+        }, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        _setup_hub_btn[i] = r;
+        _setup_hub_lbl[i] = l;
+    }
+
+    // ── Status line ──────────────────────────────────────────────────────
+    _setup_status = lv_label_create(_setup_scr);
+    lv_label_set_text(_setup_status, "");
+    lv_obj_set_style_text_font(_setup_status, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(_setup_status, COL_DIM, 0);
+    lv_obj_align(_setup_status, LV_ALIGN_TOP_MID, 0, 350);
+
+    // ── Bottom row: SCAN | SAVE | BACK ──────────────────────────────────
+    auto make_btn = [&](lv_coord_t x, lv_coord_t w, const char *txt,
+                        lv_event_cb_t cb) -> lv_obj_t * {
+        lv_obj_t *b = lv_obj_create(_setup_scr);
+        lv_obj_set_size(b, w, 44);
+        lv_obj_set_pos(b, x, 370);
+        lv_obj_set_style_radius(b, 10, 0);
+        lv_obj_set_style_bg_color(b, COL_SETUP_BTN, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(0x555555), 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *l = lv_label_create(b);
+        lv_label_set_text(l, txt);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(l, COL_TEXT, 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+        return b;
+    };
+    lv_obj_t *scan_btn = make_btn(83, 104, "SCAN", [](lv_event_t *) {
+        setup_start_scan();
+    });
+    _setup_scan_lbl = lv_obj_get_child(scan_btn, 0);
+    _setup_save_btn = make_btn(195, 104, "SAVE", [](lv_event_t *) {
+        setup_apply_save();
+    });
+    _setup_save_lbl = lv_obj_get_child(_setup_save_btn, 0);
+    make_btn(307, 76, "BACK", [](lv_event_t *) {
+        if (_cfg_valid) setup_exit();   // unpaired: nowhere to go back to
+    });
+}
+
+// ---------------------------------------------------------------------------
 // UI build
 // ---------------------------------------------------------------------------
 
@@ -804,7 +1261,8 @@ static void ui_build() {
     // regardless of which digit (1-5) is displayed.
     _lbl_num = lv_label_create(scr);
     char num[3];
-    snprintf(num, sizeof(num), "%d", MOUNT_ID);
+    if (_mount_id >= 1) snprintf(num, sizeof(num), "%d", _mount_id);
+    else                snprintf(num, sizeof(num), "?");   // unpaired
     lv_label_set_text(_lbl_num, num);
     lv_obj_set_style_text_font(_lbl_num, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(_lbl_num, COL_ACCENT, 0);
@@ -880,6 +1338,7 @@ static void ui_build() {
     lv_obj_remove_flag(z_level, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(z_level, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(z_level, [](lv_event_t *) {
+        if (_setup_active) return;   // hold-gesture switched to SETUP mid-press
         if (_dimmed) {
             set_dim(false);   // first touch just wakes the screen
         } else {
@@ -891,6 +1350,7 @@ static void ui_build() {
     lv_obj_update_layout(scr);
 
     build_level_screen();
+    setup_build();
 }
 
 // ---------------------------------------------------------------------------
@@ -940,12 +1400,18 @@ static void ui_update() {
 // ---------------------------------------------------------------------------
 
 void setup() {
-    // Set mount accent colour before any UI calls
-    _col_accent = lv_color_hex(MOUNT_ACCENT_HEX[MOUNT_ID - 1]);
-
     Serial.begin(115200);
     delay(200);
-    Serial.printf("\n=== esp_mount_amoled175  ID=%d ===\n", MOUNT_ID);
+
+    // Load runtime identity from NVS, then set the accent colour before any
+    // UI calls.  Unpaired units get neutral grey and boot into SETUP.
+    cfg_load();
+    _col_accent = lv_color_hex(_cfg_valid ? MOUNT_ACCENT_HEX[_mount_id - 1]
+                                          : 0x9E9E9E);
+    if (_cfg_valid)
+        Serial.printf("\n=== esp_mount_amoled175  CAM %d (NVS) ===\n", _mount_id);
+    else
+        Serial.println("\n=== esp_mount_amoled175  UNPAIRED — SETUP will open ===");
 
     // Teensy UART
     Serial1.begin(TEENSY_BAUD, SERIAL_8N1, TEENSY_RX, TEENSY_TX);
@@ -1010,8 +1476,6 @@ void setup() {
     esp_wifi_set_protocol(WIFI_IF_STA,
         WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     delay(200);
-    esp_err_t ch = esp_wifi_set_channel(HUB_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    Serial.printf("Channel %d: %s\n", HUB_CHANNEL, esp_err_to_name(ch));
 
     _espnow_rx_q = xQueueCreate(ESPNOW_RX_DEPTH, sizeof(EspNowMsg));
 
@@ -1022,24 +1486,27 @@ void setup() {
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);
 
-    esp_now_peer_info_t peer = {};
-    memcpy(peer.peer_addr, HUB_MAC, 6);
-    peer.channel = HUB_CHANNEL;
-    peer.ifidx   = WIFI_IF_STA;
-    peer.encrypt = false;
-    esp_err_t pr = esp_now_add_peer(&peer);
-    Serial.printf("Hub peer: %s\n", esp_err_to_name(pr));
+    if (_cfg_valid) {
+        // Paired: lock the stored channel and register the hub peer.  If the
+        // hub has moved channel, the reacquire scan in loop() self-heals.
+        esp_err_t chres = esp_wifi_set_channel(_hub_channel, WIFI_SECOND_CHAN_NONE);
+        Serial.printf("Channel %d: %s\n", _hub_channel, esp_err_to_name(chres));
+        espnow_peer_refresh();
+        Serial.printf("Hub   MAC : %02X:%02X:%02X:%02X:%02X:%02X  (\"%s\")\n",
+            _hub_mac[0], _hub_mac[1], _hub_mac[2],
+            _hub_mac[3], _hub_mac[4], _hub_mac[5],
+            _cfg.hubs[_cfg.last_hub].ssid);
+    } else {
+        Serial.println("Unpaired — no channel lock, no hub peer (SETUP will scan)");
+    }
 
     pkt_parser_init(&_espnow_parser);
     pkt_parser_init(&_teensy_parser);
     _last_hub_rx_ms       = millis();
     _last_espnow_tx_ok_ms = millis();
 
-    Serial.printf("Mount MAC : %s\n", WiFi.macAddress().c_str());
-    Serial.printf("Hub   MAC : %02x:%02x:%02x:%02x:%02x:%02x\n",
-        HUB_MAC[0],HUB_MAC[1],HUB_MAC[2],
-        HUB_MAC[3],HUB_MAC[4],HUB_MAC[5]);
-    Serial.println("*** Add this mount MAC to hub MOUNT_MACS[] ***");
+    Serial.printf("Mount MAC : %s  (hub pairs to this automatically)\n",
+                  WiFi.macAddress().c_str());
 
     // Hardware watchdog — resets the chip if loop() stalls for > 30 s
     // (e.g. QSPI deadlock, ESP-NOW stack hang, heap corruption).
@@ -1056,6 +1523,10 @@ void setup() {
     delay(100);
     send_status_heartbeat();
     _last_touch_ms = millis();   // start the 60 s dim countdown from here
+
+    // Unpaired unit: nothing useful to do on the main screen — open SETUP
+    // (which immediately starts a hub scan).
+    if (!_cfg_valid) setup_enter();
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,8 +1562,20 @@ void loop() {
     //    while LVGL was flushing to the display
     drain_teensy_serial();
 
-    // ── Display dim timeout ──────────────────────────────────────────────
-    if (!_dimmed && (millis() - _last_touch_ms >= DIM_TIMEOUT_MS)) {
+    // ── Touch & hold (~1.5 s) opens SETUP from any screen ────────────────
+    if (!_setup_active && _press_started_ms &&
+            (millis() - _press_started_ms >= SETUP_HOLD_MS)) {
+        _press_started_ms = 0;
+        setup_enter();
+    }
+
+    // ── SETUP scan poller + hub reacquire ────────────────────────────────
+    setup_poll_scan();
+    hub_reacquire_poll();
+
+    // ── Display dim timeout (never while SETUP is open) ──────────────────
+    if (!_dimmed && !_setup_active &&
+            (millis() - _last_touch_ms >= DIM_TIMEOUT_MS)) {
         if (_level_active) {
             _level_active = false;
             lv_scr_load(_main_scr);
@@ -1105,7 +1588,12 @@ void loop() {
         update_level_screen();
     }
 
-    // ── ESP-NOW full reinit (requested from send callback after ~60 s of failures)
+    // ── ESP-NOW peer refresh / full reinit (flagged from the send callback,
+    //    actioned here — esp_now_*() must never run in the WiFi task)
+    if (_espnow_need_refresh) {
+        _espnow_need_refresh = false;
+        espnow_peer_refresh();
+    }
     if (_espnow_need_reinit) {
         _espnow_need_reinit = false;
         espnow_full_reinit();
@@ -1128,7 +1616,7 @@ void loop() {
     // hold off and let the hub be recovered from the PC (CMD_HUB_RESTART).
     bool rx_stale = (millis() - _last_hub_rx_ms       > ESPNOW_RESTART_MS);
     bool tx_stale = (millis() - _last_espnow_tx_ok_ms > ESPNOW_RESTART_MS);
-    if (!hub_ok && rx_stale && tx_stale) {
+    if (_cfg_valid && !_setup_active && !hub_ok && rx_stale && tx_stale) {
         Serial.println("[ESPNOW] Mount isolated (no RX or TX) — restarting chip to recover stack");
         esp_restart();
     }
@@ -1185,7 +1673,7 @@ void loop() {
     // ── Teensy probe ─────────────────────────────────────────────────────
     if (now - _last_teensy_st_ms >= TEENSY_PROBE_MS) {
         uint8_t probe[PKT_BUF_SIZE + 4];
-        uint16_t plen = build_packet(probe, MOUNT_ID, ++_tx_seq,
+        uint16_t plen = build_packet(probe, _mount_id, ++_tx_seq,
                                      CMD_GET_STATUS, nullptr, 0);
         Serial1.write(probe, plen);
         _last_teensy_st_ms = now;

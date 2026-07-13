@@ -36,8 +36,11 @@
 // Configuration
 // ---------------------------------------------------------------------------
 
-// Must match the MOUNT_ID flashed into this mount's ESP32
-#define THIS_MOUNT_ID  1
+// Placeholder identity — NOT per-unit config.  The ESP32 bridge re-stamps its
+// own runtime mount ID (chosen on its touchscreen) onto every packet it
+// forwards to the hub, and the UART link is point-to-point, so the Teensy
+// neither needs nor uses a real identity.  One binary serves all mounts.
+#define THIS_MOUNT_ID  0
 
 #define ESP_SERIAL      Serial6    // Teensy 4.1: TX=24, RX=25
 #define ESP_SERIAL_BAUD 115200
@@ -1713,10 +1716,12 @@ void loop() {
         uint8_t byte = ESP_SERIAL.read();
         ParsedPacket pkt;
         if (pkt_feed(&_parser, byte, &pkt)) {
-            // Accept packets addressed to this mount or broadcast
-            if (pkt.mount_id == THIS_MOUNT_ID || pkt.mount_id == MOUNT_BROADCAST) {
-                dispatch(pkt);
-            }
+            // Accept every packet: the UART is point-to-point and the ESP32
+            // bridge only forwards packets addressed to this mount (or
+            // broadcast), so anything arriving here is by definition ours.
+            // Filtering on a compiled-in ID only created a silent failure
+            // mode when it disagreed with the bridge's runtime ID.
+            dispatch(pkt);
         }
     }
 

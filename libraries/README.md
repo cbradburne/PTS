@@ -22,7 +22,7 @@ Install these by copying each folder into your Arduino `libraries` directory
 These libraries are built into the board packages and do **not** need to be installed separately:
 
 ### ESP32 (Arduino-ESP32 v3.x)
-- `WiFi.h`, `Wire.h`, `EEPROM.h`
+- `WiFi.h`, `Wire.h`, `EEPROM.h`, `Preferences.h` (NVS — pairing/config storage)
 - `esp_now.h`, `esp_wifi.h`, `esp_timer.h`
 - `esp_heap_caps.h`, `esp_lcd_panel_ops.h`, `esp_lcd_panel_rgb.h`
 - `freertos/FreeRTOS.h`, `freertos/queue.h`, `freertos/semphr.h`, `freertos/task.h`
