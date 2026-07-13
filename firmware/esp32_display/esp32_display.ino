@@ -56,6 +56,10 @@ void setup() {
     // The send callback fires when the user issues a command from the UI —
     // we forward it to the hub via UART.
     hub_display_init(send_cmd_to_hub);
+
+    // Ask the hub for the paired-mount table (the hub also pushes it at its
+    // own boot, but the display may power up later than the hub).
+    disp_send_raw(DISP_MSG_GET_MOUNT_TABLE, nullptr, 0);
 }
 
 void loop() {
@@ -81,6 +85,13 @@ static void send_cmd_to_hub(uint8_t mount_id, CmdType cmd,
     buf[2] = plen;
     if (plen) memcpy(buf + 3, payload, plen);
     disp_uart_send(Serial1, DISP_MSG_SEND_CMD, buf, 3 + plen);
+}
+
+// Raw display→hub message (pairing decisions, table requests).  Declared in
+// hub_display.h so the UI code can call it; same single-caller-context rule
+// as send_cmd_to_hub (LVGL task or setup, never concurrently).
+void disp_send_raw(uint8_t type, const uint8_t *payload, uint8_t len) {
+    disp_uart_send(Serial1, type, payload, len);
 }
 
 // ============================================================
@@ -182,6 +193,18 @@ static void dispatch_msg(uint8_t type, uint8_t len, const uint8_t *d) {
             // payload: [0] mount_id, [1] direction (0=min/◀, 1=max/▶, 0xFF=stopped)
             if (len < 2) break;
             hub_ui_notify_la_move_dir(d[0], d[1]);
+            break;
+
+        case DISP_MSG_MOUNT_TABLE:
+            // payload: 5 × MAC(6) — paired-mount table (all-zero = unbound)
+            if (len < 30) break;
+            hub_ui_update_mount_table(d);
+            break;
+
+        case DISP_MSG_PAIR_CONFLICT:
+            // payload: [0] cam (0 = dismiss), [1..6] new MAC, [7..12] old MAC
+            if (len < 13) break;
+            hub_ui_notify_pair_conflict(d[0], d + 1, d + 7);
             break;
     }
 }

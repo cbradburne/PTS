@@ -145,6 +145,22 @@ static uint8_t                _pending_cam    = 0;   // for OPEN_DETAIL
 // memory barrier needed to see the latest value from core 0.
 static volatile bool          _la_refresh_pending = false;
 
+// ---- Pairing (stage 3) state ------------------------------------------------
+// Data written from loop() (core 0) via the hub_ui_* API, consumed by the LVGL
+// task (core 1) — same volatile-flag pattern as _la_refresh_pending.  The
+// _mp_act_* flags flow the other way: set in LVGL event callbacks, processed
+// in the task tick (keeps event-context work minimal, like NavAction).
+static uint8_t                _mount_table[5][6]     = {};   // zero = unbound
+static volatile bool          _mounts_table_pending  = false;
+static uint8_t                _pc_cam                = 0;    // conflict prompt cam 1-5
+static uint8_t                _pc_new[6], _pc_old[6];        // claimant / current owner
+static volatile bool          _pc_show_pending       = false;
+static volatile bool          _pc_clear_pending      = false;
+static volatile bool          _mp_act_open           = false;
+static volatile bool          _mp_act_close          = false;
+static volatile uint8_t       _mp_act_forget         = 0;    // cam 1-5
+static volatile int8_t        _mp_act_decide         = -1;   // 0=ignore 1=replace
+
 // _pending_screen is only used by direct lv_scr_load deferrals (no longer
 // needed with NavAction but kept to avoid breaking the public API path at line 2727).
 static lv_obj_t              *_pending_screen = nullptr;
@@ -560,6 +576,8 @@ static void ev_estop         (lv_event_t *e);
 
 // active_tab: 0 = Home, 1 = Positions, 2 = Config
 // Builds the 50px header on *screen* and stores its client label in _lbl_clients[active_tab].
+static void ev_mounts_open(lv_event_t *e);   // pairing panel (defined with it)
+
 static void build_top_bar(lv_obj_t *screen, int active_tab) {
     lv_obj_t *hdr = lv_obj_create(screen);
     lv_obj_set_size(hdr, LCD_WIDTH, 50);
@@ -580,6 +598,12 @@ static void build_top_bar(lv_obj_t *screen, int active_tab) {
     lv_obj_t *cl_lbl = make_label(hdr, cl_buf, &lv_font_montserrat_12, C_DIM);
     lv_obj_align(cl_lbl, LV_ALIGN_LEFT_MID, 0, 0);
     _lbl_clients[active_tab] = cl_lbl;
+
+    // Paired-mounts panel (pairing stage 3) — small button after the counts
+    lv_obj_t *mts = make_button(hdr, "Mounts", C_SURF2, ev_mounts_open);
+    lv_obj_set_size(mts, 78, 34);
+    lv_obj_align(mts, LV_ALIGN_LEFT_MID, 128, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(mts, 0), lv_color_hex(C_TEXT), 0);
 
     // Navigation tabs — centred in the header
     lv_obj_t *tabs = lv_obj_create(hdr);
@@ -2571,6 +2595,152 @@ static void la_flash_timer_cb(lv_timer_t *) {
 //  LVGL FreeRTOS task
 // ============================================================
 
+// ============================================================
+//  Pairing (stage 3) — Mounts panel + conflict prompt overlays
+// ============================================================
+// Both live on lv_layer_top() so they float above whichever screen is active.
+// Built once at init; event callbacks only set _mp_act_* flags, and all LVGL
+// mutation + UART sends happen in the lvgl task tick.
+
+static lv_obj_t *_mp_panel        = nullptr;   // Mounts list panel
+static lv_obj_t *_mp_mac_lbl[5]   = {};
+static lv_obj_t *_mp_st_lbl[5]    = {};
+static lv_obj_t *_mp_forget_btn[5]= {};
+static lv_obj_t *_pc_panel        = nullptr;   // conflict prompt
+static lv_obj_t *_pc_l1           = nullptr;
+static lv_obj_t *_pc_l2           = nullptr;
+
+static void ev_mounts_open (lv_event_t *)  { _mp_act_open  = true; }
+static void ev_mounts_close(lv_event_t *)  { _mp_act_close = true; }
+static void ev_mounts_forget(lv_event_t *e) {
+    _mp_act_forget = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+}
+static void ev_pc_replace(lv_event_t *)     { _mp_act_decide = 1; }
+static void ev_pc_ignore (lv_event_t *)     { _mp_act_decide = 0; }
+
+static void fmt_mac(char *out, size_t n, const uint8_t *m) {
+    snprintf(out, n, "%02X:%02X:%02X:%02X:%02X:%02X",
+             m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+
+static bool table_mac_valid(int i) {
+    const uint8_t *m = _mount_table[i];
+    return (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]) != 0;
+}
+
+// LVGL-task context only.
+static void mounts_panel_refresh() {
+    if (!_mp_panel) return;
+    for (int i = 0; i < 5; i++) {
+        char buf[24];
+        bool bound = table_mac_valid(i);
+        if (bound) fmt_mac(buf, sizeof(buf), _mount_table[i]);
+        else       snprintf(buf, sizeof(buf), "-  unpaired  -");
+        lv_label_set_text(_mp_mac_lbl[i], buf);
+        lv_obj_set_style_text_color(_mp_mac_lbl[i],
+            lv_color_hex(bound ? C_TEXT : C_DIM), 0);
+
+        if (_cam[i].connected)
+            snprintf(buf, sizeof(buf), "ONLINE  %d dBm", (int)_cam[i].rssi);
+        else
+            snprintf(buf, sizeof(buf), bound ? "offline" : "");
+        lv_label_set_text(_mp_st_lbl[i], buf);
+        lv_obj_set_style_text_color(_mp_st_lbl[i],
+            lv_color_hex(_cam[i].connected ? C_GREEN_LIT : C_DIM), 0);
+
+        if (bound) lv_obj_remove_flag(_mp_forget_btn[i], LV_OBJ_FLAG_HIDDEN);
+        else       lv_obj_add_flag(_mp_forget_btn[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// LVGL-task context only.
+static void conflict_panel_fill() {
+    if (!_pc_panel) return;
+    char m1[20], m2[20], buf[64];
+    fmt_mac(m1, sizeof(m1), _pc_new);
+    fmt_mac(m2, sizeof(m2), _pc_old);
+    snprintf(buf, sizeof(buf), "New device %s", m1);
+    lv_label_set_text(_pc_l1, buf);
+    snprintf(buf, sizeof(buf), "claims CAM %u — bound to %s", (unsigned)_pc_cam, m2);
+    lv_label_set_text(_pc_l2, buf);
+}
+
+static void build_pairing_overlays() {
+    // ── Mounts panel ─────────────────────────────────────────────────────
+    _mp_panel = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(_mp_panel, 620, 424);
+    lv_obj_center(_mp_panel);
+    card_style(_mp_panel, C_SURF, C_ACCENT);
+    lv_obj_set_style_border_width(_mp_panel, 2, 0);
+    lv_obj_set_style_pad_all(_mp_panel, 16, 0);
+    lv_obj_remove_flag(_mp_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(_mp_panel, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *t = make_label(_mp_panel, "PAIRED MOUNTS",
+                             &lv_font_montserrat_16, C_ACCENT2);
+    lv_obj_set_pos(t, 4, 0);
+
+    for (int i = 0; i < 5; i++) {
+        int y = 34 + i * 58;
+        char cam[8];
+        snprintf(cam, sizeof(cam), "CAM %d", i + 1);
+        lv_obj_t *c = make_label(_mp_panel, cam, &lv_font_montserrat_16, C_TEXT);
+        lv_obj_set_pos(c, 4, y + 8);
+
+        _mp_mac_lbl[i] = make_label(_mp_panel, "", &lv_font_montserrat_12, C_TEXT);
+        lv_obj_set_pos(_mp_mac_lbl[i], 92, y + 2);
+
+        _mp_st_lbl[i] = make_label(_mp_panel, "", &lv_font_montserrat_12, C_DIM);
+        lv_obj_set_pos(_mp_st_lbl[i], 92, y + 22);
+
+        _mp_forget_btn[i] = make_button(_mp_panel, "FORGET", C_RED,
+                                        ev_mounts_forget, (void *)(uintptr_t)(i + 1));
+        lv_obj_set_size(_mp_forget_btn[i], 92, 36);
+        lv_obj_set_pos(_mp_forget_btn[i], 480, y);
+        lv_obj_add_flag(_mp_forget_btn[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_obj_t *hint = make_label(_mp_panel,
+        "Forget unbinds a slot. A live mount re-pairs itself in ~5 s\n"
+        "- Forget is for retired or replaced hardware.",
+        &lv_font_montserrat_12, C_DIM);
+    lv_obj_set_pos(hint, 4, 334);
+
+    lv_obj_t *close = make_button(_mp_panel, "CLOSE", C_SURF2, ev_mounts_close);
+    lv_obj_set_size(close, 110, 40);
+    lv_obj_set_pos(close, 462, 340);
+
+    // ── Conflict prompt ──────────────────────────────────────────────────
+    _pc_panel = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(_pc_panel, 520, 220);
+    lv_obj_center(_pc_panel);
+    card_style(_pc_panel, C_SURF, C_RED_LIT);
+    lv_obj_set_style_border_width(_pc_panel, 2, 0);
+    lv_obj_set_style_pad_all(_pc_panel, 16, 0);
+    lv_obj_remove_flag(_pc_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(_pc_panel, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *pt = make_label(_pc_panel, "PAIRING CONFLICT",
+                              &lv_font_montserrat_16, C_RED_LIT);
+    lv_obj_set_pos(pt, 4, 0);
+    _pc_l1 = make_label(_pc_panel, "", &lv_font_montserrat_12, C_TEXT);
+    lv_obj_set_pos(_pc_l1, 4, 34);
+    _pc_l2 = make_label(_pc_panel, "", &lv_font_montserrat_12, C_TEXT);
+    lv_obj_set_pos(_pc_l2, 4, 56);
+    lv_obj_t *ph = make_label(_pc_panel,
+        "REPLACE re-pairs the slot to the new device.\n"
+        "IGNORE suppresses this device until the hub restarts.",
+        &lv_font_montserrat_12, C_DIM);
+    lv_obj_set_pos(ph, 4, 84);
+
+    lv_obj_t *rb = make_button(_pc_panel, "REPLACE", C_RED, ev_pc_replace);
+    lv_obj_set_size(rb, 150, 44);
+    lv_obj_set_pos(rb, 160, 136);
+    lv_obj_t *ib = make_button(_pc_panel, "IGNORE", C_SURF2, ev_pc_ignore);
+    lv_obj_set_size(ib, 150, 44);
+    lv_obj_set_pos(ib, 330, 136);
+}
+
 static void lvgl_task_fn(void *arg) {
     lv_timer_create(la_flash_timer_cb, 500, nullptr);
     for (;;) {
@@ -2735,6 +2905,47 @@ static void lvgl_task_fn(void *arg) {
                 }
             }
 
+            // ── Pairing UI (stage 3) — panel actions + hub messages ───────
+            if (_mp_act_open) {
+                _mp_act_open = false;
+                mounts_panel_refresh();
+                lv_obj_remove_flag(_mp_panel, LV_OBJ_FLAG_HIDDEN);
+                disp_send_raw(DISP_MSG_GET_MOUNT_TABLE, nullptr, 0);  // fresh copy
+            }
+            if (_mp_act_close) {
+                _mp_act_close = false;
+                lv_obj_add_flag(_mp_panel, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (_mp_act_forget) {
+                uint8_t cam = _mp_act_forget;
+                _mp_act_forget = 0;
+                disp_send_raw(DISP_MSG_PAIR_FORGET, &cam, 1);
+                // hub replies with a MOUNT_TABLE push → row refreshes below
+            }
+            if (_mounts_table_pending) {
+                _mounts_table_pending = false;
+                if (_mp_panel && !lv_obj_has_flag(_mp_panel, LV_OBJ_FLAG_HIDDEN))
+                    mounts_panel_refresh();
+            }
+            if (_pc_show_pending) {
+                _pc_show_pending = false;
+                conflict_panel_fill();
+                lv_obj_remove_flag(_pc_panel, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (_pc_clear_pending) {
+                _pc_clear_pending = false;
+                lv_obj_add_flag(_pc_panel, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (_mp_act_decide >= 0) {
+                uint8_t buf[8];
+                buf[0] = _pc_cam;
+                buf[1] = (uint8_t)_mp_act_decide;
+                memcpy(buf + 2, _pc_new, 6);
+                _mp_act_decide = -1;
+                disp_send_raw(DISP_MSG_PAIR_DECIDE, buf, 8);
+                lv_obj_add_flag(_pc_panel, LV_OBJ_FLAG_HIDDEN);
+            }
+
             uint32_t delay_ms = lv_timer_handler();
             xSemaphoreGive(_lvgl_mux);
             vTaskDelay(pdMS_TO_TICKS(delay_ms < 1 ? 1 : delay_ms > 5 ? 5 : delay_ms));
@@ -2768,6 +2979,8 @@ void hub_display_init(hub_send_fn_t send_cb) {
     Serial.println("[DISP] build_detail_screen...");
     build_detail_screen();
     Serial.println("[DISP] detail screen built");
+
+    build_pairing_overlays();   // Mounts panel + conflict prompt (lv_layer_top)
 
     Serial.printf("[DISP] free heap before task: %u bytes\n", esp_get_free_heap_size());
     Serial.flush();   // drain USB CDC so LVGL task output isn't dropped
@@ -3295,4 +3508,28 @@ void hub_ui_update_subject_mask(uint8_t mount_id, uint8_t mask) {
         refresh_positions_slots();
 
     xSemaphoreGive(_lvgl_mux);
+}
+
+// ============================================================
+//  Pairing (stage 3) — public API (called from loop(), core 0)
+// ============================================================
+
+void hub_ui_update_mount_table(const uint8_t *macs30) {
+    // Payload copy first, flag last — the LVGL task's semaphore acquisition
+    // provides the barrier (same pattern as _la_refresh_pending).
+    memcpy(_mount_table, macs30, sizeof(_mount_table));
+    _mounts_table_pending = true;
+}
+
+void hub_ui_notify_pair_conflict(uint8_t cam, const uint8_t *new_mac,
+                                 const uint8_t *old_mac) {
+    if (cam == 0) {                 // hub says: claimant gone / decided
+        _pc_clear_pending = true;
+        return;
+    }
+    if (cam > 5) return;
+    memcpy(_pc_new, new_mac, 6);
+    memcpy(_pc_old, old_mac, 6);
+    _pc_cam = cam;
+    _pc_show_pending = true;
 }

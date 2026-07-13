@@ -36,10 +36,18 @@
 #define DISP_MSG_CALIB_PROMPT      0x0B   //   2 bytes: mount_id, CalibPrompt sub_state
 #define DISP_MSG_SUBJECT_MASK      0x0C   //   2 bytes: mount_id, valid_mask (bit i = subject slot i occupied)
 #define DISP_MSG_LA_MOVE_DIR       0x0D   //   2 bytes: mount_id, direction (0=min/◀, 1=max/▶, 0xFF=stopped)
+// v3 — touchscreen pairing (stage 3)
+#define DISP_MSG_MOUNT_TABLE       0x0E   //  30 bytes: 5 × MAC(6) — paired-mount table (all-zero = unbound)
+#define DISP_MSG_PAIR_CONFLICT     0x0F   //  13 bytes: cam(1) + new_mac(6) + old_mac(6); cam=0 → dismiss
 
 // Display → Hub
 #define DISP_MSG_SEND_CMD          0x10   // variable: mount_id, cmd, plen, data[plen]
 #define DISP_MSG_SEL_CAM           0x11   // 1 byte: camera index 0-4 (selected joystick target)
+// v3 — touchscreen pairing (stage 3)
+#define DISP_MSG_PAIR_DECIDE       0x12   // 8 bytes: cam(1) + decision(1: 1=replace, 0=ignore) + new_mac(6)
+#define DISP_MSG_PAIR_FORGET       0x13   // 1 byte: cam — clear that slot's binding (a live mount re-pairs
+                                          //         itself within ~5 s; Forget is for retired/dead units)
+#define DISP_MSG_GET_MOUNT_TABLE   0x14   // 0 bytes: display requests a DISP_MSG_MOUNT_TABLE push
 
 #define DISP_UART_MAX_PAYLOAD      80
 

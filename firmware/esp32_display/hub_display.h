@@ -57,6 +57,18 @@ void hub_ui_notify_look_at_status(uint8_t mount_id, uint8_t subject_id);
 void hub_ui_notify_la_move_dir(uint8_t mount_id, uint8_t direction);
 void hub_ui_update_subject_mask(uint8_t mount_id, uint8_t mask);
 
+// ---- Pairing (stage 3) ----
+// Paired-mount table push from the hub: 30 bytes = 5 × MAC(6), zero = unbound.
+void hub_ui_update_mount_table(const uint8_t *macs30);
+// Conflict prompt: cam 1-5 shows "new device claims CAM n — Replace / Ignore";
+// cam 0 dismisses it (claimant went quiet or was decided elsewhere).
+void hub_ui_notify_pair_conflict(uint8_t cam, const uint8_t *new_mac,
+                                 const uint8_t *old_mac);
+
+// Raw display→hub UART send (pairing decisions / table requests).
+// Implemented by the sketch (esp32_display.ino).
+void disp_send_raw(uint8_t type, const uint8_t *payload, uint8_t len);
+
 
 /*
  * lv_conf.h setup

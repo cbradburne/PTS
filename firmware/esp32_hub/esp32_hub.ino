@@ -155,6 +155,28 @@ static void disp_set_disconnected(uint8_t mount_id) {
     portEXIT_CRITICAL(&_disp_mux);
 }
 
+// Push the paired-mount table (5 × MAC, zero = unbound) to the display board.
+// Sent at boot, on every table change, and on DISP_MSG_GET_MOUNT_TABLE.
+static void disp_send_mount_table() {
+    uint8_t buf[NUM_MOUNTS * 6];
+    memcpy(buf, _mount_mac, sizeof(buf));
+    portENTER_CRITICAL(&_disp_mux);
+    disp_uart_send(Serial1, DISP_MSG_MOUNT_TABLE, buf, sizeof(buf));
+    portEXIT_CRITICAL(&_disp_mux);
+}
+
+// Show (cam 1-5) or dismiss (cam 0) the pairing-conflict prompt on the display.
+static void disp_send_pair_conflict(uint8_t cam, const uint8_t *new_mac,
+                                    const uint8_t *old_mac) {
+    uint8_t buf[13] = {};
+    buf[0] = cam;
+    if (new_mac) memcpy(buf + 1, new_mac, 6);
+    if (old_mac) memcpy(buf + 7, old_mac, 6);
+    portENTER_CRITICAL(&_disp_mux);
+    disp_uart_send(Serial1, DISP_MSG_PAIR_CONFLICT, buf, sizeof(buf));
+    portEXIT_CRITICAL(&_disp_mux);
+}
+
 static void disp_update_preset(uint8_t mount_id, uint8_t pt, uint8_t sz) {
     uint8_t buf[3] = { mount_id, pt, sz };
     portENTER_CRITICAL(&_disp_mux);
@@ -356,6 +378,13 @@ static bool     _restart_block_logged = false;  // rate-limits the streak-exceed
 static uint8_t  _conflict_mac[6] = {};
 static uint8_t  _conflict_slot   = 0xFF;   // 0-based claimed slot; 0xFF = none
 static uint32_t _conflict_log_ms = 0;
+// Display-prompt bookkeeping: what the hub display is currently showing, what
+// the operator chose to ignore (suppressed until reboot), and when the
+// conflicting device last claimed (for staleness dismissal).
+static uint8_t  _conflict_shown_slot   = 0xFF;   // prompt on display for this slot
+static uint8_t  _conflict_ignored_mac[6] = {};
+static uint8_t  _conflict_ignored_slot = 0xFF;
+static uint32_t _conflict_last_claim_ms = 0;
 
 // Returns the slot this MAC is bound to after applying the rules, 0xFF if the
 // claim was rejected.  Cheap in steady state (one table lookup + compare).
@@ -370,7 +399,8 @@ static uint8_t mount_table_observe(const uint8_t mac[6], uint8_t claimed_id,
     if (mount_mac_valid(slot)) {
         // Rule 3 — claimed slot belongs to a different device.
         memcpy(_conflict_mac, mac, 6);
-        _conflict_slot = slot;
+        _conflict_slot          = slot;
+        _conflict_last_claim_ms = millis();
         uint32_t nowm = millis();
         if (_conflict_log_ms == 0 || nowm - _conflict_log_ms > 30000) {
             _conflict_log_ms = nowm;
@@ -381,6 +411,15 @@ static uint8_t mount_table_observe(const uint8_t mac[6], uint8_t claimed_id,
                           _mount_mac[slot][0], _mount_mac[slot][1], _mount_mac[slot][2],
                           _mount_mac[slot][3], _mount_mac[slot][4], _mount_mac[slot][5]);
             send_hub_event(7, claimed_id, rssi, mac[4], mac[5]);
+        }
+        // Drive the hub-display prompt: skip if the operator already chose
+        // IGNORE for this exact device+slot; otherwise show it once per new
+        // conflict (a fresh conflict replaces the shown one).
+        bool ignored = (slot == _conflict_ignored_slot &&
+                        memcmp(mac, _conflict_ignored_mac, 6) == 0);
+        if (!ignored && _conflict_shown_slot != slot) {
+            _conflict_shown_slot = slot;
+            disp_send_pair_conflict((uint8_t)(slot + 1), mac, _mount_mac[slot]);
         }
         return 0xFF;
     }
@@ -415,7 +454,84 @@ static uint8_t mount_table_observe(const uint8_t mac[6], uint8_t claimed_id,
     _espnow_fail_run[slot]   = 0;
     _tx_wedge_since_ms[slot] = 0;
     _mount_last_state[slot]  = 0xFF;
+    disp_send_mount_table();          // keep the display's Mounts panel current
     return slot;
+}
+
+// Dismiss the display's conflict prompt when the conflicting device has gone
+// quiet (renumbered on its own screen, or powered off).  Called from loop().
+static void conflict_staleness_check(uint32_t now) {
+    if (_conflict_shown_slot == 0xFF) return;
+    if (now - _conflict_last_claim_ms > 10000) {
+        Serial.println("[PAIR] Conflict claimant went quiet — dismissing display prompt");
+        _conflict_shown_slot = 0xFF;
+        disp_send_pair_conflict(0, nullptr, nullptr);
+    }
+}
+
+// Operator decision from the hub display (REPLACE / IGNORE on the prompt).
+static void pair_decide(uint8_t cam, uint8_t decision, const uint8_t *mac) {
+    if (cam < 1 || cam > NUM_MOUNTS) return;
+    uint8_t slot = (uint8_t)(cam - 1);
+
+    if (decision == 1) {
+        // REPLACE: bind the new device to this slot.  If it was bound
+        // elsewhere (renumber onto an occupied slot), free its old home.
+        int8_t cur = mount_table_find(mac);
+        if (cur >= 0 && cur != (int8_t)slot) {
+            memset(_mount_mac[cur], 0, 6);
+            _mount_last_seen[cur]  = 0;
+            _mount_last_state[cur] = 0xFF;
+            disp_set_disconnected((uint8_t)(cur + 1));
+        }
+        if (mount_mac_valid(slot))
+            esp_now_del_peer(_mount_mac[slot]);   // evict the previous owner's peer
+        Serial.printf("[PAIR] REPLACE: CAM %u now %02X:%02X:%02X:%02X:%02X:%02X "
+                      "(operator approved on display)\n", cam,
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        memcpy(_mount_mac[slot], mac, 6);
+        mount_table_save();
+        refresh_espnow_peer(slot);
+        _mount_last_seen[slot]   = 0;
+        _mount_last_state[slot]  = 0xFF;
+        _espnow_fails[slot]      = 0;
+        _espnow_fail_run[slot]   = 0;
+        _tx_wedge_since_ms[slot] = 0;
+        send_hub_event(5, cam, 0, mac[4], mac[5]);
+        disp_send_mount_table();
+    } else {
+        // IGNORE: suppress prompts for this exact device+slot until reboot.
+        Serial.printf("[PAIR] IGNORE: CAM %u claim from %02X:%02X:%02X:%02X:%02X:%02X "
+                      "suppressed until hub reboot\n", cam,
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        memcpy(_conflict_ignored_mac, mac, 6);
+        _conflict_ignored_slot = slot;
+    }
+    _conflict_shown_slot = 0xFF;
+    disp_send_pair_conflict(0, nullptr, nullptr);   // dismiss the prompt
+}
+
+// Forget a slot from the display's Mounts panel.  NOTE: a live mount that
+// still claims this cam number simply re-pairs itself within ~5 s (rule 1) —
+// Forget exists for retiring dead/replaced hardware.
+static void pair_forget(uint8_t cam) {
+    if (cam < 1 || cam > NUM_MOUNTS) return;
+    uint8_t slot = (uint8_t)(cam - 1);
+    if (!mount_mac_valid(slot)) return;
+    Serial.printf("[PAIR] FORGET: CAM %u (%02X:%02X:%02X:%02X:%02X:%02X) "
+                  "unbound from display\n", cam,
+                  _mount_mac[slot][0], _mount_mac[slot][1], _mount_mac[slot][2],
+                  _mount_mac[slot][3], _mount_mac[slot][4], _mount_mac[slot][5]);
+    esp_now_del_peer(_mount_mac[slot]);
+    memset(_mount_mac[slot], 0, 6);
+    mount_table_save();
+    _mount_last_seen[slot]   = 0;
+    _mount_last_state[slot]  = 0xFF;
+    _espnow_fails[slot]      = 0;
+    _espnow_fail_run[slot]   = 0;
+    _tx_wedge_since_ms[slot] = 0;
+    disp_set_disconnected(cam);
+    disp_send_mount_table();
 }
 
 // Rate-limit CMD_STATUS broadcasts to WebSocket clients.
@@ -740,6 +856,22 @@ static void process_disp_byte(uint8_t b) {
 }
 
 static void dispatch_disp_msg(uint8_t type, uint8_t len, const uint8_t *d) {
+    // ── Pairing (stage 3): decisions and table requests from the display ──
+    if (type == DISP_MSG_PAIR_DECIDE && len >= 8) {
+        _last_client_cmd_ms = millis();
+        pair_decide(d[0], d[1], d + 2);
+        return;
+    }
+    if (type == DISP_MSG_PAIR_FORGET && len >= 1) {
+        _last_client_cmd_ms = millis();
+        pair_forget(d[0]);
+        return;
+    }
+    if (type == DISP_MSG_GET_MOUNT_TABLE) {
+        disp_send_mount_table();
+        return;
+    }
+
     if (type == DISP_MSG_SEND_CMD && len >= 3) {
         uint8_t mount_id = d[0];
         CmdType cmd      = (CmdType)d[1];
@@ -975,6 +1107,8 @@ void setup() {
         if (esp_now_add_peer(&peer) != ESP_OK)
             Serial.printf("WARNING: failed to add peer %d\n", i + 1);
     }
+    disp_send_mount_table();   // seed the display's Mounts panel (it also
+                               // requests this itself when it boots later)
 
     // --- Relay queue ---
     _relay_queue   = xQueueCreate(RELAY_QUEUE_DEPTH, sizeof(RelayMsg));
@@ -1175,6 +1309,7 @@ void loop() {
         last_self_check = now;
         check_self_recovery(now);
         check_maintenance_restart(now);
+        conflict_staleness_check(now);
     }
 
     if (now - last_hb >= HEARTBEAT_MS) {
