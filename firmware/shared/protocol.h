@@ -131,6 +131,11 @@ typedef enum : uint8_t {
                                    //          state=wedge secs)
                                    // kind 4 = maintenance restart imminent (long uptime + idle;
                                    //          state=uptime hours)
+                                   // kind 5 = mount paired, first contact (state/flags = MAC[4]/[5])
+                                   // kind 6 = mount binding moved / renumbered (mount=new cam,
+                                   //          state=old cam, flags=MAC[5])
+                                   // kind 7 = pairing conflict rejected (mount=claimed cam,
+                                   //          state/flags = claimant MAC[4]/[5])
                                    // Diagnostic only; sent ONLY over Serial, never TCP/WS.
 } CmdType;
 

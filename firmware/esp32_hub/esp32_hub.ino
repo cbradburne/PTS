@@ -77,13 +77,50 @@ static const IPAddress AP_SUBNET (255, 255,  0,  0);
 #define TCP_PORT     7777
 #define MAX_CLIENTS  4
 
-static const uint8_t MOUNT_MACS[NUM_MOUNTS][6] = {
-    { 0x44, 0x1b, 0xf6, 0x86, 0x1e, 0x90 },   // Mount 1        44:1B:F6:86:1E:90
-    { 0x44, 0x1b, 0xf6, 0x86, 0x22, 0xB4 },   // Mount 2        44:1B:F6:86:22:B4
-    { 0x3c, 0x0f, 0x02, 0xc0, 0x1d, 0xc8 },   // Mount 3        3C:0F:02:C0:1D:C8   // Home 0x1c, 0xdb, 0xd4, 0x7b, 0x57, 0x94  // work 0x3c, 0x0f, 0x02, 0xc0, 0x1d, 0xc8
-    { 0x1c, 0xdb, 0xd4, 0x7b, 0x58, 0x30 },   // Mount 4        1C:DB:D4:7B:58:30
-    { 0x3c, 0x0f, 0x02, 0xc0, 0x24, 0x30 },   // Mount 5        3C:0F:02:C0:24:30
-};
+// ---------------------------------------------------------------------------
+// Paired-mount table — RUNTIME, no MAC addresses in source
+// ---------------------------------------------------------------------------
+// Learned by first contact and persisted in NVS.  Every packet a mount sends
+// carries the mount ID chosen on its own touchscreen; the hub binds
+// {MAC → slot} the first time it hears each device (see mount_table_observe
+// for the three binding rules).  An all-zero entry means the slot is unbound.
+//
+// Migration from the old hard-coded MOUNT_MACS[]: automatic — on the first
+// boot with an empty table, every powered mount heartbeats within ~5 s and
+// binds itself to the slot it already claims.
+
+#include <Preferences.h>
+
+static uint8_t     _mount_mac[NUM_MOUNTS][6] = {};   // all-zero = unbound
+static Preferences _prefs;
+
+static bool mount_mac_valid(uint8_t idx) {
+    if (idx >= NUM_MOUNTS) return false;
+    const uint8_t *m = _mount_mac[idx];
+    return (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]) != 0;
+}
+
+// Slot index this MAC is bound to, or -1.
+static int8_t mount_table_find(const uint8_t mac[6]) {
+    for (int i = 0; i < NUM_MOUNTS; i++)
+        if (mount_mac_valid(i) && memcmp(mac, _mount_mac[i], 6) == 0)
+            return (int8_t)i;
+    return -1;
+}
+
+static void mount_table_save() {
+    _prefs.begin("mounts", false);
+    _prefs.putBytes("table", _mount_mac, sizeof(_mount_mac));
+    _prefs.end();
+}
+
+static void mount_table_load() {
+    _prefs.begin("mounts", false);   // r/w so a missing namespace is created quietly
+    size_t n = _prefs.getBytes("table", _mount_mac, sizeof(_mount_mac));
+    _prefs.end();
+    if (n != sizeof(_mount_mac))
+        memset(_mount_mac, 0, sizeof(_mount_mac));   // absent/short — start unbound
+}
 
 // ---------------------------------------------------------------------------
 // UART link to display board
@@ -168,9 +205,10 @@ static void refresh_espnow_peer(uint8_t idx) {
     // Delete and re-add the peer to clear any stale internal send state that
     // accumulates while the mount is offline (failed-send state in the ESP-NOW
     // stack causes subsequent sends to silently fail even after the mount reboots).
-    esp_now_del_peer(MOUNT_MACS[idx]);
+    if (!mount_mac_valid(idx)) return;   // unbound slot — no peer to refresh
+    esp_now_del_peer(_mount_mac[idx]);
     esp_now_peer_info_t peer = {};
-    memcpy(peer.peer_addr, MOUNT_MACS[idx], 6);
+    memcpy(peer.peer_addr, _mount_mac[idx], 6);
     peer.channel = AP_CHANNEL;
     peer.ifidx   = WIFI_IF_AP;
     peer.encrypt = false;
@@ -209,7 +247,7 @@ static volatile uint8_t _espnow_fail_run[NUM_MOUNTS] = {};
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
     const uint8_t *mac_addr = info->des_addr;
     for (int i = 0; i < NUM_MOUNTS; i++) {
-        if (memcmp(mac_addr, MOUNT_MACS[i], 6) != 0) continue;
+        if (!mount_mac_valid(i) || memcmp(mac_addr, _mount_mac[i], 6) != 0) continue;
         if (status == ESP_NOW_SEND_SUCCESS) {
             _espnow_fails[i]    = 0;
             _espnow_fail_run[i] = 0;
@@ -303,6 +341,83 @@ static uint32_t _last_client_cmd_ms   = 0;   // last command from any client (TC
 static uint8_t  _mount_last_state[NUM_MOUNTS];  // last STATUS state byte (0xFF = unknown)
 static bool     _restart_block_logged = false;  // rate-limits the streak-exceeded log line
 
+// ---------------------------------------------------------------------------
+// Pairing rules  (called from loop() for the first parsed packet per message)
+// ---------------------------------------------------------------------------
+// Every packet a mount sends carries the mount ID chosen on its touchscreen.
+// Rules:
+//   1. new MAC   → empty slot            : bind + persist   (first contact)
+//   2. known MAC → different EMPTY slot  : move the binding (renumbered on its
+//      own screen) — old slot freed, display told it disconnected
+//   3. any MAC   → slot owned by another : reject; log + HUB_EVENT, remembered
+//      in _conflict_* for the hub-display prompt (stage 3).  The claimant
+//      never turns green, which sends the operator to its setup screen.
+
+static uint8_t  _conflict_mac[6] = {};
+static uint8_t  _conflict_slot   = 0xFF;   // 0-based claimed slot; 0xFF = none
+static uint32_t _conflict_log_ms = 0;
+
+// Returns the slot this MAC is bound to after applying the rules, 0xFF if the
+// claim was rejected.  Cheap in steady state (one table lookup + compare).
+static uint8_t mount_table_observe(const uint8_t mac[6], uint8_t claimed_id,
+                                   int8_t rssi) {
+    int8_t cur = mount_table_find(mac);
+    if (claimed_id < 1 || claimed_id > NUM_MOUNTS)
+        return (cur >= 0) ? (uint8_t)cur : 0xFF;   // no claim in this packet
+    uint8_t slot = (uint8_t)(claimed_id - 1);
+    if (cur == (int8_t)slot) return slot;          // steady state
+
+    if (mount_mac_valid(slot)) {
+        // Rule 3 — claimed slot belongs to a different device.
+        memcpy(_conflict_mac, mac, 6);
+        _conflict_slot = slot;
+        uint32_t nowm = millis();
+        if (_conflict_log_ms == 0 || nowm - _conflict_log_ms > 30000) {
+            _conflict_log_ms = nowm;
+            Serial.printf("[PAIR] CONFLICT: %02X:%02X:%02X:%02X:%02X:%02X claims CAM %u, "
+                          "already bound to %02X:%02X:%02X:%02X:%02X:%02X — ignoring. "
+                          "Re-number one of them (setup screen on the mount).\n",
+                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], claimed_id,
+                          _mount_mac[slot][0], _mount_mac[slot][1], _mount_mac[slot][2],
+                          _mount_mac[slot][3], _mount_mac[slot][4], _mount_mac[slot][5]);
+            send_hub_event(7, claimed_id, rssi, mac[4], mac[5]);
+        }
+        return 0xFF;
+    }
+
+    if (cur >= 0) {
+        // Rule 2 — known device renumbered to an empty slot: move the binding.
+        Serial.printf("[PAIR] CAM %d renumbered to CAM %u "
+                      "(%02X:%02X:%02X:%02X:%02X:%02X)\n",
+                      cur + 1, claimed_id,
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        memset(_mount_mac[cur], 0, 6);
+        _mount_last_seen[cur]   = 0;
+        _mount_last_state[cur]  = 0xFF;
+        _mount_rssi[cur]        = 0;
+        _espnow_fails[cur]      = 0;
+        _espnow_fail_run[cur]   = 0;
+        _tx_wedge_since_ms[cur] = 0;
+        disp_set_disconnected((uint8_t)(cur + 1));
+        send_hub_event(6, claimed_id, rssi, (uint8_t)(cur + 1), mac[5]);
+    } else {
+        // Rule 1 — first contact: bind.
+        Serial.printf("[PAIR] CAM %u paired: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      claimed_id,
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        send_hub_event(5, claimed_id, rssi, mac[4], mac[5]);
+    }
+
+    memcpy(_mount_mac[slot], mac, 6);
+    mount_table_save();
+    refresh_espnow_peer(slot);        // registers the ESP-NOW peer for TX
+    _espnow_fails[slot]      = 0;
+    _espnow_fail_run[slot]   = 0;
+    _tx_wedge_since_ms[slot] = 0;
+    _mount_last_state[slot]  = 0xFF;
+    return slot;
+}
+
 // Rate-limit CMD_STATUS broadcasts to WebSocket clients.
 // The XIAO ESP32S3 shares one radio between WiFi AP and ESP-NOW.  While the
 // hub is firing esp_now_send (driven by incoming jog packets), the AP radio is
@@ -356,9 +471,11 @@ static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
     uint16_t raw_len = build_packet(raw, mount_id, ++ui_seq, cmd, payload, plen);
     if (mount_id == MOUNT_BROADCAST) {
         for (int i = 0; i < NUM_MOUNTS; i++)
-            esp_now_send(MOUNT_MACS[i], raw, raw_len);
+            if (mount_mac_valid(i))
+                esp_now_send(_mount_mac[i], raw, raw_len);
     } else if (mount_id >= 1 && mount_id <= NUM_MOUNTS) {
-        esp_now_send(MOUNT_MACS[mount_id - 1], raw, raw_len);
+        if (mount_mac_valid(mount_id - 1))
+            esp_now_send(_mount_mac[mount_id - 1], raw, raw_len);
     }
 }
 
@@ -369,16 +486,15 @@ static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
 static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
                            const uint8_t *data, int len) {
     if (len <= 0 || len > (int)sizeof(RelayMsg::data)) return;
-    uint8_t src_idx = 0xFF;
-    for (int i = 0; i < NUM_MOUNTS; i++) {
-        if (memcmp(recv_info->src_addr, MOUNT_MACS[i], 6) == 0) {
-            src_idx = (uint8_t)i; break;
-        }
-    }
+    // Table lookup from the WiFi task while loop() may be binding a slot is a
+    // benign race: worst case one message classifies as unknown and the
+    // pairing logic in loop() re-resolves it from src_mac.
+    int8_t idx = mount_table_find(recv_info->src_addr);
     RelayMsg msg;
     msg.len     = (uint16_t)len;
     msg.rssi    = (int8_t)recv_info->rx_ctrl->rssi;
-    msg.src_idx = src_idx;
+    msg.src_idx = (idx >= 0) ? (uint8_t)idx : 0xFF;
+    memcpy(msg.src_mac, recv_info->src_addr, 6);
     memcpy(msg.data, data, len);
 
     xQueueSend(_relay_queue, &msg, 0);
@@ -429,9 +545,11 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
                                     pkt.payload, pkt.payload_len);
     if (pkt.mount_id == MOUNT_BROADCAST) {
         for (int i = 0; i < NUM_MOUNTS; i++)
-            esp_now_send(MOUNT_MACS[i], raw, raw_len);
+            if (mount_mac_valid(i))
+                esp_now_send(_mount_mac[i], raw, raw_len);
     } else if (pkt.mount_id >= 1 && pkt.mount_id <= NUM_MOUNTS) {
-        esp_now_send(MOUNT_MACS[pkt.mount_id - 1], raw, raw_len);
+        if (mount_mac_valid(pkt.mount_id - 1))
+            esp_now_send(_mount_mac[pkt.mount_id - 1], raw, raw_len);
     }
     // Intercept JOG to update display preset bars
     if (pkt.cmd == CMD_JOG && pkt.payload_len >= 10) {
@@ -763,15 +881,16 @@ static void hub_espnow_full_reinit() {
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);
     for (int i = 0; i < NUM_MOUNTS; i++) {
+        if (!mount_mac_valid(i)) continue;   // unbound slot — no peer
         esp_now_peer_info_t peer = {};
-        memcpy(peer.peer_addr, MOUNT_MACS[i], 6);
+        memcpy(peer.peer_addr, _mount_mac[i], 6);
         peer.channel = AP_CHANNEL;
         peer.ifidx   = WIFI_IF_AP;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
         _espnow_fails[i] = 0;
     }
-    Serial.println("[ESP-NOW] PC-requested full reinit — done");
+    Serial.println("[ESP-NOW] Full reinit — done");
 }
 
 // ---------------------------------------------------------------------------
@@ -835,15 +954,25 @@ void setup() {
     }
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);
+
+    // Load the paired-mount table from NVS and register a peer per bound slot.
+    // Unbound slots pair automatically on first contact (mount_table_observe).
+    mount_table_load();
+    Serial.println("Paired mounts (NVS):");
     for (int i = 0; i < NUM_MOUNTS; i++) {
+        if (!mount_mac_valid(i)) {
+            Serial.printf("  CAM %d : (unpaired — waiting for first contact)\n", i + 1);
+            continue;
+        }
+        Serial.printf("  CAM %d : %02X:%02X:%02X:%02X:%02X:%02X\n", i + 1,
+                      _mount_mac[i][0], _mount_mac[i][1], _mount_mac[i][2],
+                      _mount_mac[i][3], _mount_mac[i][4], _mount_mac[i][5]);
         esp_now_peer_info_t peer = {};
-        memcpy(peer.peer_addr, MOUNT_MACS[i], 6);
+        memcpy(peer.peer_addr, _mount_mac[i], 6);
         peer.channel = AP_CHANNEL;
         peer.ifidx   = WIFI_IF_AP;
         peer.encrypt = false;
-        if (esp_now_add_peer(&peer) == ESP_OK)
-            Serial.printf("Peer %d registered\n", i + 1);
-        else
+        if (esp_now_add_peer(&peer) != ESP_OK)
             Serial.printf("WARNING: failed to add peer %d\n", i + 1);
     }
 
@@ -1143,6 +1272,24 @@ void loop() {
     // ---- Relay ESP-NOW packets → clients + display ----
     RelayMsg msg;
     while (xQueueReceive(_relay_queue, &msg, 0) == pdTRUE) {
+        // ---- Pairing rules ----
+        // The first packet in every message carries the sender's claimed mount
+        // ID — run it through the binding rules (bind / move / conflict).
+        // Ghost frames (rssi==0) never touch the table.  Messages from MACs
+        // that end up unbound (rejected claim, or unparseable noise from an
+        // unknown sender) are dropped, not relayed to clients.
+        if (msg.rssi != 0) {
+            PacketParser p0; pkt_parser_init(&p0); ParsedPacket pk0;
+            for (uint16_t i = 0; i < msg.len; i++) {
+                if (pkt_feed(&p0, msg.data[i], &pk0)) {
+                    msg.src_idx = mount_table_observe(msg.src_mac, pk0.mount_id,
+                                                      msg.rssi);
+                    break;
+                }
+            }
+        }
+        if (msg.src_idx >= NUM_MOUNTS) continue;
+
         broadcast_to_all(msg.data, msg.len);   // serial + TCP (full rate)
 
         bool ws_send  = (msg.len >= 7);  // tentatively send to WS; may be cleared by STATUS rate-limit

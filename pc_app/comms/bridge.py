@@ -590,6 +590,19 @@ class Bridge:
         elif kind == 4:
             log.info("HUB EVENT: hub MAINTENANCE RESTART at %dh uptime (system idle) "
                      "— brief disconnect expected", state)
+        elif kind == 5:
+            log.info("HUB EVENT: mount PAIRED — CAM %d bound to MAC ..:%02X:%02X "
+                     "(rssi=%d dBm) | hub uptime %.1fh",
+                     mount, state, flags, rssi, hrs)
+        elif kind == 6:
+            log.info("HUB EVENT: mount RENUMBERED — CAM %d → CAM %d (MAC ..:%02X) "
+                     "| hub uptime %.1fh",
+                     state, mount, flags, hrs)
+        elif kind == 7:
+            log.warning("HUB EVENT: PAIRING CONFLICT — device ..:%02X:%02X claims "
+                        "CAM %d but that slot is bound to another mount; claim "
+                        "rejected (renumber one of them on its setup screen)",
+                        state, flags, mount)
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "

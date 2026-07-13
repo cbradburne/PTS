@@ -15,7 +15,8 @@ struct RelayMsg {
     uint8_t  data[PKT_BUF_SIZE + 4];
     uint16_t len;
     int8_t   rssi;
-    uint8_t  src_idx;
+    uint8_t  src_idx;     // bound slot 0-4, or 0xFF if the sender MAC is unbound
+    uint8_t  src_mac[6];  // sender MAC — used by the pairing rules in loop()
 };
 
 // Raw bytes received from a WebSocket client — queued from the AsyncTCP task
