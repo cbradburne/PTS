@@ -106,6 +106,10 @@ static int do_emit() {
     n = build_health(buf, 0xFE, 7, &ph);
     emit_pkt("health_24b", buf, n);
 
+    // i: live position record (floats + signed i32 + mask)
+    n = build_position(buf, 4, 99, -12.5f, 3.25f, 456.75f, -2048, 0x05);
+    emit_pkt("position_17b", buf, n);
+
     return 0;
 }
 

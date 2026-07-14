@@ -230,6 +230,22 @@ class SimMount:
                            self.occupied_mask(), self.at_mask(),
                            self.target_slot, self.active_subj & 0xFF)
 
+    def position_payload(self) -> bytes:
+        moving = 0
+        if self.state == MountState.JOGGING:
+            for a in range(4):
+                if abs(self.vel[a]) > 1: moving |= 1 << a
+        elif self.state == MountState.MOVING_TO_POS and self.goto_tgt:
+            for a in range(4):
+                if self.goto_tgt[a] != self.pos[a]: moving |= 1 << a
+        elif self.state in (MountState.LOOK_AT_MOVE, MountState.LOOK_AT_PRE_AIM):
+            moving |= 0b0111
+        return struct.pack(">fffiB",
+                           self.pos[0] / STEPS_PER_DEG,
+                           self.pos[1] / STEPS_PER_DEG,
+                           self.pos[2] / STEPS_PER_MM,
+                           self.pos[3], moving)
+
 
 class HubSim:
     def __init__(self, port: int, verbose: bool = True):
@@ -298,6 +314,15 @@ class HubSim:
                     if m.alive and m.state in (MountState.LOOK_AT_MOVE,
                                                MountState.LOOK_AT_PRE_AIM):
                         self.emit(m.id, Cmd.LOOK_AT_STATUS, m.la_status_payload())
+
+            # Live positions — 5 Hz while a mount moves, 1 Hz at rest
+            for m in self.mounts.values():
+                if not m.alive:
+                    continue
+                iv = 0.2 if m.state != MountState.IDLE else 1.0
+                if t - getattr(m, "_pos_t", 0.0) >= iv:
+                    m._pos_t = t
+                    self.emit(m.id, Cmd.POSITION, m.position_payload())
 
             if t - last_diag >= 1.0:
                 last_diag = t
@@ -389,6 +414,8 @@ class HubSim:
             self.ack(m, pkt); return
         if cmd == Cmd.GET_STATUS:
             self.emit(m.id, Cmd.STATUS, m.status_payload()); return
+        if cmd == Cmd.GET_POSITION:
+            self.emit(m.id, Cmd.POSITION, m.position_payload()); return  # no ACK, like the Teensy
         if cmd == Cmd.GET_STATE:
             self.emit(m.id, Cmd.STATE_REPORT,
                       struct.pack(">HHBB", m.occupied_mask(), m.at_mask(),
@@ -607,9 +634,17 @@ def selftest() -> int:
     check("STATUS flowing from 5 mounts",
           len({p.mount_id for p in seen.get(Cmd.STATUS, [])}) == NUM_MOUNTS)
 
+    pump(1.1)   # idle POSITION cadence is 1 Hz — allow one full interval
+    check("POSITION flowing from 5 mounts",
+          len({p.mount_id for p in seen.get(Cmd.POSITION, [])}) == NUM_MOUNTS)
+
     s.sendall(pkt_jog(2, 500, 0, 0, 0)); pump(0.2)
     st = [p for p in seen[Cmd.STATUS] if p.mount_id == 2][-1]
     check("JOG → mount 2 JOGGING", st.payload[0] == MountState.JOGGING)
+    from comms.protocol import decode_position
+    pos2 = [decode_position(p.payload) for p in seen[Cmd.POSITION] if p.mount_id == 2]
+    check("POSITION shows pan moving during jog",
+          any(pp.moving_mask & 1 for pp in pos2) and pos2[-1].pan_deg != 0.0)
     pump(0.7)
     st = [p for p in seen[Cmd.STATUS] if p.mount_id == 2][-1]
     check("jog dead-man fired after 0.5 s silence",

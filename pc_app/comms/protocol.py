@@ -74,6 +74,7 @@ class Cmd(IntEnum):
     GET_CONFIG        = 0x12   # request speed presets + orientation from mount (no payload)
     FIND_HOME             = 0x13   # home one axis to its min end stop (1 byte: axis)
     SET_STALL_THRESHOLD   = 0x14   # set + persist StallGuard threshold (2 bytes: axis, threshold)
+    GET_POSITION          = 0x15   # request an immediate POSITION reply (no payload)
 
     # PC → Mount  (v2 — look-at tracking)
     ADD_SUBJECT_START  = 0x20   # begin subject calibration: subject_id(1) + name(16) = 17B
@@ -110,6 +111,8 @@ class Cmd(IntEnum):
     HUB_RESTART       = 0x97   # PC→hub: full esp_restart() — escalation when 0x96 doesn't clear the wedge
     HUB_EVENT         = 0x98   # hub→USB-PC only: kind(1)+mount(1)+rssi(1)+state(1)+flags(1)+uptime_s(u32)
     HEALTH            = 0x99   # node→PC log: uniform 24B health record (see HealthPayload)
+    POSITION          = 0x9A   # mount→clients: live positions, 17B (see PositionPayload);
+                               # 5 Hz while moving / 1 Hz at rest / instant on GET_POSITION
 
 
 # CMD_HEALTH node_type values (payload byte [0])
@@ -675,6 +678,37 @@ def decode_health(payload: bytes) -> HealthPayload:
         node_type=node_type, reset_reason=reset_reason, uptime_s=uptime_s,
         free_heap=free_heap, min_free_heap=min_free, loop_max_ms=loop_max_ms,
         tx_fail=tx_fail, rssi=rssi, flags=flags, node_u32=node_u32)
+
+
+@dataclass
+class PositionPayload:
+    """Decoded CMD_POSITION (17-byte payload) — live positions, physical units."""
+    pan_deg:     float
+    tilt_deg:    float
+    slider_mm:   float   # 0.0 when the mount has no slider
+    zoom_steps:  int     # raw steps; meaningless for LANC zoom
+    moving_mask: int     # bit per axis (0=pan 1=tilt 2=slider 3=zoom)
+
+    def axis_moving(self, axis: "Axis") -> bool:
+        return bool(self.moving_mask & (1 << int(axis)))
+
+    @property
+    def any_moving(self) -> bool:
+        return self.moving_mask != 0
+
+
+def decode_position(payload: bytes) -> PositionPayload:
+    """Decode CMD_POSITION (17-byte payload)."""
+    if len(payload) < 17:
+        raise ParseError(f"POSITION payload too short: {len(payload)}")
+    pan, tilt, slider, zoom, mask = struct.unpack(">fffiB", payload[:17])
+    return PositionPayload(pan_deg=pan, tilt_deg=tilt, slider_mm=slider,
+                           zoom_steps=zoom, moving_mask=mask)
+
+
+def pkt_get_position(mount_id: int) -> bytes:
+    """Request an immediate CMD_POSITION reply from a mount."""
+    return build_packet(mount_id, Cmd.GET_POSITION)
 
 
 def decode_ack(payload: bytes) -> AckPayload:

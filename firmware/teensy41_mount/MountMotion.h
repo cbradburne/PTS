@@ -206,6 +206,12 @@ public:
     MountState          getState()  const { return _state; }
     bool                isMoving()  const;
 
+    // Live position in physical units (pan/tilt: degrees, slider: mm).
+    // Zoom has no physical unit — read raw steps from getStatus().pos[AXIS_ZOOM].
+    float               positionPhys(uint8_t axis) const;
+    // Bit per axis (0=pan 1=tilt 2=slider 3=zoom): stepper still in motion.
+    uint8_t             movingMask() const;
+
     // Print TMC2209 register read-backs to Serial — call after begin()
     // (Non-const: reads live registers over UART)
     void printDriverDiagnostics();

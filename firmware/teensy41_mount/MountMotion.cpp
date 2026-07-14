@@ -1589,6 +1589,20 @@ MountStatusSnapshot MountMotion::getStatus() const {
     return s;
 }
 
+float MountMotion::positionPhys(uint8_t axis) const {
+    if (axis > AXIS_ZOOM) return 0.0f;
+    float steps_per_unit = physToUSteps(axis, 1.0f);   // usteps per deg / mm
+    if (steps_per_unit == 0.0f) return 0.0f;
+    return (float)_stepper[axis]->getPosition() / steps_per_unit;
+}
+
+uint8_t MountMotion::movingMask() const {
+    uint8_t m = 0;
+    for (int i = 0; i < 4; i++)
+        if (_stepper[i]->isMoving) m |= (uint8_t)(1u << i);
+    return m;
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------

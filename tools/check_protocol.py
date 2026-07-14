@@ -236,6 +236,8 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
         "health_24b": (0xFE, 7, Cmd.HEALTH,
                        struct.pack(">BBIIIHHbBI", 1, 3, 15000, 114688, 98304,
                                    12, 3, -58, 0x01, 2)),
+        "position_17b": (4, 99, Cmd.POSITION,
+                         struct.pack(">fffiB", -12.5, 3.25, 456.75, -2048, 0x05)),
     }
 
 
@@ -333,7 +335,12 @@ def check_golden(pyproto):
                 or hh.tx_fail != 3 or hh.rssi != -58 or not hh.anomaly
                 or hh.node_u32 != 2):
             fail("decode_health() fields differ from the C-built HEALTH payload")
-        ok("semantic decoders (STATUS, LOOK_AT_STATUS, HEALTH) verified on C bytes")
+        pp = pyproto.decode_position(c_pkts["position_17b"][7:-2])
+        if (pp.pan_deg != -12.5 or pp.tilt_deg != 3.25 or pp.slider_mm != 456.75
+                or pp.zoom_steps != -2048 or pp.moving_mask != 0x05
+                or not pp.axis_moving(pyproto.Axis.PAN) or not pp.any_moving):
+            fail("decode_position() fields differ from the C-built POSITION payload")
+        ok("semantic decoders (STATUS, LOOK_AT_STATUS, HEALTH, POSITION) verified on C bytes")
 
         # ── parse: Python builds / mangles packets, C must agree ────────────
         AxisGroup = pyproto.AxisGroup

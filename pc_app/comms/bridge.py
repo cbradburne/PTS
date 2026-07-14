@@ -45,6 +45,7 @@ HUB_DEFAULT_PORT = 7777
 # look-at, etc.) stand out.  These are the only ones tracked for ACK round-trip.
 _TX_QUIET_CMDS = frozenset({
     int(Cmd.JOG), int(Cmd.GET_STATUS), int(Cmd.PING), int(Cmd.GET_STATE),
+    int(Cmd.GET_POSITION),   # replied with CMD_POSITION, never ACKed
     # Hub-control, fire-and-forget — the hub does not ACK these, so they must NOT
     # be ACK-tracked or they would themselves look like wedged commands.
     int(Cmd.HUB_REINIT_ESPNOW), int(Cmd.HUB_RESTART),

@@ -33,7 +33,7 @@ from .protocol import (
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
     decode_subject_list, decode_look_at_status, decode_ref_confirmed,
-    decode_calib_prompt,
+    decode_calib_prompt, decode_position,
     SubjectRecord, LookAtStatusPayload, RefConfirmedPayload, CalibPrompt,
     pkt_get_subjects, pkt_add_subject_start, pkt_add_subject_set_a,
     pkt_add_subject_set_b, pkt_add_subject_abort, pkt_delete_subject,
@@ -99,6 +99,10 @@ class MountState_:
     # user edits are never overwritten by a late-arriving response.
     last_config_report: Optional[object] = None   # ConfigReportPayload
 
+    # Live axis positions (CMD_POSITION — 5 Hz moving / 1 Hz at rest).
+    # None until the first POSITION packet arrives from this mount.
+    position: Optional[object] = None   # PositionPayload
+
 
 class MountManager(QObject):
     """
@@ -122,6 +126,7 @@ class MountManager(QObject):
     calib_prompt_received  = pyqtSignal(int, int)      # mount_id, CalibPrompt value
     ref_confirmed          = pyqtSignal(int, float, float)  # mount_id, pan_deg, tilt_deg
     la_move_dir_received   = pyqtSignal(int, int)      # mount_id, direction (0=◀, 1=▶, 0xFF=stopped)
+    position_updated       = pyqtSignal(int, object)   # mount_id, PositionPayload
 
     def __init__(self, bridge: Bridge, parent=None):
         super().__init__(parent)
@@ -443,6 +448,14 @@ class MountManager(QObject):
             # Hub-injected packet: direction byte 0=◀(min), 1=▶(max), 0xFF=stopped
             if pkt.payload:
                 self.la_move_dir_received.emit(mid, pkt.payload[0])
+
+        elif pkt.cmd == Cmd.POSITION:
+            try:
+                pos = decode_position(pkt.payload)
+                st.position = pos
+                self.position_updated.emit(mid, pos)
+            except Exception as e:
+                log.warning(f"Bad POSITION from mount {mid}: {e}")
 
         elif pkt.cmd == Cmd.PONG:
             st.connected    = True

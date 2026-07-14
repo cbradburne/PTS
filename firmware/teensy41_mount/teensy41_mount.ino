@@ -491,6 +491,20 @@ static void lanc_service() {
     }
 }
 
+// Live positions in physical units, adaptive rate (5 Hz moving / 1 Hz idle) —
+// see CMD_POSITION in shared/protocol.h.  Deliberately separate from the
+// 50 Hz STATUS: position is slow data and rides a slow packet.
+static void send_position() {
+    MountStatusSnapshot s = mount.getStatus();
+    uint8_t p[17];
+    write_be_float(p + 0,  mount.positionPhys(AXIS_PAN));
+    write_be_float(p + 4,  mount.positionPhys(AXIS_TILT));
+    write_be_float(p + 8,  _cfg.has_slider ? mount.positionPhys(AXIS_SLIDER) : 0.0f);
+    write_be32(p + 12, (uint32_t)s.pos[AXIS_ZOOM]);
+    p[16] = mount.movingMask();
+    send_packet(CMD_POSITION, p, 17);
+}
+
 static void send_status() {
     MountStatusSnapshot s = mount.getStatus();
 
@@ -1027,6 +1041,11 @@ static void dispatch(const ParsedPacket &pkt) {
 
         case CMD_GET_STATUS: {
             send_status();
+            break;
+        }
+
+        case CMD_GET_POSITION: {
+            send_position();
             break;
         }
 
@@ -1789,6 +1808,17 @@ void loop() {
     if (millis() - _last_status_ms >= STATUS_INTERVAL_MS) {
         _last_status_ms = millis();
         send_status();
+    }
+
+    // Live position broadcast — 5 Hz while anything moves, 1 Hz at rest
+    {
+        static uint32_t _last_pos_ms = 0;
+        uint32_t iv = (mount.movingMask() != 0 ||
+                       mount.getState() != STATE_IDLE) ? 200 : 1000;
+        if (millis() - _last_pos_ms >= iv) {
+            _last_pos_ms = millis();
+            send_position();
+        }
     }
 
     // ── Uniform health telemetry (teensy node) ──────────────────────────

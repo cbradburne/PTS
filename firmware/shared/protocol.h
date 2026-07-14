@@ -80,6 +80,7 @@ typedef enum : uint8_t {
     CMD_GET_CONFIG       = 0x12,   // request speed presets + orientation from mount (no payload)
     CMD_FIND_HOME        = 0x13,   // home one axis to its min end stop (1 byte: axis)
     CMD_SET_STALL_THRESHOLD = 0x14, // set and persist StallGuard threshold (2 bytes: axis, threshold)
+    CMD_GET_POSITION     = 0x15,   // request an immediate CMD_POSITION reply (no payload)
 
     // PC -> Mount  (v2 — look-at tracking)
     CMD_ADD_SUBJECT_START  = 0x20,  // begin subject calibration: subject_id(1) + name(16) = 17B
@@ -137,6 +138,11 @@ typedef enum : uint8_t {
                                    // kind 7 = pairing conflict rejected (mount=claimed cam,
                                    //          state/flags = claimant MAC[4]/[5])
                                    // Diagnostic only; sent ONLY over Serial, never TCP/WS.
+    CMD_POSITION          = 0x9A,  // mount → clients: live axis positions, 17-byte payload
+                                   // (see PayloadPosition).  Adaptive rate: 5 Hz while any
+                                   // axis is in motion, 1 Hz at rest; also sent immediately
+                                   // on CMD_GET_POSITION.  Deliberately NOT part of the 50 Hz
+                                   // STATUS — position is slow data (see CMD_HEALTH rationale).
     CMD_HEALTH            = 0x99,  // node → PC log: uniform health record, 24-byte payload
                                    // (see PayloadHealth).  Every node emits one every
                                    // HEALTH_INTERVAL_MS (10 s), deferred briefly around jog
@@ -305,6 +311,18 @@ typedef struct __attribute__((packed)) {
     uint32_t node_u32;        // node-specific: hub=ghost_rx_drops, bridge=reinit count
 } PayloadHealth;              // wire: 24 bytes, all multi-byte fields big-endian
                               // (build_health() is with the other builders below)
+
+// CMD_POSITION payload (17 bytes) — live axis positions in physical units.
+typedef struct __attribute__((packed)) {
+    uint8_t pan_deg[4];       // BE float — degrees
+    uint8_t tilt_deg[4];      // BE float — degrees
+    uint8_t slider_mm[4];     // BE float — millimetres (0 when no slider)
+    int32_t zoom_steps;       // BE int32 — raw steps (zoom has no physical unit;
+                              //            meaningless for LANC zoom)
+    uint8_t moving_mask;      // bit per axis (0=pan 1=tilt 2=slider 3=zoom):
+                              //   stepper still in motion — lets a client (or a
+                              //   future VISCA gateway) detect true arrival
+} PayloadPosition;            // wire: 17 bytes
 
 // CMD_STATE_REPORT layout (182 bytes, decoded inline — too large for a stack struct):
 //   +000..+159  10 × (int32 pan, int32 tilt, int32 slider, int32 zoom) BE = 160 bytes
@@ -535,6 +553,20 @@ static inline uint16_t build_health(uint8_t *buf, uint8_t mount_id, uint16_t seq
     uint8_t p[24];
     encode_health_payload(p, h);
     return build_packet(buf, mount_id, seq, CMD_HEALTH, p, 24);
+}
+
+// Build a CMD_POSITION packet (17-byte payload, physical units).
+static inline uint16_t build_position(uint8_t *buf, uint8_t mount_id, uint16_t seq,
+                                       float pan_deg, float tilt_deg,
+                                       float slider_mm, int32_t zoom_steps,
+                                       uint8_t moving_mask) {
+    uint8_t p[17];
+    write_be_float(p + 0,  pan_deg);
+    write_be_float(p + 4,  tilt_deg);
+    write_be_float(p + 8,  slider_mm);
+    write_be32(p + 12, (uint32_t)zoom_steps);
+    p[16] = moving_mask;
+    return build_packet(buf, mount_id, seq, CMD_POSITION, p, 17);
 }
 
 static inline uint16_t build_limits_found(uint8_t *buf, uint8_t mount_id,
