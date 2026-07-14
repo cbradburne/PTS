@@ -17,3 +17,4 @@ pc_app/logs/
 # Arduino build output (if arduino-cli is ever used in-tree)
 build/
 *.bin.tmp
+.build/

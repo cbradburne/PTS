@@ -314,6 +314,11 @@ static uint32_t  _mount_last_seen[NUM_MOUNTS] = {};
 #define HUB_DROP_GHOST_RSSI0  1
 static uint32_t  _ghost_rx_drops = 0;   // STATUS frames dropped as ghosts (rssi==0)
 
+// Sequence counter for hub-originated PC-diagnostic packets (HUB_DIAG /
+// HUB_EVENT / HEALTH / display-health relay).  Declared early: used by
+// dispatch_disp_msg() well before the diag block that owns the other counters.
+static uint16_t _usb_diag_seq = 0;
+
 // Last known look-at move direction per mount (-1=none, 0=min/◀, 1=max/▶).
 // Set when any client sends CMD_START_LOOK_AT_MOVE; broadcast to all clients.
 static int8_t    _la_dir[NUM_MOUNTS];   // initialised to -1 in setup()
@@ -952,7 +957,7 @@ static uint32_t _usb_rx_bytes      = 0;
 static uint32_t _usb_rx_pkts       = 0;
 static uint32_t _last_usb_diag_ms  = 0;
 #define USB_DIAG_INTERVAL_MS  1000
-static uint16_t _usb_diag_seq      = 0;
+// (_usb_diag_seq is declared early, next to the ghost guard — see above)
 // Captured once at boot — tells the PC WHY the hub last reset (poweron / panic /
 // brownout / watchdog).  Reported in every diag; the PC reads it when it sees
 // the rx counters reset (i.e. the hub rebooted).
