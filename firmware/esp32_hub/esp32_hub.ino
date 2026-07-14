@@ -264,7 +264,9 @@ static volatile bool    _need_full_restart                 = false;
 // _espnow_fails (which resets each time it triggers a peer refresh), this one
 // only resets on SUCCESS — it is the raw signal the autonomous wedge detector
 // reads in loop().  Capped at 255.
-static volatile uint8_t _espnow_fail_run[NUM_MOUNTS] = {};
+static volatile uint8_t  _espnow_fail_run[NUM_MOUNTS] = {};
+// Cumulative send failures across all mounts since boot — health telemetry.
+static volatile uint32_t _espnow_fail_total = 0;
 
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
     const uint8_t *mac_addr = info->des_addr;
@@ -274,6 +276,7 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
             _espnow_fails[i]    = 0;
             _espnow_fail_run[i] = 0;
         } else {
+            _espnow_fail_total++;                       // health telemetry (cumulative)
             if (_espnow_fail_run[i] < 255) _espnow_fail_run[i]++;
             if (++_espnow_fails[i] >= ESPNOW_MAX_CONSEC_FAILS) {
                 _espnow_fails[i]          = 0;
@@ -871,6 +874,15 @@ static void dispatch_disp_msg(uint8_t type, uint8_t len, const uint8_t *d) {
         disp_send_mount_table();
         return;
     }
+    if (type == DISP_MSG_HEALTH && len >= 24) {
+        // Display's health record — wrap into a CMD_HEALTH packet (sender
+        // sentinel 0xFD) and forward to the PC over Serial only.
+        uint8_t buf[PKT_BUF_SIZE + 4];
+        uint16_t n = build_packet(buf, 0xFD /*display sentinel*/, ++_usb_diag_seq,
+                                  CMD_HEALTH, d, 24);
+        Serial.write(buf, n);
+        return;
+    }
 
     if (type == DISP_MSG_SEND_CMD && len >= 3) {
         uint8_t mount_id = d[0];
@@ -971,6 +983,53 @@ static void send_usb_diag() {
     uint16_t n = build_packet(buf, 0xFE /*hub sentinel mount_id*/, ++_usb_diag_seq,
                               CMD_HUB_DIAG, payload, 13);
     Serial.write(buf, n);
+}
+
+// ---- Uniform health telemetry (hub node) ----
+// One CMD_HEALTH to the PC over Serial every HEALTH_INTERVAL_MS, plus an
+// immediate anomaly send on: first report, low heap, loop stall, or a jump in
+// ESP-NOW send failures.  The hub's own health rides USB (no radio cost).
+static uint32_t _health_last_ms      = 0;
+static uint32_t _health_anom_ms      = 0;
+static uint16_t _health_loop_max_ms  = 0;   // worst loop-iteration gap since last send
+static uint32_t _health_last_txfail  = 0;
+static bool     _health_first_sent   = false;
+
+static void send_own_health(bool anomaly) {
+    PayloadHealth h = {};
+    h.node_type     = HEALTH_NODE_HUB;
+    h.reset_reason  = _reset_reason;
+    h.uptime_s      = millis() / 1000UL;
+    h.free_heap     = (uint32_t)esp_get_free_heap_size();
+    h.min_free_heap = (uint32_t)esp_get_minimum_free_heap_size();
+    h.loop_max_ms   = _health_loop_max_ms;
+    h.tx_fail       = (uint16_t)_espnow_fail_total;
+    h.rssi          = 0;
+    h.flags         = anomaly ? 0x01 : 0x00;
+    h.node_u32      = _ghost_rx_drops;
+    uint8_t buf[PKT_BUF_SIZE + 4];
+    uint16_t n = build_health(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq, &h);
+    Serial.write(buf, n);
+    _health_last_ms     = millis();
+    _health_loop_max_ms = 0;
+    _health_last_txfail = _espnow_fail_total;
+    _health_first_sent  = true;
+}
+
+// Called from the 500 ms self-check tick.
+static void health_check(uint32_t now) {
+    bool anomaly =
+        (!_health_first_sent && now > 3000) ||
+        (esp_get_free_heap_size() < HEALTH_LOW_HEAP_BYTES) ||
+        (_health_loop_max_ms > HEALTH_LOOP_STALL_MS) ||
+        (_espnow_fail_total - _health_last_txfail >= HEALTH_TXFAIL_JUMP);
+    if (anomaly && (now - _health_anom_ms) >= HEALTH_ANOMALY_GAP_MS) {
+        _health_anom_ms = now;
+        send_own_health(true);
+        return;
+    }
+    if (now - _health_last_ms >= HEALTH_INTERVAL_MS)
+        send_own_health(false);
 }
 
 // Send a one-shot hub event to the PC over Serial ONLY (point-to-point, like
@@ -1279,6 +1338,15 @@ void loop() {
 
     uint32_t now = millis();
 
+    // Health telemetry: worst gap between loop iterations ≈ worst iteration time.
+    static uint32_t _prev_loop_ms = 0;
+    if (_prev_loop_ms) {
+        uint32_t gap = now - _prev_loop_ms;
+        if (gap > _health_loop_max_ms)
+            _health_loop_max_ms = (gap > 65535) ? 65535 : (uint16_t)gap;
+    }
+    _prev_loop_ms = now;
+
     // ---- Full hub restart (PC escalation when the reinit didn't clear it) ----
     if (_need_full_restart) {
         Serial.println("[HUB] PC-requested full restart (esp_restart)");
@@ -1310,6 +1378,7 @@ void loop() {
         check_self_recovery(now);
         check_maintenance_restart(now);
         conflict_staleness_check(now);
+        health_check(now);
     }
 
     if (now - last_hb >= HEARTBEAT_MS) {

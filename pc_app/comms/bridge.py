@@ -30,7 +30,7 @@ from typing import Callable, Optional
 import serial
 import serial.tools.list_ports
 
-from .protocol import PacketReader, Packet, Cmd, build_packet
+from .protocol import PacketReader, Packet, Cmd, decode_health, ParseError, build_packet
 
 log = logging.getLogger(__name__)
 
@@ -506,6 +506,7 @@ class Bridge:
         self._note_rx_ack(pkt)
         self._note_hub_diag(pkt)
         self._note_hub_event(pkt)
+        self._note_node_health(pkt)
         for cb in self._callbacks:
             try:
                 cb(pkt)
@@ -552,6 +553,40 @@ class Bridge:
         0: "IDLE", 1: "JOGGING", 2: "MOVING", 3: "FINDING_LIMITS",
         4: "ERROR", 5: "LOOK_AT_MOVE", 6: "CALIBRATING", 7: "LOOK_AT_PRE_AIM",
     }
+
+    def _note_node_health(self, pkt: Packet) -> None:
+        """Log a CMD_HEALTH record (uniform node telemetry).
+
+        Senders: mount_id 1-5 = that mount (payload says bridge vs teensy),
+        0xFE = hub, 0xFD = hub display.  Anomaly-flagged records (first boot
+        report, low heap, loop stall, TX-fail jump) log as WARNING; routine
+        10 s reports log as INFO.  Grep 'NODE HEALTH' to trend any node —
+        a falling min-heap or climbing txfail hours before symptoms is the
+        early warning this exists for.
+        """
+        if pkt.cmd != Cmd.HEALTH:
+            return
+        try:
+            h = decode_health(pkt.payload)
+        except ParseError as e:
+            log.warning("NODE HEALTH undecodable from mount_id=%d: %s",
+                        pkt.mount_id, e)
+            return
+        if pkt.mount_id == 0xFE:
+            who = "hub"
+        elif pkt.mount_id == 0xFD:
+            who = "display"
+        else:
+            who = f"cam{pkt.mount_id}/{h.node_name}"
+        line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "
+                "loopmax %4dms | txfail %d | rssi %d | n32 %d | reset %d") % (
+            who, h.uptime_s / 3600.0,
+            h.free_heap // 1024, h.min_free_heap // 1024,
+            h.loop_max_ms, h.tx_fail, h.rssi, h.node_u32, h.reset_reason)
+        if h.anomaly:
+            log.warning("%s [ANOMALY]", line)
+        else:
+            log.info(line)
 
     def _note_hub_event(self, pkt: Packet) -> None:
         """Log a hub event (Cmd.HUB_EVENT).

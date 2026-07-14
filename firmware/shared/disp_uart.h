@@ -48,6 +48,9 @@
 #define DISP_MSG_PAIR_FORGET       0x13   // 1 byte: cam — clear that slot's binding (a live mount re-pairs
                                           //         itself within ~5 s; Forget is for retired/dead units)
 #define DISP_MSG_GET_MOUNT_TABLE   0x14   // 0 bytes: display requests a DISP_MSG_MOUNT_TABLE push
+#define DISP_MSG_HEALTH            0x15   // 24 bytes: display's CMD_HEALTH payload (PayloadHealth
+                                          //           wire layout) — hub wraps it into a CMD_HEALTH
+                                          //           packet (mount_id 0xFD) and forwards to the PC
 
 #define DISP_UART_MAX_PAYLOAD      80
 

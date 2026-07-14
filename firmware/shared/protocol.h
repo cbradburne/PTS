@@ -137,7 +137,28 @@ typedef enum : uint8_t {
                                    // kind 7 = pairing conflict rejected (mount=claimed cam,
                                    //          state/flags = claimant MAC[4]/[5])
                                    // Diagnostic only; sent ONLY over Serial, never TCP/WS.
+    CMD_HEALTH            = 0x99,  // node → PC log: uniform health record, 24-byte payload
+                                   // (see PayloadHealth).  Every node emits one every
+                                   // HEALTH_INTERVAL_MS (10 s), deferred briefly around jog
+                                   // traffic, plus an immediate anomaly-flagged send on: first
+                                   // report after boot, low heap, loop stall, or a TX-fail jump.
+                                   // Sender identity: packet mount_id 1-5 = that mount (byte[0]
+                                   // says bridge vs teensy), 0xFE = hub, 0xFD = hub display.
 } CmdType;
+
+// CMD_HEALTH node_type values (payload byte [0])
+#define HEALTH_NODE_HUB      0
+#define HEALTH_NODE_BRIDGE   1   // mount-side ESP32 (AMOLED)
+#define HEALTH_NODE_TEENSY   2
+#define HEALTH_NODE_DISPLAY  3
+
+// Uniform health cadence / anomaly thresholds (shared by all nodes)
+#define HEALTH_INTERVAL_MS        10000UL
+#define HEALTH_ANOMALY_GAP_MS      2000UL   // min spacing between anomaly-triggered sends
+#define HEALTH_JOG_DEFER_MS         300UL   // hold a send this long after jog traffic
+#define HEALTH_LOW_HEAP_BYTES     30720UL   // free heap below this → anomaly
+#define HEALTH_LOOP_STALL_MS        500     // worst loop iteration above this → anomaly
+#define HEALTH_TXFAIL_JUMP            8     // tx-fail delta since last send → anomaly
 
 // ---------------------------------------------------------------------------
 // Axis / group identifiers
@@ -269,6 +290,21 @@ typedef struct __attribute__((packed)) {
     uint16_t nacked_seq;
     uint8_t  error;
 } PayloadNack;
+
+// CMD_HEALTH payload (24 bytes) — uniform across all node types.
+typedef struct __attribute__((packed)) {
+    uint8_t  node_type;       // HEALTH_NODE_*
+    uint8_t  reset_reason;    // esp_reset_reason() / Teensy SRC_SRSR low byte
+    uint32_t uptime_s;
+    uint32_t free_heap;       // bytes free now
+    uint32_t min_free_heap;   // lowest ever seen this boot (leak/fragmentation trend)
+    uint16_t loop_max_ms;     // worst loop/task iteration since the last report
+    uint16_t tx_fail;         // cumulative link send failures (wraps; deltas matter)
+    int8_t   rssi;            // last link RSSI where meaningful, else 0
+    uint8_t  flags;           // bit0 = anomaly-triggered send
+    uint32_t node_u32;        // node-specific: hub=ghost_rx_drops, bridge=reinit count
+} PayloadHealth;              // wire: 24 bytes, all multi-byte fields big-endian
+                              // (build_health() is with the other builders below)
 
 // CMD_STATE_REPORT layout (182 bytes, decoded inline — too large for a stack struct):
 //   +000..+159  10 × (int32 pan, int32 tilt, int32 slider, int32 zoom) BE = 160 bytes
@@ -475,6 +511,30 @@ static inline uint16_t build_status(uint8_t *buf, uint8_t mount_id,
     payload[9] = s->active_la_subject;
 
     return build_packet(buf, mount_id, seq, CMD_STATUS, payload, 10);
+}
+
+// Encode a PayloadHealth into its 24-byte wire form (big-endian fields).
+// Split out so nodes that ship the payload through another framing (the
+// display's DISP_MSG_HEALTH, the bridge's send_to_hub) can reuse it.
+static inline void encode_health_payload(uint8_t p[24], const PayloadHealth *h) {
+    p[0] = h->node_type;
+    p[1] = h->reset_reason;
+    write_be32(p + 2,  h->uptime_s);
+    write_be32(p + 6,  h->free_heap);
+    write_be32(p + 10, h->min_free_heap);
+    write_be16(p + 14, h->loop_max_ms);
+    write_be16(p + 16, h->tx_fail);
+    p[18] = (uint8_t)h->rssi;
+    p[19] = h->flags;
+    write_be32(p + 20, h->node_u32);
+}
+
+// Build a CMD_HEALTH packet (24-byte payload) — uniform for every node type.
+static inline uint16_t build_health(uint8_t *buf, uint8_t mount_id, uint16_t seq,
+                                     const PayloadHealth *h) {
+    uint8_t p[24];
+    encode_health_payload(p, h);
+    return build_packet(buf, mount_id, seq, CMD_HEALTH, p, 24);
 }
 
 static inline uint16_t build_limits_found(uint8_t *buf, uint8_t mount_id,

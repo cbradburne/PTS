@@ -91,6 +91,21 @@ static int do_emit() {
     n = build_look_at_status(buf, 3, 42, 123.456f, -45.5f, 12.25f, 2, 0x60);
     emit_pkt("look_at_status_floats", buf, n);
 
+    // h: uniform health record (all field widths + signed rssi exercised)
+    PayloadHealth ph;
+    ph.node_type     = HEALTH_NODE_BRIDGE;
+    ph.reset_reason  = 3;
+    ph.uptime_s      = 15000;
+    ph.free_heap     = 114688;
+    ph.min_free_heap = 98304;
+    ph.loop_max_ms   = 12;
+    ph.tx_fail       = 3;
+    ph.rssi          = -58;
+    ph.flags         = 0x01;
+    ph.node_u32      = 2;
+    n = build_health(buf, 0xFE, 7, &ph);
+    emit_pkt("health_24b", buf, n);
+
     return 0;
 }
 

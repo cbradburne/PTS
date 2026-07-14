@@ -109,6 +109,11 @@ class Cmd(IntEnum):
     HUB_REINIT_ESPNOW = 0x96   # PC→hub: full esp_now reinit — recovers the hub→mount ESP-NOW send wedge
     HUB_RESTART       = 0x97   # PC→hub: full esp_restart() — escalation when 0x96 doesn't clear the wedge
     HUB_EVENT         = 0x98   # hub→USB-PC only: kind(1)+mount(1)+rssi(1)+state(1)+flags(1)+uptime_s(u32)
+    HEALTH            = 0x99   # node→PC log: uniform 24B health record (see HealthPayload)
+
+
+# CMD_HEALTH node_type values (payload byte [0])
+HEALTH_NODE_NAMES = {0: "hub", 1: "bridge", 2: "teensy", 3: "display"}
 
 
 class Axis(IntEnum):
@@ -634,6 +639,42 @@ def decode_limits_found(payload: bytes) -> LimitsFoundPayload:
 def decode_home_complete(payload: bytes) -> Axis:
     """Decode CMD_HOME_COMPLETE — returns the axis that finished homing."""
     return Axis(payload[0])
+
+
+@dataclass
+class HealthPayload:
+    """Decoded CMD_HEALTH (24-byte payload) — uniform node health record."""
+    node_type:     int    # 0=hub 1=bridge 2=teensy 3=display (HEALTH_NODE_NAMES)
+    reset_reason:  int
+    uptime_s:      int
+    free_heap:     int
+    min_free_heap: int
+    loop_max_ms:   int    # worst loop/task iteration since last report
+    tx_fail:       int    # cumulative link send failures (wraps)
+    rssi:          int
+    flags:         int    # bit0 = anomaly-triggered send
+    node_u32:      int    # node-specific counter (hub=ghost drops, bridge=reinits)
+
+    @property
+    def anomaly(self) -> bool:
+        return bool(self.flags & 0x01)
+
+    @property
+    def node_name(self) -> str:
+        return HEALTH_NODE_NAMES.get(self.node_type, f"type{self.node_type}")
+
+
+def decode_health(payload: bytes) -> HealthPayload:
+    """Decode CMD_HEALTH (24-byte payload)."""
+    if len(payload) < 24:
+        raise ParseError(f"HEALTH payload too short: {len(payload)}")
+    (node_type, reset_reason, uptime_s, free_heap, min_free,
+     loop_max_ms, tx_fail, rssi, flags, node_u32) = struct.unpack(
+        ">BBIIIHHbBI", payload[:24])
+    return HealthPayload(
+        node_type=node_type, reset_reason=reset_reason, uptime_s=uptime_s,
+        free_heap=free_heap, min_free_heap=min_free, loop_max_ms=loop_max_ms,
+        tx_fail=tx_fail, rssi=rssi, flags=flags, node_u32=node_u32)
 
 
 def decode_ack(payload: bytes) -> AckPayload:

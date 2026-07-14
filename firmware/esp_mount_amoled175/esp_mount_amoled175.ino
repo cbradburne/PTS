@@ -325,6 +325,15 @@ static volatile bool    _espnow_need_reinit    = false; // set in callback, acti
 static volatile bool    _espnow_need_refresh   = false; // peer del/add requested, actioned in loop()
                                                         // (esp_now_*() must not run in the WiFi-task
                                                         // send callback — it can corrupt the stack)
+// Uniform health telemetry (bridge node)
+static volatile uint32_t _espnow_fail_total = 0;  // cumulative send failures since boot
+static uint32_t _reinit_count       = 0;          // completed full ESP-NOW reinits
+static uint32_t _last_jog_fwd_ms    = 0;          // last CMD_JOG forwarded → defer health send
+static uint32_t _health_last_ms     = 0;
+static uint32_t _health_anom_ms     = 0;
+static uint16_t _health_loop_max_ms = 0;
+static uint32_t _health_last_txfail = 0;
+static bool     _health_first_sent  = false;
 
 // ---------------------------------------------------------------------------
 // Colours
@@ -482,6 +491,51 @@ static void send_status_heartbeat() {
     _last_heartbeat_ms = millis();
 }
 
+// ---- Uniform health telemetry (bridge node) --------------------------------
+
+static void send_health(bool anomaly) {
+    PayloadHealth h = {};
+    h.node_type     = HEALTH_NODE_BRIDGE;
+    h.reset_reason  = (uint8_t)esp_reset_reason();
+    h.uptime_s      = millis() / 1000UL;
+    h.free_heap     = (uint32_t)esp_get_free_heap_size();
+    h.min_free_heap = (uint32_t)esp_get_minimum_free_heap_size();
+    h.loop_max_ms   = _health_loop_max_ms;
+    h.tx_fail       = (uint16_t)_espnow_fail_total;
+    h.rssi          = _last_rssi;
+    h.flags         = anomaly ? 0x01 : 0x00;
+    h.node_u32      = _reinit_count;
+    uint8_t p[24];
+    encode_health_payload(p, &h);
+    send_to_hub(CMD_HEALTH, p, 24);   // no-op while unpaired (send_to_hub guards)
+    _health_last_ms     = millis();
+    _health_loop_max_ms = 0;
+    _health_last_txfail = _espnow_fail_total;
+    _health_first_sent  = true;
+}
+
+// Called each loop pass.  Jog-aware: the periodic send steps aside while jog
+// traffic is flowing (ESP-NOW airtime matters mid-move), but never for more
+// than 2 s past its slot — one 33-byte frame among a 50 Hz jog stream is noise.
+static void health_check_bridge(uint32_t now) {
+    if (!_cfg_valid) return;
+    bool anomaly =
+        (!_health_first_sent && now > 3000) ||
+        (esp_get_free_heap_size() < HEALTH_LOW_HEAP_BYTES) ||
+        (_health_loop_max_ms > HEALTH_LOOP_STALL_MS) ||
+        (_espnow_fail_total - _health_last_txfail >= HEALTH_TXFAIL_JUMP);
+    if (anomaly && (now - _health_anom_ms) >= HEALTH_ANOMALY_GAP_MS) {
+        _health_anom_ms = now;
+        send_health(true);
+        return;
+    }
+    if (now - _health_last_ms < HEALTH_INTERVAL_MS) return;
+    bool jog_busy = (now - _last_jog_fwd_ms) < HEALTH_JOG_DEFER_MS;
+    bool overdue  = (now - _health_last_ms) > HEALTH_INTERVAL_MS + 2000;
+    if (jog_busy && !overdue) return;
+    send_health(false);
+}
+
 // ---------------------------------------------------------------------------
 // ESP-NOW callbacks
 // ---------------------------------------------------------------------------
@@ -505,6 +559,7 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
         _espnow_refresh_count = 0;
         _last_espnow_tx_ok_ms = millis();   // our send side is alive
     } else {
+        _espnow_fail_total++;                       // health telemetry (cumulative)
         Serial.printf("ESP-NOW send failed (%d)\n", (int)s);
         // After several consecutive failures the ESP-NOW stack internally marks
         // the hub peer as stale.  Refresh it so that when the hub powers back on
@@ -569,6 +624,7 @@ static void espnow_full_reinit() {
     _espnow_consec_fails  = 0;
     _espnow_refresh_count = 0;
     _espnow_need_refresh  = false;
+    _reinit_count++;                                // health telemetry
     Serial.println("[ESP-NOW] Full stack reinit done");
 }
 
@@ -581,6 +637,7 @@ static void ui_update();  // forward declaration
 static void handle_hub_packet(const ParsedPacket &pkt) {
     if (pkt.mount_id != _mount_id && pkt.mount_id != MOUNT_BROADCAST) return;
     _last_hub_rx_ms = millis();
+    if (pkt.cmd == CMD_JOG) _last_jog_fwd_ms = _last_hub_rx_ms;  // health-send deferral
     uint8_t ack[PKT_BUF_SIZE + 4];
     esp_now_send(_hub_mac, ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
     uint8_t fwd[PKT_BUF_SIZE + 4];
@@ -1548,6 +1605,18 @@ void loop() {
     esp_task_wdt_reset();
     _loop_count++;
 
+    // Health telemetry: worst gap between loop iterations ≈ worst iteration.
+    {
+        static uint32_t _prev_loop_ms2 = 0;
+        uint32_t nowh = millis();
+        if (_prev_loop_ms2) {
+            uint32_t gap = nowh - _prev_loop_ms2;
+            if (gap > _health_loop_max_ms)
+                _health_loop_max_ms = (gap > 65535) ? 65535 : (uint16_t)gap;
+        }
+        _prev_loop_ms2 = nowh;
+    }
+
     // ── Teensy serial — drain BEFORE rendering so commands are never stale
     drain_teensy_serial();
 
@@ -1669,6 +1738,9 @@ void loop() {
     // ── Heartbeat ────────────────────────────────────────────────────────
     if (now - _last_heartbeat_ms >= STATUS_HEARTBEAT_MS)
         send_status_heartbeat();
+
+    // ── Health telemetry (10 s cadence, jog-deferred, anomaly-triggered) ─
+    health_check_bridge(now);
 
     // ── Teensy probe ─────────────────────────────────────────────────────
     if (now - _last_teensy_st_ms >= TEENSY_PROBE_MS) {

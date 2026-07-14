@@ -2946,6 +2946,54 @@ static void lvgl_task_fn(void *arg) {
                 lv_obj_add_flag(_pc_panel, LV_OBJ_FLAG_HIDDEN);
             }
 
+            // ── Uniform health telemetry (display node) ───────────────────
+            // Worst gap between LVGL task iterations is exactly the signal
+            // that matters here — it is what froze in the old UI-lockup bug.
+            // Sent over the display UART; the hub wraps it into CMD_HEALTH
+            // (sender 0xFD) for the PC log.
+            {
+                static uint32_t _prev_tick_ms   = 0;
+                static uint16_t _tick_max_ms    = 0;
+                static uint32_t _health_last_ms = 0;
+                static uint32_t _health_anom_ms = 0;
+                static bool     _health_first   = false;
+
+                uint32_t nowh = millis();
+                if (_prev_tick_ms) {
+                    uint32_t gap = nowh - _prev_tick_ms;
+                    if (gap > _tick_max_ms)
+                        _tick_max_ms = (gap > 65535) ? 65535 : (uint16_t)gap;
+                }
+                _prev_tick_ms = nowh;
+
+                uint32_t free_heap = (uint32_t)esp_get_free_heap_size();
+                bool anomaly = (!_health_first && nowh > 3000) ||
+                               (free_heap < HEALTH_LOW_HEAP_BYTES) ||
+                               (_tick_max_ms > HEALTH_LOOP_STALL_MS);
+                bool periodic = (nowh - _health_last_ms >= HEALTH_INTERVAL_MS);
+                if ((anomaly && nowh - _health_anom_ms >= HEALTH_ANOMALY_GAP_MS)
+                        || periodic) {
+                    PayloadHealth h = {};
+                    h.node_type     = HEALTH_NODE_DISPLAY;
+                    h.reset_reason  = (uint8_t)esp_reset_reason();
+                    h.uptime_s      = nowh / 1000UL;
+                    h.free_heap     = free_heap;
+                    h.min_free_heap = (uint32_t)esp_get_minimum_free_heap_size();
+                    h.loop_max_ms   = _tick_max_ms;
+                    h.tx_fail       = 0;
+                    h.rssi          = 0;
+                    h.flags         = (anomaly && !periodic) ? 0x01 : 0x00;
+                    h.node_u32      = 0;
+                    uint8_t p[24];
+                    encode_health_payload(p, &h);
+                    disp_send_raw(DISP_MSG_HEALTH, p, 24);
+                    _health_last_ms = nowh;
+                    _tick_max_ms    = 0;
+                    _health_first   = true;
+                    if (anomaly) _health_anom_ms = nowh;
+                }
+            }
+
             uint32_t delay_ms = lv_timer_handler();
             xSemaphoreGive(_lvgl_mux);
             vTaskDelay(pdMS_TO_TICKS(delay_ms < 1 ? 1 : delay_ms > 5 ? 5 : delay_ms));

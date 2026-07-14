@@ -1791,6 +1791,57 @@ void loop() {
         send_status();
     }
 
+    // ── Uniform health telemetry (teensy node) ──────────────────────────
+    // 10 s cadence + anomaly sends (first report / low RAM / loop stall).
+    // No jog deferral: this rides the point-to-point UART, not the radio,
+    // and the bridge re-stamps + forwards it to the hub like any packet.
+    {
+        static uint32_t _prev_loop_ms   = 0;
+        static uint16_t _loop_max_ms    = 0;
+        static uint32_t _min_free_heap  = 0xFFFFFFFF;
+        static uint32_t _health_last_ms = 0;
+        static uint32_t _health_anom_ms = 0;
+        static bool     _health_first   = false;
+
+        uint32_t nowh = millis();
+        if (_prev_loop_ms) {
+            uint32_t gap = nowh - _prev_loop_ms;
+            if (gap > _loop_max_ms)
+                _loop_max_ms = (gap > 65535) ? 65535 : (uint16_t)gap;
+        }
+        _prev_loop_ms = nowh;
+
+        // Teensy 4.1 free RAM2 heap: distance from the break to the heap end.
+        extern char _heap_end[], *__brkval;
+        uint32_t free_heap = (uint32_t)(_heap_end - __brkval);
+        if (free_heap < _min_free_heap) _min_free_heap = free_heap;
+
+        bool anomaly = (!_health_first && nowh > 3000) ||
+                       (free_heap < HEALTH_LOW_HEAP_BYTES) ||
+                       (_loop_max_ms > HEALTH_LOOP_STALL_MS);
+        bool periodic = (nowh - _health_last_ms >= HEALTH_INTERVAL_MS);
+        if ((anomaly && nowh - _health_anom_ms >= HEALTH_ANOMALY_GAP_MS) || periodic) {
+            PayloadHealth h = {};
+            h.node_type     = HEALTH_NODE_TEENSY;
+            h.reset_reason  = (uint8_t)(SRC_SRSR & 0xFF);   // imxrt reset status
+            h.uptime_s      = nowh / 1000UL;
+            h.free_heap     = free_heap;
+            h.min_free_heap = _min_free_heap;
+            h.loop_max_ms   = _loop_max_ms;
+            h.tx_fail       = 0;
+            h.rssi          = 0;
+            h.flags         = (anomaly && !periodic) ? 0x01 : 0x00;
+            h.node_u32      = 0;
+            uint8_t p[24];
+            encode_health_payload(p, &h);
+            send_packet(CMD_HEALTH, p, 24);
+            _health_last_ms = nowh;
+            _loop_max_ms    = 0;
+            _health_first   = true;
+            if (anomaly) _health_anom_ms = nowh;
+        }
+    }
+
     // Heartbeat suppressed — re-enable for debugging by uncommenting below
     // static uint32_t _last_hb_ms = 0;
     // if (millis() - _last_hb_ms >= 3000) {
