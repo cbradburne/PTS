@@ -361,6 +361,28 @@ void MountMotion::update() {
         _updateJog();
     }
 
+    // Zoom dead-man outside STATE_JOGGING.  The look-at zoom path in jog()
+    // starts an unbounded rotateAsync() while _state stays LOOK_AT_MOVE /
+    // PRE_AIM — states where _updateJog() (and its watchdog) never runs.  The
+    // rotation can also outlive the move itself (look-at completes → IDLE with
+    // zoom still turning).  If the link dies with the stick held, nothing
+    // upstream is guaranteed to stop it — so enforce the same 500 ms rule here
+    // for a zoom axis rotating in any non-jog state.  Every other unbounded
+    // motion is either watchdogged (_updateJog) or self-terminating (GOTO,
+    // look-at slider, pre-aim, homing); LANC zoom has its own watchdog.
+    if (_state != STATE_JOGGING && _jog_dir[AXIS_ZOOM] != 0 &&
+            (millis() - _jog_last_ms > JOG_WATCHDOG_MS)) {
+        Serial.println("ZOOM watchdog: no packet — stopping zoom");
+        uint32_t stop_accel = (uint32_t)(physToUSteps(AXIS_ZOOM,
+                                  _zoom_preset.acceleration) * JOG_STOP_ACCEL_SCALE);
+        noInterrupts();
+        _stepper[AXIS_ZOOM]->setAcceleration(stop_accel);
+        _stepper[AXIS_ZOOM]->stopAsync();
+        interrupts();
+        _jog_dir[AXIS_ZOOM] = 0;
+        _jog_vel[AXIS_ZOOM] = 0;
+    }
+
     if (_state == STATE_FINDING_LIMITS) {
         _updateLimitFind();
     }
@@ -394,6 +416,10 @@ void MountMotion::jog(int16_t pan, int16_t tilt, int16_t slider, int16_t zoom,
         sz_preset = constrain(sz_preset, 1, 4);
         int16_t vel = _applyOrientation(AXIS_ZOOM, zoom);
         _jog_vel[AXIS_ZOOM] = vel;
+        // Feed the dead-man on every packet (matches the main jog() rule):
+        // the zoom watchdog in update() stops this axis if the link dies
+        // while the stick is held — _updateJog() doesn't run in this state.
+        _jog_last_ms = millis();
         const SpeedPreset &spd  = _zoom_preset;
         int32_t  max_spd_st = (int32_t)physToUSteps(AXIS_ZOOM, spd.max_speed);
         uint32_t accel_st   = (uint32_t)physToUSteps(AXIS_ZOOM, spd.acceleration);
