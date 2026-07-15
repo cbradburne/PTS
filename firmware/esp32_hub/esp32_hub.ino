@@ -371,6 +371,11 @@ static uint32_t _last_client_cmd_ms   = 0;   // last command from any client (TC
 static uint8_t  _mount_last_state[NUM_MOUNTS];  // last STATUS state byte (0xFF = unknown)
 static bool     _restart_block_logged = false;  // rate-limits the streak-exceeded log line
 
+// Per-mount live context cached from STATUS — consumed by the OSC server.
+static uint8_t  _mount_pt_preset[NUM_MOUNTS]  = {2, 2, 2, 2, 2};
+static uint8_t  _mount_sl_preset[NUM_MOUNTS]  = {2, 2, 2, 2, 2};
+static uint8_t  _mount_la_subject[NUM_MOUNTS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
 // ---------------------------------------------------------------------------
 // Pairing rules  (called from loop() for the first parsed packet per message)
 // ---------------------------------------------------------------------------
@@ -817,6 +822,15 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
 
     _mount_last_state[msg.src_idx] = state;   // read by the maintenance-restart idle check
 
+    // Cache per-mount presets + look-at subject — the OSC control server
+    // builds preset-aware GOTO_SLOT / JOG / START_LOOK_AT_MOVE from these.
+    if (pkt.payload_len >= 4) {
+        _mount_pt_preset[msg.src_idx] = pkt.payload[2];
+        _mount_sl_preset[msg.src_idx] = pkt.payload[3];
+    }
+    if (pkt.payload_len >= 10)
+        _mount_la_subject[msg.src_idx] = pkt.payload[9];
+
     disp_update_cam(mount_id, state, flags, msg.rssi);
 
     if (pkt.payload_len >= 4 && state != STATE_JOGGING) {
@@ -1090,6 +1104,243 @@ static void hub_espnow_full_reinit() {
 }
 
 // ---------------------------------------------------------------------------
+// OSC control server — Bitfocus Companion / QLab, direct to the hub
+// ---------------------------------------------------------------------------
+// Same /pts/... address space as the PC app's OSC server (docs/companion.md):
+// Companion or QLab reaches the hub over the CamMount AP or the WiFi→LAN
+// bridge and drives mounts with NO PC in the rig.  Parses the OSC 1.0 subset
+// we use (messages, #bundle, i/f/s/T/F args; numerics coerced to int32).
+//
+// Jogs are re-streamed at 20 Hz (the mount dead-man needs a live stream) with
+// a 15 s TTL bounding a lost UDP release.  OSC jogs stamp _ws_last_jog_ms so
+// the existing radio-contention protection (WS STATUS suppression) applies,
+// and every OSC command stamps _last_client_cmd_ms (defers the maintenance
+// restart while Companion is in use).
+
+#include <WiFiUdp.h>
+
+#define OSC_PORT           9700
+#define OSC_JOG_STREAM_MS  50          // 20 Hz
+#define OSC_JOG_TTL_MS     15000UL
+
+static WiFiUDP  _osc_udp;
+static int16_t  _osc_jog[NUM_MOUNTS][4]    = {};
+static uint32_t _osc_jog_until[NUM_MOUNTS] = {};   // 0 = no active OSC jog
+static uint32_t _osc_last_stream_ms        = 0;
+static int8_t   _osc_subject_sel[NUM_MOUNTS] = {-1, -1, -1, -1, -1};
+
+static int osc_pad4(int n) { return (n + 3) & ~3; }
+
+// Read a NUL-terminated, 4-byte-padded OSC string at ofs.  Returns the string
+// (guaranteed NUL-terminated within the buffer) or nullptr; *next = following offset.
+static const char *osc_str(const uint8_t *d, int len, int ofs, int *next) {
+    int end = ofs;
+    while (end < len && d[end] != 0) end++;
+    if (end >= len) { *next = len; return nullptr; }
+    *next = osc_pad4(end + 1);
+    return (const char *)(d + ofs);
+}
+
+static void osc_send_jog_pkt(uint8_t mid) {
+    uint8_t i = (uint8_t)(mid - 1);
+    uint8_t p[10];
+    write_be16(p + 0, (uint16_t)_osc_jog[i][0]);
+    write_be16(p + 2, (uint16_t)_osc_jog[i][1]);
+    write_be16(p + 4, (uint16_t)_osc_jog[i][2]);
+    write_be16(p + 6, (uint16_t)_osc_jog[i][3]);
+    p[8] = _mount_pt_preset[i];
+    p[9] = _mount_sl_preset[i];
+    ui_send_to_mount(mid, CMD_JOG, p, 10);
+    _ws_last_jog_ms = millis();
+}
+
+static void osc_stop_jog(uint8_t mid) {
+    uint8_t i = (uint8_t)(mid - 1);
+    bool was_active = (_osc_jog_until[i] != 0);
+    _osc_jog_until[i] = 0;
+    memset(_osc_jog[i], 0, sizeof(_osc_jog[i]));
+    osc_send_jog_pkt(mid);              // zeros → controlled deceleration
+    if (was_active) Serial.printf("[OSC] CAM %d jog stop\n", mid);
+}
+
+static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
+    char buf[72];
+    strncpy(buf, addr, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    const char *tok[6]; int nt = 0;
+    for (char *t = strtok(buf, "/"); t && nt < 6; t = strtok(nullptr, "/"))
+        tok[nt++] = t;
+    if (nt < 2 || strcmp(tok[0], "pts") != 0) return;
+
+    _last_client_cmd_ms = millis();     // Companion counts as client activity
+
+    if (nt == 2 && strcmp(tok[1], "estop") == 0) {
+        Serial.println("[OSC] E-STOP ALL");
+        for (int i = 0; i < NUM_MOUNTS; i++) {
+            _osc_jog_until[i] = 0;
+            memset(_osc_jog[i], 0, sizeof(_osc_jog[i]));
+        }
+        ui_send_to_mount(MOUNT_BROADCAST, CMD_E_STOP, nullptr, 0);
+        return;
+    }
+
+    if (nt < 4 || strcmp(tok[1], "cam") != 0) return;
+    int mid = atoi(tok[2]);
+    if (mid < 1 || mid > NUM_MOUNTS) return;
+    uint8_t idx = (uint8_t)(mid - 1);
+    const char *verb = tok[3];
+
+    if (strcmp(verb, "estop") == 0) {
+        Serial.printf("[OSC] CAM %d E-STOP\n", mid);
+        _osc_jog_until[idx] = 0;
+        memset(_osc_jog[idx], 0, sizeof(_osc_jog[idx]));
+        ui_send_to_mount((uint8_t)mid, CMD_E_STOP, nullptr, 0);
+
+    } else if (strcmp(verb, "goto") == 0 && argc >= 1) {
+        if (a[0] >= 1 && a[0] <= 10) {
+            uint8_t p[3] = { (uint8_t)(a[0] - 1),
+                             _mount_pt_preset[idx], _mount_sl_preset[idx] };
+            Serial.printf("[OSC] CAM %d goto slot %ld\n", mid, (long)a[0]);
+            ui_send_to_mount((uint8_t)mid, CMD_GOTO_SLOT, p, 3);
+        }
+
+    } else if (strcmp(verb, "store") == 0 && argc >= 1) {
+        if (a[0] >= 1 && a[0] <= 10) {
+            uint8_t s = (uint8_t)(a[0] - 1);
+            Serial.printf("[OSC] CAM %d store slot %ld\n", mid, (long)a[0]);
+            ui_send_to_mount((uint8_t)mid, CMD_STORE_POS, &s, 1);
+        }
+
+    } else if (strcmp(verb, "clear") == 0 && argc >= 1) {
+        if (a[0] >= 1 && a[0] <= 10) {
+            uint8_t s = (uint8_t)(a[0] - 1);
+            Serial.printf("[OSC] CAM %d clear slot %ld\n", mid, (long)a[0]);
+            ui_send_to_mount((uint8_t)mid, CMD_CLEAR_POS, &s, 1);
+        }
+
+    } else if (strcmp(verb, "jog") == 0) {
+        if (nt >= 5 && strcmp(tok[4], "stop") == 0) { osc_stop_jog((uint8_t)mid); return; }
+        bool any = false;
+        for (int k = 0; k < 4; k++) {
+            int32_t v = (k < argc) ? a[k] : 0;
+            if (v >  1000) v =  1000;
+            if (v < -1000) v = -1000;
+            _osc_jog[idx][k] = (int16_t)v;
+            if (v != 0) any = true;
+        }
+        if (any) {
+            if (_osc_jog_until[idx] == 0)
+                Serial.printf("[OSC] CAM %d jog start\n", mid);
+            _osc_jog_until[idx] = millis() + OSC_JOG_TTL_MS;
+            osc_send_jog_pkt((uint8_t)mid);
+        } else {
+            osc_stop_jog((uint8_t)mid);
+        }
+
+    } else if (strcmp(verb, "speed") == 0 && nt >= 5 && argc >= 1) {
+        if (a[0] >= 1 && a[0] <= 4) {
+            uint8_t grp;
+            if      (strcmp(tok[4], "pt") == 0) { grp = GROUP_PAN_TILT;    _mount_pt_preset[idx] = (uint8_t)a[0]; }
+            else if (strcmp(tok[4], "sl") == 0) { grp = GROUP_SLIDER_ZOOM; _mount_sl_preset[idx] = (uint8_t)a[0]; }
+            else return;
+            uint8_t p[2] = { grp, (uint8_t)a[0] };
+            Serial.printf("[OSC] CAM %d speed/%s %ld\n", mid, tok[4], (long)a[0]);
+            ui_send_to_mount((uint8_t)mid, CMD_SET_ACTIVE_PRESET, p, 2);
+        }
+
+    } else if (strcmp(verb, "subject") == 0 && argc >= 1) {
+        if (a[0] >= 0 && a[0] <= 7) {
+            _osc_subject_sel[idx] = (int8_t)a[0];
+            Serial.printf("[OSC] CAM %d subject %ld\n", mid, (long)a[0]);
+            if (_mount_last_state[idx] == STATE_LOOK_AT_MOVE ||
+                _mount_last_state[idx] == STATE_LOOK_AT_PRE_AIM) {
+                uint8_t s = (uint8_t)a[0];
+                ui_send_to_mount((uint8_t)mid, CMD_SWITCH_SUBJECT, &s, 1);
+            }
+        }
+
+    } else if (strcmp(verb, "lookat") == 0 && argc >= 1) {
+        if (a[0] == 0 || a[0] == 1) {
+            uint8_t subj = (_osc_subject_sel[idx] >= 0)
+                               ? (uint8_t)_osc_subject_sel[idx]
+                               : ((_mount_la_subject[idx] <= 7)
+                                      ? _mount_la_subject[idx] : 0);
+            uint8_t p[3] = { subj, (uint8_t)a[0], _mount_sl_preset[idx] };
+            Serial.printf("[OSC] CAM %d lookat %s subject %u\n",
+                          mid, a[0] ? ">" : "<", subj);
+            ui_send_to_mount((uint8_t)mid, CMD_START_LOOK_AT_MOVE, p, 3);
+            intercept_la_move_dir((uint8_t)mid, (uint8_t)a[0]);  // arrow flash everywhere
+        }
+    }
+}
+
+static void osc_handle_message(const uint8_t *d, int len) {
+    int next = 0;
+    const char *addr = osc_str(d, len, 0, &next);
+    if (!addr || addr[0] != '/') return;
+    int ofs = next;
+    int32_t args[8]; int argc = 0;
+    if (ofs < len && d[ofs] == ',') {
+        const char *tags = osc_str(d, len, ofs, &next);
+        if (!tags) return;
+        ofs = next;
+        for (int ti = 1; tags[ti] != 0 && argc < 8; ti++) {
+            char t = tags[ti];
+            if (t == 'i' && ofs + 4 <= len) {
+                args[argc++] = (int32_t)be32(d + ofs); ofs += 4;
+            } else if (t == 'f' && ofs + 4 <= len) {
+                args[argc++] = (int32_t)lroundf(be_float(d + ofs)); ofs += 4;
+            } else if (t == 'T') { args[argc++] = 1;
+            } else if (t == 'F') { args[argc++] = 0;
+            } else if (t == 's') {
+                osc_str(d, len, ofs, &next); ofs = next;   // skip strings
+            } else break;                                   // unsupported tag
+        }
+    }
+    osc_dispatch(addr, args, argc);
+}
+
+// Messages or #bundle (recursive) — QLab wraps cues in bundles.
+static void osc_handle_packet(const uint8_t *d, int len) {
+    if (len >= 16 && memcmp(d, "#bundle\0", 8) == 0) {
+        int ofs = 16;                    // header + 8-byte timetag (ignored)
+        while (ofs + 4 <= len) {
+            int32_t sz = (int32_t)be32(d + ofs);
+            ofs += 4;
+            if (sz <= 0 || ofs + sz > len) break;
+            osc_handle_packet(d + ofs, sz);
+            ofs += osc_pad4(sz);
+        }
+        return;
+    }
+    osc_handle_message(d, len);
+}
+
+// Called every loop(): drain datagrams + drive the 20 Hz jog re-stream.
+static void osc_poll() {
+    int psize;
+    while ((psize = _osc_udp.parsePacket()) > 0) {
+        static uint8_t rx[512];
+        int n = _osc_udp.read(rx, sizeof(rx));
+        if (n > 0) osc_handle_packet(rx, n);
+    }
+    uint32_t now = millis();
+    if (now - _osc_last_stream_ms >= OSC_JOG_STREAM_MS) {
+        _osc_last_stream_ms = now;
+        for (int i = 0; i < NUM_MOUNTS; i++) {
+            if (_osc_jog_until[i] == 0) continue;
+            if (now >= _osc_jog_until[i]) {
+                Serial.printf("[OSC] CAM %d jog TTL expired — stopping "
+                              "(lost release?)\n", i + 1);
+                osc_stop_jog((uint8_t)(i + 1));
+            } else {
+                osc_send_jog_pkt((uint8_t)(i + 1));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 
@@ -1185,6 +1436,11 @@ void setup() {
     }
     _tcp_server.begin();
     Serial.printf("TCP listening on port %d\n", TCP_PORT);
+
+    // --- OSC control (Bitfocus Companion / QLab) ---
+    _osc_udp.begin(OSC_PORT);
+    Serial.printf("OSC control : UDP %d  (/pts/... — see docs/companion.md)\n",
+                  OSC_PORT);
 
     // --- HTTP / WebSocket ---
     _ws.onEvent(on_ws_event);
@@ -1415,6 +1671,9 @@ void loop() {
             }
         }
     }
+
+    // ---- OSC control (Companion / QLab) → mounts ----
+    osc_poll();
 
     // ---- TCP clients → mounts ----
     for (int i = 0; i < MAX_CLIENTS; i++) {

@@ -1,16 +1,21 @@
 # Bitfocus Companion (and QLab) control
 
-The PC app runs an OSC control server (UDP, default port **9700** — change or
-disable via `osc_enabled` / `osc_port` in the app's config file).  Anything
-that can send OSC can drive the mounts: Companion, QLab network cues,
-TouchOSC, etc.  The PC app must be running and connected to the hub as usual;
-OSC rides its existing link.
+Two OSC control servers speak the same `/pts/...` address space on UDP port
+**9700** — point Companion at whichever fits the rig:
+
+| Target | When to use |
+|---|---|
+| **The hub itself** (`169.254.22.22`) | No PC needed — hub + display + mounts + Stream Deck is a complete rig.  Reachable from the LAN via a WiFi→LAN bridge joined to the CamMount AP, or from any machine joined to CamMount directly. |
+| **The PC app's machine** | When the PC app is running anyway (its server is configurable via `osc_enabled` / `osc_port` in the app config). |
+
+Both accept the identical addresses below, so Companion pages work unchanged
+against either.  QLab network cues likewise.
 
 ## Companion connection
 
 1. Companion → **Connections** → add **Generic: OSC**
-2. **Target IP** = the PC running the PC app (`127.0.0.1` if Companion runs on
-   the same machine) · **Target port** = `9700`
+2. **Target IP** = `169.254.22.22` (hub) or the PC app machine's IP ·
+   **Target port** = `9700`
 3. Use the connection's **"Send message"** actions on buttons as below.
    Argument type matters: use **integer** arguments (floats also accepted).
 
@@ -62,10 +67,13 @@ accepts that.)
 
 ## Safety notes
 
-- Jogs started over OSC are re-streamed by the PC app at 20 Hz (the mount's
-  own 500 ms dead-man requires a live stream).  If the *release* message is
-  lost (UDP), a **15 s TTL** stops the jog anyway — for long moves prefer
-  `goto` / `lookat`, which are position-bounded.
-- The mount-side dead-man still applies end-to-end: if the PC app dies
+- Jogs started over OSC are re-streamed at 20 Hz by whichever server received
+  them (the mount's own 500 ms dead-man requires a live stream).  If the
+  *release* message is lost (UDP), a **15 s TTL** stops the jog anyway — for
+  long moves prefer `goto` / `lookat`, which are position-bounded.
+- The mount-side dead-man still applies end-to-end: if the hub or PC app dies
   mid-jog, motion stops within 500 ms regardless of Companion.
 - E-STOP over OSC also cancels any OSC-held jog streams immediately.
+- Hub-side extras: OSC jogs engage the same radio-contention protection as
+  web-app jogs, OSC `lookat` triggers the ◀/▶ arrow flash on every connected
+  UI, and Companion activity defers the hub's idle maintenance restart.
