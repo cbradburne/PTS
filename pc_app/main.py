@@ -88,6 +88,14 @@ def main() -> None:
     joystick = JoystickHandler(deadzone=config.joystick_deadzone)
     joystick.init()
 
+    # OSC control surface (Bitfocus Companion / QLab) — see docs/companion.md
+    osc = None
+    if config.osc_enabled:
+        from comms.osc_server import OscServer
+        osc = OscServer(mm, port=config.osc_port)
+        osc.start()   # logs + returns False on bind failure; app runs regardless
+        app.aboutToQuit.connect(osc.stop)
+
     window = MainWindow(config, bridge, mm, store, joystick)
     window.show()
 

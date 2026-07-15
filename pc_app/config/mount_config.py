@@ -86,6 +86,8 @@ class AppConfig:
     bridge_tcp_port: int = 7777        # hub TCP port
     bridge_port: str = ""              # serial port name (serial mode)
     joystick_deadzone: float = 0.08
+    osc_enabled: bool = True           # OSC control server (Companion / QLab)
+    osc_port: int = 9700               # UDP port for /pts/... addresses
 
     def mount(self, mount_id: int) -> MountConfig:
         if mount_id not in self.mounts:
@@ -168,6 +170,8 @@ def load_config() -> AppConfig:
         cfg.bridge_tcp_port   = data.get("bridge_tcp_port", 7777)
         cfg.bridge_port       = data.get("bridge_port", "")
         cfg.joystick_deadzone = data.get("joystick_deadzone", 0.08)
+        cfg.osc_enabled       = data.get("osc_enabled", True)
+        cfg.osc_port          = data.get("osc_port", 9700)
         # Load only the display label for each mount — everything else is in EEPROM
         for mid_str, md in data.get("mounts", {}).items():
             mid = int(mid_str)
@@ -195,6 +199,8 @@ def save_config(cfg: AppConfig) -> None:
             "bridge_tcp_port":   cfg.bridge_tcp_port,
             "bridge_port":       cfg.bridge_port,
             "joystick_deadzone": cfg.joystick_deadzone,
+            "osc_enabled":       cfg.osc_enabled,
+            "osc_port":          cfg.osc_port,
             # Only the display label is app-specific; all other mount settings are in EEPROM
             "mounts": {
                 str(mid): {"mount_id": mc.mount_id, "label": mc.label}
