@@ -1,10 +1,12 @@
 {
   "cv_mount_id": 1,
-  "bridge_mode": "serial",
-  "bridge_host": "192.168.4.1",
+  "bridge_mode": "tcp",
+  "bridge_host": "127.0.0.1",
   "bridge_tcp_port": 7777,
   "bridge_port": "COM10",
   "joystick_deadzone": 0.08,
+  "osc_enabled": true,
+  "osc_port": 9700,
   "mounts": {
     "1": {
       "mount_id": 1,

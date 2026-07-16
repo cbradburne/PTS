@@ -342,7 +342,10 @@ class CVWindow(QWidget):
 
     def __init__(self, mount_id: int, mount_manager: MountManager,
                  config: AppConfig, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
+        # Dialog (not Window) type: with the main window in native fullscreen,
+        # macOS gives a plain Qt.Window its own fullscreen Space — a Dialog
+        # floats over the fullscreen parent instead, like ConfigDialog does.
+        super().__init__(parent, Qt.WindowType.Dialog)
         self._mount_id = mount_id
         self._mm       = mount_manager
         self._config   = config
