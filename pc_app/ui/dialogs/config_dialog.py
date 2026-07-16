@@ -373,7 +373,7 @@ class ConfigDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
 
         # Orientation / hardware
-        orientation_box = QGroupBox("Orientation & Hardware")
+        orientation_box = QGroupBox("Orientation / Hardware")
         ol = QVBoxLayout(orientation_box)
         has_slider_cb = QCheckBox("Has slider axis")
         pan_inv_cb    = QCheckBox("Invert pan direction (mount is back-to-front)")

@@ -16,14 +16,33 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import sys
 import logging
 import logging.handlers
 from pathlib import Path
 
-# cv2 must be imported before pygame to avoid duplicate SDL2 library warnings
-# on macOS — both packages bundle libSDL2 and the first one loaded wins.
-import cv2  # noqa: F401
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")   # no stdout banner
+
+# cv2 and pygame each bundle their own libSDL2.  On macOS, the moment the
+# second copy loads, the Objective-C runtime prints ~17 "Class SDLxxx is
+# implemented in both…" warnings — written straight to file descriptor 2,
+# bypassing Python, so import order and logging config can't stop them.
+# Harmless for this app (nothing uses cv2's SDL-backed GUI; frames render via
+# Qt), so load both libraries inside a brief OS-level stderr quiet window.
+if sys.platform == "darwin":
+    _stderr_fd = os.dup(2)
+    _devnull   = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(_devnull, 2)
+    try:
+        import cv2     # noqa: F401
+        import pygame  # noqa: F401  (cached — motion.joystick reuses it)
+    finally:
+        os.dup2(_stderr_fd, 2)
+        os.close(_devnull)
+        os.close(_stderr_fd)
+else:
+    import cv2  # noqa: F401
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
