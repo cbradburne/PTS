@@ -105,9 +105,14 @@ class JoystickHandler:
 
         count = pygame.joystick.get_count()
         if count == 0:
-            log.warning("No joystick detected")
+            # init() is retried at the poll rate (~20 Hz) while unplugged —
+            # warn once per absence, not 20 times a second.
+            if not getattr(self, "_warned_no_joystick", False):
+                self._warned_no_joystick = True
+                log.warning("No joystick detected — will keep checking quietly")
             return False
 
+        self._warned_no_joystick = False
         if self._joystick is None:
             self._joystick = pygame.joystick.Joystick(0)
             self._joystick.init()
