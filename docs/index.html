@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PTS — Pan / Tilt / Slider camera mount system</title>
+<meta name="description" content="A five-mount motorised camera system for live video production — wireless, self-healing, and controllable from everything in the booth.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <span class="logo">P<span>T</span>S</span>
+    <a class="item" href="#mounts">Mounts</a>
+    <a class="item" href="#hub">Hub</a>
+    <a class="item" href="#lookat">Look-at</a>
+    <a class="item" href="#surfaces">Control</a>
+    <a class="item" href="#engineering">Engineering</a>
+    <a class="item" href="#osc">OSC</a>
+    <a class="item" href="#build">Build it</a>
+    <a class="gh" href="https://github.com/cbradburne/PTS">GitHub →</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Five cameras.<br>One operator. <em>Zero cables.</em></h1>
+    <p class="tag">PTS is a five-mount motorised pan / tilt / slider / zoom camera
+    system for live video production — wireless, self-healing, and controllable
+    from a PC, phones, a touchscreen console, Stream Decks and QLab cue stacks.</p>
+    <div class="camstrip">
+      <i style="background:var(--cam1)"></i><i style="background:var(--cam2)"></i>
+      <i style="background:var(--cam3)"></i><i style="background:var(--cam4)"></i>
+      <i style="background:var(--cam5)"></i>
+    </div>
+    <div class="btns">
+      <a class="btn primary" href="https://github.com/cbradburne/PTS">Source on GitHub</a>
+      <a class="btn" href="PTS_Overview.pdf">Overview PDF</a>
+      <a class="btn" href="companion.md">Companion guide</a>
+    </div>
+    <figure class="shot" data-file="hero.jpg">
+      <img src="assets/img/hero.jpg" alt="The PTS rig in use"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The rig in production — five mounts, hub console, one operator.</figcaption>
+    </figure>
+  </div>
+</header>
+
+<!-- ══════════════════════════ MOUNTS ══════════════════════════ -->
+<section id="mounts">
+  <div class="wrap">
+    <h2>The mounts</h2>
+    <p class="lead">Each mount is a self-contained four-axis robot: pan, tilt,
+    slider and zoom (stepper or LANC) driven by a Teensy 4.1 at 600&nbsp;MHz
+    through TMC2209 silent stepper drivers. StallGuard sensorless homing means
+    no limit switches — the mount finds its own travel ends by feel.</p>
+
+    <div class="grid c3">
+      <div class="card"><h4>Motion controller</h4>
+        <p><span class="k">Teensy 4.1 + TeensyStep4</span><br>
+        Smooth jog profiles with expo curves, direction reversals handled as a
+        single continuous ramp, per-axis speed presets, 10 stored positions in
+        EEPROM.</p></div>
+      <div class="card"><h4>Wireless bridge + screen</h4>
+        <p><span class="k">ESP32-S3 · 1.75&Prime; round AMOLED</span><br>
+        Shows live state, signal, presets and stored positions; doubles as a
+        spirit level using the onboard IMU. Touch &amp; hold opens setup.</p></div>
+      <div class="card"><h4>Safety by construction</h4>
+        <p><span class="k">500 ms dead-man</span><br>
+        Jogging requires a live 20 Hz command stream. If any upstream link dies
+        — hub, PC, WiFi — the motion controller stops itself in half a second.</p></div>
+    </div>
+
+    <div class="shotrow">
+      <figure class="shot" data-file="mount-front.jpg">
+        <img src="assets/img/mount-front.jpg" alt="A PTS mount"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>Pan/tilt head on its slider rail.</figcaption>
+      </figure>
+      <figure class="shot" data-file="mount-screen.jpg">
+        <img src="assets/img/mount-screen.jpg" alt="Mount AMOLED screen"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>The round status screen — state ring, presets, positions.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ HUB ══════════════════════════ -->
+<section id="hub">
+  <div class="wrap">
+    <h2>The hub &amp; its console</h2>
+    <p class="lead">A single ESP32-S3 hub runs the camera network: its own WiFi
+    access point, an ESP-NOW star to the five mounts, and simultaneous servers
+    for every kind of controller — TCP for the PC app, WebSocket for phones,
+    OSC for show control, USB serial, and a UART link to a 7&Prime; touchscreen
+    console.</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 920 360" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#4f6b8f"/>
+          </marker>
+        </defs>
+        <!-- surfaces row -->
+        <g text-anchor="middle" font-size="13">
+          <rect x="20"  y="18" width="190" height="58" rx="9" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="115" y="42" fill="#fff" font-weight="600">PC app</text>
+          <text x="115" y="60" fill="#8a97a8" font-size="11">PyQt6 · joystick · CV tracking</text>
+          <rect x="250" y="18" width="140" height="58" rx="9" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="320" y="42" fill="#fff" font-weight="600">Web app</text>
+          <text x="320" y="60" fill="#8a97a8" font-size="11">any phone on CamMount</text>
+          <rect x="430" y="18" width="150" height="58" rx="9" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="505" y="42" fill="#fff" font-weight="600">7&Prime; console</text>
+          <text x="505" y="60" fill="#8a97a8" font-size="11">LVGL touchscreen</text>
+          <rect x="620" y="18" width="280" height="58" rx="9" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="760" y="42" fill="#fff" font-weight="600">Companion · QLab · TouchOSC</text>
+          <text x="760" y="60" fill="#8a97a8" font-size="11">OSC over UDP 9700</text>
+        </g>
+        <!-- links to hub -->
+        <g stroke="#4f6b8f" stroke-width="1.6" marker-end="url(#arr)">
+          <line x1="115" y1="76" x2="380" y2="152"/>
+          <line x1="320" y1="76" x2="430" y2="150"/>
+          <line x1="505" y1="76" x2="480" y2="148"/>
+          <line x1="760" y1="76" x2="530" y2="152"/>
+        </g>
+        <g font-size="10.5" fill="#5d7a9c">
+          <text x="205" y="122">USB / TCP</text>
+          <text x="352" y="118">WebSocket</text>
+          <text x="497" y="112">UART</text>
+          <text x="650" y="122">OSC (UDP)</text>
+        </g>
+        <!-- hub -->
+        <rect x="360" y="150" width="200" height="64" rx="10" fill="#12233a" stroke="#1565C0" stroke-width="2"/>
+        <text x="460" y="177" fill="#fff" font-weight="700" font-size="15" text-anchor="middle">HUB</text>
+        <text x="460" y="196" fill="#8fb3dd" font-size="11" text-anchor="middle">ESP32-S3 · WiFi AP · self-recovery</text>
+        <!-- espnow -->
+        <g stroke="#4f6b8f" stroke-width="1.6" marker-end="url(#arr)">
+          <line x1="410" y1="214" x2="105" y2="286"/>
+          <line x1="435" y1="214" x2="285" y2="286"/>
+          <line x1="460" y1="214" x2="460" y2="286"/>
+          <line x1="485" y1="214" x2="640" y2="286"/>
+          <line x1="510" y1="214" x2="820" y2="286"/>
+        </g>
+        <text x="580" y="250" fill="#5d7a9c" font-size="10.5">ESP-NOW wireless star · touch-screen pairing · channel self-healing</text>
+        <!-- mounts -->
+        <g text-anchor="middle" font-size="12.5" font-weight="600">
+          <rect x="30"  y="288" width="150" height="52" rx="9" fill="#161d17" stroke="#A5D6A7"/>
+          <text x="105" y="310" fill="#A5D6A7">CAM 1</text>
+          <rect x="210" y="288" width="150" height="52" rx="9" fill="#161a20" stroke="#90CAF9"/>
+          <text x="285" y="310" fill="#90CAF9">CAM 2</text>
+          <rect x="385" y="288" width="150" height="52" rx="9" fill="#1d1b12" stroke="#D4B800"/>
+          <text x="460" y="310" fill="#D4B800">CAM 3</text>
+          <rect x="565" y="288" width="150" height="52" rx="9" fill="#131d1c" stroke="#80CBC4"/>
+          <text x="640" y="310" fill="#80CBC4">CAM 4</text>
+          <rect x="745" y="288" width="150" height="52" rx="9" fill="#1a1520" stroke="#CE93D8"/>
+          <text x="820" y="310" fill="#CE93D8">CAM 5</text>
+          <g fill="#8a97a8" font-size="10" font-weight="400">
+            <text x="105" y="328">bridge + Teensy 4.1</text>
+            <text x="285" y="328">bridge + Teensy 4.1</text>
+            <text x="460" y="328">bridge + Teensy 4.1</text>
+            <text x="640" y="328">bridge + Teensy 4.1</text>
+            <text x="820" y="328">bridge + Teensy 4.1</text>
+          </g>
+        </g>
+      </svg>
+    </div>
+
+    <div class="shotrow">
+      <figure class="shot" data-file="hub-display.jpg">
+        <img src="assets/img/hub-display.jpg" alt="Hub touchscreen console"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>The 7&Prime; console — live tiles, positions, config, pairing.</figcaption>
+      </figure>
+      <figure class="shot" data-file="webapp.jpg">
+        <img src="assets/img/webapp.jpg" alt="Web app on a phone"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>The web app — served by the hub itself, nothing to install.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ LOOK-AT ══════════════════════════ -->
+<section id="lookat">
+  <div class="wrap">
+    <h2>Look-at tracking</h2>
+    <p class="lead">The signature move: the camera keeps aiming at a fixed
+    subject while the slider travels. Calibrate a subject once — aim at it from
+    both ends of the rail, two taps — and the mount solves its 3D position by
+    triangulation. From then on, pan and tilt become <i>derived</i> values,
+    computed continuously from the slider position, and the shot stays locked
+    on the presenter while the camera orbits past.</p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 860 300" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+        <!-- rail -->
+        <line x1="80" y1="240" x2="640" y2="240" stroke="#4f6b8f" stroke-width="5" stroke-linecap="round"/>
+        <text x="360" y="270" fill="#8a97a8" font-size="12" text-anchor="middle">slider rail (X)</text>
+        <!-- camera positions -->
+        <g>
+          <circle cx="140" cy="240" r="9" fill="#1565C0"/>
+          <circle cx="580" cy="240" r="9" fill="#1565C0" opacity=".45"/>
+          <circle cx="360" cy="240" r="9" fill="#4f9ce8"/>
+          <text x="140" y="222" fill="#8fb3dd" font-size="11" text-anchor="middle">cal A</text>
+          <text x="580" y="222" fill="#8fb3dd" font-size="11" text-anchor="middle">cal B</text>
+          <text x="360" y="220" fill="#cfe2f7" font-size="11" text-anchor="middle">camera</text>
+        </g>
+        <!-- subject -->
+        <circle cx="700" cy="80" r="13" fill="#d4b83a"/>
+        <circle cx="700" cy="80" r="22" fill="none" stroke="#d4b83a" stroke-width="1.4" opacity=".5"/>
+        <text x="700" y="48" fill="#d4b83a" font-size="13" font-weight="600" text-anchor="middle">subject (sx, sy, sz)</text>
+        <!-- sight lines -->
+        <g stroke-dasharray="6 5" stroke-width="1.6" fill="none">
+          <line x1="140" y1="240" x2="700" y2="80" stroke="#7fbf72" opacity=".8"/>
+          <line x1="580" y1="240" x2="700" y2="80" stroke="#7fbf72" opacity=".8"/>
+          <line x1="360" y1="240" x2="700" y2="80" stroke="#e0e6ee"/>
+        </g>
+        <text x="250" y="130" fill="#7fbf72" font-size="12">two calibration rays → 3D solve</text>
+        <text x="490" y="215" fill="#e0e6ee" font-size="12">live: pan/tilt derived from slider X</text>
+        <!-- travel arrow -->
+        <g stroke="#4f9ce8" stroke-width="2.4" fill="none">
+          <path d="M 300 252 L 430 252" marker-end="url(#arr2)"/>
+        </g>
+        <defs>
+          <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="#4f9ce8"/>
+          </marker>
+        </defs>
+      </svg>
+    </div>
+
+    <ul class="checks">
+      <li><b>Eight named subjects per mount</b>, stored in EEPROM, survive power cycles.</li>
+      <li><b>Switch subjects mid-move</b> from any controller — the shot re-aims smoothly while the slider keeps travelling.</li>
+      <li><b>Pre-aim phase</b>: pan/tilt settle on target before the slider starts, so the move begins composed.</li>
+      <li><b>◀ / ▶ one-tap moves</b> with live arrow feedback mirrored on every screen — whoever started the move.</li>
+    </ul>
+
+    <figure class="shot" data-file="lookat-action.jpg">
+      <img src="assets/img/lookat-action.jpg" alt="Look-at move in action"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>A look-at move mid-travel — slider moving, shot locked.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════════════════ SURFACES ══════════════════════════ -->
+<section id="surfaces">
+  <div class="wrap">
+    <h2>Control surfaces</h2>
+    <p class="lead">Every surface speaks to the same hub, sees the same state,
+    and can hand off to any other mid-show. Positions and calibrations live on
+    the mounts — controllers are stateless and interchangeable.</p>
+
+    <div class="grid c2">
+      <div class="card"><h4>PC app</h4>
+        <p>PyQt6 dark-theme controller: game-pad jogging with expo curves,
+        position grid with live borders, look-at calibration wizard, computer-vision
+        tracking (optical flow or YOLO) that drives pan/tilt while you ride the
+        slider, connection health diagnostics, and an OSC server of its own.</p></div>
+      <div class="card"><h4>Web app</h4>
+        <p>Served from the hub's flash — join the <code>CamMount</code> WiFi and
+        it's just there. Full position recall, jog, speeds and look-at on any
+        phone; portrait and landscape layouts.</p></div>
+      <div class="card"><h4>Hub console</h4>
+        <p>The 7&Prime; touchscreen shows five live camera tiles, drives
+        positions and speed dials, hosts per-camera config (speeds, homing,
+        inversion, stall tuning), and owns the pairing UI — conflicts and
+        forget-a-mount included.</p></div>
+      <div class="card"><h4>Stream Deck &amp; cue stacks</h4>
+        <p>Bitfocus Companion and QLab drive everything over OSC — recall
+        shots, hold-to-jog, look-at moves and E-STOP from buttons, or fire
+        camera moves as cues in the show script, in time with light and sound.</p></div>
+    </div>
+
+    <figure class="shot" data-file="pc-app.png">
+      <img src="assets/img/pc-app.png" alt="PC app screenshot"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The PC app — five mounts, position grid, live state.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════════════════ ENGINEERING ══════════════════════════ -->
+<section id="engineering">
+  <div class="wrap">
+    <h2>Engineering for showtime</h2>
+    <p class="lead">A live rig earns trust by surviving the boring failures:
+    radios that wedge after twelve hours, links that drop mid-jog, a mount that
+    reboots mid-show. PTS treats reliability as a feature with a spec.</p>
+
+    <div class="grid c2">
+      <div class="card"><h4><span class="pill">PAIRING</span>Zero configuration</h4>
+        <p>No MAC addresses in source, no per-unit builds. Mounts pick their
+        camera number and hub on their own touchscreen; the hub binds on first
+        contact, renumbering just works, and conflicts pop a one-tap
+        Replace/Ignore prompt on the console. Moving the rig between venues —
+        or WiFi channels — heals automatically.</p></div>
+      <div class="card"><h4><span class="pill">RECOVERY</span>Self-healing radios</h4>
+        <p>Hub and mounts each run an autonomous detect → reinit → restart
+        ladder for the classic long-uptime ESP32 radio wedge, with boot-loop
+        guards in RTC memory. An idle maintenance restart keeps the hub's
+        uptime below the degradation horizon — it waits for a quiet moment,
+        never fires mid-move.</p></div>
+      <div class="card"><h4><span class="pill">SAFETY</span>Motion-side dead-man</h4>
+        <p>The Teensy stops any velocity move within 500 ms of its command
+        stream going quiet — audited across every mode, including the
+        obscure ones (zoom during a look-at move). E-STOP is one packet,
+        from any surface, and hard-stops all four axes.</p></div>
+      <div class="card"><h4><span class="pill">TELEMETRY</span>Health before symptoms</h4>
+        <p>Every node — Teensys, bridges, hub, console — reports heap
+        watermarks, worst loop time, link failures and reset cause every 10
+        seconds into the PC log. Slow leaks and radio degradation announce
+        themselves hours early, with anomaly-triggered reports the moment
+        something jumps.</p></div>
+      <div class="card"><h4><span class="pill">PROTOCOL</span>One source of truth</h4>
+        <p>The binary protocol is defined once in a canonical C header. A
+        pre-commit checker verifies the Python and JavaScript mirrors and
+        compiles the <i>actual firmware encoders</i>, byte-comparing them
+        against the PC decoders — wire-format drift cannot land.</p></div>
+      <div class="card"><h4><span class="pill">SIMULATOR</span>Hardware-free development</h4>
+        <p>A full hub-plus-five-mounts simulator speaks the real protocol over
+        TCP, with a fault-injection console: link wedges, NACKs, packet loss,
+        dead mounts. The PC app, OSC surface and UI develop against it with
+        zero hardware on the desk.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════ OSC ══════════════════════════ -->
+<section id="osc">
+  <div class="wrap">
+    <h2>OSC reference</h2>
+    <p class="lead">Two identical servers — one on the hub
+    (<code>169.254.22.22:9700</code>, no PC required), one in the PC app — accept
+    the same address space. Point Companion's <b>Generic:&nbsp;OSC</b> connection
+    at either. <code>N</code>&nbsp;= camera 1–5; slots and speeds are 1-based,
+    subjects 0-based.</p>
+
+    <table>
+      <tr><th style="width:30%">Address</th><th style="width:22%">Arguments</th><th>Action</th></tr>
+      <tr><td class="addr danger">/pts/estop</td><td>—</td><td>E-STOP every mount</td></tr>
+      <tr><td class="addr danger">/pts/cam/N/estop</td><td>—</td><td>E-STOP mount N</td></tr>
+      <tr><td class="addr">/pts/cam/N/goto</td><td>slot 1–10</td><td>Recall a stored position at the active speed presets</td></tr>
+      <tr><td class="addr">/pts/cam/N/store</td><td>slot 1–10</td><td>Store the current position</td></tr>
+      <tr><td class="addr">/pts/cam/N/clear</td><td>slot 1–10</td><td>Clear a stored position</td></tr>
+      <tr><td class="addr">/pts/cam/N/jog</td><td>pan tilt slider zoom</td><td>Velocities −1000…1000, re-streamed at 20 Hz until stopped</td></tr>
+      <tr><td class="addr">/pts/cam/N/jog/stop</td><td>—</td><td>Stop jogging (put on the button's release action)</td></tr>
+      <tr><td class="addr">/pts/cam/N/speed/pt</td><td>1–4</td><td>Active pan/tilt speed preset</td></tr>
+      <tr><td class="addr">/pts/cam/N/speed/sl</td><td>1–4</td><td>Active slider speed preset</td></tr>
+      <tr><td class="addr">/pts/cam/N/subject</td><td>0–7</td><td>Select look-at subject — switches live during a move</td></tr>
+      <tr><td class="addr">/pts/cam/N/lookat</td><td>0 | 1</td><td>Look-at slider move to min (0) or max (1) with the selected subject</td></tr>
+    </table>
+
+    <p style="color:var(--dim);font-size:14px">Hold-to-jog uses Companion's
+    press/release action pairs. Lost a release message? A 15-second TTL stops
+    the jog anyway, and the mount's own dead-man remains the final backstop.
+    Full recipes in the <a href="companion.md">Companion guide</a>.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════ BUILD ══════════════════════════ -->
+<section id="build">
+  <div class="wrap">
+    <h2>Build it</h2>
+    <p class="lead">Everything is in the repository: firmware for all four
+    board types (one binary each — no per-unit configuration), the PC app,
+    pinned Arduino libraries, STEP models and PCB fabrication files.</p>
+
+    <pre class="code"><span class="c"># compile every firmware target against the repo-pinned libraries</span>
+tools/build.sh
+
+<span class="c"># run the PC app</span>
+cd pc_app && python3 -m pip install -r requirements.txt && python3 main.py
+
+<span class="c"># develop with zero hardware</span>
+python3 tools/mount_sim.py</pre>
+
+    <p>First bring-up is two taps per mount: hold its screen, pick
+    <b>CAM 1–5</b>, tap your hub, save. The hub learns each mount on first
+    contact.</p>
+
+    <h3>Hardware</h3>
+    <p style="color:var(--dim)">STEP models for the pan/tilt head and slider are in
+    <code>Print&nbsp;Files/</code>; PCB fabrication files in the repo root.
+    <i>Detailed mechanics, BOM and wiring docs are on their way.</i></p>
+
+    <div class="shotrow">
+      <figure class="shot" data-file="cad.png">
+        <img src="assets/img/cad.png" alt="CAD model"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>The pan/tilt head CAD.</figcaption>
+      </figure>
+      <figure class="shot" data-file="pcb.jpg">
+        <img src="assets/img/pcb.jpg" alt="PTS PCB"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>The mount PCB.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <b style="color:var(--text)">PTS</b> — designed and built by Colin Bradburne ·
+    <a href="https://github.com/cbradburne/PTS">github.com/cbradburne/PTS</a><br>
+    Free for noncommercial use under the
+    <a href="https://github.com/cbradburne/PTS/blob/main/LICENSE.md">PolyForm
+    Noncommercial License</a> — commercial licensing by arrangement.
+  </div>
+</footer>
+
+</body>
+</html>

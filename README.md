@@ -7,6 +7,7 @@ Companion, and QLab cue stacks.
 
 > 📷 *TODO: hero photo of a mount / the rig in use*
 
+🌐 **[Project site](https://cbradburne.github.io/PTS/)** ·
 📄 **[Two-page overview + OSC reference (PDF)](docs/PTS_Overview.pdf)** ·
 🎛 **[Companion / QLab setup](docs/companion.md)** ·
 📐 **[Look-at tracking design notes](DESIGN_V2.md)**
