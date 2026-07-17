@@ -37,6 +37,7 @@ nav .wrap { display: flex; align-items: center; gap: 22px; height: 54px;
             overflow-x: auto; scrollbar-width: none; }
 nav .wrap::-webkit-scrollbar { display: none; }
 nav .logo { font-weight: 800; letter-spacing: .12em; color: #fff; }
+nav .logo:hover { text-decoration: none; }
 nav .logo span { color: var(--accent); }
 nav a.item { color: var(--dim); font-size: 14px; white-space: nowrap; }
 nav a.item:hover { color: var(--text); text-decoration: none; }
