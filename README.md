@@ -153,4 +153,14 @@ Print Files/            STEP models        PTS_4_PCB_*.zip   PCB fab files
 
 ## License
 
-> ⚖️ *TODO — pick a license.*
+**[PolyForm Noncommercial 1.0.0](LICENSE.md)** — in plain English:
+
+- ✅ **Fork it, modify it, build it, share it** — free for any noncommercial
+  purpose (personal, hobby, research, education), as long as the license and
+  the copyright notice (which links back to this repository) stay with it.
+- 💬 **Selling a product that uses any part of this?** That needs a separate
+  commercial license — I'm open to discussion: contact
+  [@cbradburne](https://github.com/cbradburne).
+
+The license text in [LICENSE.md](LICENSE.md) is what governs; the bullets
+above are just the summary.
