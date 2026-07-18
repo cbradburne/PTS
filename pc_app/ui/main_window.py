@@ -23,7 +23,6 @@ MODE — EDIT:  position buttons store current camera position to that slot
 from __future__ import annotations
 
 import logging
-import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QSizePolicy, QFrame, QInputDialog,
@@ -1133,22 +1132,18 @@ class MainWindow(QMainWindow):
                                self._config.bridge_tcp_port, self._config.bridge_port)
         dlg = ConfigDialog(self._config, self._mm, self._bridge, self)
         self._config_dlg = dlg
-        # macOS: modeless-float (plain and Tool-window) both proved unreliable
-        # over a fullscreen main window — one intermittently exited fullscreen,
-        # the other opened on the desktop Space.  A window-modal dialog is
-        # rendered by macOS as a SHEET attached to the parent window, so it is
-        # physically drawn in the parent's Space and cannot leave fullscreen.
-        # Still shown non-blocking via .show(); the accepted signal delivers
-        # the result exactly as before.
-        if sys.platform == "darwin":
-            dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        # Shown exactly like the CV window (which floats correctly over macOS
+        # fullscreen): plain modeless .show() + raise_, NO window modality.
+        # WindowModal+.show() does NOT make a native sheet — it spawns a
+        # separate window that lands on the desktop Space; Tool did the same.
+        # The connection-dependent fullscreen wobble was the reconnect blip on
+        # Config→OK, now fixed above (only reconnect if settings changed).
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dlg.accepted.connect(self._on_config_accepted)
         dlg.finished.connect(lambda _: setattr(self, "_config_dlg", None))
         dlg.show()
-        if sys.platform != "darwin":
-            dlg.raise_()
-            dlg.activateWindow()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_config_accepted(self) -> None:
         conn_now = (self._config.bridge_mode, self._config.bridge_host,
