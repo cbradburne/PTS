@@ -1126,19 +1126,22 @@ class MainWindow(QMainWindow):
             return
         dlg = ConfigDialog(self._config, self._mm, self._bridge, self)
         self._config_dlg = dlg
-        # macOS: a plain modeless dialog over a fullscreen main window still
-        # sometimes animates the app out of its fullscreen Space.  The Tool
-        # window type is a utility panel that reliably floats ON the current
-        # Space (fullscreen included) without a transition.  (On a fullscreen
-        # kiosk the app never deactivates, so Tool's auto-hide never fires.)
+        # macOS: modeless-float (plain and Tool-window) both proved unreliable
+        # over a fullscreen main window — one intermittently exited fullscreen,
+        # the other opened on the desktop Space.  A window-modal dialog is
+        # rendered by macOS as a SHEET attached to the parent window, so it is
+        # physically drawn in the parent's Space and cannot leave fullscreen.
+        # Still shown non-blocking via .show(); the accepted signal delivers
+        # the result exactly as before.
         if sys.platform == "darwin":
-            dlg.setWindowFlag(Qt.WindowType.Tool, True)
+            dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dlg.accepted.connect(self._on_config_accepted)
         dlg.finished.connect(lambda _: setattr(self, "_config_dlg", None))
         dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        if sys.platform != "darwin":
+            dlg.raise_()
+            dlg.activateWindow()
 
     def _on_config_accepted(self) -> None:
         self._connect_bridge()
