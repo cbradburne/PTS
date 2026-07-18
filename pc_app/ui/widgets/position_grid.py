@@ -331,6 +331,11 @@ class PositionGrid(QWidget):
 
     def set_has_slider(self, mount_id: int, has_slider: bool) -> None:
         """Switch between position-slot mode and subject/arrow mode for one row."""
+        # Grey out the slider speed dial when this mount has no slider (done
+        # before the change guard so it always reflects the current flag).
+        sl_dial = self._sl_dials.get(mount_id)
+        if sl_dial is not None:
+            sl_dial.setEnabled(has_slider)
         if self._has_slider[mount_id] == has_slider:
             return
         self._has_slider[mount_id] = has_slider
@@ -419,6 +424,9 @@ class PositionGrid(QWidget):
         sl_dial.preset_changed.connect(self._make_sl_handler(mount_id))
         self._pt_dials[mount_id] = pt_dial
         self._sl_dials[mount_id] = sl_dial
+        # Slider dial starts greyed until a mount reports it has a slider
+        # (set_has_slider, driven by CONFIG_REPORT / config).
+        sl_dial.setEnabled(self._has_slider[mount_id])
         hl.addWidget(sl_dial)   # Slider  — left
         hl.addWidget(pt_dial)   # Pan/Tilt — right
 

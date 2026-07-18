@@ -68,6 +68,11 @@ class RotaryDial(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Greyed-out when disabled (e.g. the slider dial on a mount with no
+        # slider): draw the whole dial faint so it reads as inactive.  Qt also
+        # blocks mouse events on a disabled widget, so it can't be tapped.
+        if not self.isEnabled():
+            painter.setOpacity(0.28)
 
         w, h   = self.width(), self.height()
         size   = min(w, h)
