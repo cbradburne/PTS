@@ -269,6 +269,12 @@ class ConfigDialog(QDialog):
         self._deadzone_spin.setValue(self._config.joystick_deadzone)
         form.addRow("Joystick deadzone:", self._deadzone_spin)
 
+        # ---- On-screen keyboard (touchscreen setups) ----
+        self._osk_check = QCheckBox(
+            "Show an on-screen keyboard for text entry (touchscreen, no keyboard)")
+        self._osk_check.setChecked(self._config.virtual_keyboard)
+        form.addRow("Virtual keyboard:", self._osk_check)
+
         # ---- Slider / Zoom / Ref grid (all 5 cameras) ----
         ops_box = QGroupBox("Homing & Reference")
         ops_vl  = QVBoxLayout(ops_box)
@@ -513,6 +519,10 @@ class ConfigDialog(QDialog):
 
         self._config.cv_mount_id       = self._cv_mount_spin.value()
         self._config.joystick_deadzone = self._deadzone_spin.value()
+
+        self._config.virtual_keyboard  = self._osk_check.isChecked()
+        from ui import virtual_keyboard
+        virtual_keyboard.set_enabled(self._config.virtual_keyboard)  # live
 
         # Per-mount — only apply settings for connected cameras.
         # Unconnected cameras have no authoritative values (checkboxes show stale

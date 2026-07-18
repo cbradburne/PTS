@@ -101,6 +101,8 @@ def main() -> None:
 
     # Core objects
     config   = load_config()
+    from ui import virtual_keyboard
+    virtual_keyboard.set_enabled(config.virtual_keyboard)
     store    = PositionStore()
     bridge   = Bridge()
     mm       = MountManager(bridge)
