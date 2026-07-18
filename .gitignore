@@ -21,3 +21,6 @@ build/
 
 # local browser-preview scratch (see .claude/launch.json)
 preview/
+
+# per-machine runtime settings (host, labels, checkboxes) — written by the app
+pc_app/data/config.json
