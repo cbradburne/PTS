@@ -178,6 +178,7 @@ def get_text(parent, title: str, prompt: str, text: str = "") -> tuple[str, bool
     QInputDialog's implicit default-button activation is not reliably
     triggered by synthetic (on-screen) Enter keys.
     """
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import (
         QApplication, QDialog, QVBoxLayout, QLabel, QLineEdit, QDialogButtonBox,
     )
@@ -188,6 +189,11 @@ def get_text(parent, title: str, prompt: str, text: str = "") -> tuple[str, bool
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
     dlg.setModal(True)
+    # macOS/Linux: window-modal renders as a sheet attached to the parent, so a
+    # modal text-entry popup stays within the parent's fullscreen Space instead
+    # of animating the app out of fullscreen (application-modal exec() does).
+    if sys.platform != "win32":
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
     dlg.setMinimumWidth(560 if use_embedded else 460)
 
     lay = QVBoxLayout(dlg)

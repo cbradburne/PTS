@@ -353,6 +353,12 @@ class ConfigDialog(QDialog):
                                lanc_zoom=mc.lanc_zoom,
                                stall_threshold_slider=thresh_sl,
                                stall_threshold_zoom=thresh_zm)
+        # Window-modal → sheet on macOS, so this sub-dialog doesn't animate the
+        # app out of fullscreen the way application-modal exec() does.
+        import sys
+        if sys.platform != "win32":
+            from PyQt6.QtCore import Qt
+            dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.exec()
 
     def _refresh_ports(self) -> None:

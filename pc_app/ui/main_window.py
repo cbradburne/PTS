@@ -23,6 +23,7 @@ MODE — EDIT:  position buttons store current camera position to that slot
 from __future__ import annotations
 
 import logging
+import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QSizePolicy, QFrame, QInputDialog,
@@ -1125,6 +1126,13 @@ class MainWindow(QMainWindow):
             return
         dlg = ConfigDialog(self._config, self._mm, self._bridge, self)
         self._config_dlg = dlg
+        # macOS: a plain modeless dialog over a fullscreen main window still
+        # sometimes animates the app out of its fullscreen Space.  The Tool
+        # window type is a utility panel that reliably floats ON the current
+        # Space (fullscreen included) without a transition.  (On a fullscreen
+        # kiosk the app never deactivates, so Tool's auto-hide never fires.)
+        if sys.platform == "darwin":
+            dlg.setWindowFlag(Qt.WindowType.Tool, True)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dlg.accepted.connect(self._on_config_accepted)
         dlg.finished.connect(lambda _: setattr(self, "_config_dlg", None))
