@@ -8,12 +8,12 @@ Tabs:
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
-    QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QFormLayout, QLabel, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
     QPushButton, QComboBox, QGroupBox, QDialogButtonBox, QScrollArea,
     QRadioButton, QButtonGroup, QStackedWidget
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 from config.mount_config import AppConfig, SpeedPreset, save_config
 from comms.bridge import Bridge
@@ -21,11 +21,21 @@ from comms.mount_manager import MountManager
 from comms.protocol import AxisGroup, Axis, NUM_MOUNTS as _NUM_MOUNTS
 
 
-class ConfigDialog(QDialog):
+# NOTE: this is a QWidget, NOT a QDialog, on purpose.  On macOS a QDialog
+# opened over a native-fullscreen main window is placed on the *desktop* Space
+# (dragging the operator out of fullscreen), whereas a plain QWidget with the
+# Dialog window flag floats correctly on the fullscreen Space — exactly like
+# the CV window.  We re-provide the tiny QDialog surface we actually use
+# (accept()/reject() + accepted/finished signals) so callers are unchanged.
+class ConfigDialog(QWidget):
+
+    accepted = pyqtSignal()      # emitted on OK (after settings are applied)
+    finished = pyqtSignal(int)   # emitted on any close: 1 = accepted, 0 = rejected
 
     def __init__(self, config: AppConfig, mount_manager: MountManager,
                  bridge: Bridge, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, Qt.WindowType.Dialog)
+        self._result = 0
         self._config  = config
         self._mm      = mount_manager
         self._bridge  = bridge
@@ -42,6 +52,21 @@ class ConfigDialog(QDialog):
         self._mm.config_report_received.connect(self._on_config_report)
         # Request config from all online mounts immediately
         self._request_all_configs()
+
+    # ── QDialog-compatible surface (this is a QWidget — see class note) ──
+    def accept(self) -> None:
+        self._result = 1
+        self.accepted.emit()
+        self.close()
+
+    def reject(self) -> None:
+        self._result = 0
+        self.close()
+
+    def closeEvent(self, event) -> None:
+        # Fires for OK, Cancel, and the window close button alike.
+        self.finished.emit(self._result)
+        super().closeEvent(event)
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
