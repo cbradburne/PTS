@@ -1115,14 +1115,30 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_config(self) -> None:
+        # Shown modeless with .show() rather than .exec(): a modal exec() loop
+        # animates macOS out of the main window's fullscreen Space (the same
+        # reason the CV window used .show()).  Result handled via the accepted
+        # signal instead of exec()'s return value.
+        if getattr(self, "_config_dlg", None):
+            self._config_dlg.raise_()
+            self._config_dlg.activateWindow()
+            return
         dlg = ConfigDialog(self._config, self._mm, self._bridge, self)
-        if dlg.exec():
-            self._connect_bridge()
-            for mid in range(1, 6):
-                self._grid.set_has_slider(mid, self._config.mount(mid).has_slider)
-                self._grid.set_look_at_mode(mid, self._config.mount(mid).look_at_mode)
-                # Reset cached look-at selection so stale subjects don't persist.
-                self._active_la_subject[mid] = -1
+        self._config_dlg = dlg
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.accepted.connect(self._on_config_accepted)
+        dlg.finished.connect(lambda _: setattr(self, "_config_dlg", None))
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_config_accepted(self) -> None:
+        self._connect_bridge()
+        for mid in range(1, 6):
+            self._grid.set_has_slider(mid, self._config.mount(mid).has_slider)
+            self._grid.set_look_at_mode(mid, self._config.mount(mid).look_at_mode)
+            # Reset cached look-at selection so stale subjects don't persist.
+            self._active_la_subject[mid] = -1
 
     def _open_cv(self) -> None:
         from .cv_window import CVWindow
