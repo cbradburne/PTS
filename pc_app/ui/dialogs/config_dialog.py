@@ -31,12 +31,14 @@ class ConfigDialog(QWidget):
 
     accepted = pyqtSignal()      # emitted on OK (after settings are applied)
     finished = pyqtSignal(int)   # emitted on any close: 1 = accepted, 0 = rejected
+    names_changed = pyqtSignal() # emitted after a name set is Loaded
 
     def __init__(self, config: AppConfig, mount_manager: MountManager,
-                 bridge: Bridge, parent=None):
+                 bridge: Bridge, position_store=None, parent=None):
         super().__init__(parent, Qt.WindowType.Dialog)
         self._result = 0
         self._config  = config
+        self._store   = position_store
         self._mm      = mount_manager
         self._bridge  = bridge
         self._tabs    = None   # set in _build
@@ -67,6 +69,63 @@ class ConfigDialog(QWidget):
         # Fires for OK, Cancel, and the window close button alike.
         self.finished.emit(self._result)
         super().closeEvent(event)
+
+    # ── Camera & position name sets ──────────────────────────────────────
+    def _names_save(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+        from config import name_store
+        if self._store is None:
+            return
+        name_store.ensure_dir()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Names", str(name_store.NAMES_DIR / "Names.json"),
+            "Name sets (*.json)",
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            name_store.save_to(path, self._store, self._config)
+            self._names_status.setText(f"Saved → {path}")
+        except Exception as e:
+            self._names_status.setStyleSheet("color:#EF5350; font-size:11px;")
+            self._names_status.setText(f"Save failed: {e}")
+
+    def _names_load(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+        from config import name_store
+        if self._store is None:
+            return
+        name_store.ensure_dir()
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Names", str(name_store.NAMES_DIR),
+            "Name sets (*.json)",
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if not path:
+            return
+        try:
+            name_store.load_from(path, self._store, self._config)
+            name_store.save_temp(self._store, self._config)   # loaded set becomes the working copy
+            self.names_changed.emit()                          # refresh grid + cam buttons
+            self._names_status.setStyleSheet("color:#7fbf72; font-size:11px;")
+            self._names_status.setText(f"Loaded ← {path}")
+        except Exception as e:
+            self._names_status.setStyleSheet("color:#EF5350; font-size:11px;")
+            self._names_status.setText(f"Load failed: {e}")
+
+    def _names_set_defaults(self) -> None:
+        from config import name_store
+        if self._store is None:
+            return
+        try:
+            name_store.save_default(self._store, self._config)
+            self._names_status.setStyleSheet("color:#7fbf72; font-size:11px;")
+            self._names_status.setText(f"Current names set as defaults "
+                                       f"({name_store.DEFAULT_PATH.name})")
+        except Exception as e:
+            self._names_status.setStyleSheet("color:#EF5350; font-size:11px;")
+            self._names_status.setText(f"Set defaults failed: {e}")
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
@@ -299,6 +358,31 @@ class ConfigDialog(QWidget):
             "Show an on-screen keyboard for text entry (touchscreen, no keyboard)")
         self._osk_check.setChecked(self._config.virtual_keyboard)
         form.addRow("Virtual keyboard:", self._osk_check)
+
+        # ---- Camera & position names (save / load / defaults) ----
+        names_box = QGroupBox("Camera && Position Names")
+        names_vl  = QVBoxLayout(names_box)
+        names_note = QLabel(
+            "The 5 camera names and 50 position names load from Default.json at "
+            "startup.  Editing a name updates the working copy only — use these "
+            "buttons to save, load, or set the startup defaults.\nFiles live in "
+            "your Documents/PTS folder.")
+        names_note.setWordWrap(True)
+        names_vl.addWidget(names_note)
+        names_row = QHBoxLayout()
+        save_names_btn     = QPushButton("Save…")
+        load_names_btn     = QPushButton("Load…")
+        defaults_names_btn = QPushButton("Set as Defaults")
+        save_names_btn.clicked.connect(self._names_save)
+        load_names_btn.clicked.connect(self._names_load)
+        defaults_names_btn.clicked.connect(self._names_set_defaults)
+        for b in (save_names_btn, load_names_btn, defaults_names_btn):
+            names_row.addWidget(b)
+        names_vl.addLayout(names_row)
+        self._names_status = QLabel("")
+        self._names_status.setStyleSheet("color:#7fbf72; font-size:11px;")
+        names_vl.addWidget(self._names_status)
+        form.addRow(names_box)
 
         # ---- Slider / Zoom / Ref grid (all 5 cameras) ----
         ops_box = QGroupBox("Homing & Reference")

@@ -511,7 +511,7 @@ class MainWindow(QMainWindow):
         self._grid.recall_requested.connect(self._on_recall)
         self._grid.store_requested.connect(self._on_store)
         self._grid.clear_requested.connect(self._on_clear)
-        self._grid.label_edited.connect(lambda *_: None)  # labels are session-only
+        self._grid.label_edited.connect(self._on_label_edited)
         self._grid.pt_preset_changed.connect(self._on_pt_preset)
         self._grid.sl_preset_changed.connect(self._on_sl_preset)
         self._grid.calibrate_subject_requested.connect(self._on_calibrate_subject)
@@ -756,10 +756,26 @@ class MainWindow(QMainWindow):
         )
         if ok:
             self._config.mount(mount_id).label = text.strip()
-            save_config(self._config)
+            # Name changes are written to the working temp.json only — never to
+            # a saved set (Default.json / user files); those change only via the
+            # Config dialog's Save / Set Defaults buttons.
+            from config import name_store
+            name_store.save_temp(self._store, self._config)
             # Update both cam and clear buttons
             new_label = self._config.mount_label(mount_id)
             self._cam_btns[mount_id - 1].setText(new_label)
+
+    def _on_label_edited(self, mount_id: int, slot: int, label: str) -> None:
+        # A position name was edited — persist the working set to temp.json only.
+        from config import name_store
+        name_store.save_temp(self._store, self._config)
+
+    def _reload_names_ui(self) -> None:
+        """Refresh every camera button + position button after a name Load."""
+        for mid in range(1, 6):
+            self._cam_btns[mid - 1].setText(self._config.mount_label(mid))
+            for slot in range(10):
+                self._grid.refresh_button(mid, slot)
 
     def _select_mount(self, mount_id: int) -> None:
         self._active_mount         = mount_id
@@ -1130,8 +1146,9 @@ class MainWindow(QMainWindow):
         # the macOS fullscreen wobble.
         self._conn_snapshot = (self._config.bridge_mode, self._config.bridge_host,
                                self._config.bridge_tcp_port, self._config.bridge_port)
-        dlg = ConfigDialog(self._config, self._mm, self._bridge, self)
+        dlg = ConfigDialog(self._config, self._mm, self._bridge, self._store, self)
         self._config_dlg = dlg
+        dlg.names_changed.connect(self._reload_names_ui)
         # Shown exactly like the CV window (which floats correctly over macOS
         # fullscreen): plain modeless .show() + raise_, NO window modality.
         # WindowModal+.show() does NOT make a native sheet — it spawns a

@@ -104,6 +104,11 @@ def main() -> None:
     from ui import virtual_keyboard
     virtual_keyboard.set_enabled(config.virtual_keyboard)
     store    = PositionStore()
+    # Names (50 positions + 5 cameras): load the startup defaults from
+    # ~/Documents/PTS/Default.json (created from the numeric/"Cam N" defaults
+    # on first run).  See config/name_store.py.
+    from config import name_store
+    name_store.load_default(store, config)
     bridge   = Bridge()
     mm       = MountManager(bridge)
     joystick = JoystickHandler(deadzone=config.joystick_deadzone)
