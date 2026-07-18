@@ -1124,6 +1124,13 @@ class MainWindow(QMainWindow):
             self._config_dlg.raise_()
             self._config_dlg.activateWindow()
             return
+        # Snapshot the connection settings so _on_config_accepted only tears
+        # down + rebuilds the link if they actually changed — otherwise every
+        # Config→OK blipped all mounts off/on (disconnect+reconnect), which is
+        # both disruptive mid-show and the connected-only disturbance behind
+        # the macOS fullscreen wobble.
+        self._conn_snapshot = (self._config.bridge_mode, self._config.bridge_host,
+                               self._config.bridge_tcp_port, self._config.bridge_port)
         dlg = ConfigDialog(self._config, self._mm, self._bridge, self)
         self._config_dlg = dlg
         # macOS: modeless-float (plain and Tool-window) both proved unreliable
@@ -1144,7 +1151,13 @@ class MainWindow(QMainWindow):
             dlg.activateWindow()
 
     def _on_config_accepted(self) -> None:
-        self._connect_bridge()
+        conn_now = (self._config.bridge_mode, self._config.bridge_host,
+                    self._config.bridge_tcp_port, self._config.bridge_port)
+        # Only (re)connect if the connection settings changed, or we're not
+        # currently connected.  An unconditional reconnect dropped every mount
+        # on each Config→OK even when nothing about the link changed.
+        if conn_now != getattr(self, "_conn_snapshot", None) or not self._bridge.connected:
+            self._connect_bridge()
         for mid in range(1, 6):
             self._grid.set_has_slider(mid, self._config.mount(mid).has_slider)
             self._grid.set_look_at_mode(mid, self._config.mount(mid).look_at_mode)
