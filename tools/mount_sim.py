@@ -438,7 +438,10 @@ class HubSim:
                                   m.pt_preset, m.sl_preset))
             self.ack(m, pkt); return
         if cmd == Cmd.GET_CONFIG:
-            ori = 0x04 | (0x40 if m.look_at else 0)     # has_slider + look_at
+            # Report the ACTUAL slider state (was hardcoded 0x04 — which made a
+            # toggled-off mount still claim a slider, re-enabling the PC app's
+            # slider dial after it had greyed out).
+            ori = (0x04 if m.has_slider else 0) | (0x40 if m.look_at else 0)
             cfg = bytes([ori])
             for s in ([(6,12),(12,24),(20,40),(35,70)] +
                       [(10,20),(25,50),(45,90),(80,160)] + [(50,100)]):

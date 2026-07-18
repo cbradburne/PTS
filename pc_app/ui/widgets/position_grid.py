@@ -632,5 +632,9 @@ class PositionGrid(QWidget):
 
     def _make_sl_handler(self, mount_id: int):
         def handler(preset: int):
+            # Never act on the slider dial for a mount with no slider (the dial
+            # is disabled too, so this is belt-and-braces).
+            if not self._has_slider[mount_id]:
+                return
             self.sl_preset_changed.emit(mount_id, preset)
         return handler

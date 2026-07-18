@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from PyQt6.QtWidgets import QWidget
-from PyQt6.QtCore import pyqtSignal, Qt, QPoint, QTimer
+from PyQt6.QtCore import pyqtSignal, Qt, QPoint, QTimer, QEvent
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 
 
@@ -68,11 +68,12 @@ class RotaryDial(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Greyed-out when disabled (e.g. the slider dial on a mount with no
-        # slider): draw the whole dial faint so it reads as inactive.  Qt also
-        # blocks mouse events on a disabled widget, so it can't be tapped.
-        if not self.isEnabled():
-            painter.setOpacity(0.28)
+        # Disabled (e.g. the slider dial on a mount with no slider) renders
+        # exactly like a disconnected dial: preset 0 — grey track, no fill, no
+        # indicator line, "–" in the centre.  Qt also blocks mouse events on a
+        # disabled widget, so it can't be tapped.  _preset is left untouched so
+        # the real value returns if the dial is ever re-enabled.
+        preset = 0 if not self.isEnabled() else self._preset
 
         w, h   = self.width(), self.height()
         size   = min(w, h)
@@ -89,8 +90,8 @@ class RotaryDial(QWidget):
 
         # --- Active track arc (up to current preset) ---
         # 4 equal segments; preset=1 fills the first segment so it never looks zero.
-        # preset=0 (disconnected) → no fill drawn.
-        active_span = self._preset * ARC_SPAN / 4
+        # preset=0 (disconnected / no slider) → no fill drawn.
+        active_span = preset * ARC_SPAN / 4
         if active_span > 0:
             painter.setPen(QPen(self._accent, track_w, Qt.PenStyle.SolidLine,
                                 Qt.PenCapStyle.FlatCap))
@@ -98,11 +99,11 @@ class RotaryDial(QWidget):
                            ARC_START, active_span)
 
         # --- Detent dots (5 dots = 4 equal segments) ---
-        # No dots lit when preset=0 (disconnected).
+        # No dots lit when preset=0 (disconnected / no slider).
         for i in range(5):
             dot_angle = ARC_START + i * ARC_SPAN / 4
             dx, dy    = _angle_to_xy(cx, cy, outer_r + 4, dot_angle)
-            col = self._accent if (self._preset > 0 and i <= self._preset) else QColor("#555")
+            col = self._accent if (preset > 0 and i <= preset) else QColor("#555")
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(col)
             painter.drawEllipse(int(dx - 3), int(dy - 3), 6, 6)
@@ -113,21 +114,21 @@ class RotaryDial(QWidget):
         painter.drawEllipse(int(cx - inner_r), int(cy - inner_r),
                             int(inner_r * 2), int(inner_r * 2))
 
-        # --- Indicator line (hidden when disconnected) ---
-        if self._preset > 0:
-            ind_angle = ARC_START + self._preset * ARC_SPAN / 4
+        # --- Indicator line (hidden when disconnected / no slider) ---
+        if preset > 0:
+            ind_angle = ARC_START + preset * ARC_SPAN / 4
             ix, iy    = _angle_to_xy(cx, cy, inner_r * 0.8, ind_angle)
             painter.setPen(QPen(INDICATOR_COL, 2.5, Qt.PenStyle.SolidLine,
                                 Qt.PenCapStyle.RoundCap))
             painter.drawLine(int(cx), int(cy), int(ix), int(iy))
 
-        # --- Preset number in centre ("–" when disconnected) ---
-        painter.setPen(self._accent if self._preset > 0 else QColor("#555"))
+        # --- Preset number in centre ("–" when disconnected / no slider) ---
+        painter.setPen(self._accent if preset > 0 else QColor("#555"))
         font = QFont()
         font.setPointSize(10)
         font.setBold(True)
         painter.setFont(font)
-        label = str(self._preset) if self._preset > 0 else "–"
+        label = str(preset) if preset > 0 else "–"
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, label)
 
     def _draw_arc(self, painter: QPainter, cx: float, cy: float,
@@ -143,6 +144,13 @@ class RotaryDial(QWidget):
     # ------------------------------------------------------------------
     # Interaction
     # ------------------------------------------------------------------
+
+    def changeEvent(self, event):
+        # Repaint when enabled/disabled toggles so the greyed (preset-0) look
+        # applies immediately.
+        if event.type() == QEvent.Type.EnabledChange:
+            self.update()
+        super().changeEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
