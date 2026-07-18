@@ -89,13 +89,16 @@ class SimMount:
         self.has_slider  = mid in (3, 6 - 3)          # mounts 3 — tweak freely
         self.look_at     = False
         self.state       = MountState.IDLE
-        self.pos         = [0, 0, 0, 0]               # pan/tilt/slider/zoom steps
+        self.pos         = [0.0, 0.0, 0.0, 0.0]       # pan/tilt/slider/zoom steps
+                                                       # (floats: slow jogs must
+                                                       # accumulate sub-step motion)
         self.vel         = [0.0, 0.0, 0.0, 0.0]       # steps/s
         self.pt_preset   = 2
         self.sl_preset   = 2
         self.slots       = {}                          # slot → pos[4]
         self.target_slot = 0xFF
         self.goto_tgt    = None                        # pos[4]
+        self.move_preset = None                        # GOTO/MOVE_REL travel preset
         self.jog_last    = 0.0
         self.limits_set  = True
         self.ref_set     = False
@@ -139,20 +142,23 @@ class SimMount:
                 self.vel = [0.0] * 4                   # Teensy dead-man mirror
                 self.state = MountState.IDLE
             for a in range(4):
-                self.pos[a] += int(self.vel[a] * dt)
+                self.pos[a] += self.vel[a] * dt
 
         elif self.state == MountState.MOVING_TO_POS and self.goto_tgt:
             done = True
-            spd = [PT_MAX_DEG_S[self.pt_preset - 1] * STEPS_PER_DEG] * 2 + \
-                  [SL_MAX_MM_S[self.sl_preset - 1] * STEPS_PER_MM, 4000]
+            ptp = self.move_preset or self.pt_preset
+            slp = self.move_preset or self.sl_preset
+            spd = [PT_MAX_DEG_S[ptp - 1] * STEPS_PER_DEG] * 2 + \
+                  [SL_MAX_MM_S[slp - 1] * STEPS_PER_MM, 4000]
             for a in range(4):
                 d = self.goto_tgt[a] - self.pos[a]
                 step = spd[a] * dt
                 if abs(d) <= step: self.pos[a] = self.goto_tgt[a]
                 else:
-                    self.pos[a] += int(math.copysign(step, d)); done = False
+                    self.pos[a] += math.copysign(step, d); done = False
             if done:
                 self.goto_tgt, self.target_slot = None, 0xFF
+                self.move_preset = None
                 self.state = MountState.IDLE
 
         elif self.state == MountState.FINDING_LIMITS:
@@ -192,7 +198,7 @@ class SimMount:
                     emit(self.id, Cmd.LOOK_AT_STATUS, self.la_status_payload())
                     emit(0, Cmd.LA_MOVE_DIR, bytes([0xFF]), hub_inject=self.id)
                 else:
-                    self.pos[2] += int(math.copysign(step, d))
+                    self.pos[2] += math.copysign(step, d)
 
         self.pos[2] = max(0, min(SLIDER_MAX_STEPS, self.pos[2]))
         self.pos[3] = max(0, min(ZOOM_MAX_STEPS, self.pos[3]))
@@ -244,7 +250,7 @@ class SimMount:
                            self.pos[0] / STEPS_PER_DEG,
                            self.pos[1] / STEPS_PER_DEG,
                            self.pos[2] / STEPS_PER_MM,
-                           self.pos[3], moving)
+                           int(self.pos[3]), moving)
 
 
 class HubSim:
@@ -393,6 +399,15 @@ class HubSim:
             self.nack(m, pkt, err)
             return
 
+        # A homing mount is busy — motion commands are refused like the real
+        # Teensy refuses them (jog is silently ignored; it is never ACKed).
+        if m.state == MountState.FINDING_LIMITS and cmd in (
+                Cmd.JOG, Cmd.GOTO, Cmd.MOVE_REL, Cmd.GOTO_SLOT,
+                Cmd.START_LOOK_AT_MOVE, Cmd.FIND_LIMITS, Cmd.FIND_HOME):
+            if cmd != Cmd.JOG:
+                self.nack(m, pkt, NackError.BUSY)
+            return
+
         if cmd == Cmd.JOG and len(p) >= 10:
             pan, tilt, sl, zm, ptp, szp = struct.unpack(">hhhhBB", p[:10])
             m.pt_preset, m.sl_preset = ptp, szp
@@ -410,6 +425,7 @@ class HubSim:
             self.emit(m.id, Cmd.PONG, p[:4]); return
         if cmd == Cmd.E_STOP:
             m.vel = [0.0]*4; m.goto_tgt = None; m.la = None
+            m.move_preset = None
             m.target_slot = 0xFF; m.state = MountState.IDLE
             self.ack(m, pkt); return
         if cmd == Cmd.GET_STATUS:
@@ -439,6 +455,7 @@ class HubSim:
             if p[0] not in m.slots: self.nack(m, pkt, NackError.INVALID_PARAM); return
             if len(p) >= 3: m.pt_preset, m.sl_preset = p[1], p[2]
             m.goto_tgt, m.target_slot = list(m.slots[p[0]]), p[0]
+            m.move_preset = None          # slot recalls travel at active presets
             m.state = MountState.MOVING_TO_POS
             self.ack(m, pkt); return
         if cmd == Cmd.SET_ACTIVE_PRESET and len(p) >= 2:
@@ -453,8 +470,26 @@ class HubSim:
             m.state = MountState.FINDING_LIMITS
             m.calib = (p[0], now() + 3.0)
             self.ack(m, pkt); return
+        if cmd in (Cmd.GOTO, Cmd.MOVE_REL) and len(p) >= 17:
+            # 17 bytes: pan(i32) tilt(i32) slider(i32) zoom(i32) preset(i8).
+            # GOTO is absolute; MOVE_REL adds the deltas to the current
+            # position — the PC app's manual move/nudge buttons use this, so
+            # the sim must genuinely travel (and drop off any stored slot's
+            # at-position tolerance, turning its green border red).
+            pan, tilt, sl, zm, preset = struct.unpack(">iiiib", p[:17])
+            base = [0.0] * 4 if cmd == Cmd.GOTO else list(m.pos)
+            tgt = [base[0] + pan, base[1] + tilt,
+                   base[2] + (sl if m.has_slider else 0), base[3] + zm]
+            tgt[2] = max(0.0, min(float(SLIDER_MAX_STEPS), tgt[2]))
+            tgt[3] = max(0.0, min(float(ZOOM_MAX_STEPS),  tgt[3]))
+            m.goto_tgt    = tgt
+            m.move_preset = max(1, min(4, preset)) if preset else None
+            m.target_slot = 0xFF          # not a slot recall — no target flash
+            m.state       = MountState.MOVING_TO_POS
+            self.ack(m, pkt); return
+
         if cmd in (Cmd.SET_SPEED_PRESET, Cmd.SAVE_SPEEDS, Cmd.SET_LIMITS,
-                   Cmd.SET_STALL_THRESHOLD, Cmd.MOVE_REL, Cmd.GOTO):
+                   Cmd.SET_STALL_THRESHOLD):
             self.ack(m, pkt); return
 
         # ── look-at v2 ────────────────────────────────────────────────────
@@ -655,6 +690,24 @@ def selftest() -> int:
     st = [p for p in seen[Cmd.STATUS] if p.mount_id == 1][-1]
     occupied = (st.payload[4] << 8) | st.payload[5]
     check("slot 5 occupied in STATUS", bool(occupied & (1 << 4)))
+    at = (st.payload[6] << 8) | st.payload[7]
+    check("slot 5 AT-position after store (green)", bool(at & (1 << 4)))
+
+    # The reported bug: a manual move (MOVE_REL — the PC app's nudge buttons)
+    # must actually travel, dropping the stored slot's at-position bit
+    # (green border → red) exactly like a real mount.
+    from comms.protocol import pkt_move_rel
+    seen.clear(); s.sendall(pkt_move_rel(1, 800, 0, 0, 0)); pump(1.2)
+    st = [p for p in seen[Cmd.STATUS] if p.mount_id == 1][-1]
+    at = (st.payload[6] << 8) | st.payload[7]
+    check("MOVE_REL travels: AT bit cleared (green → red)",
+          not (at & (1 << 4)) and
+          any(p.payload[0] == MountState.MOVING_TO_POS
+              for p in seen[Cmd.STATUS] if p.mount_id == 1))
+    seen.clear(); s.sendall(pkt_goto_slot(1, 4)); pump(1.5)
+    st = [p for p in seen[Cmd.STATUS] if p.mount_id == 1][-1]
+    at = (st.payload[6] << 8) | st.payload[7]
+    check("recall returns: AT bit restored (red → green)", bool(at & (1 << 4)))
 
     # Jog away from the stored spot so the recall has real travel time
     s.sendall(pkt_jog(1, 800, 800, 0, 0)); pump(0.35)
