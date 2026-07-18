@@ -11,6 +11,7 @@ slot on the site fills itself in (no HTML edits needed):
 | `hub-display.jpg` | Hub — the 7" touchscreen console |
 | `webapp.jpg` | Hub — the web app on a phone |
 | `lookat-action.jpg` | Look-at — a move mid-travel |
+| `cv-window.png` | CV tracking — the tracking window with a lock-on target |
 | `pc-app.png` | Control surfaces — PC app screenshot |
 | `cad.png` | Build it — CAD model |
 | `pcb.jpg` | Build it — the mount PCB |

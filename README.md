@@ -21,6 +21,10 @@ Companion, and QLab cue stacks.
 - **Look-at tracking** — calibrate a subject's 3D position in two taps; the
   camera keeps aiming at it while the slider travels, and you can switch
   subjects mid-move from any controller
+- **CV tracking** — the PC app watches the camera's feed and drives pan/tilt
+  to keep a subject framed (optical-flow point tracking, or YOLO person
+  detection with `ultralytics`); the operator keeps manual control of slider
+  and zoom at the same time via a dedicated axis-mask jog mode
 - **10 stored positions per mount** — recall from any surface at any speed
   preset; positions live on the mounts, so controllers can come and go
 - **Zero-config pairing** — no MAC addresses, no per-unit firmware builds:

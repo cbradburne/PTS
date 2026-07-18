@@ -16,6 +16,7 @@
     <a class="item" href="#mounts">Mounts</a>
     <a class="item" href="#hub">Hub</a>
     <a class="item" href="#lookat">Look-at</a>
+    <a class="item" href="#cv">CV</a>
     <a class="item" href="#surfaces">Control</a>
     <a class="item" href="#engineering">Engineering</a>
     <a class="item" href="#osc">OSC</a>
@@ -244,6 +245,41 @@
       <img src="assets/img/lookat-action.jpg" alt="Look-at move in action"
            onerror="this.closest('figure').classList.add('missing')">
       <figcaption>A look-at move mid-travel — slider moving, shot locked.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════════════════ CV TRACKING ══════════════════════════ -->
+<section id="cv">
+  <div class="wrap">
+    <h2>CV tracking</h2>
+    <p class="lead">Look-at tracking follows a <i>calibrated point in space</i>;
+    CV tracking follows <i>what the camera actually sees</i>. The PC app takes
+    the camera's video feed and closes the loop with computer vision — pan and
+    tilt continuously re-frame the subject while the operator keeps flying the
+    slider and zoom by hand.</p>
+
+    <div class="grid c3">
+      <div class="card"><h4>Two trackers</h4>
+        <p><span class="k">optical flow · YOLO</span><br>
+        Click any point or object to lock on with optical-flow tracking, or
+        enable YOLO person detection (via <code>ultralytics</code>) to follow a
+        presenter automatically.</p></div>
+      <div class="card"><h4>Human + machine</h4>
+        <p><span class="k">axis-mask jog</span><br>
+        CV commands carry a pan/tilt-only axis mask, so the vision loop and the
+        operator's slider/zoom joystick drive the same mount simultaneously
+        without fighting.</p></div>
+      <div class="card"><h4>Same safety net</h4>
+        <p><span class="k">500 ms dead-man</span><br>
+        CV output is just a jog stream — lose the PC, the feed, or the WiFi
+        and the mount stops itself like any other jog source.</p></div>
+    </div>
+
+    <figure class="shot" data-file="cv-window.png">
+      <img src="assets/img/cv-window.png" alt="CV tracking window"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The CV tracking window — live feed, lock-on target, tracker controls.</figcaption>
     </figure>
   </div>
 </section>
