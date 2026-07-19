@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pairing &amp; identity — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Pairing &amp; identity</h1>
+    <p class="subtitle">How a mount picks its camera number and hub — with no MAC
+    addresses and no per-unit firmware.</p>
+
+    <p>Every board runs one identical binary. A mount isn't "camera 3" because of
+    its firmware — it's camera 3 because someone tapped <strong>3</strong> on its
+    screen. Identity and pairing are set entirely from touchscreens and stored in
+    each mount's flash, so there's nothing to configure in source and no per-unit
+    builds.</p>
+
+    <h2>Pairing a mount</h2>
+    <p>Pairing tells a mount two things: <strong>which camera number</strong> it is
+    (1–5) and <strong>which hub</strong> to talk to. It's done on the mount's own
+    round touchscreen.</p>
+    <ol class="steps">
+      <li>Open <strong>Setup</strong> — a brand-new mount opens it automatically;
+      otherwise <strong>touch and hold the screen for about 1.5 seconds</strong>.</li>
+      <li>Tap the <strong>camera number</strong> (1–5) that matches the mount's
+      label.</li>
+      <li>The mount scans and lists the hubs it can see. Tap <strong>your
+      hub</strong> (if only one is found, it's pre-selected).</li>
+      <li>Tap <strong>Save</strong>. The mount restarts and comes back paired — its
+      ring turns green when it's talking to the hub.</li>
+    </ol>
+    <div class="note"><b>The hub needs no setup</b> The hub learns each mount the
+    first time it hears from it — it binds on first contact. There's nothing to
+    enter on the hub side. Repeat the steps above for each mount.</div>
+
+    <h2>Renumbering</h2>
+    <p>To change a mount's camera number, open Setup again and pick a different
+    number. The hub picks up the change on the mount's next contact — renumbering
+    "just works", no un-pairing step required.</p>
+
+    <h2>When two mounts pick the same number</h2>
+    <p>If two mounts claim the same camera number, the hub notices and raises a
+    <strong>conflict prompt on the console</strong> — a one-tap
+    <strong>Replace</strong> / <strong>Ignore</strong> choice — so you resolve it
+    without digging through settings. Give one of them a different number in Setup
+    and the conflict clears.</p>
+
+    <h2>Moving between venues</h2>
+    <div class="tip"><b>Pair to more than one hub</b> A mount can be paired to
+    several hubs — say, one at home and one at work. After that it finds whichever
+    hub is powered on by itself, with no re-pairing. Handy for a rig that travels.</div>
+
+    <h2>Channel self-healing</h2>
+    <p>WiFi environments change — a venue's channel plan won't match your bench. The
+    hub and mounts negotiate and <strong>heal the ESP-NOW link automatically</strong>
+    when the channel moves, so a rig set up in one place comes up working in another
+    without intervention.</p>
+
+    <h2>Forgetting a mount</h2>
+    <p>The console's pairing UI can <strong>forget a mount</strong> the hub has
+    learned — useful when retiring or swapping hardware, so a stale mount doesn't
+    linger in the hub's list.</p>
+
+    <div class="note"><b>Under the hood</b> Pairing rides on ESP-NOW, and identity
+    lives in the mount's and hub's non-volatile storage — see
+    <a href="concepts.html">How it fits together</a>. The exact protocol is
+    documented in the firmware sources for anyone building or modifying the
+    system.</div>
+
+    <p>Next: every setting, explained — <a href="config.html">Configuration
+    reference</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

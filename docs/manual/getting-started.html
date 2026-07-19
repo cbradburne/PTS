@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting started — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Getting started</h1>
+    <p class="subtitle">From a box of powered-off parts to your first camera
+    move.</p>
+
+    <p>This page assumes the hardware is built and the firmware is flashed. If
+    you still need to build the firmware, see
+    <a href="building.html">Building the firmware</a> first.</p>
+
+    <h2>What's in a system</h2>
+    <p>A complete PTS rig is:</p>
+    <ul>
+      <li><strong>Up to five mounts</strong> — each a pan / tilt / slider / zoom
+      camera head with a small round touchscreen.</li>
+      <li><strong>One hub</strong> — a small box that creates its own WiFi
+      network (<code>CamMount</code>) and links every mount to your controllers.</li>
+      <li><strong>Optionally, a 7″ touchscreen console</strong> wired to the
+      hub — enough to run the rig with no computer at all.</li>
+      <li><strong>Your choice of controller</strong> — the PC app, a phone, a
+      Stream Deck, or QLab. You can mix and match, and hand off between them
+      mid-show.</li>
+    </ul>
+
+    <figure class="shot" data-file="rig-overview.jpg">
+      <img src="../assets/img/rig-overview.jpg" alt="A PTS rig"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>A typical rig: five mounts, the hub, and a console.</figcaption>
+    </figure>
+
+    <h2>1. Power on</h2>
+    <ol class="steps">
+      <li>Power the <strong>hub</strong> first. After a few seconds it starts
+      broadcasting its <code>CamMount</code> WiFi network.</li>
+      <li>Power each <strong>mount</strong>. Its screen lights up showing the
+      camera number and connection state.</li>
+      <li>If you're using the <strong>7″ console</strong>, power it too — it
+      connects to the hub over a wired link automatically.</li>
+    </ol>
+    <div class="note"><b>First time only</b> A brand-new mount doesn't know
+    which camera it is or which hub to talk to yet — its screen opens straight
+    into Setup. That's the next step.</div>
+
+    <h2>2. Pair each mount</h2>
+    <p>Pairing tells a mount two things: <strong>which camera number it is</strong>
+    (1–5) and <strong>which hub to use</strong>. It's done entirely on the
+    mount's own touchscreen — no addresses to type, nothing to configure on the
+    hub.</p>
+    <ol class="steps">
+      <li>On the mount, open <strong>Setup</strong> — a new mount opens it
+      automatically; otherwise <strong>touch and hold the screen for about
+      1.5 seconds</strong>.</li>
+      <li>Tap the <strong>camera number</strong> (1–5) that matches the label on
+      the mount.</li>
+      <li>The mount scans and lists the hubs it can see. Tap <strong>your
+      hub</strong> (if only one is found it's pre-selected).</li>
+      <li>Tap <strong>Save</strong>. The mount restarts and comes back paired —
+      its ring turns green when it's talking to the hub.</li>
+    </ol>
+    <p>The hub learns each mount the first time it hears from it, so there's
+    nothing to do on the hub side. Repeat for each mount. Full detail, including
+    what happens if two mounts pick the same number, is in
+    <a href="pairing.html">Pairing &amp; identity</a>.</p>
+    <div class="tip"><b>Moving between venues</b> You can pair a mount to more
+    than one hub (say, home and work). After that it finds whichever hub is
+    powered on by itself — no re-pairing.</div>
+
+    <h2>3. Connect a controller</h2>
+    <p>Pick whichever suits you — they all talk to the same hub and show the
+    same state.</p>
+    <h3>The quickest: a phone</h3>
+    <ol class="steps">
+      <li>On your phone, join the <strong><code>CamMount</code> WiFi</strong>
+      network.</li>
+      <li>Open a browser to <strong><code>http://192.168.4.1</code></strong>.
+      The web app loads — no install.</li>
+    </ol>
+    <h3>The full controller: the PC app</h3>
+    <ol class="steps">
+      <li>Connect the PC to the hub — by USB, or over the
+      <code>CamMount</code> WiFi.</li>
+      <li>Launch the app, open <strong>Config</strong>, and set the connection
+      (USB serial port, or TCP to <code>192.168.4.1</code>).</li>
+      <li>The five camera tiles come alive as the mounts report in.</li>
+    </ol>
+    <p>See <a href="pc-app.html">PC app</a> and <a href="web-app.html">Web
+    app</a> for the full tour.</p>
+
+    <h2>4. Home the axes</h2>
+    <p>Before stored positions mean anything, each mount needs to know where its
+    travel ends are. This is <strong>homing</strong> — the mount drives each
+    axis gently to its end stop and zeroes it (no limit switches needed).</p>
+    <ol class="steps">
+      <li>In the PC app, open <strong>Config → the camera's tab → Homing</strong>.</li>
+      <li>Home the <strong>slider</strong> and <strong>zoom</strong> as fitted.
+      Pan and tilt are continuous and don't need homing.</li>
+    </ol>
+    <div class="warn"><b>Give it room</b> Homing moves the axis to its physical
+    limit. Make sure the mount is clear to move before you start.</div>
+
+    <h2>5. Your first move</h2>
+    <ol class="steps">
+      <li>Select a camera (tap its tile / number).</li>
+      <li><strong>Jog</strong> it with the joystick or the on-screen controls to
+      frame a shot.</li>
+      <li><strong>Store</strong> the shot to a position slot (1–10).</li>
+      <li>Move the camera somewhere else, then <strong>recall</strong> the slot
+      — the mount travels back to the exact framing.</li>
+    </ol>
+    <p>That's the core loop. From here:</p>
+    <ul>
+      <li><a href="positions.html">Storing &amp; recalling shots</a> — speeds,
+      clearing, the 10 slots.</li>
+      <li><a href="lookat.html">Look-at tracking</a> — keep a presenter framed
+      while the camera slides.</li>
+      <li><a href="companion.html">Companion / QLab</a> — put shots on Stream
+      Deck buttons and show cues.</li>
+    </ul>
+
+    <div class="note"><b>Safety</b> Every mount stops itself within about half a
+    second if it loses contact with its controller mid-move, and an E-STOP from
+    any surface halts all axes at once. More in
+    <a href="troubleshooting.html">Troubleshooting</a>.</div>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

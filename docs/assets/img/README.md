@@ -17,3 +17,14 @@ slot on the site fills itself in (no HTML edits needed):
 | `pcb.jpg` | Build it — the mount PCB |
 
 Landscape ~1600px wide works best; JPG for photos, PNG for screenshots.
+
+## Manual pages
+
+Pages under `docs/manual/` use the same self-filling photo-slot convention.
+So far:
+
+| File | Where it appears |
+|---|---|
+| `rig-overview.jpg` | Manual → Getting started — a whole rig |
+
+More slots will be added as manual sections are written.

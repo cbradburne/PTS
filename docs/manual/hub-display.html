@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hub touchscreen — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Hub touchscreen</h1>
+    <p class="subtitle">The 7″ console — enough to run the whole rig with no
+    computer at all.</p>
+
+    <p>An optional <strong>7″ touchscreen console</strong> wires directly to the
+    hub. It's a standalone control surface: a hub, its display, five mounts and a
+    Stream Deck make a complete rig with no PC in sight. It runs on an LVGL
+    interface and connects to the hub over a wired UART link automatically on
+    power-up.</p>
+
+    <figure class="shot" data-file="hub-display.jpg">
+      <img src="../assets/img/hub-display.jpg" alt="The 7-inch hub console"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The 7″ console — live tiles, positions, config and pairing.</figcaption>
+    </figure>
+
+    <h2>What's on it</h2>
+    <ul>
+      <li><strong>Five live camera tiles</strong> — each shows its camera's state,
+      link and activity, updating as any surface drives the rig.</li>
+      <li><strong>Positions</strong> — store and recall the ten slots per camera
+      (<a href="positions.html">Storing &amp; recalling shots</a>).</li>
+      <li><strong>Speed dials</strong> — set the active pan/tilt and slider
+      presets.</li>
+      <li><strong>Look-at</strong> — select subjects and run ◀ / ▶ moves
+      (<a href="lookat.html">Look-at tracking</a>).</li>
+      <li><strong>Per-camera config</strong> — speeds, homing, inversion and stall
+      tuning, right on the touchscreen (<a href="config.html">Configuration</a>).</li>
+      <li><strong>Pairing UI</strong> — the console owns mount pairing, including
+      conflict and forget-a-mount prompts (<a href="pairing.html">Pairing &amp;
+      identity</a>).</li>
+    </ul>
+
+    <div class="tip"><b>The no-computer rig</b> Everything a show needs — recall
+    shots, jog, speeds, look-at, E-STOP — is on the console. Add a
+    <a href="companion.html">Stream Deck over OSC</a> for one-touch shot buttons and
+    you have a full front-of-house setup without opening a laptop.</div>
+
+    <h2>Working alongside other surfaces</h2>
+    <p>The console is a peer, not a master. It shows the same state as the PC app,
+    phones and Stream Decks, and any of them can take over at any moment — because
+    positions and calibration live on the mounts, not on whichever surface you
+    happen to be touching (<a href="concepts.html">How it fits together</a>).</p>
+
+    <div class="note"><b>E-STOP</b> An E-STOP from the console — like from any
+    surface — is a single packet that hard-stops all four axes on every mount at
+    once.</div>
+
+    <p>Next: driving the rig from buttons and cues —
+    <a href="companion.html">Companion / QLab</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

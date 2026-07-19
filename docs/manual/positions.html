@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storing &amp; recalling shots — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Storing &amp; recalling shots</h1>
+    <p class="subtitle">The core loop of the whole system: frame it, store it,
+    recall it on demand.</p>
+
+    <p>Every mount has <strong>ten position slots</strong> (1–10). A slot holds a
+    complete framing — pan, tilt, slider and zoom together. Store your shots once,
+    then recall any of them instantly from any controller, at whatever speed you
+    choose.</p>
+
+    <h2>The three actions</h2>
+    <table>
+      <tr><th style="width:22%">Action</th><th>What it does</th></tr>
+      <tr><td><strong>Store</strong></td><td>Saves the mount's <em>current</em> position into a slot, overwriting whatever was there.</td></tr>
+      <tr><td><strong>Recall</strong> (goto)</td><td>Moves the mount to a stored slot, using the active speed presets.</td></tr>
+      <tr><td><strong>Clear</strong></td><td>Empties a slot.</td></tr>
+    </table>
+
+    <h2>Storing a shot</h2>
+    <ol class="steps">
+      <li>Select the camera.</li>
+      <li><strong>Jog</strong> it — with the PC app's joystick, the on-screen
+      controls, or the console — until the framing is right.</li>
+      <li><strong>Store</strong> it to a slot (1–10). The framing is written to the
+      mount's memory immediately.</li>
+    </ol>
+    <p>That's it — the shot now survives power cycles and is visible to every
+    controller.</p>
+
+    <h2>Recalling a shot</h2>
+    <p>Recall a slot and the mount travels back to the exact framing. The
+    <strong>active speed preset</strong> decides how fast — so the same stored shot
+    can be a slow creep for a live segment or a quick reset between takes, just by
+    changing the preset first. Set speeds per camera; see
+    <a href="mounts.html">The mounts</a>.</p>
+
+    <div class="tip"><b>Recall from anything</b> A shot stored from the PC app can
+    be recalled from a phone, the console, or a Stream Deck button — they all read
+    the same slots. Put your show's key shots on
+    <a href="companion.html">Companion buttons or QLab cues</a> and fire them in
+    time with light and sound.</div>
+
+    <h2>In the PC app</h2>
+    <p>The PC app shows all five cameras as a <strong>position grid</strong> — ten
+    slots per camera, each a button. A filled slot has a coloured border; an empty
+    one is blank. Tap to recall, or use store/clear controls to manage a slot. The
+    grid mirrors live state, so a shot recalled from another surface lights up here
+    too. Slots can be named — see <a href="names.html">Camera &amp; position
+    names</a>.</p>
+
+    <figure class="shot" data-file="pc-app.png">
+      <img src="../assets/img/pc-app.png" alt="The PC app position grid"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The PC app — five cameras, ten position slots each, live state.</figcaption>
+    </figure>
+
+    <div class="note"><b>Positions vs. look-at</b> A stored position is a fixed
+    framing you return to. <a href="lookat.html">Look-at tracking</a> is different:
+    the camera keeps aiming at a subject <em>while the slider moves</em>, computing
+    pan and tilt on the fly rather than replaying a stored pair. They complement
+    each other — use stored shots for repeatable framings, look-at for moving
+    ones.</div>
+
+    <div class="warn"><b>Store overwrites without warning</b> Storing to a slot
+    replaces its contents immediately. If you keep a show's shots in specific
+    slots, be deliberate about which slot you store into.</div>
+
+    <p>Next: the signature move — <a href="lookat.html">look-at tracking</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

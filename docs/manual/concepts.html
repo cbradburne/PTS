@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it fits together — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>How it fits together</h1>
+    <p class="subtitle">The mental model behind the whole system — worth five
+    minutes before you dive into any one part.</p>
+
+    <p>PTS has one idea at its core: <strong>the mounts do the work and remember
+    everything; the hub is a switchboard; and every controller is just an
+    interchangeable window onto the same rig.</strong> Once that clicks, the rest
+    of the manual is detail.</p>
+
+    <div style="border:1px solid var(--border);border-radius:10px;background:var(--bg2);padding:8px;margin:20px 0;overflow-x:auto">
+      <svg viewBox="0 0 760 320" width="100%" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#4f6b8f"/>
+          </marker>
+        </defs>
+        <!-- surfaces -->
+        <g text-anchor="middle" font-size="12.5">
+          <rect x="20"  y="16" width="150" height="46" rx="8" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="95"  y="37" fill="#fff" font-weight="600">PC app</text>
+          <text x="95"  y="53" fill="#8a97a8" font-size="10.5">joystick · CV</text>
+          <rect x="200" y="16" width="130" height="46" rx="8" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="265" y="37" fill="#fff" font-weight="600">Web app</text>
+          <text x="265" y="53" fill="#8a97a8" font-size="10.5">any phone</text>
+          <rect x="360" y="16" width="150" height="46" rx="8" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="435" y="37" fill="#fff" font-weight="600">7″ console</text>
+          <text x="435" y="53" fill="#8a97a8" font-size="10.5">touchscreen</text>
+          <rect x="540" y="16" width="200" height="46" rx="8" fill="#1a212b" stroke="#3d5a7d"/>
+          <text x="640" y="37" fill="#fff" font-weight="600">Companion · QLab</text>
+          <text x="640" y="53" fill="#8a97a8" font-size="10.5">OSC</text>
+        </g>
+        <!-- links down to hub -->
+        <g stroke="#4f6b8f" stroke-width="1.5" marker-end="url(#arr)">
+          <line x1="95"  y1="62" x2="330" y2="128"/>
+          <line x1="265" y1="62" x2="360" y2="126"/>
+          <line x1="435" y1="62" x2="400" y2="126"/>
+          <line x1="640" y1="62" x2="430" y2="128"/>
+        </g>
+        <!-- hub -->
+        <rect x="300" y="128" width="160" height="56" rx="9" fill="#12233a" stroke="#1565C0" stroke-width="2"/>
+        <text x="380" y="152" fill="#fff" font-weight="700" font-size="14" text-anchor="middle">HUB</text>
+        <text x="380" y="170" fill="#8fb3dd" font-size="10.5" text-anchor="middle">ESP32-S3 · WiFi AP · servers</text>
+        <!-- espnow -->
+        <g stroke="#4f6b8f" stroke-width="1.5" marker-end="url(#arr)">
+          <line x1="330" y1="184" x2="95"  y2="250"/>
+          <line x1="355" y1="184" x2="255" y2="250"/>
+          <line x1="380" y1="184" x2="380" y2="250"/>
+          <line x1="405" y1="184" x2="505" y2="250"/>
+          <line x1="430" y1="184" x2="665" y2="250"/>
+        </g>
+        <text x="380" y="214" fill="#5d7a9c" font-size="10.5" text-anchor="middle">ESP-NOW wireless star</text>
+        <!-- mounts -->
+        <g text-anchor="middle" font-size="11.5" font-weight="600">
+          <rect x="30"  y="252" width="130" height="52" rx="8" fill="#161d17" stroke="#A5D6A7"/>
+          <text x="95"  y="272" fill="#A5D6A7">CAM 1</text>
+          <rect x="190" y="252" width="130" height="52" rx="8" fill="#161a20" stroke="#90CAF9"/>
+          <text x="255" y="272" fill="#90CAF9">CAM 2</text>
+          <rect x="315" y="252" width="130" height="52" rx="8" fill="#1d1b12" stroke="#D4B800"/>
+          <text x="380" y="272" fill="#D4B800">CAM 3</text>
+          <rect x="440" y="252" width="130" height="52" rx="8" fill="#131d1c" stroke="#80CBC4"/>
+          <text x="505" y="272" fill="#80CBC4">CAM 4</text>
+          <rect x="600" y="252" width="130" height="52" rx="8" fill="#1a1520" stroke="#CE93D8"/>
+          <text x="665" y="272" fill="#CE93D8">CAM 5</text>
+          <g fill="#8a97a8" font-size="9.5" font-weight="400">
+            <text x="95"  y="290">bridge + Teensy</text>
+            <text x="255" y="290">bridge + Teensy</text>
+            <text x="380" y="290">bridge + Teensy</text>
+            <text x="505" y="290">bridge + Teensy</text>
+            <text x="665" y="290">bridge + Teensy</text>
+          </g>
+        </g>
+      </svg>
+    </div>
+
+    <h2>The three layers</h2>
+
+    <h3>The mounts — where the work happens</h3>
+    <p>Each mount is a self-contained four-axis robot: <strong>pan, tilt, slider
+    and zoom</strong>. Two boards live on it — a <strong>Teensy 4.1</strong> that
+    drives the motors through silent TMC2209 stepper drivers, and an
+    <strong>ESP32-S3 bridge</strong> with a small round touchscreen that carries
+    the wireless link and shows live state. Crucially, the mount stores its own
+    positions, subjects, calibration and settings in non-volatile memory — power
+    it off and back on and it still knows everything.</p>
+
+    <h3>The hub — the switchboard</h3>
+    <p>A single ESP32-S3 hub runs the camera network. It creates its own WiFi
+    access point (<code>CamMount</code>), holds an <strong>ESP-NOW wireless
+    star</strong> out to the five mounts, and simultaneously runs a server for
+    every kind of controller at once:</p>
+    <table>
+      <tr><th style="width:34%">Server</th><th style="width:26%">Used by</th><th>Address</th></tr>
+      <tr><td>TCP</td><td>PC app (WiFi)</td><td><code>192.168.4.1:7777</code></td></tr>
+      <tr><td>USB serial</td><td>PC app (bench)</td><td>USB cable to the hub</td></tr>
+      <tr><td>WebSocket + HTTP</td><td>Web app (phones)</td><td><code>http://192.168.4.1</code></td></tr>
+      <tr><td>OSC (UDP)</td><td>Companion, QLab</td><td><code>192.168.4.1:9700</code></td></tr>
+      <tr><td>UART</td><td>7″ touchscreen console</td><td>wired to the hub</td></tr>
+    </table>
+
+    <h3>The controllers — interchangeable windows</h3>
+    <p>The PC app, a phone, the console and a Stream Deck all speak to that same
+    hub, all see the same state, and any of them can <strong>hand off to any other
+    mid-show</strong>. There's no "master" controller. This works because the
+    controllers are <em>stateless</em> — they don't own anything the rig needs to
+    function.</p>
+
+    <h2>Where settings live</h2>
+    <p>This is the payoff of the model: almost everything the rig needs is stored
+    <strong>on the mounts themselves</strong>. Only a few conveniences live in the
+    PC app.</p>
+    <table>
+      <tr><th style="width:44%">What</th><th>Stored on</th></tr>
+      <tr><td>10 stored positions per camera</td><td>Mount (Teensy EEPROM)</td></tr>
+      <tr><td>Look-at subjects (up to 8) &amp; their 3D calibration</td><td>Mount (Teensy EEPROM)</td></tr>
+      <tr><td>Speed presets, orientation, stall thresholds, axis limits</td><td>Mount (Teensy EEPROM)</td></tr>
+      <tr><td>Which camera number a mount is, and its hub</td><td>Mount &amp; hub (flash / NVS)</td></tr>
+      <tr><td>Camera &amp; position <em>names</em> (display labels)</td><td>PC app — <code>Documents/PTS/*.json</code></td></tr>
+      <tr><td>Connection, CV mount, deadzone, OSC, keyboard</td><td>PC app — <code>config.json</code></td></tr>
+    </table>
+
+    <div class="tip"><b>Why this matters</b> Because the rig's memory lives on the
+    mounts, a controller can crash, close, run out of battery or be swapped for a
+    different one, and <strong>nothing is lost</strong>. Reconnect and every
+    position and calibration is still there. The names are the one thing the PC
+    app owns — see <a href="names.html">Camera &amp; position names</a>.</div>
+
+    <h2>How a command flows</h2>
+    <p>Say you tap <strong>recall shot 3 on camera 2</strong> on your phone:</p>
+    <ol class="steps">
+      <li>The web app sends the request to the hub over WebSocket.</li>
+      <li>The hub relays it over ESP-NOW to camera 2's bridge.</li>
+      <li>The bridge hands it to the Teensy, which drives the motors to the stored
+      position at the active speed preset.</li>
+      <li>Status flows back the same way, so <em>every</em> connected surface
+      updates — your phone, the PC app and the console all show camera 2 moving.</li>
+    </ol>
+
+    <div class="note"><b>Safety runs underneath all of it</b> Continuous
+    <em>jogging</em> needs a live 20 Hz command stream. If any link in that chain
+    goes quiet — hub, PC, WiFi — the mount stops itself within half a second. More
+    in <a href="troubleshooting.html">Troubleshooting</a>.</div>
+
+    <p>From here, the <a href="mounts.html">The mounts</a> page opens up the
+    hardware you'll actually be driving.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

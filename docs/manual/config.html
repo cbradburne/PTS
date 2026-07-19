@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration reference — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Configuration reference</h1>
+    <p class="subtitle">Every setting in the PC app's Config dialog, and where each
+    one is stored.</p>
+
+    <p>Open <strong>Config</strong> in the PC app. It has a <strong>General</strong>
+    tab for app-wide and connection settings, and a tab per camera
+    (<strong>Camera 1–5</strong>) for that mount's hardware and speeds.</p>
+
+    <div class="note"><b>Where settings live</b> Per-camera settings (orientation,
+    speeds, stall thresholds, limits) are written to the <strong>mount's own
+    memory</strong> — the app just reads and edits them, and they follow the mount
+    anywhere. Only the connection settings and camera <em>labels</em> are saved on
+    the PC. See <a href="concepts.html">How it fits together</a>.</div>
+
+    <h2>General tab</h2>
+
+    <h3>Hub Connection</h3>
+    <table>
+      <tr><th style="width:30%">Setting</th><th>Meaning</th></tr>
+      <tr><td><strong>WiFi TCP</strong></td><td>Production mode. <strong>Hub
+      IP</strong> — the hub's access point, <code>192.168.4.1</code>.
+      <strong>Port</strong> — <code>7777</code>.</td></tr>
+      <tr><td><strong>USB Serial</strong></td><td>Bench / development mode. Pick the
+      hub's <strong>serial port</strong> (Refresh re-scans).</td></tr>
+    </table>
+
+    <h3>Other general settings</h3>
+    <table>
+      <tr><th style="width:30%">Setting</th><th>Meaning</th></tr>
+      <tr><td><strong>CV tracking mount</strong></td><td>Which camera (1–5)
+      <a href="cv.html">CV tracking</a> drives.</td></tr>
+      <tr><td><strong>Joystick deadzone</strong></td><td>How far the game
+      controller's stick must move before a jog starts (0.0–0.5). Raise it if a
+      resting stick creeps.</td></tr>
+      <tr><td><strong>Virtual keyboard</strong></td><td>Show an on-screen keyboard
+      for text entry — for touchscreen setups with no physical keyboard.</td></tr>
+      <tr><td><strong>Camera &amp; Position Names</strong></td><td>Save / Load / Set
+      as Defaults for the 5 camera and 50 position names. Full detail on
+      <a href="names.html">Camera &amp; position names</a>.</td></tr>
+    </table>
+
+    <h3>Homing &amp; Reference</h3>
+    <p>A grid of buttons, one column per camera:</p>
+    <table>
+      <tr><th style="width:24%">Button</th><th>Action</th></tr>
+      <tr><td><strong>Slider Home</strong></td><td>Drives the slider to its end
+      stop, zeroes it, then backs off.</td></tr>
+      <tr><td><strong>Zoom Home</strong></td><td>Same for the zoom axis.</td></tr>
+      <tr><td><strong>Ref</strong></td><td>Zeroes the look-at angular reference at
+      the camera's current position — the once-per-session <strong>Set Ref</strong>
+      for <a href="lookat.html">look-at tracking</a>. No motion is commanded.</td></tr>
+    </table>
+
+    <h2>Per-camera tabs (Camera 1–5)</h2>
+
+    <h3>Orientation / Hardware</h3>
+    <table>
+      <tr><th style="width:30%">Setting</th><th>Meaning</th></tr>
+      <tr><td><strong>Has slider axis</strong></td><td>Whether this mount has a
+      slider. Off greys out the slider dial and hides slider speeds and Find
+      Limits.</td></tr>
+      <tr><td><strong>Invert pan</strong></td><td>Mount is mounted back-to-front —
+      flips pan direction.</td></tr>
+      <tr><td><strong>Invert tilt</strong></td><td>Use if +tilt physically moves the
+      camera down.</td></tr>
+      <tr><td><strong>Invert slider</strong></td><td>Left/right swapped.</td></tr>
+      <tr><td><strong>Invert zoom</strong></td><td>Lens zooms the opposite way.</td></tr>
+      <tr><td><strong>LANC Zoom</strong></td><td>Zoom is controlled by LANC serial
+      rather than a stepper — position isn't stored or recalled.</td></tr>
+      <tr><td><strong>Look-at mode</strong></td><td>Enables 3D triangulation
+      tracking (subjects 1–8 + slider arrows). Only available when Has slider is
+      on. See <a href="lookat.html">Look-at tracking</a>.</td></tr>
+    </table>
+
+    <h3>Speed presets</h3>
+    <p>Each preset is a max speed and an acceleration. The active preset applies to
+    jogging and recalls; edit the values here.</p>
+    <table>
+      <tr><th style="width:30%">Group</th><th>Units</th></tr>
+      <tr><td><strong>Pan / Tilt</strong> — 4 presets</td><td>deg/s and deg/s²</td></tr>
+      <tr><td><strong>Slider</strong> — 4 presets</td><td>mm/s and mm/s² (hidden if no slider)</td></tr>
+      <tr><td><strong>Zoom</strong> — 1 preset</td><td>deg/s and deg/s²</td></tr>
+    </table>
+
+    <h3>StallGuard thresholds</h3>
+    <p>How much load the axis must feel before the mount decides it's hit an end
+    stop, for the slider and zoom (<strong>0 = sensitive, 255 = coarse</strong>).
+    Tune these if homing stops early (too sensitive) or pushes into the stop (too
+    coarse). Used by <a href="mounts.html">homing</a> and Find Limits.</p>
+
+    <h3>Find Limits</h3>
+    <p>Drives the slider and zoom to their end stops to measure the axis range in
+    millimetres. <strong>Required before using look-at tracking.</strong> Hidden if
+    the camera has no slider.</p>
+
+    <div class="warn"><b>Homing and Find Limits move the axis to its physical
+    limit</b> Make sure the mount is clear to move before running either.</div>
+
+    <div class="note"><b>Saving</b> Changes to per-camera settings are written to
+    the mount when you apply them; the app fetches the mount's live values each time
+    you open Config, so what you see is what the mount actually holds.</div>
+
+    <p>Building or flashing the boards? See
+    <a href="building.html">Building the firmware</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

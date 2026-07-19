@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Companion / QLab (OSC) — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Companion / QLab (OSC)</h1>
+    <p class="subtitle">Put shots on Stream Deck buttons and fire camera moves as
+    cues in the show script.</p>
+
+    <p>PTS speaks <strong>OSC</strong> (Open Sound Control) over UDP port
+    <strong>9700</strong>. Point Bitfocus Companion or QLab at it and every
+    function — recall a shot, hold-to-jog, look-at moves, E-STOP — becomes a button
+    or a cue, in time with light and sound.</p>
+
+    <h2>Two servers, one address space</h2>
+    <p>There are two identical OSC servers; use whichever fits the rig. Both accept
+    the same addresses, so your Companion pages and QLab cues work unchanged against
+    either.</p>
+    <table>
+      <tr><th style="width:38%">Target</th><th>When to use</th></tr>
+      <tr><td><strong>The hub</strong> — <code>192.168.4.1:9700</code></td>
+      <td>No PC needed. Hub + console + mounts + Stream Deck is a complete rig.
+      Reach it from any machine joined to the <code>CamMount</code> WiFi, or via a
+      WiFi→LAN bridge.</td></tr>
+      <tr><td><strong>The PC app</strong> — its machine, port <code>9700</code></td>
+      <td>When the PC app is running anyway. Its server is toggleable
+      (<code>osc_enabled</code> / <code>osc_port</code>) in the app config.</td></tr>
+    </table>
+
+    <h2>Connecting Companion</h2>
+    <ol class="steps">
+      <li>Companion → <strong>Connections</strong> → add <strong>Generic:
+      OSC</strong>.</li>
+      <li>Set <strong>Target IP</strong> to <code>192.168.4.1</code> (the hub) or
+      the PC app machine's IP, and <strong>Target port</strong> to
+      <code>9700</code>.</li>
+      <li>Use the connection's <strong>"Send message"</strong> actions on buttons,
+      as below. Use <strong>integer</strong> arguments (floats are also accepted).</li>
+    </ol>
+
+    <h2>Address reference</h2>
+    <p><code>N</code> = camera 1–5. Slots and speed presets are 1-based; subjects
+    are 0-based — matching what every screen shows.</p>
+    <table>
+      <tr><th style="width:36%">Address</th><th style="width:22%">Arguments</th><th>Action</th></tr>
+      <tr><td><code>/pts/estop</code></td><td>—</td><td>E-STOP <strong>all</strong> mounts</td></tr>
+      <tr><td><code>/pts/cam/N/estop</code></td><td>—</td><td>E-STOP mount N</td></tr>
+      <tr><td><code>/pts/cam/N/goto</code></td><td>slot 1–10</td><td>Recall a stored position (active speed presets)</td></tr>
+      <tr><td><code>/pts/cam/N/store</code></td><td>slot 1–10</td><td>Store the current position</td></tr>
+      <tr><td><code>/pts/cam/N/clear</code></td><td>slot 1–10</td><td>Clear a stored position</td></tr>
+      <tr><td><code>/pts/cam/N/jog</code></td><td>pan tilt slider zoom</td><td>Velocities −1000…1000, re-streamed at 20 Hz until stopped</td></tr>
+      <tr><td><code>/pts/cam/N/jog/stop</code></td><td>—</td><td>Stop jogging (put on the button's release action)</td></tr>
+      <tr><td><code>/pts/cam/N/speed/pt</code></td><td>1–4</td><td>Active pan/tilt speed preset</td></tr>
+      <tr><td><code>/pts/cam/N/speed/sl</code></td><td>1–4</td><td>Active slider speed preset</td></tr>
+      <tr><td><code>/pts/cam/N/subject</code></td><td>0–7</td><td>Select look-at subject — switches live during a move</td></tr>
+      <tr><td><code>/pts/cam/N/lookat</code></td><td>0 | 1</td><td>Look-at slider move to min (0) or max (1) with the selected subject</td></tr>
+    </table>
+
+    <h2>Button recipes</h2>
+    <p><strong>Recall shot 3 on camera 2</strong> — the bread-and-butter Stream
+    Deck button:</p>
+    <ul>
+      <li>Press action: <code>/pts/cam/2/goto</code>, int <code>3</code></li>
+    </ul>
+    <p><strong>Hold-to-jog pan-left on camera 1</strong> — uses Companion's press
+    <em>and</em> release action lists:</p>
+    <ul>
+      <li>Press: <code>/pts/cam/1/jog</code>, ints <code>-400 0 0 0</code></li>
+      <li>Release: <code>/pts/cam/1/jog/stop</code></li>
+    </ul>
+    <p><strong>Look-at: track subject 2, slider right, camera 3</strong>:</p>
+    <ul>
+      <li>Button A press: <code>/pts/cam/3/subject</code>, int <code>2</code></li>
+      <li>Button B press: <code>/pts/cam/3/lookat</code>, int <code>1</code>
+      (pressing A during the move switches the tracked subject live)</li>
+    </ul>
+    <p><strong>Show-stopper</strong>: a big red <code>/pts/estop</code> (no argument
+    needed).</p>
+
+    <h2>QLab</h2>
+    <p>QLab network cues speak OSC natively, so a camera move can be a <em>cue in the
+    show script</em>. Patch a network destination to the hub or PC app on port
+    <code>9700</code>, then a cue like <code>/pts/cam/2/goto 4</code> fires a recall
+    in the cue stack, exactly in time with lighting and sound. (QLab sends numbers as
+    floats — the server accepts that.)</p>
+
+    <div class="warn"><b>Jog safety over UDP</b> Jogs are re-streamed at 20 Hz by
+    whichever server received them. If a <em>release</em> message is lost (UDP isn't
+    guaranteed), a <strong>15-second TTL</strong> stops the jog anyway — and the
+    mount's own 500 ms dead-man is the final backstop. For long moves prefer
+    <code>goto</code> / <code>lookat</code>, which are position-bounded.</div>
+
+    <div class="note"><b>Full guide</b> There's a standalone
+    <a href="../companion.md">Companion / QLab guide</a> in the repo with the same
+    reference and extra notes.</div>
+
+    <p>Next up, the setup topics — starting with
+    <a href="pairing.html">Pairing &amp; identity</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The mounts — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>The mounts</h1>
+    <p class="subtitle">The four-axis camera head — its axes, its screen, and how
+    it moves.</p>
+
+    <p>Every camera in the rig sits on an identical mount. Each one is a small
+    robot with up to four motorised axes, a motion controller, and a wireless
+    bridge with its own touchscreen.</p>
+
+    <h2>The four axes</h2>
+    <table>
+      <tr><th style="width:20%">Axis</th><th style="width:26%">Range</th><th>Notes</th></tr>
+      <tr><td><strong>Pan</strong></td><td>Continuous</td><td>Rotates left/right. No end stops — see homing below.</td></tr>
+      <tr><td><strong>Tilt</strong></td><td>Continuous</td><td>Aims up/down. No end stops.</td></tr>
+      <tr><td><strong>Slider</strong></td><td>Rail-limited</td><td>Travels the camera along a rail. Homes to its end stops. Optional — a mount can be built without one.</td></tr>
+      <tr><td><strong>Zoom</strong></td><td>Lens-limited</td><td>Either a stepper on the lens ring, or <strong>LANC</strong> serial zoom on cameras that support it.</td></tr>
+    </table>
+    <p>Motion runs on a <strong>Teensy 4.1 at 600 MHz</strong> through
+    <strong>TMC2209</strong> silent stepper drivers, with smooth jog profiles and
+    expo curves so slow moves stay controllable and fast ones stay smooth. A
+    direction reversal is handled as one continuous ramp rather than a stop and
+    restart.</p>
+
+    <div class="note"><b>Pan and tilt are continuous</b> They have no hardware end
+    stops, so on power-up the mount doesn't know their absolute angle. That's fine
+    for jogging and for storing/recalling positions. It only matters for
+    <a href="lookat.html">look-at tracking</a>, which needs a once-per-session
+    <strong>Set Ref</strong> — covered on that page.</div>
+
+    <h2>The mount screen</h2>
+    <p>The bridge board carries a <strong>1.75″ round AMOLED touchscreen</strong>.
+    At a glance it shows:</p>
+    <ul>
+      <li>The <strong>camera number</strong> and a <strong>state ring</strong> —
+      its colour tells you the mount's link and activity at a distance.</li>
+      <li>The <strong>active speed presets</strong> and the <strong>stored
+      positions</strong>.</li>
+      <li>A built-in <strong>spirit level</strong>, using the bridge's onboard
+      IMU, for levelling the head on a stand.</li>
+    </ul>
+    <p>Touch <strong>and hold for about 1.5 seconds</strong> to open
+    <strong>Setup</strong>, where the mount is paired to a camera number and a hub
+    (see <a href="pairing.html">Pairing &amp; identity</a>).</p>
+
+    <figure class="shot" data-file="mount-screen.jpg">
+      <img src="../assets/img/mount-screen.jpg" alt="The mount's round status screen"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The round status screen — state ring, presets and positions.</figcaption>
+    </figure>
+
+    <h2>Homing the axes</h2>
+    <p>The slider and zoom need to know where their travel ends are before stored
+    positions mean anything. This is <strong>homing</strong>, and it uses
+    <strong>StallGuard</strong> sensorless load detection built into the TMC2209
+    drivers — the mount drives the axis gently until it feels the end stop, then
+    zeroes there. <strong>No limit switches are fitted or needed.</strong></p>
+    <ul>
+      <li><strong>Slider</strong> and <strong>zoom</strong> are homed from
+      <strong>Config → Homing &amp; Reference</strong> in the PC app, or from the
+      hub console.</li>
+      <li><strong>Pan</strong> and <strong>tilt</strong> are continuous and are not
+      homed.</li>
+    </ul>
+    <p>How firmly the axis has to push before the mount decides it's hit the end is
+    set by the <strong>StallGuard threshold</strong> (0 = sensitive, 255 = coarse),
+    tuned per camera in <a href="config.html">Configuration</a>. The full travel
+    range is measured with <strong>Find Limits</strong>, also per camera.</p>
+
+    <div class="warn"><b>Give it room</b> Homing and Find Limits drive an axis to
+    its physical limit. Make sure the mount is clear to move before you start.</div>
+
+    <h2>Speeds</h2>
+    <p>Each mount holds <strong>four speed presets</strong> for pan/tilt and four
+    for the slider (plus one for zoom). A preset is a max speed and an
+    acceleration; you pick which preset is <em>active</em> from any controller, and
+    it applies to both jogging and position recalls. Pan/tilt speeds are in
+    degrees per second, slider speeds in millimetres per second. Editing the preset
+    values themselves is done in <a href="config.html">Configuration</a>.</p>
+
+    <div class="note"><b>Everything is stored on the mount</b> Positions, speeds,
+    orientation, stall thresholds and limits all live in the mount's own memory and
+    survive power cycles — controllers just read and change them. See
+    <a href="concepts.html">How it fits together</a>.</div>
+
+    <p>Next: put those axes to work with <a href="positions.html">stored
+    shots</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

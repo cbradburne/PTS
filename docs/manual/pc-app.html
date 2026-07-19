@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC app — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>PC app</h1>
+    <p class="subtitle">The full controller: joystick jogging, the position grid,
+    look-at calibration, CV tracking and diagnostics.</p>
+
+    <p>The PC app is the most complete way to drive the rig. It's a PyQt6
+    application (Windows, macOS, Linux) that connects to the hub over WiFi or USB
+    and gives you everything in one window.</p>
+
+    <h2>Install &amp; run</h2>
+    <pre><code>cd pc_app
+python3 -m pip install -r requirements.txt
+python3 main.py</code></pre>
+    <p>Python 3.11+ is recommended. The requirements cover the core app plus CV
+    tracking (OpenCV and the YOLO model). See <a href="cv.html">CV tracking</a> for
+    the tracking-specific packages.</p>
+
+    <h2>Connecting</h2>
+    <p>Open <strong>Config → Hub Connection</strong> and pick one:</p>
+    <table>
+      <tr><th style="width:26%">Mode</th><th>When to use</th><th>Setting</th></tr>
+      <tr><td><strong>WiFi TCP</strong></td><td>Production — PC joined to the
+      <code>CamMount</code> WiFi</td><td>Hub IP <code>192.168.4.1</code>, port
+      <code>7777</code></td></tr>
+      <tr><td><strong>USB Serial</strong></td><td>Bench / development — PC cabled to
+      the hub</td><td>Pick the serial port</td></tr>
+    </table>
+    <div class="note"><b>Hub address</b> The hub's WiFi access point is at
+    <strong><code>192.168.4.1</code></strong>. Join the <code>CamMount</code>
+    network, then point the app there on port <code>7777</code>.</div>
+
+    <h2>The main window</h2>
+    <p>Once connected, the five cameras come alive as they report in. From here you
+    can:</p>
+    <ul>
+      <li><strong>Jog</strong> with a game controller or the on-screen controls —
+      smooth expo curves make both fine and fast moves controllable. The
+      <strong>joystick deadzone</strong> is adjustable in Config.</li>
+      <li>Work the <strong>position grid</strong> — ten slots per camera with live
+      borders. Store, recall and clear shots (<a href="positions.html">Storing
+      &amp; recalling shots</a>).</li>
+      <li>Set the <strong>active speed presets</strong> with the on-screen
+      dials.</li>
+      <li>Run the <strong>look-at</strong> calibration wizard and moves
+      (<a href="lookat.html">Look-at tracking</a>).</li>
+      <li>Open <strong>CV tracking</strong> — optical-flow or YOLO — while you ride
+      the slider and zoom (<a href="cv.html">CV tracking</a>).</li>
+      <li>Name cameras and positions (<a href="names.html">Camera &amp; position
+      names</a>).</li>
+    </ul>
+
+    <figure class="shot" data-file="pc-app.png">
+      <img src="../assets/img/pc-app.png" alt="The PC app main window"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The PC app — five mounts, position grid, speed dials, live state.</figcaption>
+    </figure>
+
+    <div class="note"><b>Slider-less cameras</b> If a camera doesn't have a slider,
+    enable "Has slider" off in its config and the slider speed dial greys out — it
+    won't react, exactly like a disconnected axis. See
+    <a href="config.html">Configuration</a>.</div>
+
+    <h2>Diagnostics &amp; health</h2>
+    <p>Every node in the system — Teensys, bridges, hub, console — reports heap,
+    worst loop time, link failures and reset cause into the PC app's log every 10
+    seconds, with an extra report the moment something jumps. Slow leaks and radio
+    degradation show up hours before they'd become a symptom. See
+    <a href="troubleshooting.html">Troubleshooting</a> for reading them.</p>
+
+    <h2>Built-in OSC server</h2>
+    <p>The app runs its own <a href="companion.html">OSC server</a> (default UDP
+    <code>9700</code>), so Companion or QLab can drive the rig through the PC app —
+    handy when the PC is on the network anyway. It's toggleable in Config.</p>
+
+    <div class="tip"><b>No keyboard?</b> For touchscreen setups, enable
+    <strong>Virtual keyboard</strong> in Config and an on-screen keyboard appears
+    for text entry (naming, IPs). It works on Windows, macOS and Linux.</div>
+
+    <h2>Develop with no hardware</h2>
+    <p>You don't need a rig to run the app. Start the simulator and point the app at
+    <code>127.0.0.1</code>:</p>
+    <pre><code>python3 tools/mount_sim.py</code></pre>
+    <p>It speaks the real protocol as a hub plus five mounts, with a fault-injection
+    console. See <a href="building.html">Building the firmware</a>.</p>
+
+    <p>Prefer a phone? See the <a href="web-app.html">Web app</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

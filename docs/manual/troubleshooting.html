@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Troubleshooting</h1>
+    <p class="subtitle">Recovery, health telemetry, and fixes for the things that
+    actually go wrong.</p>
+
+    <h2>Safety first: the dead-man and E-STOP</h2>
+    <p>Two safety behaviours underlie everything, and explain a lot of "why did it
+    stop?" moments:</p>
+    <ul>
+      <li><strong>500 ms dead-man</strong> — continuous jogging needs a live 20 Hz
+      command stream. If the stream goes quiet (PC closed, WiFi dropped, hub
+      rebooted) the mount stops that move within half a second. This is by design,
+      across every mode. Position recalls and look-at moves are bounded, so they
+      complete on their own.</li>
+      <li><strong>E-STOP</strong> — one packet from any surface hard-stops all four
+      axes on every mount at once, and cancels any held jog streams.</li>
+    </ul>
+
+    <h2>Self-healing &amp; recovery</h2>
+    <p>The rig is built to survive the boring long-run failures. You mostly won't
+    see these working — that's the point:</p>
+    <ul>
+      <li><strong>Radio recovery</strong> — the hub and mounts each run an
+      autonomous detect → reinit → restart ladder for the classic long-uptime ESP32
+      radio wedge, with boot-loop guards in RTC memory.</li>
+      <li><strong>Idle maintenance restart</strong> — the hub takes a brief restart
+      during a quiet moment to keep its uptime below the degradation horizon. It
+      waits for idle and defers while a controller is active, so it never fires
+      mid-move.</li>
+      <li><strong>Channel self-healing</strong> — the ESP-NOW link re-negotiates if
+      the WiFi channel changes (<a href="pairing.html">Pairing &amp; identity</a>).</li>
+    </ul>
+
+    <h2>Health telemetry</h2>
+    <p>Every node — Teensys, bridges, hub, console — reports <strong>heap
+    watermarks, worst loop time, link failures and reset cause every 10
+    seconds</strong> into the PC app's log, with an extra report the instant
+    something jumps. Watch the log to catch a slow memory leak or radio degradation
+    <em>hours</em> before it becomes a visible symptom. If a mount is misbehaving,
+    the log's reset-cause and link-failure counts are the first place to look.</p>
+
+    <h2>Common issues</h2>
+
+    <h3>A mount won't connect (ring not green)</h3>
+    <ul>
+      <li>Check it's <strong>paired to the right hub</strong> and camera number —
+      hold the screen 1.5 s to open Setup (<a href="pairing.html">Pairing</a>).</li>
+      <li>Confirm the <strong>hub is powered</strong> and broadcasting
+      <code>CamMount</code>.</li>
+      <li>Moved venues? The channel should self-heal; if not, power-cycle the
+      mount.</li>
+      <li>Two mounts on the same number trigger a <strong>conflict prompt</strong> on
+      the console — resolve it there.</li>
+    </ul>
+
+    <h3>The PC app won't connect</h3>
+    <ul>
+      <li><strong>WiFi TCP:</strong> the PC must be joined to <code>CamMount</code>,
+      with the hub at <code>192.168.4.1:7777</code> in
+      <a href="config.html">Config</a>.</li>
+      <li><strong>USB Serial:</strong> pick the right port (use Refresh); close any
+      other program holding the port.</li>
+    </ul>
+
+    <h3>The web app won't load</h3>
+    <ul>
+      <li>Confirm the phone is on the <code>CamMount</code> WiFi, then browse to
+      <strong><code>http://192.168.4.1</code></strong> (note <code>http</code>,
+      not https).</li>
+      <li>Some phones auto-drop a WiFi network with "no internet" — tell the phone to
+      stay connected.</li>
+    </ul>
+
+    <h3>Homing stops early or pushes into the stop</h3>
+    <ul>
+      <li>Tune the <strong>StallGuard threshold</strong> for that axis (0 =
+      sensitive, 255 = coarse) in <a href="config.html">Config</a>. Stops too early
+      → raise it; pushes into the end → lower it.</li>
+    </ul>
+
+    <h3>Look-at is rejected or drifts</h3>
+    <ul>
+      <li>Look-at needs a <strong>Set Ref</strong> this session — aim at a
+      calibrated subject and press <strong>Ref</strong>. Moves are rejected until you
+      do (<a href="lookat.html">Look-at tracking</a>).</li>
+      <li>It also needs <strong>Has slider</strong> + <strong>Look-at mode</strong>
+      on, and <strong>Find Limits</strong> run.</li>
+      <li>Drifting? Re-aim and press Ref again — someone may have nudged the head.</li>
+    </ul>
+
+    <h3>CV tracking does nothing</h3>
+    <ul>
+      <li>Set the right <strong>CV tracking mount</strong> in Config and make sure
+      its <strong>video feed</strong> reaches the PC.</li>
+      <li>For person detection, install <code>ultralytics</code> — the first run
+      downloads the model (<a href="cv.html">CV tracking</a>).</li>
+    </ul>
+
+    <h3>OSC buttons don't fire</h3>
+    <ul>
+      <li>Point Companion/QLab at the hub (<code>192.168.4.1:9700</code>) or the PC
+      app machine, port <strong>9700</strong>, and use the exact addresses in the
+      <a href="companion.html">Companion / QLab</a> reference.</li>
+      <li>A jog that won't stop usually means a lost release message — the 15 s TTL
+      and the mount dead-man will stop it; put <code>/jog/stop</code> on the button's
+      release action.</li>
+    </ul>
+
+    <div class="tip"><b>When in doubt, the mounts remember</b> Closing and reopening
+    a controller, or power-cycling a mount, is safe — positions and calibration live
+    on the mounts, so you won't lose your setup (<a href="concepts.html">How it fits
+    together</a>). The one session-only thing is the look-at <strong>Set Ref</strong>,
+    which you re-do after any power cycle.</div>
+
+    <p>That's the manual. Back to the <a href="index.html">contents</a>, or the
+    <a href="../index.html">project home</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

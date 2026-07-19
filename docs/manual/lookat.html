@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Look-at tracking — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Look-at tracking</h1>
+    <p class="subtitle">The signature move — the camera keeps aiming at a fixed
+    subject while the slider travels past.</p>
+
+    <p>Normally pan, tilt, slider and zoom are independent. In <strong>look-at
+    mode</strong>, pan and tilt stop being things you set directly and become
+    <em>derived</em>: the mount computes them continuously from the slider's
+    position so the shot stays locked on a subject while the camera orbits past on
+    the rail. Calibrate a subject once and the rig keeps it framed for you.</p>
+
+    <div style="border:1px solid var(--border);border-radius:10px;background:var(--bg2);padding:8px;margin:20px 0;overflow-x:auto">
+      <svg viewBox="0 0 760 250" width="100%" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="#4f9ce8"/>
+          </marker>
+        </defs>
+        <line x1="70" y1="200" x2="560" y2="200" stroke="#4f6b8f" stroke-width="5" stroke-linecap="round"/>
+        <text x="315" y="228" fill="#8a97a8" font-size="12" text-anchor="middle">slider rail</text>
+        <circle cx="120" cy="200" r="8" fill="#1565C0"/>
+        <circle cx="510" cy="200" r="8" fill="#1565C0" opacity=".45"/>
+        <circle cx="315" cy="200" r="8" fill="#4f9ce8"/>
+        <text x="120" y="184" fill="#8fb3dd" font-size="11" text-anchor="middle">calibrate A</text>
+        <text x="510" y="184" fill="#8fb3dd" font-size="11" text-anchor="middle">calibrate B</text>
+        <text x="315" y="182" fill="#cfe2f7" font-size="11" text-anchor="middle">live camera</text>
+        <circle cx="620" cy="66" r="12" fill="#d4b83a"/>
+        <circle cx="620" cy="66" r="20" fill="none" stroke="#d4b83a" stroke-width="1.3" opacity=".5"/>
+        <text x="620" y="40" fill="#d4b83a" font-size="12" font-weight="600" text-anchor="middle">subject</text>
+        <g stroke-dasharray="6 5" stroke-width="1.5" fill="none">
+          <line x1="120" y1="200" x2="620" y2="66" stroke="#7fbf72" opacity=".8"/>
+          <line x1="510" y1="200" x2="620" y2="66" stroke="#7fbf72" opacity=".8"/>
+          <line x1="315" y1="200" x2="620" y2="66" stroke="#e0e6ee"/>
+        </g>
+        <text x="230" y="110" fill="#7fbf72" font-size="11.5">two aims → 3D solve</text>
+        <g stroke="#4f9ce8" stroke-width="2.2" fill="none">
+          <path d="M 255 212 L 375 212" marker-end="url(#a2)"/>
+        </g>
+      </svg>
+    </div>
+
+    <h2>Before you can use it</h2>
+    <p>Look-at has a few one-time prerequisites. Set these up per camera in
+    <a href="config.html">Configuration</a>:</p>
+    <ol class="steps">
+      <li><strong>Has slider</strong> is enabled and the slider is
+      <strong>homed</strong> — look-at is a slider move, so it needs one.</li>
+      <li><strong>Find Limits</strong> has been run, so the mount knows the rail's
+      full millimetre range.</li>
+      <li><strong>Look-at mode</strong> is enabled on that camera's tab.</li>
+    </ol>
+
+    <h2>Calibrating a subject</h2>
+    <p>You teach the mount where a subject is in 3D by aiming at it from
+    <strong>two points on the rail</strong>. Two sight-lines cross in space, and
+    the mount solves for the subject's position by triangulation. Each mount holds
+    up to <strong>eight named subjects</strong>, stored in its memory.</p>
+    <ol class="steps">
+      <li>Start <strong>Add Subject</strong> (PC app, console or web). The slider
+      moves itself to the home end of the rail.</li>
+      <li>Jog pan/tilt until the camera is aimed dead-on the subject, then press
+      <strong>Set</strong>.</li>
+      <li>The slider moves to the far end. Re-aim at the <em>same</em> subject and
+      press <strong>Set</strong> again.</li>
+      <li>The mount solves the subject's 3D position and saves it. Give it a
+      name.</li>
+    </ol>
+    <div class="tip"><b>Aim carefully</b> The two aims are the whole calibration —
+    the more precisely you put the subject in frame at both ends, the tighter the
+    tracking. Pick a clear feature to aim at (a presenter's eyeline, a mark on the
+    set).</div>
+
+    <h2>Set Ref — once per session</h2>
+    <p>Because pan and tilt have no end stops, the mount loses its absolute angle
+    reference every time it powers off — or if someone nudges the head by hand.
+    Look-at needs that reference, so it's re-established with <strong>Set
+    Ref</strong>:</p>
+    <ol class="steps">
+      <li>Aim the camera at any already-calibrated subject.</li>
+      <li>Press <strong>Ref</strong> (Config → Homing &amp; Reference) and it zeroes
+      the angular reference at the current position.</li>
+    </ol>
+    <p>No motion is commanded — Ref only updates the mount's internal angle offset.
+    Press it at the start of a session, after repositioning the head, or any time
+    you suspect tracking has drifted. If the first try looks slightly off, re-aim
+    and press Ref again.</p>
+    <div class="warn"><b>Look-at is gated on Set Ref</b> If you start a look-at move
+    before setting the reference this session, the mount rejects it and every
+    controller shows a warning. Set Ref first.</div>
+
+    <h2>Running a move</h2>
+    <p>With a subject selected, a look-at move sends the slider to one end of the
+    rail while pan/tilt keep the subject framed the whole way:</p>
+    <ul>
+      <li><strong>◀ / ▶ one-tap moves</strong> send the slider to the min or max
+      end. A live arrow shows the direction on every screen at once — whoever
+      started it.</li>
+      <li><strong>Pre-aim</strong>: pan and tilt settle onto the subject
+      <em>before</em> the slider starts, so the move begins already composed.</li>
+      <li><strong>Switch subjects mid-move</strong> from any controller — the shot
+      re-aims smoothly to the new subject while the slider keeps travelling.</li>
+    </ul>
+
+    <figure class="shot" data-file="lookat-action.jpg">
+      <img src="../assets/img/lookat-action.jpg" alt="A look-at move in action"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>A look-at move mid-travel — the slider moves, the shot stays locked.</figcaption>
+    </figure>
+
+    <div class="note"><b>Look-at vs. CV tracking</b> Look-at follows a
+    <em>calibrated point in space</em> — precise, repeatable, and it needs no video
+    feed. <a href="cv.html">CV tracking</a> follows <em>what the camera actually
+    sees</em>. Look-at is ideal when the subject holds a spot (a lectern, a set
+    mark); CV is better for a subject that wanders.</div>
+
+    <p>Next: <a href="cv.html">CV tracking</a>, the sighted cousin of look-at.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

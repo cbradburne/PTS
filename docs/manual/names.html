@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera &amp; position names — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Camera &amp; position names</h1>
+    <p class="subtitle">Give the five cameras and their fifty position slots
+    readable names — and save whole sets for different shows.</p>
+
+    <p>By default a camera is "Cam 1" and a slot is just a number. The PC app lets
+    you name all <strong>5 cameras</strong> and all <strong>50 position slots</strong>
+    (10 per camera) — so "Cam 2" becomes "Stage Left" and slot 3 becomes "Wide
+    on lectern". Names are display labels only; they don't change any camera
+    behaviour.</p>
+
+    <div class="note"><b>Names are the one thing the app owns</b> Unlike positions
+    and calibration (which live on the mounts), names live on the PC, in
+    <code>Documents/PTS/</code> as JSON files. That's why naming is an app feature,
+    and why you can keep different name sets for different productions. See
+    <a href="concepts.html">How it fits together</a>.</div>
+
+    <h2>Editing a name</h2>
+    <p>Click a camera's name or a position slot's label in the PC app and type. The
+    change shows everywhere in the app immediately.</p>
+    <p>Editing a name updates a <strong>working copy only</strong> — it does
+    <em>not</em> touch your saved name files (not even the defaults) until you
+    explicitly save. So you can rename freely while setting up without disturbing a
+    saved set.</p>
+
+    <h2>Save, load, set defaults</h2>
+    <p>The controls live in <strong>Config → Camera &amp; Position Names</strong>.</p>
+    <table>
+      <tr><th style="width:26%">Button</th><th>What it does</th></tr>
+      <tr><td><strong>Save…</strong></td><td>Writes the current names to a
+      <code>.json</code> file you choose. Use this to keep a set for a show.</td></tr>
+      <tr><td><strong>Load…</strong></td><td>Loads a saved <code>.json</code> set,
+      replacing the current names.</td></tr>
+      <tr><td><strong>Set as Defaults</strong></td><td>Makes the current names the
+      set that loads automatically every time the app starts.</td></tr>
+    </table>
+    <p>The file picker defaults to your <strong>Documents/PTS</strong> folder,
+    where all name sets live.</p>
+
+    <h2>How startup works</h2>
+    <ul>
+      <li>Every time the app opens, it loads the names from
+      <strong><code>Default.json</code></strong>.</li>
+      <li>As you edit, changes are kept in a working copy
+      (<code>temp.json</code>) — your saved sets and the defaults are left
+      alone.</li>
+      <li>To make edits stick across restarts, press <strong>Set as
+      Defaults</strong> (updates <code>Default.json</code>), or <strong>Save…</strong>
+      to a named file you can re-load later.</li>
+    </ul>
+
+    <div class="tip"><b>Per-show name sets</b> Set up naming for a production once,
+    <strong>Save…</strong> it as e.g. <code>Autumn-Gala.json</code>, and next time
+    just <strong>Load…</strong> it. Keep a neutral house set as your
+    <strong>Defaults</strong> so every fresh start is clean.</div>
+
+    <div class="note"><b>First run</b> If <code>Default.json</code> doesn't exist
+    yet, the app seeds it from the current names, so there's always a defaults file
+    to fall back on.</div>
+
+    <p>Next: a full tour of the <a href="pc-app.html">PC app</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

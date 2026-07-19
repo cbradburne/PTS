@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CV tracking — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>CV tracking</h1>
+    <p class="subtitle">Let the PC app watch the camera's video and keep a subject
+    framed for you — while you keep flying the slider and zoom.</p>
+
+    <p>Where <a href="lookat.html">look-at</a> follows a calibrated point in space,
+    <strong>CV tracking follows what the camera actually sees</strong>. The PC app
+    takes the camera's video feed, finds the subject, and drives pan and tilt to
+    keep it framed — closing the loop with computer vision. It runs
+    <strong>only in the PC app</strong> (it needs the video feed and the
+    processing).</p>
+
+    <h2>Two trackers</h2>
+    <table>
+      <tr><th style="width:26%">Tracker</th><th>How it works</th></tr>
+      <tr><td><strong>Optical flow</strong></td><td>Click any point or object in
+      the feed to lock on. The tracker follows that patch of image frame to frame —
+      good for a specific object or a spot on a subject.</td></tr>
+      <tr><td><strong>YOLO person detection</strong></td><td>Detects people
+      automatically and follows a presenter, using the <code>ultralytics</code>
+      YOLO model. Good when you just want "keep the person in frame".</td></tr>
+    </table>
+
+    <h2>Human + machine at once</h2>
+    <p>The clever part: CV drives <strong>pan and tilt only</strong>. Its commands
+    carry an axis mask, so the vision loop and your joystick can drive the
+    <em>same</em> mount at the <em>same</em> time without fighting. The machine
+    keeps the subject centred while <strong>you keep manual control of the slider
+    and zoom</strong> — riding the move and the framing by hand while pan/tilt look
+    after themselves.</p>
+
+    <figure class="shot" data-file="cv-window.png">
+      <img src="../assets/img/cv-window.png" alt="The CV tracking window"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>The CV tracking window — live feed, lock-on target, tracker controls.</figcaption>
+    </figure>
+
+    <h2>Using it</h2>
+    <ol class="steps">
+      <li>Set which camera CV drives — <strong>Config → CV tracking mount</strong>
+      (1–5). Its video feed needs to be reachable by the PC.</li>
+      <li>Open the <strong>CV tracking window</strong> in the PC app.</li>
+      <li>Either <strong>click a point/object</strong> to lock optical-flow
+      tracking, or enable <strong>YOLO</strong> to follow a detected person.</li>
+      <li>Fly the <strong>slider and zoom</strong> by hand as the shot develops —
+      pan/tilt track automatically.</li>
+    </ol>
+
+    <h2>What you need installed</h2>
+    <p>CV needs a couple of extra Python packages on the PC (they're in the app's
+    requirements):</p>
+    <pre><code>python3 -m pip install opencv-contrib-python   # trackers
+python3 -m pip install ultralytics             # YOLO person detection</code></pre>
+    <p>The YOLO model (~6 MB) downloads automatically the first time you enable
+    person detection. Optical-flow tracking works without it. See
+    <a href="pc-app.html">PC app</a> for the full setup.</p>
+
+    <div class="note"><b>The same safety net</b> CV output is just a jog stream, so
+    it lives under the same dead-man as everything else: lose the PC, the video
+    feed or the WiFi and the mount stops itself within 500 ms. An E-STOP from any
+    surface cancels it instantly.</div>
+
+    <div class="tip"><b>Which tracker when</b> Use <strong>optical flow</strong> for
+    a specific object or a non-person subject, and when you want to choose exactly
+    what's tracked. Use <strong>YOLO</strong> for hands-off "follow the presenter".
+    Both leave the slider and zoom to you.</div>
+
+    <p>Next, the surfaces you drive all this from — starting with the
+    <a href="pc-app.html">PC app</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building the firmware — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Building the firmware</h1>
+    <p class="subtitle">Boards, pinned libraries and flashing — one binary per board
+    type, no per-unit configuration.</p>
+
+    <p>There are four firmware targets. Each builds to a single binary that runs on
+    every unit of that type — identity, pairing and calibration live in
+    NVS/EEPROM, set from the touchscreens, so there's nothing per-unit in
+    source.</p>
+
+    <h2>The boards</h2>
+    <table>
+      <tr><th style="width:24%">Part</th><th style="width:40%">Hardware</th><th>Firmware</th></tr>
+      <tr><td><strong>Hub</strong></td><td>Seeed XIAO ESP32-S3</td><td><code>firmware/esp32_hub</code></td></tr>
+      <tr><td><strong>Hub display</strong></td><td>Waveshare ESP32-S3 Touch LCD 7″ (800×480, LVGL 9)</td><td><code>firmware/esp32_display</code></td></tr>
+      <tr><td><strong>Mount bridge</strong></td><td>Waveshare ESP32-S3 Touch AMOLED 1.75″ (466×466 round, LVGL 9)</td><td><code>firmware/esp_mount_amoled175</code></td></tr>
+      <tr><td><strong>Motion controller</strong></td><td>Teensy 4.1 @ 600 MHz, TMC2209 ×4, TeensyStep4</td><td><code>firmware/teensy41_mount</code></td></tr>
+    </table>
+
+    <h2>Libraries</h2>
+    <p>Arduino library versions are <strong>pinned in the repo's
+    <code>libraries/</code> folder</strong> — the versions there are the versions
+    that compile. Board settings and the pinned versions are documented in
+    <code>libraries/README.md</code>. For the Arduino IDE, copy the
+    <code>libraries/</code> folders into your Arduino libraries directory.</p>
+
+    <h2>Command-line build</h2>
+    <p>With <code>arduino-cli</code> installed
+    (<code>brew install arduino-cli</code>), one script compiles every target
+    against the pinned libraries — board FQBNs are baked in, so there's no
+    Tools-menu state to get wrong:</p>
+    <pre><code>tools/build.sh                   # compile all four targets
+tools/build.sh hub display       # compile a subset
+tools/build.sh flash hub [port]  # compile + upload one target</code></pre>
+    <p>It needs the esp32 (3.x) and Teensy cores, which <code>arduino-cli</code>
+    shares with an existing Arduino IDE 2.x install — so an existing setup needs
+    nothing extra. Build output goes to <code>.build/</code> (gitignored).</p>
+
+    <h2>First bring-up</h2>
+    <ol class="steps">
+      <li>Flash the <strong>hub</strong> and the <strong>mounts</strong>.</li>
+      <li>Power everything up.</li>
+      <li><strong>Pair each mount</strong> from its own screen: hold ~1.5 s → pick
+      CAM 1–5 → pick your hub → Save. The hub needs no action — it learns mounts on
+      first contact (<a href="pairing.html">Pairing &amp; identity</a>).</li>
+    </ol>
+
+    <div class="warn"><b>Set your own WiFi credentials before deploying</b> The hub
+    creates the <code>CamMount</code> access point from an SSID and password defined
+    near the top of <code>firmware/esp32_hub/esp32_hub.ino</code>. Change the
+    <strong>SSID</strong> and especially the <strong>password</strong> to your own
+    before using the rig anywhere real — the repo ships with a placeholder, and
+    anyone who knows it can join your camera network.</div>
+
+    <h2>Running the PC app</h2>
+    <pre><code>cd pc_app
+python3 -m pip install -r requirements.txt
+python3 -m pip install opencv-contrib-python   # + ultralytics for YOLO
+python3 main.py</code></pre>
+    <p>Then set the connection in <a href="config.html">Config</a>. Full tour on the
+    <a href="pc-app.html">PC app</a> page.</p>
+
+    <h2>Developing with no hardware</h2>
+    <p>The simulator speaks the real protocol as a hub plus five mounts, with a
+    fault-injection console (link wedges, NACKs, packet loss, dead mounts):</p>
+    <pre><code>python3 tools/mount_sim.py       # then point the PC app at 127.0.0.1</code></pre>
+
+    <div class="note"><b>Protocol integrity</b> The binary wire format is defined
+    once in a canonical C header, and a pre-commit checker verifies the Python and
+    JavaScript mirrors and byte-compares the compiled firmware encoders against the
+    PC decoders — so wire-format drift can't land. After cloning, enable the hook
+    with <code>git config core.hooksPath .githooks</code>.</div>
+
+    <div class="note"><b>Hardware files</b> STEP models for the pan/tilt head and
+    slider are in <code>Print Files/</code>, and PCB fabrication files are in the
+    repo root. Detailed mechanics, BOM and wiring docs are on the way.</div>
+
+    <p>If something's misbehaving, head to
+    <a href="troubleshooting.html">Troubleshooting</a>.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>
