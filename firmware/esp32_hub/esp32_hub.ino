@@ -71,6 +71,10 @@
 // Static soft-AP network config.  Clients (phone/tablet/laptop over WS/TCP)
 // connect to AP_IP — this is the hub's address on its own WiFi network.
 // (The directly-wired PC uses USB serial, so it's unaffected by this.)
+//
+// 169.254.x.x is link-local, chosen here for Dante audio-network compatibility.
+// >> BEFORE PUBLIC RELEASE: set AP_IP + AP_GATEWAY to 192.168.4.1 and AP_SUBNET
+//    to 255.255.255.0 — the standard SoftAP address used throughout the docs. <<
 static const IPAddress AP_IP     (169, 254, 22, 22);
 static const IPAddress AP_GATEWAY(169, 254, 22, 22);   // the AP is its own gateway
 static const IPAddress AP_SUBNET (255, 255,  0,  0);

@@ -117,7 +117,7 @@ an OSC server for Companion/QLab (UDP 9700).
 
 ## Show control (Companion / QLab)
 
-Point a **Generic: OSC** connection at the hub (`169.254.22.22:9700`) or the
+Point a **Generic: OSC** connection at the hub (`192.168.4.1:9700`) or the
 PC app machine — same `/pts/...` addresses on both, full reference in
 [`docs/companion.md`](docs/companion.md) and the [PDF](docs/PTS_Overview.pdf).
 

@@ -5,7 +5,7 @@ Two OSC control servers speak the same `/pts/...` address space on UDP port
 
 | Target | When to use |
 |---|---|
-| **The hub itself** (`169.254.22.22`) | No PC needed — hub + display + mounts + Stream Deck is a complete rig.  Reachable from the LAN via a WiFi→LAN bridge joined to the CamMount AP, or from any machine joined to CamMount directly. |
+| **The hub itself** (`192.168.4.1`) | No PC needed — hub + display + mounts + Stream Deck is a complete rig.  Reachable from the LAN via a WiFi→LAN bridge joined to the CamMount AP, or from any machine joined to CamMount directly. |
 | **The PC app's machine** | When the PC app is running anyway (its server is configurable via `osc_enabled` / `osc_port` in the app config). |
 
 Both accept the identical addresses below, so Companion pages work unchanged
@@ -14,7 +14,7 @@ against either.  QLab network cues likewise.
 ## Companion connection
 
 1. Companion → **Connections** → add **Generic: OSC**
-2. **Target IP** = `169.254.22.22` (hub) or the PC app machine's IP ·
+2. **Target IP** = `192.168.4.1` (hub) or the PC app machine's IP ·
    **Target port** = `9700`
 3. Use the connection's **"Send message"** actions on buttons as below.
    Argument type matters: use **integer** arguments (floats also accepted).

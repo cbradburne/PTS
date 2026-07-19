@@ -236,7 +236,7 @@ def build():
     el.append(Spacer(1, 5))
     el.append(styled_table([
         [P("<b>Target</b>", "th"), P("<b>Address</b>", "th"), P("<b>When to use</b>", "th")],
-        [P("<b>The hub itself</b>", "cellb"), P("169.254.22.22", "monoc"),
+        [P("<b>The hub itself</b>", "cellb"), P("192.168.4.1", "monoc"),
          P("No PC needed - hub + display + mounts + Stream Deck is a complete "
            "rig. Reach it via a WiFi-to-LAN bridge joined to the CamMount AP, "
            "or any machine joined to CamMount directly.", "cell")],
