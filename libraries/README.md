@@ -53,5 +53,13 @@ These libraries are built into the board packages and do **not** need to be inst
 - `examples/`, `tests/`, `demos/`, `docs/` subfolders have been removed from
   libraries to reduce repository size. Only the source files needed to compile
   are included.
-- `lvgl` requires a `lv_conf.h` file in the sketch folder. Each firmware target
-  that uses LVGL has its own `lv_conf.h` with the appropriate configuration.
+- `lvgl` is configured by [`lv_conf.h`](lv_conf.h) in this folder — LVGL finds
+  it next to the `lvgl/` library directory (both for `tools/build.sh` and for
+  an Arduino IDE setup that copies `libraries/` wholesale, including this
+  file). Exception: `esp_mount_amoled175` defines `LV_CONF_INCLUDE_SIMPLE` and
+  carries its own sketch-folder `lv_conf.h` (PSRAM-pool setup for the bridge
+  board); the display target has no sketch-local config.
+- After changing `lv_conf.h`, rebuild **clean** (`rm -rf .build`, or clear the
+  IDE cache): the build cache does not reliably recompile LVGL when only the
+  config changes, and a stale build silently keeps the old settings (e.g.
+  LVGL's 64 KB default memory pool instead of the 192 KB configured here).
