@@ -28,7 +28,7 @@
 #define PIN_DE      5
 #define PIN_VSYNC   3
 #define PIN_HSYNC  46
-#define PIN_PCLK    7
+#define PIN_PCLK    7       // 7
 
 #define PIN_R0  1
 #define PIN_R1  2
@@ -56,11 +56,16 @@
 #define PIN_TOUCH_RST  -1   // RST not wired to a free GPIO on this board
 
 // Display timing for Waveshare ESP32-S3-Touch-LCD-7 (ST7262, 800×480)
+// 16 MHz is this panel's floor — tested at 12 MHz it doesn't just slow down,
+// it shows solid primary-colour blocks from boot (out of the ST7262's range).
 #define LCD_PCLK_HZ      (16 * 1000 * 1000)
 #define LCD_HBPORCH  40
 #define LCD_HFPORCH  40
 #define LCD_HPULSE   48
-#define LCD_VBPORCH  23
+// 30, not 23: at 23 the vertical sync margin is borderline for this panel —
+// during redraw bursts the image slips lines, so icons visibly "jump" and the
+// whole picture can settle vertically displaced.  30 blank lines is stable.
+#define LCD_VBPORCH  30
 #define LCD_VFPORCH   7
 #define LCD_VPULSE    1
 
@@ -2486,6 +2491,32 @@ static void init_lvgl() {
     // 150+ KB free at boot; the two PSRAM framebuffers don't consume DRAM).
     void *extra_heap = malloc(32 * 1024);
     if (extra_heap) lv_mem_add_pool(extra_heap, 32 * 1024);
+
+    // Even that is no longer enough: the v2 UI (Mounts panel, conflict prompt,
+    // and the Positions screen's 50-button grid) exhausts the pool during
+    // build_positions_screen() — lv_malloc() starts returning NULL, which
+    // glitches renders (starved draw-layer allocs) and crashed or hung the
+    // build (StoreProhibited via get_local_style(), or a silent spin).
+    //
+    // Beware the build cache: libraries/lv_conf.h sets LV_MEM_SIZE to 192 KB,
+    // but a stale .build/ (or Arduino IDE cache) compiled before that file
+    // existed bakes in LVGL's 64 KB default — and a TLSF built for a ≤64 KB
+    // pool silently REJECTS any added pool larger than 64 KB, so a single
+    // big lv_mem_add_pool() can be a no-op.  Hence the overflow is added as
+    // several 32 KB pools — a size that registers under either TLSF build —
+    // parked in PSRAM: 8 MB fitted, only ~1.5 MB used by the two frame
+    // buffers, and the S3's cache makes PSRAM fine for object/style structs.
+    // TLSF fills earlier pools first, so these are overflow-only.  After
+    // changing lv_conf.h, rebuild clean (rm -rf .build) so it actually takes.
+    int pools_ok = 0;
+    for (int p = 0; p < 8; p++) {
+        void *pool = heap_caps_malloc(32 * 1024, MALLOC_CAP_SPIRAM);
+        if (!pool) break;
+        if (!lv_mem_add_pool(pool, 32 * 1024)) { heap_caps_free(pool); break; }
+        pools_ok++;
+    }
+    Serial.printf("[DISP] LVGL: +%d x 32 KB PSRAM overflow pools\n", pools_ok);
+    if (pools_ok == 0) Serial.println("[DISP] WARNING: no LVGL PSRAM pools added");
 
     // Tick source
     const esp_timer_create_args_t tick_args = {
