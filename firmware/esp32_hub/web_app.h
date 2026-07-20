@@ -104,6 +104,32 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 #calib-set-btn{background:var(--blue);border-color:var(--blue-lit);}
 #calib-cancel-btn.ok{background:var(--green);border-color:var(--green-lit);color:#fff;}
 
+/* ---- mounts (pairing) page ---- */
+.mnt-wrap{max-width:560px;margin:0 auto;width:100%;}
+.mnt-h{font-size:16px;font-weight:600;color:var(--text);margin:4px 0 8px;}
+.mnt-note{font-size:12px;color:var(--dim);line-height:1.6;margin:0 0 16px;}
+.mnt-row{display:flex;align-items:center;gap:10px;padding:12px;margin-bottom:8px;
+  background:var(--surf);border:1px solid var(--border);border-radius:10px;}
+.mnt-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0;}
+.mnt-cam{font-weight:600;color:var(--text);font-size:14px;width:64px;flex-shrink:0;}
+.mnt-mac{flex:1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;color:var(--text);}
+.mnt-mac.un{color:var(--dim);font-family:inherit;font-style:italic;}
+.mnt-forget{padding:8px 16px;border-radius:8px;border:1px solid var(--red);
+  background:transparent;color:var(--red);font-size:13px;font-weight:600;cursor:pointer;}
+.mnt-forget:active{background:var(--red);color:#fff;}
+.mnt-forget-sp{width:1px;}
+/* ---- pairing-conflict sheet (shows over any page, like the hub display) ---- */
+#pair-sheet{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;
+  flex-direction:column;align-items:center;justify-content:center;z-index:60;padding:16px;}
+#pair-card{background:var(--surf);border:2px solid var(--red);border-radius:14px;
+  padding:20px 18px;max-width:460px;width:100%;}
+#pair-title{font-size:16px;font-weight:700;color:var(--red);margin-bottom:10px;}
+#pair-detail{font-size:13px;color:var(--text);margin-bottom:20px;line-height:1.6;}
+.pair-btns{display:flex;gap:8px;}
+.pair-btn{flex:1;padding:14px 4px;border-radius:8px;border:1px solid var(--border);
+  font-size:14px;font-weight:600;cursor:pointer;background:var(--surf2);color:var(--text);}
+.pair-btn.pair-replace{background:var(--red);border-color:var(--red);color:#fff;}
+
 /* ---- portrait ctrl bar ---- */
 .ctrl-bar{display:flex;gap:6px;padding:8px;background:var(--surf);
   border-top:1px solid var(--border);flex-shrink:0;}
@@ -374,6 +400,17 @@ canvas.hsl-c{display:block;touch-action:none;}
   </div>
 </div>
 
+<div id="pair-sheet">
+  <div id="pair-card">
+    <div id="pair-title">Pairing conflict</div>
+    <div id="pair-detail"></div>
+    <div class="pair-btns">
+      <button class="pair-btn pair-replace" id="pair-replace-btn">Replace</button>
+      <button class="pair-btn" id="pair-ignore-btn">Ignore</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===================================================== EXTENDED VIEW -->
 <div id="ext-view" class="view">
   <!-- Header: back button | nav tabs | ws-dot + e-stop -->
@@ -382,6 +419,7 @@ canvas.hsl-c{display:block;touch-action:none;}
     <nav class="ext-nav">
       <button class="ext-tab active" data-page="positions">Home</button>
       <button class="ext-tab" data-page="config">Config</button>
+      <button class="ext-tab" data-page="mounts">Mounts</button>
     </nav>
     <div style="display:flex;align-items:center;gap:8px;">
       <button class="ext-hdr-btn" id="btn-edit-ext">EDIT</button>
@@ -446,6 +484,19 @@ canvas.hsl-c{display:block;touch-action:none;}
       <div class="ext-config-cams" id="ext-config-cams"></div>
     </div>
 
+    <div class="ext-page" id="ext-page-mounts">
+      <div class="mnt-wrap">
+        <h2 class="mnt-h">Paired mounts</h2>
+        <p class="mnt-note">Each mount picks its camera number and hub on its own
+          screen; the hub binds it on first contact. This is the hub's live
+          pairing table &mdash; <b>Forget</b> frees a slot (a live mount re-pairs
+          itself within ~5&nbsp;s, so use it for a retired unit). If two mounts
+          claim the same number, a conflict prompt appears here to Replace or
+          Ignore.</p>
+        <div id="ext-mnt-list"></div>
+      </div>
+    </div>
+
   </div><!-- .ext-body -->
 </div><!-- #ext-view -->
 
@@ -476,6 +527,12 @@ const CMD_STATUS             = 0x80;
 const CMD_CONFIG_REPORT      = 0x86;  // 75B: ori_byte(1) + speeds(72) + stall(2)
 const CMD_CALIB_PROMPT       = 0x93;  // 1B sub-state
 const CMD_LA_MOVE_DIR        = 0x94;  // hub-injected: direction(1) — 0=min/◀, 1=max/▶, 0xFF=stopped
+// Pairing management (hub owns the mount table; these view/set/clear it)
+const CMD_GET_MOUNT_TABLE    = 0x9B;  // →hub, no payload: request a MOUNT_TABLE push
+const CMD_MOUNT_TABLE        = 0x9C;  // hub→: 30B = 5 × MAC(6); all-zero slot = unbound
+const CMD_PAIR_CONFLICT      = 0x9D;  // hub→: 13B = cam(1)+new_mac(6)+old_mac(6); cam=0 = dismiss
+const CMD_PAIR_DECIDE        = 0x9E;  // →hub: 8B = cam(1)+decision(1: 1=replace, 0=ignore)+new_mac(6)
+const CMD_PAIR_FORGET        = 0x9F;  // →hub: 1B = cam — clear (unbind) that slot
 // CalibPrompt sub-states (mirrors protocol.h CalibPrompt enum)
 const CP_MOVING_TO_A = 0x01;  // slider moving to home — wait
 const CP_WAIT_SET_A  = 0x02;  // at home: aim then Set A
@@ -609,6 +666,56 @@ function mkStartLookAtMove(id, subjId, direction, speedPreset) {
 }
 
 function mkGetConfig(id)  { return buildPkt(id, CMD_GET_CONFIG, null); }
+
+// ---- Pairing management (reads/writes the hub's mount table; nothing local) ----
+let mountTable   = [];      // 5 × [6 MAC bytes]; empty until the first MOUNT_TABLE
+let pairConflict = null;    // {cam, newMac[6], oldMac[6]} while a conflict is live
+
+function macStr(m) {
+    return (m && m.some(b => b))
+        ? m.map(b => b.toString(16).padStart(2, '0')).join(':') : null;
+}
+function reqMountTable() { wsSend(buildPkt(0xFE, CMD_GET_MOUNT_TABLE, null)); }
+function pairForget(cam) { wsSend(buildPkt(0xFE, CMD_PAIR_FORGET, [cam])); }
+function pairDecide(cam, decision) {
+    const mac = (pairConflict && pairConflict.cam === cam)
+        ? pairConflict.newMac : [0, 0, 0, 0, 0, 0];
+    wsSend(buildPkt(0xFE, CMD_PAIR_DECIDE, [cam, decision & 1, ...mac]));
+    // The hub echoes an updated table + a cam=0 dismiss, which clears the UI.
+}
+
+function refreshMounts() {
+    const el = document.getElementById('ext-mnt-list');
+    if (!el) return;
+    let h = '';
+    for (let i = 1; i <= NUM_MOUNTS; i++) {
+        const mac = macStr(mountTable[i - 1]);
+        h += '<div class="mnt-row">'
+           +   '<span class="mnt-dot" style="background:' + (CAM_ACCENT[i] || '#888') + '"></span>'
+           +   '<span class="mnt-cam">CAM ' + i + '</span>'
+           +   '<span class="mnt-mac' + (mac ? '' : ' un') + '">'
+           +     (mac || '— unpaired —') + '</span>'
+           +   (mac ? '<button class="mnt-forget" data-cam="' + i + '">Forget</button>'
+                    : '<span class="mnt-forget-sp"></span>')
+           + '</div>';
+    }
+    el.innerHTML = h;
+    el.querySelectorAll('.mnt-forget').forEach(b =>
+        b.addEventListener('click', () => pairForget(parseInt(b.dataset.cam, 10))));
+}
+
+function renderConflict() {
+    const sheet = document.getElementById('pair-sheet');
+    if (!sheet) return;
+    if (!pairConflict) { sheet.style.display = 'none'; return; }
+    const c = pairConflict, oldM = macStr(c.oldMac);
+    document.getElementById('pair-detail').innerHTML =
+        'A new device <b>' + macStr(c.newMac) + '</b> is claiming <b>CAM ' + c.cam + '</b>'
+        + (oldM ? ', which is currently paired to <b>' + oldM + '</b>.' : '.')
+        + '<br><br><b>Replace</b> binds the new device to CAM ' + c.cam
+        + '; <b>Ignore</b> keeps the current one.';
+    sheet.style.display = 'flex';
+}
 function mkSetSpeedPreset(id, group, preset, speed, accel) {
     const p = new Uint8Array(10);
     p[0]=group; p[1]=preset;
@@ -773,7 +880,7 @@ function wsConnect() {
         sock.binaryType = 'arraybuffer';
         // Capture `sock` (not `ws`) in each handler so a stale socket's events
         // never operate on a newer socket that has already replaced `ws`.
-        sock.onopen    = () => { if (ws === sock) setWsSt(true); };
+        sock.onopen    = () => { if (ws === sock) { setWsSt(true); reqMountTable(); } };
         sock.onclose   = () => { if (ws === sock) { setWsSt(false); _wsScheduleRetry(); } };
         sock.onerror   = () => sock.close();   // close THIS socket, not whatever ws points to now
         sock.onmessage = e => onPkt(new Uint8Array(e.data));
@@ -991,6 +1098,24 @@ function _onOnePkt(buf, off) {
             cs.zmThresh = buf[base + 74];
         }
         if (_extActive && _extPage === 'config') refreshExtConfig();
+    }
+
+    if (cmd === CMD_MOUNT_TABLE && plen >= 30) {
+        const base = off + 7;
+        mountTable = [];
+        for (let i = 0; i < NUM_MOUNTS; i++)
+            mountTable.push(Array.from(buf.subarray(base + i * 6, base + i * 6 + 6)));
+        if (_extActive && _extPage === 'mounts') refreshMounts();
+    }
+
+    if (cmd === CMD_PAIR_CONFLICT && plen >= 13) {
+        const base = off + 7, cam = buf[base];
+        pairConflict = (cam >= 1 && cam <= NUM_MOUNTS) ? {
+            cam:    cam,
+            newMac: Array.from(buf.subarray(base + 1, base + 7)),
+            oldMac: Array.from(buf.subarray(base + 7, base + 13)),
+        } : null;                       // cam 0 = dismiss
+        renderConflict();
     }
 }
 
@@ -1889,6 +2014,7 @@ function showExtPage(page) {
             if (camSt[i].connected) wsSend(mkGetConfig(i));
         refreshExtConfig();
     }
+    else if (page === 'mounts') { reqMountTable(); refreshMounts(); }
 }
 
 // ---- Status tiles ----
@@ -2556,6 +2682,10 @@ window.addEventListener('DOMContentLoaded', () => {
         () => wsSend(mkEStop(0x00)));
     document.querySelectorAll('.ext-tab').forEach(tab =>
         tab.addEventListener('click', () => showExtPage(tab.dataset.page)));
+    document.getElementById('pair-replace-btn').addEventListener('click',
+        () => { if (pairConflict) pairDecide(pairConflict.cam, 1); });
+    document.getElementById('pair-ignore-btn').addEventListener('click',
+        () => { if (pairConflict) pairDecide(pairConflict.cam, 0); });
 
     // ---- Extended view: auto-activate if pref says so ----
     // Small delay ensures checkOrientation() runs first and portrait/landscape

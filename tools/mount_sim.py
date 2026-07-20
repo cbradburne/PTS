@@ -38,6 +38,10 @@ FAULT CONSOLE (stdin)
     nack N CODE         force next command to mount N to NACK
                         (codes: crc len cmd param busy noref)
     drop P              drop STATUS with probability P (0-1), e.g. drop 0.3
+    conflict [N]        raise a pairing conflict on cam N (default 1): a new
+                        device claims a bound slot — resolve with Replace/Ignore
+                        from any surface (web app / PC app / hub display)
+    table               print the simulated paired-mount table
     state               print the simulator state table
     help / quit
 """
@@ -272,6 +276,10 @@ class HubSim:
         # give every mount slider+look-at so all UI paths are exercisable
         for m in self.mounts.values():
             m.has_slider = True
+        # Paired-mount table (5 × 6-byte MAC; all-zero slot = unbound).  Seeded
+        # bound for all 5, matching the alive mounts — the hub owns this table;
+        # clients (web/PC/display) view and set/clear it over the protocol.
+        self.mount_table = [bytes([0x02, 0, 0, 0, 0, i]) for i in range(1, NUM_MOUNTS + 1)]
 
     # ── output ───────────────────────────────────────────────────────────
     def log(self, msg: str):
@@ -296,6 +304,10 @@ class HubSim:
              hub_inject: int | None = None):
         mid = hub_inject if hub_inject is not None else mount_id
         self.send_raw(build_packet(mid, cmd, payload, seq=self.nseq()))
+
+    def send_mount_table(self):
+        # 30-byte payload = 5 × MAC(6); hub sentinel 0xFE, like the real hub
+        self.emit(0xFE, Cmd.MOUNT_TABLE, b"".join(self.mount_table))
 
     # ── periodic broadcast ────────────────────────────────────────────────
     def ticker(self):
@@ -371,6 +383,27 @@ class HubSim:
                     try: c.close()
                     except OSError: pass
                 self.clients.clear()
+            return
+
+        # ── Pairing management (hub-scoped; works even while wedged) ──────────
+        if cmd == Cmd.GET_MOUNT_TABLE:
+            self.send_mount_table(); return
+        if cmd == Cmd.PAIR_DECIDE and len(pkt.payload) >= 8:
+            cam, decision, mac = pkt.payload[0], pkt.payload[1], bytes(pkt.payload[2:8])
+            if 1 <= cam <= NUM_MOUNTS and decision == 1:
+                self.mount_table[cam - 1] = mac          # REPLACE: set the binding
+                self.log(f"pair: REPLACE cam{cam} -> {mac.hex(':')}")
+            else:
+                self.log(f"pair: IGNORE cam{cam}")
+            self.emit(0xFE, Cmd.PAIR_CONFLICT, bytes(13))  # cam=0 → dismiss prompt everywhere
+            self.send_mount_table()
+            return
+        if cmd == Cmd.PAIR_FORGET and len(pkt.payload) >= 1:
+            cam = pkt.payload[0]
+            if 1 <= cam <= NUM_MOUNTS:
+                self.mount_table[cam - 1] = bytes(6)       # CLEAR: unbind the slot
+                self.log(f"pair: FORGET cam{cam}")
+            self.send_mount_table()
             return
 
         if self.wedged:
@@ -616,6 +649,18 @@ class HubSim:
                 elif c == "wedge":   self.wedged = True
                 elif c == "unwedge": self.wedged = False
                 elif c == "drop":    self.drop_p = float(parts[1])
+                elif c == "conflict":
+                    cam = int(parts[1]) if len(parts) > 1 else 1
+                    newmac = bytes([0x02, 0, 0, 0, 0xAA, cam])
+                    oldmac = (self.mount_table[cam - 1]
+                              if 1 <= cam <= NUM_MOUNTS else bytes(6))
+                    self.emit(0xFE, Cmd.PAIR_CONFLICT,
+                              bytes([cam]) + newmac + oldmac)
+                elif c == "table":
+                    for i, mac in enumerate(self.mount_table, 1):
+                        print(f"  cam{i}: "
+                              f"{mac.hex(':') if any(mac) else '- unpaired -'}")
+                    continue
                 elif c == "nack":
                     self.mounts[int(parts[1])].force_nack = NACK_CODES[parts[2]]
                 elif c == "state":
@@ -732,6 +777,25 @@ def selftest() -> int:
     seen.clear(); s.sendall(pkt_e_stop(0)); pump(0.4)
     check("broadcast E-STOP ACKed by all mounts",
           len({p.mount_id for p in seen.get(Cmd.ACK, [])}) == NUM_MOUNTS)
+
+    # ── Pairing management: view / clear / set the hub's mount table ──────────
+    seen.clear(); s.sendall(build_packet(0xFE, Cmd.GET_MOUNT_TABLE, b"")); pump(0.3)
+    mt = seen.get(Cmd.MOUNT_TABLE, [])
+    check("GET_MOUNT_TABLE → 30-byte MOUNT_TABLE, 5 slots bound",
+          bool(mt) and len(mt[-1].payload) == 30 and
+          all(any(mt[-1].payload[i*6:i*6+6]) for i in range(NUM_MOUNTS)))
+
+    seen.clear(); s.sendall(build_packet(0xFE, Cmd.PAIR_FORGET, bytes([3]))); pump(0.3)
+    mt = seen.get(Cmd.MOUNT_TABLE, [])
+    check("PAIR_FORGET cam3 → slot 3 cleared in pushed table",
+          bool(mt) and not any(mt[-1].payload[12:18]))
+
+    newmac = bytes([0x02, 0, 0, 0, 0xAA, 3])
+    seen.clear()
+    s.sendall(build_packet(0xFE, Cmd.PAIR_DECIDE, bytes([3, 1]) + newmac)); pump(0.3)
+    mt = seen.get(Cmd.MOUNT_TABLE, [])
+    check("PAIR_DECIDE replace → slot 3 rebound to the new device",
+          bool(mt) and mt[-1].payload[12:18] == newmac)
 
     sim.running = False
     print("[selftest] PASS")

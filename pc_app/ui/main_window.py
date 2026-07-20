@@ -26,7 +26,7 @@ import logging
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QSizePolicy, QFrame, QInputDialog,
-    QDialog, QDialogButtonBox
+    QDialog, QDialogButtonBox, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QTimer
 from PyQt6.QtGui import QFont, QColor, QPainter, QPaintEvent
@@ -502,11 +502,13 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self._estop_btn.clicked.connect(lambda: self._mm.send_e_stop())
 
+        self._pair_conflict_box = None   # open pairing-conflict QMessageBox, or None
         self._mm.mount_status_updated.connect(self._on_status_updated)
         self._mm.mount_connected.connect(self._on_mount_connected)
         self._mm.mount_disconnected.connect(self._on_mount_disconnected)
         self._mm.limits_found.connect(self._on_limits_found)
         self._mm.state_report_received.connect(self._on_state_report)
+        self._mm.pair_conflict.connect(self._on_pair_conflict)
 
         self._grid.recall_requested.connect(self._on_recall)
         self._grid.store_requested.connect(self._on_store)
@@ -928,6 +930,40 @@ class MainWindow(QMainWindow):
             self._grid.set_sl_preset(mount_id, sl)
         if 1 <= pt <= 4 and 1 <= sl <= 4:
             self._dispatcher.sync_preset_from_mount(mount_id, pt, sl)
+
+    def _on_pair_conflict(self, conflict) -> None:
+        """A device is claiming a camera number already bound to another mount.
+        Show a Replace/Ignore prompt — like the hub display and web app — so
+        pairing can be resolved from the PC with no console.  cam 0 = the hub
+        cleared the conflict (device left, or it was resolved elsewhere)."""
+        cam = conflict.cam
+        if cam < 1 or cam > 5:
+            if self._pair_conflict_box is not None:
+                self._pair_conflict_box.done(0)   # dismiss the open prompt
+            return
+        if self._pair_conflict_box is not None:
+            return                                # a prompt is already showing
+
+        def mac(b: bytes) -> str:
+            return ":".join(f"{x:02x}" for x in b)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Pairing conflict")
+        box.setText(
+            f"A new device {mac(conflict.new_mac)} is claiming CAM {cam}"
+            + (f",\ncurrently paired to {mac(conflict.old_mac)}."
+               if any(conflict.old_mac) else "."))
+        box.setInformativeText("Replace binds the new device to this camera; "
+                               "Ignore keeps the current one.")
+        replace_btn = box.addButton("Replace", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Ignore", QMessageBox.ButtonRole.RejectRole)
+        self._pair_conflict_box = box
+        box.exec()
+        self._pair_conflict_box = None
+        if box.clickedButton() is replace_btn:
+            self._mm.send_pair_decide(cam, True, conflict.new_mac)     # set
+        elif box.clickedButton() is not None:
+            self._mm.send_pair_decide(cam, False, conflict.new_mac)    # ignore
 
     @pyqtSlot(int)
     def _on_status_updated(self, mount_id: int) -> None:

@@ -114,6 +114,15 @@ class Cmd(IntEnum):
     POSITION          = 0x9A   # mount→clients: live positions, 17B (see PositionPayload);
                                # 5 Hz while moving / 1 Hz at rest / instant on GET_POSITION
 
+    # Pairing management — hub mount-table access for all clients (hub owns the
+    # table in NVS; these give the PC/web app the same view/set/clear the 7"
+    # display has).  Hub-consumed or hub-originated; never forwarded to mounts.
+    GET_MOUNT_TABLE   = 0x9B   # client→hub, no payload: request a MOUNT_TABLE push
+    MOUNT_TABLE       = 0x9C   # hub→clients, 30B: 5 × MAC(6); all-zero slot = unbound
+    PAIR_CONFLICT     = 0x9D   # hub→clients, 13B: cam(1)+new_mac(6)+old_mac(6); cam=0 = dismiss
+    PAIR_DECIDE       = 0x9E   # client→hub, 8B: cam(1)+decision(1: 1=replace, 0=ignore)+new_mac(6)
+    PAIR_FORGET       = 0x9F   # client→hub, 1B: cam — clear (unbind) that slot
+
 
 # CMD_HEALTH node_type values (payload byte [0])
 HEALTH_NODE_NAMES = {0: "hub", 1: "bridge", 2: "teensy", 3: "display"}
@@ -1064,3 +1073,52 @@ def pkt_switch_subject(mount_id: int, subject_id: int) -> bytes:
 def pkt_get_subjects(mount_id: int) -> bytes:
     """Request the full subject list from the mount."""
     return build_packet(mount_id, Cmd.GET_SUBJECTS)
+
+
+# ---------------------------------------------------------------------------
+# Pairing management — the hub owns the mount table; clients view/set/clear it.
+# Hub-scoped, so these carry the hub sentinel mount_id (like HUB_RESTART).
+# ---------------------------------------------------------------------------
+HUB_SENTINEL              = 0xFE
+MOUNT_TABLE_PAYLOAD_LEN   = 30   # 5 × MAC(6)
+PAIR_CONFLICT_PAYLOAD_LEN = 13   # cam(1) + new_mac(6) + old_mac(6)
+
+
+def pkt_get_mount_table() -> bytes:
+    """Ask the hub to push its current CMD_MOUNT_TABLE."""
+    return build_packet(HUB_SENTINEL, Cmd.GET_MOUNT_TABLE)
+
+
+def pkt_pair_decide(cam: int, decision: int, mac: bytes) -> bytes:
+    """Resolve a pairing conflict on cam 1-5.  decision: 1 = replace (bind the
+    new device to this slot), 0 = ignore (keep the current one)."""
+    payload = bytes([cam & 0xFF, decision & 0x01]) + bytes(mac[:6]).ljust(6, b"\x00")
+    return build_packet(HUB_SENTINEL, Cmd.PAIR_DECIDE, payload)
+
+
+def pkt_pair_forget(cam: int) -> bytes:
+    """Clear (unbind) the pairing for cam 1-5."""
+    return build_packet(HUB_SENTINEL, Cmd.PAIR_FORGET, bytes([cam & 0xFF]))
+
+
+def decode_mount_table(payload: bytes) -> list[bytes]:
+    """CMD_MOUNT_TABLE → 5 × 6-byte MAC; an all-zero entry means unbound."""
+    if len(payload) < MOUNT_TABLE_PAYLOAD_LEN:
+        raise ParseError(f"MOUNT_TABLE payload too short: {len(payload)}")
+    return [bytes(payload[i * 6:i * 6 + 6]) for i in range(NUM_MOUNTS)]
+
+
+@dataclass
+class PairConflictPayload:
+    cam: int        # camera 1-5, or 0 = dismiss the prompt
+    new_mac: bytes  # the device now claiming the slot
+    old_mac: bytes  # the device currently bound to it
+
+
+def decode_pair_conflict(payload: bytes) -> PairConflictPayload:
+    """CMD_PAIR_CONFLICT → (cam, new_mac, old_mac); cam 0 dismisses."""
+    if len(payload) < PAIR_CONFLICT_PAYLOAD_LEN:
+        raise ParseError(f"PAIR_CONFLICT payload too short: {len(payload)}")
+    return PairConflictPayload(cam=payload[0],
+                               new_mac=bytes(payload[1:7]),
+                               old_mac=bytes(payload[7:13]))

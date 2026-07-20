@@ -46,6 +46,11 @@
 // CMD_CONFIG_REPORT payload size: 1 orientation byte + 72 speed bytes + 2 stall thresholds = 75
 #define CONFIG_REPORT_PAYLOAD_LEN  75
 
+// Pairing management payload sizes (mirror the disp_uart.h DISP_MSG_* messages)
+#define MOUNT_TABLE_PAYLOAD_LEN    30   // 5 × MAC(6); an all-zero slot = unbound
+#define PAIR_CONFLICT_PAYLOAD_LEN  13   // cam(1) + new_mac(6) + old_mac(6)
+#define PAIR_DECIDE_PAYLOAD_LEN     8   // cam(1) + decision(1) + new_mac(6)
+
 // v2 look-at subject constants
 #define MAX_SUBJECTS            8
 #define MAX_SLIDER_MOVES        8
@@ -150,6 +155,20 @@ typedef enum : uint8_t {
                                    // report after boot, low heap, loop stall, or a TX-fail jump.
                                    // Sender identity: packet mount_id 1-5 = that mount (byte[0]
                                    // says bridge vs teensy), 0xFE = hub, 0xFD = hub display.
+
+    // ── Pairing management: hub mount-table access for ALL clients ──────────
+    // The hub owns the paired-mount table (5 slots × MAC, in NVS).  These
+    // commands give TCP / WebSocket / USB clients the same view / set / clear
+    // capability the 7" display already has, so the PC app and web app can
+    // manage pairing too — always operating on the hub's stored table, never a
+    // local copy.  Hub-consumed (client→hub) or hub-originated (hub→clients);
+    // never forwarded to mounts.  Payloads mirror the disp_uart.h DISP_MSG_*
+    // pairing messages byte-for-byte, so the hub reuses one code path.
+    CMD_GET_MOUNT_TABLE   = 0x9B,  // client→hub, no payload: request a CMD_MOUNT_TABLE push
+    CMD_MOUNT_TABLE       = 0x9C,  // hub→clients, 30B: 5 × MAC(6); an all-zero slot = unbound
+    CMD_PAIR_CONFLICT     = 0x9D,  // hub→clients, 13B: cam(1)+new_mac(6)+old_mac(6); cam=0 = dismiss
+    CMD_PAIR_DECIDE       = 0x9E,  // client→hub, 8B: cam(1)+decision(1: 1=replace/set, 0=ignore)+new_mac(6)
+    CMD_PAIR_FORGET       = 0x9F,  // client→hub, 1B: cam — clear (unbind) that slot (live mount re-pairs in ~5 s)
 } CmdType;
 
 // CMD_HEALTH node_type values (payload byte [0])

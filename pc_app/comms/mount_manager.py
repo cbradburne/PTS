@@ -40,6 +40,9 @@ from .protocol import (
     pkt_set_ref, pkt_set_slider_move, pkt_start_look_at_move,
     pkt_switch_subject,
     MAX_SUBJECTS,
+    # pairing management (hub mount-table view / set / clear)
+    pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
+    decode_mount_table, decode_pair_conflict, PairConflictPayload,
 )
 
 
@@ -128,12 +131,19 @@ class MountManager(QObject):
     la_move_dir_received   = pyqtSignal(int, int)      # mount_id, direction (0=◀, 1=▶, 0xFF=stopped)
     position_updated       = pyqtSignal(int, object)   # mount_id, PositionPayload
 
+    # Pairing management (hub-owned mount table; nothing stored locally)
+    mount_table_updated    = pyqtSignal(list)          # [5 × 6-byte MAC]; all-zero = unbound
+    pair_conflict          = pyqtSignal(object)        # PairConflictPayload; cam 0 = dismiss
+
     def __init__(self, bridge: Bridge, parent=None):
         super().__init__(parent)
         self._bridge = bridge
         self._states: dict[int, MountState_] = {
             i: MountState_(mount_id=i) for i in range(1, NUM_MOUNTS + 1)
         }
+        # Last mount table pushed by the hub (5 × 6-byte MAC; all-zero = unbound).
+        # Mirror only — the hub is the source of truth.
+        self._mount_table: list[bytes] = [b"\x00" * 6 for _ in range(NUM_MOUNTS)]
 
         bridge.on_packet(self._on_packet)
         self.destroyed.connect(lambda: bridge.off_packet(self._on_packet))
@@ -199,6 +209,24 @@ class MountManager(QObject):
 
     def send_find_home(self, mount_id: int, axis: Axis, stall_threshold: int = 80) -> None:
         self._send(pkt_find_home(mount_id, axis, stall_threshold))
+
+    # ---- Pairing management (hub owns the table; view / set / clear it) ----
+    def request_mount_table(self) -> None:
+        """Ask the hub to push its current pairing table (CMD_MOUNT_TABLE)."""
+        self._send(pkt_get_mount_table())
+
+    def send_pair_decide(self, cam: int, replace: bool, mac: bytes) -> None:
+        """Resolve a conflict on cam 1-5: replace=True binds the new device to
+        the slot (set); replace=False ignores the claim (keep current)."""
+        self._send(pkt_pair_decide(cam, 1 if replace else 0, mac))
+
+    def send_pair_forget(self, cam: int) -> None:
+        """Clear (unbind) a camera's pairing on the hub."""
+        self._send(pkt_pair_forget(cam))
+
+    def mount_table(self) -> list[bytes]:
+        """Last table the hub pushed (5 × 6-byte MAC; all-zero = unbound)."""
+        return list(self._mount_table)
 
     def send_set_limits(self, mount_id: int, axis: Axis,
                         min_steps: int, max_steps: int) -> None:
@@ -319,6 +347,22 @@ class MountManager(QObject):
         try:
             self._states  # cheap attribute access — raises RuntimeError if deleted
         except RuntimeError:
+            return
+
+        # Hub-level pairing packets carry the hub sentinel (0xFE), so they must
+        # be handled BEFORE the 1-5 mount guard below.
+        if pkt.cmd == Cmd.MOUNT_TABLE:
+            try:
+                self._mount_table = decode_mount_table(pkt.payload)
+                self.mount_table_updated.emit(list(self._mount_table))
+            except Exception as e:
+                log.error(f"MOUNT_TABLE decode failed: {e}")
+            return
+        if pkt.cmd == Cmd.PAIR_CONFLICT:
+            try:
+                self.pair_conflict.emit(decode_pair_conflict(pkt.payload))
+            except Exception as e:
+                log.error(f"PAIR_CONFLICT decode failed: {e}")
             return
 
         mid = pkt.mount_id

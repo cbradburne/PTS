@@ -159,6 +159,16 @@ static void disp_set_disconnected(uint8_t mount_id) {
     portEXIT_CRITICAL(&_disp_mux);
 }
 
+// Network-client mirrors of the two display pushes below (defined later, after
+// the client-broadcast helpers).  Every table change and every conflict already
+// funnels through disp_send_mount_table() / disp_send_pair_conflict() for the
+// console, so notifying TCP/WS/USB clients from the same two spots keeps the web
+// app and PC app in lock-step with the display — all reading the hub's one table.
+// Both run in loop() context (on_espnow_recv only queues), so inline sends are safe.
+static void bcast_mount_table();
+static void bcast_pair_conflict(uint8_t cam, const uint8_t *new_mac,
+                                const uint8_t *old_mac);
+
 // Push the paired-mount table (5 × MAC, zero = unbound) to the display board.
 // Sent at boot, on every table change, and on DISP_MSG_GET_MOUNT_TABLE.
 static void disp_send_mount_table() {
@@ -167,6 +177,7 @@ static void disp_send_mount_table() {
     portENTER_CRITICAL(&_disp_mux);
     disp_uart_send(Serial1, DISP_MSG_MOUNT_TABLE, buf, sizeof(buf));
     portEXIT_CRITICAL(&_disp_mux);
+    bcast_mount_table();                        // ...and to TCP / WS / USB clients
 }
 
 // Show (cam 1-5) or dismiss (cam 0) the pairing-conflict prompt on the display.
@@ -179,6 +190,7 @@ static void disp_send_pair_conflict(uint8_t cam, const uint8_t *new_mac,
     portENTER_CRITICAL(&_disp_mux);
     disp_uart_send(Serial1, DISP_MSG_PAIR_CONFLICT, buf, sizeof(buf));
     portEXIT_CRITICAL(&_disp_mux);
+    bcast_pair_conflict(cam, new_mac, old_mac);   // ...and to TCP / WS / USB clients
 }
 
 static void disp_update_preset(uint8_t mount_id, uint8_t pt, uint8_t sz) {
@@ -648,6 +660,57 @@ static void broadcast_to_all(const uint8_t *data, uint16_t len) {
 }
 
 // ---------------------------------------------------------------------------
+// Pairing management — mirror the hub's table / conflict to network clients
+// ---------------------------------------------------------------------------
+// Hub-injected packets (mount_id 0xFE = hub sentinel), not part of the relay
+// queue, so — exactly like intercept_la_move_dir() — they go to TCP/serial via
+// broadcast_to_all() and to WebSocket via _ws.binaryAll().  Called only from
+// disp_send_mount_table()/disp_send_pair_conflict(), always in loop() context.
+static uint16_t _pair_seq = 0;
+
+static void bcast_mount_table() {
+    uint8_t buf[MOUNT_TABLE_PAYLOAD_LEN];
+    memcpy(buf, _mount_mac, sizeof(buf));
+    uint8_t raw[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_MOUNT_TABLE, buf, sizeof(buf));
+    broadcast_to_all(raw, n);
+    _ws.binaryAll(raw, (size_t)n);
+}
+
+static void bcast_pair_conflict(uint8_t cam, const uint8_t *new_mac,
+                                const uint8_t *old_mac) {
+    uint8_t buf[PAIR_CONFLICT_PAYLOAD_LEN] = {};
+    buf[0] = cam;
+    if (new_mac) memcpy(buf + 1, new_mac, 6);
+    if (old_mac) memcpy(buf + 7, old_mac, 6);
+    uint8_t raw[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_PAIR_CONFLICT, buf, sizeof(buf));
+    broadcast_to_all(raw, n);
+    _ws.binaryAll(raw, (size_t)n);
+}
+
+// Hub-scoped pairing commands from any client (TCP / WebSocket / USB).  The hub
+// owns the mount table; these view / set / clear it and must NOT reach a mount.
+// Returns true if consumed (the caller then stops — does not forward).
+static bool handle_pairing_cmd(const ParsedPacket &pkt) {
+    switch (pkt.cmd) {
+    case CMD_GET_MOUNT_TABLE:
+        bcast_mount_table();                       // refresh every client's view
+        return true;
+    case CMD_PAIR_DECIDE:                           // set: replace (1) / ignore (0)
+        if (pkt.payload_len >= PAIR_DECIDE_PAYLOAD_LEN)
+            pair_decide(pkt.payload[0], pkt.payload[1], pkt.payload + 2);
+        return true;
+    case CMD_PAIR_FORGET:                           // clear: unbind a slot
+        if (pkt.payload_len >= 1)
+            pair_forget(pkt.payload[0]);
+        return true;
+    default:
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Forward packet to mount(s)
 // ---------------------------------------------------------------------------
 
@@ -673,6 +736,7 @@ static void intercept_la_move_dir(uint8_t mount_id, uint8_t dir) {
 
 static void forward_to_mounts(const ParsedPacket &pkt) {
     _last_client_cmd_ms = millis();   // any client traffic defers the maintenance restart
+    if (handle_pairing_cmd(pkt)) return;   // hub-scoped pairing — handled here, not sent to mounts
     uint8_t  raw[PKT_BUF_SIZE + 4];
     uint16_t raw_len = build_packet(raw, pkt.mount_id, pkt.seq, pkt.cmd,
                                     pkt.payload, pkt.payload_len);

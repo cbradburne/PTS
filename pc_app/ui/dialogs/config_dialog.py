@@ -54,6 +54,10 @@ class ConfigDialog(QWidget):
         self._mm.config_report_received.connect(self._on_config_report)
         # Request config from all online mounts immediately
         self._request_all_configs()
+        # Pairing table (hub-owned): live-refresh + request an initial push
+        self._mm.mount_table_updated.connect(self._refresh_mount_table)
+        self._refresh_mount_table(self._mm.mount_table())
+        self._mm.request_mount_table()
 
     # ── QDialog-compatible surface (this is a QWidget — see class note) ──
     def accept(self) -> None:
@@ -427,7 +431,51 @@ class ConfigDialog(QWidget):
         ops_vl.addLayout(grid)
         form.addRow(ops_box)
 
+        # ---- Paired mounts (hub pairing table: view / forget) ----
+        pair_box = QGroupBox("Paired Mounts")
+        pair_vl  = QVBoxLayout(pair_box)
+        pair_note = QLabel(
+            "The hub owns the pairing table; this shows its live state (nothing "
+            "is stored here).  Forget frees a slot — a live mount re-pairs itself "
+            "within ~5 s, so use it for a retired unit.  A same-number conflict "
+            "pops a Replace / Ignore prompt.")
+        pair_note.setWordWrap(True)
+        pair_vl.addWidget(pair_note)
+
+        pair_grid = QGridLayout()
+        pair_grid.setSpacing(6)
+        self._pair_mac_lbls:    dict[int, QLabel]      = {}
+        self._pair_forget_btns: dict[int, QPushButton] = {}
+        for row, mid in enumerate(range(1, 6)):
+            cam_lbl = QLabel(self._config.mount_label(mid))
+            cam_lbl.setStyleSheet("font-weight: bold;")
+            mac_lbl = QLabel("—")
+            mac_lbl.setStyleSheet("font-family: monospace; color: #8a97a8;")
+            forget_btn = QPushButton("Forget")
+            forget_btn.setFixedHeight(28)
+            forget_btn.clicked.connect(lambda checked, m=mid: self._mm.send_pair_forget(m))
+            pair_grid.addWidget(cam_lbl,    row, 0)
+            pair_grid.addWidget(mac_lbl,    row, 1)
+            pair_grid.addWidget(forget_btn, row, 2)
+            self._pair_mac_lbls[mid]    = mac_lbl
+            self._pair_forget_btns[mid] = forget_btn
+        pair_grid.setColumnStretch(1, 1)
+        pair_vl.addLayout(pair_grid)
+        form.addRow(pair_box)
+
         return w
+
+    @staticmethod
+    def _fmt_mac(mac: bytes) -> str:
+        return ":".join(f"{b:02x}" for b in mac)
+
+    def _refresh_mount_table(self, table: list) -> None:
+        """Update the Paired Mounts rows from the hub's table (5 × 6-byte MAC)."""
+        for mid in range(1, 6):
+            mac   = table[mid - 1] if len(table) >= mid else b"\x00" * 6
+            bound = any(mac)
+            self._pair_mac_lbls[mid].setText(self._fmt_mac(mac) if bound else "— unpaired —")
+            self._pair_forget_btns[mid].setVisible(bound)
 
     def _do_home_slider(self, mount_id: int) -> None:
         key   = f"m{mount_id}"
