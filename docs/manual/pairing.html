@@ -51,10 +51,12 @@
 
     <h2>When two mounts pick the same number</h2>
     <p>If two mounts claim the same camera number, the hub notices and raises a
-    <strong>conflict prompt on the console</strong> — a one-tap
-    <strong>Replace</strong> / <strong>Ignore</strong> choice — so you resolve it
-    without digging through settings. Give one of them a different number in Setup
-    and the conflict clears.</p>
+    <strong>conflict prompt on every controller at once</strong> — the hub
+    touchscreen, the web app's <strong>Mounts</strong> page, and the PC app — a
+    one-tap <strong>Replace</strong> / <strong>Ignore</strong> choice on any of
+    them. Replace binds the new device to that camera; Ignore keeps the current
+    one. Or just give one mount a different number in Setup and the conflict
+    clears itself.</p>
 
     <h2>Moving between venues</h2>
     <div class="tip"><b>Pair to more than one hub</b> A mount can be paired to
@@ -67,10 +69,18 @@
     when the channel moves, so a rig set up in one place comes up working in another
     without intervention.</p>
 
+    <h2>Managing pairing from any surface</h2>
+    <p>The hub owns the pairing table; every controller is just a window onto it.
+    The <strong>hub touchscreen</strong>, the web app's <strong>Mounts</strong>
+    page, and the PC app's <strong>Config → Paired Mounts</strong> all show the
+    same live table and can act on it — so a rig with just a hub and a phone (or a
+    PC) is fully manageable, no console required.</p>
+
     <h2>Forgetting a mount</h2>
-    <p>The console's pairing UI can <strong>forget a mount</strong> the hub has
+    <p>Any of those surfaces can <strong>forget a mount</strong> the hub has
     learned — useful when retiring or swapping hardware, so a stale mount doesn't
-    linger in the hub's list.</p>
+    linger in the hub's list. (A mount that's still powered on simply re-pairs
+    itself within about five seconds, so Forget is for units that are gone.)</p>
 
     <div class="note"><b>Under the hood</b> Pairing rides on ESP-NOW, and identity
     lives in the mount's and hub's non-volatile storage — see
