@@ -2692,7 +2692,7 @@ static void conflict_panel_fill() {
     fmt_mac(m2, sizeof(m2), _pc_old);
     snprintf(buf, sizeof(buf), "New device %s", m1);
     lv_label_set_text(_pc_l1, buf);
-    snprintf(buf, sizeof(buf), "claims CAM %u — bound to %s", (unsigned)_pc_cam, m2);
+    snprintf(buf, sizeof(buf), "claims CAM %u - bound to %s", (unsigned)_pc_cam, m2);
     lv_label_set_text(_pc_l2, buf);
 }
 

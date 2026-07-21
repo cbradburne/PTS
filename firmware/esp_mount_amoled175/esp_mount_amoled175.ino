@@ -198,6 +198,22 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area,
     lv_display_flush_ready(disp);
 }
 
+// The CO5300 AMOLED addresses columns in pairs, so a flush window starting on an
+// odd column (or with an odd width) leaves the panel's write pointer misaligned:
+// every row lands one pixel over and the region renders visibly SHEARED.
+// Full-screen redraws (x=0, w=466) are naturally aligned, which is why only small
+// partial updates showed it — notably the centred SETUP status line, whose x1 is
+// (466 - text_width)/2 and so flips parity with the message being displayed.
+// Round every invalidated area out to even bounds BEFORE LVGL renders it, so the
+// rendered px_map always matches the widened, aligned window.
+static void lvgl_rounder_cb(lv_event_t *e) {
+    lv_area_t *a = lv_event_get_invalidated_area(e);
+    a->x1 &= ~1;    // start on an even column
+    a->x2 |= 1;     // end on an odd column  → even width
+    a->y1 &= ~1;
+    a->y2 |= 1;
+}
+
 // ---------------------------------------------------------------------------
 // Display brightness / dim
 // ---------------------------------------------------------------------------
@@ -315,8 +331,6 @@ static uint32_t _last_teensy_st_ms   = 0;
 static uint32_t _last_heartbeat_ms   = 0;
 static int8_t   _last_rssi           = 0;
 static uint32_t _last_rssi_update_ms = 0;
-static uint32_t _loop_count          = 0;   // increments every loop — proves loop() is alive
-static uint32_t _last_diag_update_ms = 0;
 
 static uint8_t _tx_buf[PKT_BUF_SIZE + 4];
 static volatile uint8_t _espnow_consec_fails   = 0;   // consecutive send failures → peer refresh
@@ -383,10 +397,6 @@ static lv_obj_t *_ring         = nullptr;   // status ring
 static lv_obj_t *_lbl_num      = nullptr;   // "1"–"5" in 48pt
 static lv_obj_t *_lbl_state    = nullptr;
 static lv_obj_t *_lbl_rssi     = nullptr;
-// On-screen ESP-NOW diagnostics — readable at the pole (or via a phone photo)
-// during a wedge, so the mount-side state is visible without a serial console.
-static lv_obj_t *_lbl_diag     = nullptr;
-
 // Arc strips (not full dials — just arc + dots + label)
 static ArcStrip _pt_strip = {};
 static ArcStrip _sl_strip = {};
@@ -967,6 +977,10 @@ static void setup_refresh_widgets() {
         ready ? COL_TEXT : COL_DIM, 0);
 }
 
+// Keep on-screen text ASCII-only.  LVGL's built-in Montserrat fonts cover
+// ASCII plus the degree sign and LVGL's own symbols — nothing else.  A typographic
+// dash (— U+2014) has no glyph and renders as a missing-glyph box, so use a plain
+// '-'.  (Serial.print* strings are unaffected — a terminal renders UTF-8 fine.)
 static void setup_show_status(const char *txt) {
     if (_setup_status) lv_label_set_text(_setup_status, txt);
 }
@@ -1023,11 +1037,11 @@ static void setup_poll_scan() {
         esp_wifi_set_channel(_hub_channel, WIFI_SECOND_CHAN_NONE);
 
     if (_scan_n == 0) {
-        setup_show_status("No hubs found — is the hub powered?");
+        setup_show_status("No hubs found - is the hub powered?");
     } else {
         if (_scan_n == 1) _setup_sel_hub = 0;   // only one — preselect it
         char s[40];
-        snprintf(s, sizeof(s), "%d hub%s found — tap to choose",
+        snprintf(s, sizeof(s), "%d hub%s found - tap to choose",
                  (int)_scan_n, _scan_n == 1 ? "" : "s");
         setup_show_status(s);
     }
@@ -1057,7 +1071,7 @@ static void setup_apply_save() {
     }
     cfg_save();
 
-    setup_show_status("Saved — restarting...");
+    setup_show_status("Saved - restarting...");
     lv_refr_now(NULL);          // force the message onto the panel
     delay(800);
     esp_restart();              // boot clean as the new identity
@@ -1077,7 +1091,7 @@ static void setup_enter() {
                  _mount_id, _cfg.hubs[_cfg.last_hub].ssid,
                  _hub_mac[4], _hub_mac[5]);
     else
-        snprintf(cur, sizeof(cur), "UNPAIRED — pick ID, then a hub");
+        snprintf(cur, sizeof(cur), "UNPAIRED - pick ID, then a hub");
     lv_scr_load(_setup_scr);
     setup_show_status(cur);
     setup_refresh_widgets();
@@ -1344,15 +1358,6 @@ static void ui_build() {
     lv_obj_set_style_text_color(_lbl_rssi, COL_DIM, 0);
     lv_obj_align(_lbl_rssi, LV_ALIGN_CENTER, 0, 58);
 
-    // ESP-NOW diagnostic line (low, wide part of the circle).  Compact so it
-    // reads in a photo: RX/TX ages in s, consec send-fails F, peer-refreshes R,
-    // and the loop counter # (must be changing — confirms loop() isn't frozen).
-    _lbl_diag = lv_label_create(scr);
-    lv_label_set_text(_lbl_diag, "");
-    lv_obj_set_style_text_font(_lbl_diag, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(_lbl_diag, COL_DIM, 0);
-    lv_obj_align(_lbl_diag, LV_ALIGN_CENTER, 0, 175);
-
     /* ── Slot circles ────────────────────────────────────────────────────── */
     for (int i = 0; i < 10; i++) {
         int col  = i % 5;
@@ -1512,6 +1517,7 @@ void setup() {
     lv_display_t *disp = lv_display_create(SCR_W, SCR_H);
     _level_disp = disp;
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
+    lv_display_add_event_cb(disp, lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
     lv_display_set_buffers(disp, _lvgl_buf1, _lvgl_buf2,
                            LVGL_BUF_BYTES, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
@@ -1603,7 +1609,6 @@ static inline void drain_teensy_serial() {
 
 void loop() {
     esp_task_wdt_reset();
-    _loop_count++;
 
     // Health telemetry: worst gap between loop iterations ≈ worst iteration.
     {
@@ -1721,18 +1726,6 @@ void loop() {
         } else {
             lv_label_set_text(_lbl_rssi, "");
         }
-    }
-
-    // ── ESP-NOW diagnostic line (every 500 ms) ───────────────────────────
-    if (_lbl_diag && (now - _last_diag_update_ms >= 500)) {
-        _last_diag_update_ms = now;
-        char dbuf[48];
-        snprintf(dbuf, sizeof(dbuf), "RX%lus TX%lus F%d R%d #%lu",
-                 (unsigned long)((now - _last_hub_rx_ms)       / 1000),
-                 (unsigned long)((now - _last_espnow_tx_ok_ms) / 1000),
-                 (int)_espnow_consec_fails, (int)_espnow_refresh_count,
-                 (unsigned long)_loop_count);
-        lv_label_set_text(_lbl_diag, dbuf);
     }
 
     // ── Heartbeat ────────────────────────────────────────────────────────
