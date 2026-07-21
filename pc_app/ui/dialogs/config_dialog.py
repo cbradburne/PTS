@@ -11,14 +11,30 @@ from PyQt6.QtWidgets import (
     QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QFormLayout, QLabel, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
     QPushButton, QComboBox, QGroupBox, QDialogButtonBox, QScrollArea,
-    QRadioButton, QButtonGroup, QStackedWidget
+    QRadioButton, QButtonGroup, QStackedWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFontDatabase
 
 from config.mount_config import AppConfig, SpeedPreset, save_config
 from comms.bridge import Bridge
 from comms.mount_manager import MountManager
 from comms.protocol import AxisGroup, Axis, NUM_MOUNTS as _NUM_MOUNTS
+
+
+def _scrollable(inner: QWidget) -> QScrollArea:
+    """Wrap a tab's content so it scrolls instead of being squashed.
+
+    Qt will happily shrink widgets below their natural height to fit a short
+    dialog, which made the Homing/Paired-Mounts button rows overlap their own
+    labels.  Inside a scroll area the content keeps its real size and the user
+    scrolls instead — so the layout no longer depends on the window size.
+    """
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)                      # follow width only
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll.setWidget(inner)
+    return scroll
 
 
 # NOTE: this is a QWidget, NOT a QDialog, on purpose.  On macOS a QDialog
@@ -48,7 +64,16 @@ class ConfigDialog(QWidget):
         # (e.g. the echo fired by CMD_SET_STALL_THRESHOLD or a tab-switch retry).
         self._config_fetched: set[int] = set()
         self.setWindowTitle("Settings")
-        self.setMinimumSize(600, 500)
+        # The General tab's content is ~600x666.  The old 600x500 minimum was
+        # exactly as wide as the content, so as soon as the vertical scrollbar
+        # appeared it stole ~15 px and forced a horizontal one too.  Size the
+        # floor to content + chrome (margins, tab frame, scrollbar).
+        self.setMinimumSize(680, 640)
+        # Open tall enough to show the tallest tab without scrolling at all —
+        # but never taller than the screen it lands on.
+        scr = self.screen()
+        avail_h = scr.availableGeometry().height() if scr else 900
+        self.resize(720, max(640, min(820, avail_h - 80)))
         self._build()
         # Connect live-update signal — fires when a mount responds to CMD_GET_CONFIG
         self._mm.config_report_received.connect(self._on_config_report)
@@ -169,9 +194,14 @@ class ConfigDialog(QWidget):
             # (this handles the case where the cache is slightly stale).
             # _config_fetched is only populated by _on_config_report itself.
 
+        # Explicit tab-index → mount map, so adding/reordering tabs can't
+        # silently make _on_tab_changed request config for the wrong camera.
+        self._tab_mount: dict[int, int] = {}
         self._tabs.addTab(self._build_general_tab(), "General")
+        self._tabs.addTab(self._build_mounts_tab(),  "Mounts")
         for mid in range(1, 6):
-            self._tabs.addTab(self._build_mount_tab(mid), f"Camera {mid}")
+            idx = self._tabs.addTab(self._build_mount_tab(mid), f"Camera {mid}")
+            self._tab_mount[idx] = mid
 
         # Request config when the user switches to a mount tab
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -199,10 +229,14 @@ class ConfigDialog(QWidget):
                 self._mm.send_get_config(mid)
 
     def _on_tab_changed(self, index: int) -> None:
-        """Tab 0 = General; tabs 1-5 = Camera 1-5."""
-        if index < 1:
+        """Request a camera's config when its tab is opened.
+
+        Uses the explicit map built in _build() — General and Mounts simply
+        aren't in it, so they no-op.
+        """
+        mount_id = self._tab_mount.get(index)
+        if mount_id is None:
             return
-        mount_id = index   # tab 1 → mount 1, etc.
         # Only request if we haven't already applied a CONFIG_REPORT for this mount.
         # Avoids clobbering in-progress edits when the user switches tabs.
         if mount_id not in self._config_fetched:
@@ -290,10 +324,17 @@ class ConfigDialog(QWidget):
     # ------------------------------------------------------------------
 
     def _build_general_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
+        # Form goes in its own widget so the outer layout can park all leftover
+        # vertical space in a stretch at the BOTTOM.  Otherwise the form shares
+        # the slack out among its rows — which inflated the Hub Connection box
+        # (a big gap under Port) while squeezing the names box below it.
+        w     = QWidget()
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(16, 16, 16, 16)
+        inner = QWidget()
+        form  = QFormLayout(inner)
         form.setSpacing(10)
-        form.setContentsMargins(16, 16, 16, 16)
+        form.setContentsMargins(0, 0, 0, 0)
 
         # ---- Connection mode ----
         mode_box = QGroupBox("Hub Connection")
@@ -337,6 +378,10 @@ class ConfigDialog(QWidget):
         serial_form.addRow("Serial port:", port_row)
         self._conn_stack.addWidget(serial_page)  # index 1
 
+        # Don't let the stack grow past the taller of its two pages — by default
+        # a QStackedWidget expands vertically and absorbs the tab's spare space.
+        self._conn_stack.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                       QSizePolicy.Policy.Fixed)
         self._conn_stack.setCurrentIndex(0 if self._config.bridge_mode == "tcp" else 1)
         self._tcp_radio.toggled.connect(
             lambda checked: self._conn_stack.setCurrentIndex(0 if checked else 1))
@@ -389,7 +434,8 @@ class ConfigDialog(QWidget):
         form.addRow(names_box)
 
         # ---- Slider / Zoom / Ref grid (all 5 cameras) ----
-        ops_box = QGroupBox("Homing & Reference")
+        # "&&" — a lone '&' is a Qt mnemonic marker and renders as an underscore.
+        ops_box = QGroupBox("Homing && Reference")
         ops_vl  = QVBoxLayout(ops_box)
         ops_note = QLabel(
             "Home: drives the axis to its end stop, zeroes position, then backs off.\n"
@@ -431,7 +477,24 @@ class ConfigDialog(QWidget):
         ops_vl.addLayout(grid)
         form.addRow(ops_box)
 
-        # ---- Paired mounts (hub pairing table: view / forget) ----
+        outer.addWidget(inner)
+        outer.addStretch()      # spare space collects here, below Homing & Reference
+
+        # Scroll rather than squash: without this the tab's groups get crushed
+        # below their natural height when the dialog is short (the Home/Ref
+        # buttons overlap their own labels).
+        return _scrollable(w)
+
+    # ------------------------------------------------------------------
+    # Mounts tab — the hub's pairing table (view / forget)
+    # ------------------------------------------------------------------
+
+    def _build_mounts_tab(self) -> QWidget:
+        w  = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(16, 16, 16, 16)
+        vl.setSpacing(10)
+
         pair_box = QGroupBox("Paired Mounts")
         pair_vl  = QVBoxLayout(pair_box)
         pair_note = QLabel(
@@ -443,16 +506,23 @@ class ConfigDialog(QWidget):
         pair_vl.addWidget(pair_note)
 
         pair_grid = QGridLayout()
-        pair_grid.setSpacing(6)
+        pair_grid.setSpacing(8)
+        # Ask Qt for the platform's real fixed-width face.  A CSS
+        # "font-family: monospace" is not a family that exists on macOS, and
+        # sends Qt off building font-family aliases (the startup warning).
+        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self._pair_mac_lbls:    dict[int, QLabel]      = {}
         self._pair_forget_btns: dict[int, QPushButton] = {}
         for row, mid in enumerate(range(1, 6)):
             cam_lbl = QLabel(self._config.mount_label(mid))
             cam_lbl.setStyleSheet("font-weight: bold;")
+            cam_lbl.setMinimumHeight(30)
             mac_lbl = QLabel("—")
-            mac_lbl.setStyleSheet("font-family: monospace; color: #8a97a8;")
+            mac_lbl.setFont(mono)
+            mac_lbl.setStyleSheet("color: #8a97a8;")
+            mac_lbl.setMinimumHeight(30)
             forget_btn = QPushButton("Forget")
-            forget_btn.setFixedHeight(28)
+            forget_btn.setFixedHeight(30)
             forget_btn.clicked.connect(lambda checked, m=mid: self._mm.send_pair_forget(m))
             pair_grid.addWidget(cam_lbl,    row, 0)
             pair_grid.addWidget(mac_lbl,    row, 1)
@@ -461,9 +531,10 @@ class ConfigDialog(QWidget):
             self._pair_forget_btns[mid] = forget_btn
         pair_grid.setColumnStretch(1, 1)
         pair_vl.addLayout(pair_grid)
-        form.addRow(pair_box)
 
-        return w
+        vl.addWidget(pair_box)
+        vl.addStretch()
+        return _scrollable(w)
 
     @staticmethod
     def _fmt_mac(mac: bytes) -> str:
