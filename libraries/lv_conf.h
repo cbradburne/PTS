@@ -19,7 +19,13 @@
 
 #define LV_COLOR_DEPTH     16
 
-#define LV_MEM_SIZE        (192U * 1024U)
+/* Keep the internal (DRAM) pool SMALL.  The 7" display's RGB panel needs a
+ * ~96 KB bounce buffer in internal DRAM, and that allocation must succeed or
+ * esp_lcd_new_rgb_panel() aborts at boot (blank screen, no serial — it dies
+ * before USB CDC enumerates).  A 192 KB pool here left only ~95 KB free and
+ * broke exactly that.  Capacity instead comes from the PSRAM overflow pools
+ * added in hub_display.cpp's init_lvgl(), which is where the big UI lives. */
+#define LV_MEM_SIZE        (64U * 1024U)
 
 #define LV_USE_THEME_DEFAULT 1
 #define LV_USE_FLEX          1
