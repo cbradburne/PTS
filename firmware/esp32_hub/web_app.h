@@ -68,8 +68,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .cam-btn .dot.on{background:var(--green-lit);}
 
 /* ---- portrait position grid ---- */
+/* Grid keeps its natural (2-row) height and never shrinks, so the position
+   buttons are always fully visible; the joystick area below flexes instead.
+   Fixes the top row being clipped in mobile Safari, where the toolbar leaves
+   less height than standalone (home-screen) mode. */
 .pos-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:8px;
-  flex:1;align-content:start;overflow-y:auto;background:var(--cam-bg);}
+  flex:0 0 auto;align-content:start;overflow-y:auto;background:var(--cam-bg);}
 .pos-btn{aspect-ratio:1;background:var(--surf2);border:6px solid var(--border);
   border-radius:8px;color:var(--dim);font-size:11px;cursor:pointer;
   display:flex;align-items:center;justify-content:center;
@@ -181,7 +185,8 @@ canvas.hsl-c{display:block;touch-action:none;}
 
 /* ---- portrait joystick + sliders ---- */
 #p-ctrl-area{display:flex;flex-direction:column;align-items:center;gap:6px;
-  padding:8px;background:var(--surf);border-top:1px solid var(--border);flex-shrink:0;}
+  padding:8px;background:var(--surf);border-top:1px solid var(--border);
+  flex:1 1 auto;min-height:0;overflow:hidden;justify-content:center;}
 
 /* ---- portrait speed dials ---- */
 .dial-bar{display:flex;flex-direction:row;justify-content:center;align-items:center;
@@ -1940,9 +1945,14 @@ function sizePortraitControls() {
     const aw  = area.clientWidth - 16;   // subtract padding
     const slW = Math.max(80, Math.min(aw, 420));
     const slH = Math.max(36, Math.min(54, Math.floor(aw * 0.13)));
-    const joySz = Math.max(100, Math.min(aw, 200));
     if (pHslZoom)   pHslZoom.resize(slW, slH);
     if (pHslSlider) pHslSlider.resize(slW, slH);
+    // Size the joystick to the height p-ctrl-area actually got (it now flexes)
+    // minus the two sliders and the pan/tilt row — so on a short viewport it
+    // shrinks instead of starving the position grid.  Still width-bounded.
+    const slidersH = 2 * (slH + 18);                      // 2 slider groups (canvas+label+gap)
+    const joyByH   = area.clientHeight - slidersH - 46;   // pan/tilt row + padding + gaps
+    const joySz = Math.max(90, Math.min(aw, joyByH, 220));
     if (pJoy)       pJoy.resize(joySz);
 }
 
