@@ -219,12 +219,16 @@ canvas.hsl-c{display:block;touch-action:none;}
 .ext-dial-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;}
 
 /* --- Positions page --- */
-.ext-pos-table{display:flex;flex-direction:column;gap:6px;}
-.ext-pos-row{display:flex;gap:4px;align-items:center;}
+/* The 5 rows share the grid-area height (flex:1 each) so all five always fit,
+   shrinking on short windows instead of overflowing and hiding CAM 5. */
+.ext-pos-table{display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;height:100%;}
+.ext-pos-row{display:flex;gap:4px;align-items:stretch;flex:1 1 0;min-height:0;}
 .ext-pos-cam-lbl{width:56px;flex-shrink:0;font-size:11px;font-weight:700;
-  text-align:right;padding-right:8px;}
-.ext-pos-cells{display:flex;gap:4px;flex:1;}
-.ext-pcell{flex:1;aspect-ratio:1;border-radius:5px;background:var(--surf2);
+  text-align:right;padding-right:8px;align-self:center;}
+.ext-pos-cells{display:flex;gap:4px;flex:1;min-height:0;}
+/* No fixed aspect-ratio: cells fill the (flexing) row height, so the grid
+   scales with the window rather than being locked to a width-derived square. */
+.ext-pcell{flex:1;min-height:0;border-radius:5px;background:var(--surf2);
   border:4px solid var(--border);font-size:24px;color:var(--dim);
   display:flex;align-items:center;justify-content:center;cursor:pointer;
   text-align:center;padding:2px;line-height:1.1;word-break:break-all;overflow:hidden;}
@@ -233,14 +237,16 @@ canvas.hsl-c{display:block;touch-action:none;}
 .ext-pcell.moving{border-color:var(--yellow);}
 .ext-pcell.la-arrow{font-size:26px;color:var(--text);}
 /* Per-row speed dials on positions page */
-.ext-pos-dials{display:flex;gap:6px;padding-left:8px;flex-shrink:0;align-items:center;}
+.ext-pos-dials{display:flex;gap:6px;padding-left:8px;flex-shrink:0;align-items:center;align-self:center;}
 .ext-pos-dial-wrap{display:flex;flex-direction:column;align-items:center;gap:1px;}
 .ext-pos-dial-cv{width:40px;height:40px;display:block;}
 .ext-pos-dial-lbl{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;}
 /* Positions page — grid top, control strip bottom */
 #ext-page-positions{flex-direction:column;padding:0;gap:0;overflow:hidden;}
-.ext-pos-grid-area{flex:1;overflow-y:auto;padding:6px 8px;}
-.ext-pos-ctrl-strip{flex-shrink:0;height:240px;border-top:1px solid var(--border);
+.ext-pos-grid-area{flex:1;min-height:0;overflow:hidden;padding:6px 8px;}
+/* Bottom control strip is a static share of the page height; the joystick
+   inside resizes to it (sizeExtPosControls, re-run on window resize). */
+.ext-pos-ctrl-strip{flex-shrink:0;height:38%;border-top:1px solid var(--border);
   display:flex;flex-direction:row;align-items:stretch;}
 /* Slider column */
 .ext-pos-sliders{flex-shrink:0;display:flex;flex-direction:column;
@@ -614,7 +620,9 @@ function setPreset(which, val, sendToMount) {
         p[0] = grp; p[1] = val;
         wsSend(buildPkt(selCam, CMD_SET_ACTIVE_PRESET, p));
     } else {
-        // STATUS arrived — now update visuals.
+        // STATUS arrived — now update visuals.  A slider-less mount renders its
+        // slider dial at preset 0 (dormant), like a disconnected axis.
+        if (which === 'sz' && !camHasSlider(selCam)) val = 0;
         // Landscape arc indicators
         if (which === 'pt' && arcPT) arcPT.update(val);
         if (which === 'sz' && arcSZ) arcSZ.update(val);
@@ -803,6 +811,13 @@ function makeCamState() {
 
 function camIsLookAt(cam) {
     return !!(camSt[cam].flags & FLAG_HAS_SLIDER) && !!(camSt[cam].flags & FLAG_LOOK_AT_MODE);
+}
+
+// Slider-less mounts show their slider dial dormant (preset 0 — the same look as
+// a disconnected axis) and ignore taps on it, matching the PC app and the hub
+// display.  A live, tappable slider speed for an axis that isn't fitted is a lie.
+function camHasSlider(cam) {
+    return !!(camSt[cam].flags & FLAG_HAS_SLIDER);
 }
 
 const camSt = {};
@@ -1227,7 +1242,7 @@ function refreshPosGrid() {
         if (la) {
             if (s >= 8) {
                 // Arrow buttons — border reflects look-at move direction state.
-                btn.textContent = s === 8 ? '◄' : '►';
+                btn.textContent = s === 8 ? '◀' : '▶';
                 const dir = s === 8 ? 'left' : 'right';
                 const arr = cs.laArrow;
                 let cls = 'pos-btn la-arrow';
@@ -1408,6 +1423,7 @@ class SpeedDial {
         this.ctx.scale(dpr, dpr);
         // Tap / click cycles the preset for this group
         this.cv.addEventListener('click', () => {
+            if (this.which === 'sz' && !camHasSlider(selCam)) return;  // dormant
             setPreset(this.which, (this.preset % 4) + 1, true);
         });
         this.draw();
@@ -2118,6 +2134,7 @@ function buildExtPositionsTable() {
             wrap.addEventListener('click', () => {
                 const cs2 = camSt[i];
                 if (!cs2.connected) return;
+                if (which === 'sz' && !camHasSlider(i)) return;   // dormant — no slider
                 const cur = (which === 'sz') ? cs2.activeSlPreset : cs2.activePtPreset;
                 const next = (cur % 4) + 1;
                 const grp = (which === 'sz') ? GROUP_SLIDER_ZOOM : GROUP_PAN_TILT;
@@ -2183,7 +2200,7 @@ function refreshExtPositions() {
             const cell = document.getElementById('ext-pcell-' + i + '-' + s);
             if (!cell) continue;
             if (la && s >= 8) {
-                cell.textContent = s === 8 ? '◄' : '►';
+                cell.textContent = s === 8 ? '◀' : '▶';
                 const dir = s === 8 ? 'left' : 'right';
                 const arr = cs.laArrow;
                 let cls = 'ext-pcell la-arrow';
@@ -2207,7 +2224,8 @@ function refreshExtPositions() {
         // Per-row speed dials
         const cvSZ = document.getElementById('ext-pos-dial-sz-' + i);
         const cvPT = document.getElementById('ext-pos-dial-pt-' + i);
-        if (cvSZ) _drawPosPresetDial(cvSZ, cs.connected ? cs.activeSlPreset : 0, color);
+        if (cvSZ) _drawPosPresetDial(cvSZ,
+                      (cs.connected && camHasSlider(i)) ? cs.activeSlPreset : 0, color);
         if (cvPT) _drawPosPresetDial(cvPT, cs.connected ? cs.activePtPreset : 0, color);
     }
 }

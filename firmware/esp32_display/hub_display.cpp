@@ -333,6 +333,14 @@ static inline bool cam_is_look_at(int i) {
     return (_cam[i].flags & FLAG_HAS_SLIDER) && (_cam[i].flags & FLAG_LOOK_AT_MODE);
 }
 
+// Slider-less mounts render their slider dial dormant (preset 0: "-", dark dots
+// — the same look as a disconnected axis) and ignore taps on it, matching the
+// PC app.  Showing a live, tappable slider speed for an axis that isn't fitted
+// is misleading.
+static inline bool cam_has_slider(int i) {
+    return (_cam[i].flags & FLAG_HAS_SLIDER) != 0;
+}
+
 static const char *state_name(uint8_t s) {
     switch (s) {
         case 0: return "IDLE";
@@ -665,9 +673,13 @@ static void build_top_bar(lv_obj_t *screen, int active_tab) {
 //  Positions screen — slot / dial refresh
 // ============================================================
 
-static void refresh_positions_slots() {
-    if (!_scr_positions) return;
-    for (int i = 0; i < 5; i++) {
+// Repaint ONE camera's row.  Split out of refresh_positions_slots() so a STATUS
+// update can refresh just the camera that changed: the full sweep touches all 50
+// buttons (~350 LVGL style calls) and re-renders the whole screen, which is far
+// too heavy to run on every incoming STATUS.
+static void refresh_positions_row(int i) {
+    if (!_scr_positions || i < 0 || i >= 5) return;
+    {
         uint16_t occ = _slots[i].slot_occupied;
         uint16_t at  = _slots[i].slot_at;
         uint8_t  tgt = _slots[i].target_slot;
@@ -722,9 +734,10 @@ static void refresh_positions_slots() {
                 continue;
             }
 
-            // Normal position-slot buttons
+            // Normal position-slot buttons.  The target flashes while the mount
+            // travels — same behaviour as the PC app and the web app.
             if (tgt != 0xFF && s == (int)tgt && st == STATE_MOVING_TO_POS)
-                border_col = C_BTN_BORDER_TGT;
+                border_col = _la_flash_on ? C_BTN_BORDER_TGT : C_BORDER;
             else if ((at & bit) && (occ & bit)) border_col = C_BTN_BORDER_AT;
             else if (occ & bit)                 border_col = C_BTN_BORDER_OCC;
             else                                border_col = C_BTN_BORDER_EMPTY;
@@ -743,11 +756,17 @@ static void refresh_positions_slots() {
     }
 }
 
+static void refresh_positions_slots() {
+    if (!_scr_positions) return;
+    for (int i = 0; i < 5; i++) refresh_positions_row(i);
+}
+
 static void refresh_positions_dials() {
     if (!_scr_positions) return;
     for (int i = 0; i < 5; i++) {
         update_tile_dial(&_pos_pt_dial[i], _cam[i].pt_preset);
-        update_tile_dial(&_pos_sl_dial[i], _cam[i].sl_preset);
+        update_tile_dial(&_pos_sl_dial[i],
+                         cam_has_slider(i) ? _cam[i].sl_preset : 0);
     }
 }
 
@@ -840,6 +859,7 @@ static void ev_pos_pt_click(lv_event_t *e) {
 static void ev_pos_sl_click(lv_event_t *e) {
     if (!_send_cb) return;
     uint8_t cam = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    if (!cam_has_slider(cam)) return;         // dormant — no slider fitted
     uint8_t np  = (_cam[cam].sl_preset % 4) + 1;
     uint8_t payload[2] = { GROUP_SLIDER_ZOOM, np };
     _send_cb(cam + 1, CMD_SET_ACTIVE_PRESET, payload, 2);
@@ -1278,7 +1298,10 @@ static void refresh_detail_slots() {
 
         uint32_t border_col;
         if (tgt != 0xFF && s == (int)tgt && st == STATE_MOVING_TO_POS) {
-            border_col = C_BTN_BORDER_TGT;    // yellow — moving to this slot
+            // Follow the flash phase, not a solid colour: this runs on every
+            // STATUS (~10 Hz), so painting solid yellow here overrode the flash
+            // timer's grey phase — the border sat yellow ~90% of the time.
+            border_col = _la_flash_on ? C_BTN_BORDER_TGT : C_BORDER;
         } else if (cam_is_look_at(i) && s < 8) {
             // Look-at mode: slots 0-7 are subjects — green=active subject, red=stored.
             if (s == (int)_active_la_subject[i])
@@ -1349,7 +1372,7 @@ static void refresh_detail_dials() {
     if (!_scr_detail) return;
     int i = _detail_cam;
     update_tile_dial(&_det_pt_dial, _cam[i].pt_preset);
-    update_tile_dial(&_det_sl_dial, _cam[i].sl_preset);
+    update_tile_dial(&_det_sl_dial, cam_has_slider(i) ? _cam[i].sl_preset : 0);
 }
 
 // ============================================================
@@ -1761,6 +1784,7 @@ static void ev_det_pt_click(lv_event_t *e) {
 
 static void ev_det_sl_click(lv_event_t *e) {
     if (!_send_cb) return;
+    if (!cam_has_slider(_detail_cam)) return;  // dormant — no slider fitted
     uint8_t np = (_cam[_detail_cam].sl_preset % 4) + 1;
     uint8_t payload[2] = { GROUP_SLIDER_ZOOM, np };
     _send_cb(_detail_cam + 1, CMD_SET_ACTIVE_PRESET, payload, 2);
@@ -2568,11 +2592,20 @@ static void init_lvgl() {
 //  Look-at arrow flash timer (500 ms, driven by lv_timer_handler)
 // ============================================================
 
+// True while this camera is travelling to a stored position (not look-at).
+static inline bool cam_moving_to_pos(int i) {
+    return _slots[i].state == STATE_MOVING_TO_POS && _slots[i].target_slot != 0xFF;
+}
+
 static void la_flash_timer_cb(lv_timer_t *) {
-    // Only act if at least one look-at mount has a moving arrow.
+    // Act if any look-at arrow is moving OR any mount is travelling to a stored
+    // position — the target slot flashes in both cases, matching the PC and web
+    // apps.  (Position targets were previously left out, so they never flashed.)
     bool any_moving = false;
     for (int i = 0; i < 5; i++) {
-        if (cam_is_look_at(i) && (_la_arrow_state[i] == 0 || _la_arrow_state[i] == 1)) {
+        if ((cam_is_look_at(i) &&
+                (_la_arrow_state[i] == 0 || _la_arrow_state[i] == 1))
+            || cam_moving_to_pos(i)) {
             any_moving = true;
             break;
         }
@@ -2587,6 +2620,12 @@ static void la_flash_timer_cb(lv_timer_t *) {
         // Positions screen — flash the border on moving arrow buttons.
         uint32_t bc = _la_flash_on ? C_BTN_BORDER_TGT : C_BORDER;
         for (int i = 0; i < 5; i++) {
+            // Normal recall: flash the slot being travelled to.
+            if (!cam_is_look_at(i) && cam_moving_to_pos(i)) {
+                lv_obj_t *btn = _pos_slot_btn[i][_slots[i].target_slot];
+                if (btn) lv_obj_set_style_border_color(btn, lv_color_hex(bc), 0);
+                continue;
+            }
             if (!cam_is_look_at(i)) continue;
             int8_t arr = _la_arrow_state[i];
             for (int s = 8; s <= 9; s++) {
@@ -2599,9 +2638,15 @@ static void la_flash_timer_cb(lv_timer_t *) {
     } else if (active_scr == _scr_detail && _scr_detail) {
         // Detail screen — flash the border on the moving arrow button.
         int i = _detail_cam;
-        if (!cam_is_look_at(i)) return;
-        int8_t arr = _la_arrow_state[i];
         uint32_t bc = _la_flash_on ? C_BTN_BORDER_TGT : C_BORDER;
+        if (!cam_is_look_at(i)) {
+            if (cam_moving_to_pos(i)) {          // normal recall in progress
+                lv_obj_t *btn = _det_pos_btn[_slots[i].target_slot];
+                if (btn) lv_obj_set_style_border_color(btn, lv_color_hex(bc), 0);
+            }
+            return;
+        }
+        int8_t arr = _la_arrow_state[i];
         for (int s = 8; s <= 9; s++) {
             if (!_det_pos_btn[s]) continue;
             if ((arr == 0 && s == 8) || (arr == 1 && s == 9))
@@ -2611,7 +2656,13 @@ static void la_flash_timer_cb(lv_timer_t *) {
         // Home/status screen — flash the tile dot bg colour.
         uint32_t dot_col = _la_flash_on ? C_SLOT_TGT : C_SLOT_EMPTY;
         for (int i = 0; i < 5; i++) {
-            if (!cam_is_look_at(i)) continue;
+            if (!cam_is_look_at(i)) {
+                if (cam_moving_to_pos(i)) {      // normal recall in progress
+                    lv_obj_t *dot = _tile_slot[i][_slots[i].target_slot];
+                    if (dot) lv_obj_set_style_bg_color(dot, lv_color_hex(dot_col), 0);
+                }
+                continue;
+            }
             int8_t arr = _la_arrow_state[i];
             for (int s = 8; s <= 9; s++) {
                 if (!_tile_slot[i][s]) continue;
@@ -3242,7 +3293,10 @@ void hub_ui_update_preset(uint8_t mount_id, uint8_t pt_preset, uint8_t sz_preset
     _cam[i].pt_preset = pt_preset;
     _cam[i].sl_preset = sz_preset;
     update_tile_dial(&_tile_pt_dial[i], pt_preset);
-    update_tile_dial(&_tile_sl_dial[i], sz_preset);
+    // Slider-less mount → slider dial dormant, same as the positions/detail
+    // screens.  (Must gate here too: the home-screen dial is updated by this
+    // function, not by refresh_positions_dials/refresh_detail_dials.)
+    update_tile_dial(&_tile_sl_dial[i], cam_has_slider(i) ? sz_preset : 0);
     if (lv_scr_act() == _scr_detail && _detail_cam == (uint8_t)i)
         refresh_detail_dials();
     if (_scr_positions && lv_scr_act() == _scr_positions)
@@ -3307,7 +3361,7 @@ void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
                                    arr_done   ? C_SLOT_AT  : C_SLOT_EMPTY);
             } else if (target_slot != 0xFF && s == (int)target_slot &&
                     state == STATE_MOVING_TO_POS)
-                col = lv_color_hex(C_SLOT_TGT);
+                col = lv_color_hex(_la_flash_on ? C_SLOT_TGT : C_SLOT_EMPTY);  // flash, don't sit solid
             else if (is_active)
                 col = lv_color_hex(C_SLOT_AT);
             else if (slot_occupied & bit)
@@ -3322,6 +3376,13 @@ void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
         // of progressive ESP32 heap fragmentation that froze the UI after hours.
         if (_scr_detail && _detail_cam == (int)i)
             refresh_detail_slots();
+
+        // ...and the Positions screen, which was previously never repainted from
+        // here — so its borders only updated when the page was opened, and a
+        // recall's amber "moving" / green "arrived" transitions were invisible.
+        // Only this camera's row, for the same cost reason as above.
+        if (_scr_positions && lv_scr_act() == _scr_positions)
+            refresh_positions_row((int)i);
     }
 
     xSemaphoreGive(_lvgl_mux);
