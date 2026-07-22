@@ -77,6 +77,36 @@ python3 -m pip install ultralytics             # YOLO person detection</code></p
     feed or the WiFi and the mount stops itself within 500 ms. An E-STOP from any
     surface cancels it instantly.</div>
 
+    <h2>Tuning it for your PC</h2>
+    <p>CV tracking is the only part of the system that really depends on how fast
+    your computer is, and two settings in <a href="config.html">Config</a> decide
+    almost all of it:</p>
+    <table>
+      <tr><th style="width:26%">Setting</th><th>What it does</th></tr>
+      <tr><td><strong>CV tracker</strong></td><td>The tracker that follows the
+      subject <em>between</em> detections. It runs on <strong>every</strong> frame,
+      so it dominates the cost. <strong>MOSSE</strong> (the default) is the
+      fastest; CSRT is the most accurate but far slower.</td></tr>
+      <tr><td><strong>CV detect size</strong></td><td>The image size YOLO runs at.
+      Smaller is much faster; <strong>416</strong> is the default. Below ~320 you
+      lose the ability to pick out a distant subject without gaining much
+      speed.</td></tr>
+    </table>
+    <p>The defaults suit a modest laptop. On a 4-core machine from around 2017,
+    the original CSRT-at-640 combination needed <em>three times</em> one CPU core —
+    it simply could not keep up, and tracking visibly lagged. MOSSE at 416 needs
+    about a third of one core on the same PC.</p>
+    <div class="tip"><b>Measure your own machine</b> Run
+    <code>python tools/cv_benchmark.py</code> (add <code>--device 0</code> to use
+    your real capture card). It times detection at every size and every tracker,
+    then prints the CPU cost per second for each combination, so you can pick
+    settings from numbers rather than guesswork. It only measures — it changes
+    nothing.</div>
+    <div class="note"><b>Why the fast tracker is good enough</b> MOSSE on its own
+    would drift, but YOLO re-anchors the box onto a fresh detection about three
+    times a second — so drift never has time to accumulate. That is what makes
+    trading accuracy for speed a good deal here.</div>
+
     <div class="tip"><b>Which tracker when</b> Use <strong>optical flow</strong> for
     a specific object or a non-person subject, and when you want to choose exactly
     what's tracked. Use <strong>YOLO</strong> for hands-off "follow the presenter".

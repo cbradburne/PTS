@@ -47,6 +47,13 @@
       <tr><th style="width:30%">Setting</th><th>Meaning</th></tr>
       <tr><td><strong>CV tracking mount</strong></td><td>Which camera (1–5)
       <a href="cv.html">CV tracking</a> drives.</td></tr>
+      <tr><td><strong>CV tracker</strong></td><td>Correlation tracker used between
+      detections — it runs on every frame, so it dominates CPU cost.
+      <strong>MOSSE</strong> (default) is fastest; CSRT is most accurate but far
+      slower. See <a href="cv.html">Tuning it for your PC</a>.</td></tr>
+      <tr><td><strong>CV detect size</strong></td><td>Image size YOLO runs at.
+      <strong>416</strong> (default) balances speed and the ability to spot a
+      distant subject; smaller is faster, larger is slower.</td></tr>
       <tr><td><strong>Joystick deadzone</strong></td><td>How far the game
       controller's stick must move before a jog starts (0.0–0.5). Raise it if a
       resting stick creeps.</td></tr>
