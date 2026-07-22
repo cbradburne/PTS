@@ -28,6 +28,7 @@ FQBN_TEENSY="teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
 sketch_for() {
     case "$1" in
         hub)     echo "$REPO/firmware/esp32_hub" ;;
+        hubdemo) echo "$REPO/firmware/esp32_hub" ;;
         display) echo "$REPO/firmware/esp32_display" ;;
         amoled)  echo "$REPO/firmware/esp_mount_amoled175" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
@@ -38,9 +39,21 @@ sketch_for() {
 fqbn_for() {
     case "$1" in
         hub)     echo "$FQBN_HUB" ;;
+        hubdemo) echo "$FQBN_HUB" ;;
         display) echo "$FQBN_DISPLAY" ;;
         amoled)  echo "$FQBN_AMOLED" ;;
         teensy)  echo "$FQBN_TEENSY" ;;
+    esac
+}
+
+# Extra compiler flags per target.  "hubdemo" is the ordinary hub firmware built
+# with DEMO_MODE=1: it invents five mounts with stored positions so the display,
+# PC app and web app can all be photographed without a rig.  Flash "hub" to go
+# back to a real rig.  Demo builds never persist the pairing table.
+props_for() {
+    case "$1" in
+        hubdemo) echo "compiler.cpp.extra_flags=-DDEMO_MODE=1" ;;
+        *)       echo "" ;;
     esac
 }
 
@@ -49,12 +62,23 @@ compile_one() {
     sk="$(sketch_for "$t")"
     if [ -z "$sk" ]; then echo "unknown target: $t"; return 2; fi
     printf '── %-8s %s\n' "$t" "$(fqbn_for "$t")"
-    arduino-cli compile \
-        --fqbn "$(fqbn_for "$t")" \
-        --libraries "$LIBS" \
-        --build-path "$OUT/$t" \
-        --warnings default \
-        "$sk"
+    props="$(props_for "$t")"
+    if [ -n "$props" ]; then
+        arduino-cli compile \
+            --fqbn "$(fqbn_for "$t")" \
+            --libraries "$LIBS" \
+            --build-path "$OUT/$t" \
+            --build-property "$props" \
+            --warnings default \
+            "$sk"
+    else
+        arduino-cli compile \
+            --fqbn "$(fqbn_for "$t")" \
+            --libraries "$LIBS" \
+            --build-path "$OUT/$t" \
+            --warnings default \
+            "$sk"
+    fi
 }
 
 if [ "${1:-}" = "flash" ]; then

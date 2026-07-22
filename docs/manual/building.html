@@ -81,6 +81,19 @@ python3 main.py</code></pre>
     <p>The simulator speaks the real protocol as a hub plus five mounts, with a
     fault-injection console (link wedges, NACKs, packet loss, dead mounts):</p>
     <pre><code>python3 tools/mount_sim.py       # then point the PC app at 127.0.0.1</code></pre>
+    <p>The simulator only serves the PC app. To bring the <strong>display and web
+    app</strong> to life as well — for screenshots, or UI work without a rig —
+    flash the hub's <strong>demo build</strong> instead. It invents five mounts
+    with stored positions; recalls flash amber while "travelling" for 15 s, then
+    settle green on arrival:</p>
+    <pre><code>tools/build.sh flash hubdemo     # demo hub: five simulated mounts
+tools/build.sh flash hub         # back to a real rig</code></pre>
+    <div class="note"><b>Why this works everywhere at once</b> The hub is the
+    switchboard, so the simulated mounts reach the 7″ display, the PC app and the
+    web app through the normal path — all three agree, with no changes to any of
+    them. Demo builds never write the pairing table, so nothing persists; and
+    power down any real mount while demoing, or its genuine identity will collide
+    with a simulated one and raise a pairing conflict.</div>
 
     <div class="note"><b>Protocol integrity</b> The binary wire format is defined
     once in a canonical C header, and a pre-commit checker verifies the Python and

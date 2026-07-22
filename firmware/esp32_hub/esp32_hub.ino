@@ -64,6 +64,21 @@
 // Configuration — edit before flashing
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// DEMO MODE — five simulated mounts, for photography and UI work with no rig
+// ---------------------------------------------------------------------------
+// Set to 1, flash the hub, and it invents five mounts with stored positions.
+// Because the hub is the switchboard, the 7" display, the PC app and the web
+// app all light up identically with NO changes to any of them — recalls flash
+// amber while "travelling", then settle green on arrival.
+//
+// Set back to 0 and reflash for a real rig.  Demo builds never write the
+// pairing table (mount_table_save() is a no-op), so nothing persists.
+#ifndef DEMO_MODE                // -DDEMO_MODE=1 also works, without editing this
+#define DEMO_MODE        0
+#endif
+#define DEMO_TRAVEL_MS   15000   // simulated travel time for a recall
+
 #define AP_SSID      "CamMount"
 #define AP_PASSWORD  "camctrl123"
 #define AP_CHANNEL   1
@@ -113,9 +128,13 @@ static int8_t mount_table_find(const uint8_t mac[6]) {
 }
 
 static void mount_table_save() {
+#if DEMO_MODE
+    return;   // demo builds must never persist their fake mounts (see DEMO_MODE)
+#else
     _prefs.begin("mounts", false);
     _prefs.putBytes("table", _mount_mac, sizeof(_mount_mac));
     _prefs.end();
+#endif
 }
 
 static void mount_table_load() {
@@ -603,6 +622,13 @@ static PacketParser _serial_parser;
 // ---------------------------------------------------------------------------
 
 static void forward_to_mounts(const ParsedPacket &pkt);
+#if DEMO_MODE
+// Defined further down (needs _relay_queue); ui_send_to_mount() calls it above.
+static bool demo_consume_cmd(uint8_t mount_id, uint8_t cmd,
+                             const uint8_t *payload, uint8_t plen);
+static void demo_init();
+static void demo_tick();
+#endif
 static void intercept_la_move_dir(uint8_t mount_id, uint8_t dir);
 static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
                               const uint8_t *payload, uint8_t plen);
@@ -611,6 +637,9 @@ static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
 
 static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
                               const uint8_t *payload, uint8_t plen) {
+#if DEMO_MODE
+    if (demo_consume_cmd(mount_id, cmd, payload, plen)) return;   // display presses
+#endif
     static uint16_t ui_seq = 0;
     uint8_t  raw[PKT_BUF_SIZE + 4];
     uint16_t raw_len = build_packet(raw, mount_id, ++ui_seq, cmd, payload, plen);
@@ -734,9 +763,140 @@ static void intercept_la_move_dir(uint8_t mount_id, uint8_t dir) {
     _ws.binaryAll(raw, (size_t)rlen);   // hub-injected — not in relay queue, must send explicitly
 }
 
+#if DEMO_MODE
+// ---------------------------------------------------------------------------
+// Demo engine
+// ---------------------------------------------------------------------------
+// Synthetic STATUS frames are pushed into _relay_queue — the same queue real
+// ESP-NOW traffic arrives on — so they travel the normal relay path out to TCP,
+// WebSocket, USB serial and the display.  Nothing downstream can tell the
+// difference, which is why all three surfaces agree without touching them.
+
+struct DemoCam {
+    uint16_t occupied;    // bitmask of stored slots
+    uint16_t at;          // slot the camera is parked on (0 while travelling)
+    uint8_t  state;       // STATE_IDLE / STATE_MOVING_TO_POS
+    uint8_t  target;      // slot being travelled to, 0xFF when idle
+    uint32_t arrive_ms;   // millis() at which the move completes
+};
+static DemoCam  _demo[NUM_MOUNTS];
+static uint32_t _demo_status_ms = 0;
+static uint16_t _demo_seq       = 0;
+
+static void demo_init() {
+    // 4-6 stored positions each, deliberately uneven so screenshots look real
+    // rather than synthetic.  Bit 0 = slot 1.
+    static const uint16_t MASKS[NUM_MOUNTS] = {
+        0x001F,   // cam 1: slots 1-5            (5)
+        0x002B,   // cam 2: slots 1,2,4,6        (4)
+        0x003F,   // cam 3: slots 1-6            (6)
+        0x0117,   // cam 4: slots 1,2,3,5,9      (5)
+        0x00E3,   // cam 5: slots 1,2,6,7,8      (5)
+    };
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        _demo[i].occupied  = MASKS[i];
+        _demo[i].state     = STATE_IDLE;
+        _demo[i].target    = 0xFF;
+        _demo[i].arrive_ms = 0;
+        _demo[i].at        = 0;
+        for (int s = 0; s < NUM_POSITIONS; s++)     // park on the lowest slot
+            if (MASKS[i] & (1u << s)) { _demo[i].at = (uint16_t)(1u << s); break; }
+        // Fake MAC so the Mounts pairing panel shows five bound mounts too.
+        // RAM only — mount_table_save() is disabled in demo builds.
+        uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0xDE, (uint8_t)(i + 1) };
+        memcpy(_mount_mac[i], mac, 6);
+    }
+    Serial.println("[DEMO] five simulated mounts active — this is NOT a real rig");
+}
+
+// Handle a command aimed at a simulated mount.  Returns true if consumed, so
+// the caller must not try to send it over ESP-NOW (there is nothing out there).
+static bool demo_consume_cmd(uint8_t mount_id, uint8_t cmd,
+                             const uint8_t *payload, uint8_t plen) {
+    int lo = 0, hi = NUM_MOUNTS - 1;
+    if (mount_id >= 1 && mount_id <= NUM_MOUNTS) lo = hi = mount_id - 1;
+    else if (mount_id != MOUNT_BROADCAST)        return false;
+
+    for (int i = lo; i <= hi; i++) {
+        DemoCam &d = _demo[i];
+        switch (cmd) {
+        case CMD_GOTO_SLOT:
+            if (plen >= 1 && payload[0] < NUM_POSITIONS
+                    && (d.occupied & (1u << payload[0]))) {
+                d.target    = payload[0];
+                d.state     = STATE_MOVING_TO_POS;   // UIs flash the target amber
+                d.at        = 0;                     // no longer at the old slot
+                d.arrive_ms = millis() + DEMO_TRAVEL_MS;
+            }
+            break;
+        case CMD_STORE_POS:
+            if (plen >= 1 && payload[0] < NUM_POSITIONS) {
+                d.occupied |= (uint16_t)(1u << payload[0]);
+                d.at        = (uint16_t)(1u << payload[0]);   // stored = you are there
+                d.state     = STATE_IDLE;
+                d.target    = 0xFF;
+            }
+            break;
+        case CMD_CLEAR_POS:
+            if (plen >= 1 && payload[0] < NUM_POSITIONS) {
+                d.occupied &= (uint16_t)~(1u << payload[0]);
+                d.at       &= (uint16_t)~(1u << payload[0]);
+            }
+            break;
+        case CMD_E_STOP:
+            d.state = STATE_IDLE; d.target = 0xFF;   // stops mid-travel, parked nowhere
+            break;
+        default:
+            break;    // everything else is simply swallowed
+        }
+    }
+    return true;
+}
+
+static void demo_tick() {
+    uint32_t now = millis();
+
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        DemoCam &d = _demo[i];
+        if (d.state == STATE_MOVING_TO_POS && (int32_t)(now - d.arrive_ms) >= 0) {
+            d.at     = (uint16_t)(1u << d.target);   // arrived — UIs turn it green
+            d.state  = STATE_IDLE;
+            d.target = 0xFF;
+        }
+    }
+
+    if (now - _demo_status_ms < 100) return;         // STATUS at 10 Hz
+    _demo_status_ms = now;
+
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        DemoCam &d = _demo[i];
+        uint8_t p[10] = {
+            d.state,
+            (uint8_t)(FLAG_HAS_SLIDER | FLAG_LIMITS_SET | FLAG_REF_SET),
+            2, 2,                                              // speed presets
+            (uint8_t)(d.occupied >> 8), (uint8_t)(d.occupied & 0xFF),
+            (uint8_t)(d.at >> 8),       (uint8_t)(d.at & 0xFF),
+            d.target,
+            0xFF,                                              // no look-at subject
+        };
+        RelayMsg msg;
+        msg.len     = build_packet(msg.data, (uint8_t)(i + 1), ++_demo_seq,
+                                   CMD_STATUS, p, sizeof(p));
+        msg.rssi    = -52;          // MUST be non-zero: rssi==0 is the ghost guard
+        msg.src_idx = (uint8_t)i;
+        memcpy(msg.src_mac, _mount_mac[i], 6);
+        xQueueSend(_relay_queue, &msg, 0);
+    }
+}
+#endif  // DEMO_MODE
+
+
 static void forward_to_mounts(const ParsedPacket &pkt) {
     _last_client_cmd_ms = millis();   // any client traffic defers the maintenance restart
     if (handle_pairing_cmd(pkt)) return;   // hub-scoped pairing — handled here, not sent to mounts
+#if DEMO_MODE
+    if (demo_consume_cmd(pkt.mount_id, pkt.cmd, pkt.payload, pkt.payload_len)) return;
+#endif
     uint8_t  raw[PKT_BUF_SIZE + 4];
     uint16_t raw_len = build_packet(raw, pkt.mount_id, pkt.seq, pkt.cmd,
                                     pkt.payload, pkt.payload_len);
@@ -1497,6 +1657,10 @@ void setup() {
     _relay_queue   = xQueueCreate(RELAY_QUEUE_DEPTH, sizeof(RelayMsg));
     _ws_rx_queue   = xQueueCreate(WS_RX_QUEUE_DEPTH, sizeof(WsRxMsg));
 
+#if DEMO_MODE
+    demo_init();   // invent five mounts (after the queue exists)
+#endif
+
     // --- TCP server ---
     for (int i = 0; i < MAX_CLIENTS; i++) {
         pkt_parser_init(&_slots[i].parser);
@@ -1666,6 +1830,10 @@ void loop() {
     esp_task_wdt_reset();
 
     uint32_t now = millis();
+
+#if DEMO_MODE
+    demo_tick();   // feed synthetic STATUS into the normal relay path
+#endif
 
     // Health telemetry: worst gap between loop iterations ≈ worst iteration time.
     static uint32_t _prev_loop_ms = 0;
