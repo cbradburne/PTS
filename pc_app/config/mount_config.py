@@ -81,6 +81,17 @@ class MountConfig:
 class AppConfig:
     mounts: dict[int, MountConfig] = field(default_factory=dict)
     cv_mount_id: int = 1               # which mount uses CV tracking
+    # CV tracking performance.  The correlation tracker runs on EVERY tick
+    # (30 Hz) while YOLO only runs ~3x/s, so the tracker dominates the cost.
+    # Measured on a 4-core Kaby Lake: CSRT needs 75 ms per update against a
+    # 33 ms budget (343% of a core — it simply cannot keep up), while MOSSE
+    # needs 0.66 ms.  MOSSE is accurate enough here because YOLO re-anchors
+    # the box ~3x/s, so drift between detections is bounded.
+    # Detection size: ultralytics defaults to 640, which costs 313 ms/frame on
+    # that CPU vs 88 ms at 416 — and 320 gains little over 416 in quality terms.
+    # Run tools/cv_benchmark.py to pick values for a specific machine.
+    cv_tracker: str = "mosse"          # mosse | medianflow | kcf | csrt
+    cv_detect_size: int = 416          # YOLO input size (256/320/416/512/640)
     bridge_mode: str = "tcp"           # "tcp" or "serial"
     bridge_host: str = "192.168.4.1"   # hub AP IP (TCP mode)
     bridge_tcp_port: int = 7777        # hub TCP port
@@ -167,6 +178,8 @@ def load_config() -> AppConfig:
         with open(CONFIG_FILE) as f:
             data = json.load(f)
         cfg.cv_mount_id       = data.get("cv_mount_id", 1)
+        cfg.cv_tracker        = data.get("cv_tracker", "mosse")
+        cfg.cv_detect_size    = data.get("cv_detect_size", 416)
         cfg.bridge_mode       = data.get("bridge_mode", "tcp")
         cfg.bridge_host       = data.get("bridge_host", "192.168.4.1")
         cfg.bridge_tcp_port   = data.get("bridge_tcp_port", 7777)
@@ -197,6 +210,8 @@ def save_config(cfg: AppConfig) -> None:
     try:
         data = {
             "cv_mount_id":       cfg.cv_mount_id,
+            "cv_tracker":        cfg.cv_tracker,
+            "cv_detect_size":    cfg.cv_detect_size,
             "bridge_mode":       cfg.bridge_mode,
             "bridge_host":       cfg.bridge_host,
             "bridge_tcp_port":   cfg.bridge_tcp_port,

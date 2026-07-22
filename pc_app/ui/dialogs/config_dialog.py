@@ -395,6 +395,27 @@ class ConfigDialog(QWidget):
         self._cv_mount_spin.setValue(self._config.cv_mount_id)
         form.addRow("CV tracking mount:", self._cv_mount_spin)
 
+        # ---- CV performance (see tools/cv_benchmark.py) ----
+        # The correlation tracker runs every tick (30 Hz) while YOLO runs ~3x/s,
+        # so the tracker choice dominates CPU cost on modest machines.
+        self._cv_tracker_combo = QComboBox()
+        for label, key in (("MOSSE  (fastest — recommended)", "mosse"),
+                           ("MedianFlow  (fast)",             "medianflow"),
+                           ("KCF  (slower)",                  "kcf"),
+                           ("CSRT  (most accurate, slowest)", "csrt")):
+            self._cv_tracker_combo.addItem(label, key)
+        idx = self._cv_tracker_combo.findData(self._config.cv_tracker)
+        self._cv_tracker_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("CV tracker:", self._cv_tracker_combo)
+
+        self._cv_size_combo = QComboBox()
+        for sz in (256, 320, 416, 512, 640):
+            self._cv_size_combo.addItem(
+                f"{sz} px" + ("  (recommended)" if sz == 416 else ""), sz)
+        idx = self._cv_size_combo.findData(self._config.cv_detect_size)
+        self._cv_size_combo.setCurrentIndex(idx if idx >= 0 else 2)
+        form.addRow("CV detect size:", self._cv_size_combo)
+
         # ---- Joystick deadzone ----
         self._deadzone_spin = QDoubleSpinBox()
         self._deadzone_spin.setRange(0.0, 0.5)
@@ -752,6 +773,8 @@ class ConfigDialog(QWidget):
                 self._config.bridge_port = port
 
         self._config.cv_mount_id       = self._cv_mount_spin.value()
+        self._config.cv_tracker        = self._cv_tracker_combo.currentData()
+        self._config.cv_detect_size    = int(self._cv_size_combo.currentData())
         self._config.joystick_deadzone = self._deadzone_spin.value()
 
         self._config.virtual_keyboard  = self._osk_check.isChecked()

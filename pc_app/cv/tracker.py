@@ -29,10 +29,23 @@ log = logging.getLogger(__name__)
 
 
 class TrackerKind(str, Enum):
-    """Kept for API compatibility — CSRT is always used internally."""
-    KCF   = "kcf"
-    CSRT  = "csrt"
-    MOSSE = "mosse"
+    """Correlation trackers, cheapest first.
+
+    Measured per update on a 640x360 frame, 4-core Kaby Lake (the slowest
+    machine this runs on) — the tracker runs on EVERY tick at 30 Hz, so the
+    budget is 33 ms:
+
+        MOSSE       0.66 ms      MEDIANFLOW   1.2 ms
+        KCF        16.2 ms       CSRT        75.4 ms   <- cannot keep up
+
+    CSRT is the most accurate but by far the slowest; it is NOT a sensible
+    default here.  Accuracy matters less than it looks because YOLO re-anchors
+    the box ~3x/s, so drift between detections is bounded.
+    """
+    MOSSE      = "mosse"
+    MEDIANFLOW = "medianflow"
+    KCF        = "kcf"
+    CSRT       = "csrt"
 
 
 @dataclass
@@ -56,8 +69,13 @@ class PersonDetector:
     CONF_THRESHOLD = 0.45
     PERSON_CLASS   = 0          # COCO class 0 = person
     MODEL_NAME     = "yolov8n.pt"
+    DEFAULT_IMGSZ  = 416
 
-    def __init__(self):
+    def __init__(self, imgsz: int = DEFAULT_IMGSZ):
+        # Inference size.  Left unset, ultralytics uses 640 — which costs
+        # 313 ms/frame on a 4-core Kaby Lake vs 88 ms at 416.  Below 320 the
+        # curve flattens, so there is little to gain and detail to lose.
+        self._imgsz     = int(imgsz)
         self._model     = None
         self._available = False
         self._try_load()
@@ -90,10 +108,11 @@ class PersonDetector:
                 ssl._create_default_https_context = orig_ctx
 
             # Warmup pass so the first real detection is not slow
-            dummy = np.zeros((320, 320, 3), dtype=np.uint8)
-            self._model(dummy, verbose=False, classes=[self.PERSON_CLASS])
+            dummy = np.zeros((self._imgsz, self._imgsz, 3), dtype=np.uint8)
+            self._model(dummy, verbose=False, imgsz=self._imgsz,
+                        classes=[self.PERSON_CLASS])
             self._available = True
-            log.info("YOLOv8-nano person detector ready")
+            log.info("YOLOv8-nano person detector ready (imgsz=%d)", self._imgsz)
         except ImportError:
             log.warning(
                 "ultralytics not installed — auto-detection unavailable.  "
@@ -116,6 +135,7 @@ class PersonDetector:
         try:
             results = self._model(
                 frame, verbose=False,
+                imgsz=self._imgsz,
                 classes=[self.PERSON_CLASS],
                 conf=self.CONF_THRESHOLD,
             )
@@ -145,20 +165,46 @@ def _attr_exists(dotted: str) -> bool:
         return False
 
 
-_CSRT_FACTORIES = [
-    ("cv2.legacy.TrackerCSRT_create", lambda: cv2.legacy.TrackerCSRT_create()),
-    ("cv2.TrackerCSRT.create",        lambda: cv2.TrackerCSRT.create()),
-    # Fallbacks when CSRT is not in the installed OpenCV build
-    ("cv2.TrackerKCF.create",         lambda: cv2.TrackerKCF.create()),
-    ("cv2.legacy.TrackerKCF_create",  lambda: cv2.legacy.TrackerKCF_create()),
-]
+# Constructors per kind, in preference order.  The legacy.* variants live in
+# opencv-contrib-python; MOSSE and MedianFlow exist ONLY there, so a plain
+# opencv-python install silently falls back to the slower kinds below.
+_FACTORIES = {
+    TrackerKind.MOSSE: [
+        ("cv2.legacy.TrackerMOSSE_create", lambda: cv2.legacy.TrackerMOSSE_create()),
+    ],
+    TrackerKind.MEDIANFLOW: [
+        ("cv2.legacy.TrackerMedianFlow_create",
+         lambda: cv2.legacy.TrackerMedianFlow_create()),
+    ],
+    TrackerKind.KCF: [
+        ("cv2.TrackerKCF.create",        lambda: cv2.TrackerKCF.create()),
+        ("cv2.legacy.TrackerKCF_create", lambda: cv2.legacy.TrackerKCF_create()),
+    ],
+    TrackerKind.CSRT: [
+        ("cv2.legacy.TrackerCSRT_create", lambda: cv2.legacy.TrackerCSRT_create()),
+        ("cv2.TrackerCSRT.create",        lambda: cv2.TrackerCSRT.create()),
+    ],
+}
+
+# If the requested kind isn't in this OpenCV build, try the rest cheapest-first
+# so a missing contrib package degrades to "slower" rather than "broken".
+_FALLBACK_ORDER = [TrackerKind.MOSSE, TrackerKind.MEDIANFLOW,
+                   TrackerKind.KCF, TrackerKind.CSRT]
+
+
+def _factories_for(kind: TrackerKind) -> list:
+    ordered = [kind] + [k for k in _FALLBACK_ORDER if k != kind]
+    out = []
+    for k in ordered:
+        out.extend(_FACTORIES.get(k, []))
+    return out
 
 
 class Tracker:
     """
-    Wraps OpenCV CSRT for smooth per-frame tracking between YOLO detections.
-    The kind argument is accepted for API compatibility but ignored — CSRT
-    (with KCF fallback) is always used.
+    Wraps an OpenCV correlation tracker for smooth per-frame tracking between
+    YOLO detections.  The requested kind is honoured; if this OpenCV build
+    lacks it, the remaining kinds are tried cheapest-first.
     """
 
     def __init__(self):
@@ -173,12 +219,12 @@ class Tracker:
 
     def init(self, frame: np.ndarray,
              bbox: tuple[int, int, int, int],
-             kind: TrackerKind = TrackerKind.CSRT) -> bool:
+             kind: TrackerKind = TrackerKind.MOSSE) -> bool:
         """Initialise tracker on bbox (x, y, w, h) in frame coordinates."""
         self._tracker = None
         self._active  = False
 
-        for name, factory in _CSRT_FACTORIES:
+        for name, factory in _factories_for(kind):
             try:
                 candidate = factory()
                 result = candidate.init(frame, bbox)
@@ -199,7 +245,9 @@ class Tracker:
         if not self._active:
             # Probe what is actually available to help diagnose the failure.
             _available = [s for s in [
-                "cv2.legacy", "cv2.legacy.TrackerCSRT_create",
+                "cv2.legacy", "cv2.legacy.TrackerMOSSE_create",
+                "cv2.legacy.TrackerMedianFlow_create",
+                "cv2.legacy.TrackerCSRT_create",
                 "cv2.legacy.TrackerKCF_create", "cv2.TrackerCSRT", "cv2.TrackerKCF",
             ] if _attr_exists(s)]
             log.error(

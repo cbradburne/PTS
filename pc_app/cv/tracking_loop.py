@@ -100,11 +100,19 @@ class TrackingLoop(QObject):
     detector_ready     = pyqtSignal(bool)
 
     def __init__(self, mount_manager: MountManager,
-                 capture: CaptureSource, parent=None):
+                 capture: CaptureSource, parent=None,
+                 tracker_kind: str = "mosse", detect_size: int = 416):
         super().__init__(parent)
         self._mm       = mount_manager
         self._capture  = capture
         self._mount_id = 1
+        # Perf settings (see AppConfig.cv_tracker / cv_detect_size, and
+        # tools/cv_benchmark.py for measuring a given machine).
+        try:
+            self._tracker_kind = TrackerKind(str(tracker_kind).lower())
+        except ValueError:
+            log.warning("Unknown cv_tracker %r — using MOSSE", tracker_kind)
+            self._tracker_kind = TrackerKind.MOSSE
         self._gain_pan  = DEFAULT_GAIN_PAN
         self._gain_tilt = DEFAULT_GAIN_TILT
 
@@ -127,7 +135,7 @@ class TrackingLoop(QObject):
         self._frame_h = 720
 
         # ── Workers ────────────────────────────────────────────────────────
-        self._detector = PersonDetector()
+        self._detector = PersonDetector(imgsz=detect_size)
         self._tracker  = Tracker()
 
         # Separate executors so detection and tracking run in parallel.
@@ -172,7 +180,8 @@ class TrackingLoop(QObject):
         self._gain_tilt = tilt
 
     def set_tracker_kind(self, kind: TrackerKind) -> None:
-        """No-op — CSRT is always used.  Kept for API compatibility."""
+        """Change the correlation tracker; takes effect on the next re-anchor."""
+        self._tracker_kind = kind
 
     def set_target(self, cx: float, cy: float) -> None:
         """Reposition the target point (offset from frame centre, full-res px)."""
@@ -211,7 +220,7 @@ class TrackingLoop(QObject):
             scaled = bbox
 
         was_tracking = self._tracking
-        ok = self._tracker.init(small, scaled)
+        ok = self._tracker.init(small, scaled, self._tracker_kind)
         if ok:
             self._selected_bbox = bbox
             self._tracking      = True
@@ -402,6 +411,6 @@ class TrackingLoop(QObject):
                       max(1, int(w * TRACK_SCALE)), max(1, int(h * TRACK_SCALE)))
         else:
             small, scaled = frame, bbox
-        self._tracker.init(small, scaled)
+        self._tracker.init(small, scaled, self._tracker_kind)
         self._selected_bbox = bbox
-        log.debug(f"CSRT re-anchored to YOLO detection {bbox}")
+        log.debug(f"tracker re-anchored to YOLO detection {bbox}")

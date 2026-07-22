@@ -536,7 +536,9 @@ class CVWindow(QWidget):
 
         self._feed_btn.setText("Stop Feed")
 
-        loop = TrackingLoop(self._mm, self._capture, self)
+        loop = TrackingLoop(self._mm, self._capture, self,
+                            tracker_kind=self._config.cv_tracker,
+                            detect_size=self._config.cv_detect_size)
         loop.set_mount(self._mount_id)
         loop.frame_ready.connect(self._on_frame)
         loop.tracking_lost.connect(self._on_tracking_lost)
