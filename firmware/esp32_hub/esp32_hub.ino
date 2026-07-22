@@ -778,6 +778,12 @@ struct DemoCam {
     uint8_t  state;       // STATE_IDLE / STATE_MOVING_TO_POS
     uint8_t  target;      // slot being travelled to, 0xFF when idle
     uint32_t arrive_ms;   // millis() at which the move completes
+    uint8_t  pt_preset;   // 1-4, cycled by tapping the PT dial
+    uint8_t  sl_preset;   // 1-4, cycled by tapping the SL dial
+    bool     has_slider;  // false → slider dial renders dormant everywhere
+    bool     look_at;     // true  → row shows subjects 1-8 plus ◀/▶ arrows
+    uint8_t  subject;     // active look-at subject 0-7, 0xFF = none
+    bool     at_max;      // look-at: slider parked at max (▶) end vs min (◀)
 };
 static DemoCam  _demo[NUM_MOUNTS];
 static uint32_t _demo_status_ms = 0;
@@ -786,19 +792,37 @@ static uint16_t _demo_seq       = 0;
 static void demo_init() {
     // 4-6 stored positions each, deliberately uneven so screenshots look real
     // rather than synthetic.  Bit 0 = slot 1.
+    // Bit 0 = slot 1.  On the look-at camera these bits are stored SUBJECTS
+    // (1-8) instead of positions, because that is what the row shows.
     static const uint16_t MASKS[NUM_MOUNTS] = {
         0x001F,   // cam 1: slots 1-5            (5)
-        0x002B,   // cam 2: slots 1,2,4,6        (4)
+        0x000F,   // cam 2: LOOK-AT — subjects 1-4 calibrated
         0x003F,   // cam 3: slots 1-6            (6)
         0x0117,   // cam 4: slots 1,2,3,5,9      (5)
         0x00E3,   // cam 5: slots 1,2,6,7,8      (5)
     };
+    // Cam 2 runs in look-at mode: its row becomes 8 subject buttons plus ◀/▶,
+    // so the look-at UI can be photographed too.  Needs a slider by definition.
+    static const bool LOOKAT[NUM_MOUNTS] = { false, true, false, false, false };
+    // Mixed speeds — five identical dials look obviously synthetic in a photo.
+    // Tapping a dial on any surface cycles these for real (CMD_SET_ACTIVE_PRESET).
+    static const uint8_t PT[NUM_MOUNTS] = { 2, 3, 1, 4, 2 };
+    static const uint8_t SL[NUM_MOUNTS] = { 3, 1, 2, 1, 4 };
+    // Cam 4 has no slider, so its slider dial shows dormant on every surface —
+    // a realistic mixed rig, and it lets that state be photographed.
+    static const bool HAS_SL[NUM_MOUNTS] = { true, true, true, false, true };
     for (int i = 0; i < NUM_MOUNTS; i++) {
-        _demo[i].occupied  = MASKS[i];
-        _demo[i].state     = STATE_IDLE;
-        _demo[i].target    = 0xFF;
-        _demo[i].arrive_ms = 0;
-        _demo[i].at        = 0;
+        _demo[i].occupied   = MASKS[i];
+        _demo[i].state      = STATE_IDLE;
+        _demo[i].target     = 0xFF;
+        _demo[i].arrive_ms  = 0;
+        _demo[i].at         = 0;
+        _demo[i].pt_preset  = PT[i];
+        _demo[i].sl_preset  = SL[i];
+        _demo[i].has_slider = HAS_SL[i];
+        _demo[i].look_at    = LOOKAT[i];
+        _demo[i].subject    = LOOKAT[i] ? 1 : 0xFF;   // subject 2 selected
+        _demo[i].at_max     = false;                  // parked at the min (◀) end
         for (int s = 0; s < NUM_POSITIONS; s++)     // park on the lowest slot
             if (MASKS[i] & (1u << s)) { _demo[i].at = (uint16_t)(1u << s); break; }
         // Fake MAC so the Mounts pairing panel shows five bound mounts too.
@@ -843,6 +867,32 @@ static bool demo_consume_cmd(uint8_t mount_id, uint8_t cmd,
                 d.at       &= (uint16_t)~(1u << payload[0]);
             }
             break;
+        case CMD_SET_ACTIVE_PRESET:
+            // Tapping a speed dial on any surface cycles the preset. The UIs
+            // deliberately do NOT update locally — they wait for the STATUS
+            // echo — so the demo has to carry this or the dials never move.
+            if (plen >= 2 && payload[1] >= 1 && payload[1] <= 4) {
+                if      (payload[0] == GROUP_PAN_TILT)    d.pt_preset = payload[1];
+                else if (payload[0] == GROUP_SLIDER_ZOOM && d.has_slider)
+                                                          d.sl_preset = payload[1];
+            }
+            break;
+        case CMD_SWITCH_SUBJECT:                 // subject tap on a look-at row
+            if (plen >= 1 && payload[0] < 8) d.subject = payload[0];
+            break;
+        case CMD_START_LOOK_AT_MOVE:             // ◀ / ▶ on a look-at row
+            // payload: subject_id, direction (0=min/◀, 1=max/▶), speed_preset
+            if (plen >= 2 && d.look_at) {
+                if (payload[0] < 8) d.subject = payload[0];
+                d.state     = STATE_LOOK_AT_MOVE;
+                d.at_max    = (payload[1] == 1);   // destination end (▶ = max)
+                d.arrive_ms = millis() + DEMO_TRAVEL_MS;
+                // forward_to_mounts() only reaches its own intercept AFTER the
+                // send, which we skipped — so fire the arrow-flash broadcast
+                // here or the ◀/▶ indicator never animates for TCP/WS clients.
+                intercept_la_move_dir((uint8_t)(i + 1), payload[1]);
+            }
+            break;
         case CMD_E_STOP:
             d.state = STATE_IDLE; d.target = 0xFF;   // stops mid-travel, parked nowhere
             break;
@@ -862,6 +912,10 @@ static void demo_tick() {
             d.at     = (uint16_t)(1u << d.target);   // arrived — UIs turn it green
             d.state  = STATE_IDLE;
             d.target = 0xFF;
+        } else if (d.state == STATE_LOOK_AT_MOVE && (int32_t)(now - d.arrive_ms) >= 0) {
+            // Leaving STATE_LOOK_AT_MOVE is what promotes the ◀/▶ arrow from
+            // flashing amber to solid green — the UIs key off that transition.
+            d.state = STATE_IDLE;
         }
     }
 
@@ -872,12 +926,18 @@ static void demo_tick() {
         DemoCam &d = _demo[i];
         uint8_t p[10] = {
             d.state,
-            (uint8_t)(FLAG_HAS_SLIDER | FLAG_LIMITS_SET | FLAG_REF_SET),
-            2, 2,                                              // speed presets
+            (uint8_t)((d.has_slider ? FLAG_HAS_SLIDER  : 0)
+                      | (d.look_at  ? FLAG_LOOK_AT_MODE : 0)
+                      // Idle look-at mount reports which slider end it's parked
+                      // at, so the ◀/▶ arrow shows green there (like a real one).
+                      | ((d.look_at && d.state == STATE_IDLE)
+                             ? (d.at_max ? FLAG_AT_MAX_LIMIT : FLAG_AT_MIN_LIMIT) : 0)
+                      | FLAG_LIMITS_SET | FLAG_REF_SET),
+            d.pt_preset, d.sl_preset,
             (uint8_t)(d.occupied >> 8), (uint8_t)(d.occupied & 0xFF),
             (uint8_t)(d.at >> 8),       (uint8_t)(d.at & 0xFF),
             d.target,
-            0xFF,                                              // no look-at subject
+            d.subject,                                         // active look-at subject
         };
         RelayMsg msg;
         msg.len     = build_packet(msg.data, (uint8_t)(i + 1), ++_demo_seq,
