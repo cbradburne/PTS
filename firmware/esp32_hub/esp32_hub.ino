@@ -311,9 +311,11 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
             _espnow_fails[i]    = 0;
             _espnow_fail_run[i] = 0;
         } else {
-            _espnow_fail_total++;                       // health telemetry (cumulative)
-            if (_espnow_fail_run[i] < 255) _espnow_fail_run[i]++;
-            if (++_espnow_fails[i] >= ESPNOW_MAX_CONSEC_FAILS) {
+            // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
+            _espnow_fail_total = _espnow_fail_total + 1;   // health telemetry (cumulative)
+            if (_espnow_fail_run[i] < 255) _espnow_fail_run[i] = _espnow_fail_run[i] + 1;
+            _espnow_fails[i] = _espnow_fails[i] + 1;
+            if (_espnow_fails[i] >= ESPNOW_MAX_CONSEC_FAILS) {
                 _espnow_fails[i]          = 0;
                 _espnow_need_refresh[i]   = true;  // handled safely in loop()
             }
