@@ -1887,6 +1887,97 @@ function _stopJogLoop() {
 }
 
 // ============================================================
+//  Gamepad  (Bluetooth / USB controller — Gamepad API)
+// ------------------------------------------------------------
+//   left stick  X  -> slider      right stick X -> pan
+//   (left stick Y unused)         right stick Y -> tilt
+//   LT / RT triggers -> zoom      (zoom = RT - LT, so both fully
+//                                  pressed cancels to 0)
+// Drives the *selected* camera through the same jog path as the
+// on-screen sticks (_jl / _jr + _sendJog), so the at-position and
+// look-at side-effects and the 80 ms rate-limit come along for free.
+// ============================================================
+let _padRaf   = null;    // non-null while polling a connected pad
+let _padDrive = false;   // pad is commanding motion (owes a zero-stop on release)
+
+// Per-axis deadzone with edge rescaling (same shape as the on-screen sticks).
+function _padDead(v, dz) {
+    const a = Math.abs(v);
+    if (a < dz) return 0;
+    return Math.sign(v) * (a - dz) / (1 - dz);
+}
+function _padAxis(gp, i) { return (gp.axes && gp.axes.length > i) ? gp.axes[i] : 0; }
+function _padTrig(gp, i) { const b = gp.buttons && gp.buttons[i];
+    return b == null ? 0 : (typeof b === 'object' ? b.value : b); }
+
+function _padActivePad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const p of pads) if (p && p.connected) return p;
+    return null;
+}
+
+function _padPoll() {
+    const gp = _padActivePad();
+    if (gp) {
+        const DZ = 0.10, TDZ = 0.04;
+        let   slider = _padDead(_padAxis(gp, 0), DZ);   // left stick X
+        const pan    = _padDead(_padAxis(gp, 2), DZ);   // right stick X
+        const tilt   = _padDead(_padAxis(gp, 3), DZ);   // right stick Y (down = +, as on-screen)
+        const lt     = _padDead(_padTrig(gp, 6), TDZ);  // left trigger  -> zoom out
+        const rt     = _padDead(_padTrig(gp, 7), TDZ);  // right trigger -> zoom in
+        const zoom   = rt - lt;                          // both fully pressed = 0
+        if (!camHasSlider(selCam)) slider = 0;           // this mount has no rail
+
+        if (pan || tilt || slider || zoom) {
+            _jr.x = pan;    _jr.y = tilt;
+            _jl.x = slider; _jl.y = zoom;
+            _padDrive = true;
+            _sendJog(false);            // rate-limited to 80 ms internally
+        } else if (_padDrive) {
+            _jr.x = _jr.y = _jl.x = _jl.y = 0;
+            _sendJog(true);             // guaranteed zero-velocity stop
+            _padDrive = false;
+        }
+    }
+    _padRaf = requestAnimationFrame(_padPoll);
+}
+
+function _startPad() { if (_padRaf === null) _padRaf = requestAnimationFrame(_padPoll); }
+function _stopPad() {
+    if (_padRaf !== null) { cancelAnimationFrame(_padRaf); _padRaf = null; }
+    if (_padDrive) { _jr.x = _jr.y = _jl.x = _jl.y = 0; _sendJog(true); _padDrive = false; }
+}
+
+// Small auto-hiding toast so the operator knows a controller is live.
+let _padToastEl = null, _padToastT = null;
+function _padToast(msg) {
+    if (!_padToastEl) {
+        _padToastEl = document.createElement('div');
+        _padToastEl.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);' +
+            'background:#1565c0;color:#fff;font:600 13px system-ui,sans-serif;padding:8px 14px;' +
+            'border-radius:8px;z-index:9999;pointer-events:none;opacity:0;transition:opacity .2s;' +
+            'box-shadow:0 4px 16px rgba(0,0,0,.4)';
+        document.body.appendChild(_padToastEl);
+    }
+    _padToastEl.textContent = msg;
+    _padToastEl.style.opacity = '1';
+    clearTimeout(_padToastT);
+    _padToastT = setTimeout(() => { _padToastEl.style.opacity = '0'; }, 2200);
+}
+
+if ('getGamepads' in navigator) {
+    // Most browsers only surface the pad after the first button press.
+    window.addEventListener('gamepadconnected', e => {
+        const id = (e.gamepad && e.gamepad.id ? e.gamepad.id.split('(')[0] : 'Controller').trim();
+        _padToast('🎮 ' + (id || 'Controller') + ' connected');
+        _startPad();
+    });
+    window.addEventListener('gamepaddisconnected', () => {
+        if (!_padActivePad()) { _stopPad(); _padToast('🎮 Controller disconnected'); }
+    });
+}
+
+// ============================================================
 //  Fullscreen  (Fullscreen API — Android Chrome; hidden on iOS where unavailable)
 // ============================================================
 function toggleFullscreen() {
