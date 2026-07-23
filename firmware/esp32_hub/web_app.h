@@ -275,12 +275,12 @@ canvas.hsl-c{display:block;touch-action:none;}
 /* Middle: cam bar + set/clear + dials */
 .ext-pos-middle{flex:1;display:flex;flex-direction:column;justify-content:center;
   gap:6px;padding:8px 12px;border-right:1px solid var(--border);}
-.ext-pos-setclear{display:flex;gap:6px;justify-content:center;}
-.ext-pos-act-btn{padding:7px 18px;border-radius:6px;background:var(--surf2);
-  border:1px solid #555;color:var(--text);font-size:13px;font-weight:700;cursor:pointer;text-align:center;}
+.ext-pos-ctrls{flex:1;display:flex;flex-direction:row;align-items:center;
+  justify-content:center;gap:16px;flex-wrap:wrap;}
+.ext-pos-act-btn{padding:11px 22px;border-radius:8px;background:var(--surf2);
+  border:1px solid var(--border);color:var(--text);font-size:14px;font-weight:600;cursor:pointer;text-align:center;}
 .ext-pos-act-btn.armed{background:var(--orange);border-color:var(--orange);color:#fff;}
 .ext-pos-act-btn.clear-armed{background:var(--red-lit);border-color:var(--red-lit);color:#fff;}
-.ext-pos-speed-row{display:flex;gap:8px;align-items:center;justify-content:center;}
 /* Joystick section */
 .ext-pos-joy-wrap{display:flex;flex-direction:column;align-items:center;
   justify-content:center;padding:6px 8px;flex-shrink:0;}
@@ -503,20 +503,17 @@ canvas.hsl-c{display:block;touch-action:none;}
         <!-- Middle: cam selector + SET/CLEAR + speed dials -->
         <div class="ext-pos-middle">
           <div class="cam-bar" id="ext-pos-cam-bar" style="flex-wrap:wrap;gap:4px;margin-bottom:auto;"></div>
-          <div style="flex:1;display:flex;flex-direction:column;justify-content:space-evenly;align-items:center;">
-            <div class="ext-pos-setclear">
-              <button id="ext-pos-set-btn" class="ext-pos-act-btn">SET</button>
-              <button id="ext-pos-clear-btn" class="ext-pos-act-btn">CLEAR</button>
+          <!-- Slider dial | CLEAR | SET | Pan/Tilt dial — same row order as the GC screen -->
+          <div class="ext-pos-ctrls">
+            <div class="ext-dial-wrap">
+              <canvas id="ext-pos-dial-sz" width="70" height="70"></canvas>
+              <span class="dial-lbl">Slider</span>
             </div>
-            <div class="ext-pos-speed-row">
-              <div class="ext-dial-wrap">
-                <canvas id="ext-pos-dial-sz" width="70" height="70"></canvas>
-                <span class="dial-lbl">SZ</span>
-              </div>
-              <div class="ext-dial-wrap">
-                <canvas id="ext-pos-dial-pt" width="70" height="70"></canvas>
-                <span class="dial-lbl">PT</span>
-              </div>
+            <button id="ext-pos-clear-btn" class="ext-pos-act-btn">CLEAR</button>
+            <button id="ext-pos-set-btn" class="ext-pos-act-btn">SET</button>
+            <div class="ext-dial-wrap">
+              <canvas id="ext-pos-dial-pt" width="70" height="70"></canvas>
+              <span class="dial-lbl">Pan / Tilt</span>
             </div>
           </div>
         </div>
