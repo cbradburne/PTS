@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bill of materials — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+<style>
+  table.bom td.num, table.bom th.num { text-align: right; white-space: nowrap; width: 1%; }
+  table.bom td a { white-space: nowrap; }
+  .dim { color: var(--dim); }
+  .fgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; margin: 18px 0; }
+  .fcard { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .fcard h4 { margin: 0 0 8px; font-size: 14px; color: var(--accent); }
+  .fcard ul { margin: 0; padding-left: 18px; }
+  .fcard li { font-size: 13.5px; margin: 2px 0; }
+  .fcard li .num { color: var(--dim); }
+</style>
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Bill of materials</h1>
+    <p class="subtitle">Every part to build one mount, the slider and the hub — with
+    buy-links. Quantities are per unit; scale up for a multi-camera rig.</p>
+
+    <div class="note"><b>Spreadsheet download</b> The same list, plus the full
+    nuts-and-bolts breakdown per printed part, is in
+    <a href="../assets/BoM.xlsx">BoM.xlsx</a>. Links point to the parts the rig was
+    built with — equivalents are fine.</div>
+
+    <h2>Parts</h2>
+    <p>58 line items. The <strong>HDMI</strong>, <strong>SDI</strong> and
+    <strong>BMD converter</strong> groups are alternative video paths — pick the one
+    that suits your camera, you don't need all three.</p>
+    <h3>Circuit</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>Teensy 4.1</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0BCTSKYQZ?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>TMC2209</td><td class="num">4</td><td><a href="https://www.amazon.co.uk/dp/B07WC71M4R?ref=ppx_yo2ov_dt_b_fed_asin_title&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>5V regulator</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B09Z2BM94R?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>1n4007</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/sourcing-map-Rectifier-Electronic-Industrial/dp/B0FZFSXY79/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>100nf 35v</td><td class="num">6</td><td><a href="https://www.amazon.co.uk/dp/B08MZ1BSN6?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_3" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>10K ¼W</td><td class="num">4</td><td><a href="https://www.amazon.co.uk/dp/B0CL73CZPQ/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>100K ¼W</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0CL6TJZPC/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Screw PCB terminals 5.08mm 2pin</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/sourcing-map-Connectors-Connector-Electronic/dp/B0G8YZSX2B/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>JST 4pin Plug + Lead + Socket</td><td class="num">6</td><td><a href="https://www.amazon.co.uk/dp/B09LCRCTQG?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_5" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>JST 5pin Plug + Lead + Socket</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0CBWZBB63?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_3&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>JST 2pin Plug + Lead + Socket</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B0CBWZLB5C?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Header Sockets</td><td class="num">Pack</td><td><a href="https://www.amazon.co.uk/dp/B00R1JDS1Q?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Header Pins</td><td class="num">Pack</td><td><a href="https://www.amazon.co.uk/dp/B0GZZXN23M/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Mount</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>6824ZZ 120x150x16mm Bearing</td><td class="num">1</td><td><a href="https://simplybearings.co.uk/shop/p170416/6824ZZ-Budget-Metal-Shielded-Thin-Section-Deep-Groove-Ball-Bearing-120x150x16mm/product_info.html" target="_blank" rel="noopener">Simply Bearings &#8599;</a></td></tr>
+      <tr><td>F688ZZ Flanged Bearing 8 x 16 x 5mm</td><td class="num">4</td><td><a href="https://www.amazon.co.uk/dp/B0CRLSHL1N?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GT2 Pulley - 120 tooth, 8mm bore</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B09DS9PJ55?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_6&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GT2 Pulley - 36 tooth, 5mm bore</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07X8776QQ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_4" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GT2 Pulley - 16 tooth, 5mm bore</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07SX1N19C/?th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GT2 Belt - 580mm loop, 6mm wide</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07RCZPRG9?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_5" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GT2 Belt - 350mm loop, 6mm wide</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/sourcing-map-Timing-Printing-Closed/dp/B0GVKNPKQV/?th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Nema14 0.9 deg 36Ncm</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B00W98OYE4?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_2" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Nema14 Round Pancake Stepper Motor 0.9 deg</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0B9RVCDTJ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_3" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GX12 2 Pin Aviation Connector &amp; Panel Socket</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DX5PVGJ9?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Waveshare ESP32-S3 1.75inch AMOLED Round Touch Display</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0F7XTJ1ZL?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Sticky Pads Heavy Duty 40x40mm</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0GQRJJPFN?ref=ppx_yo2ov_dt_b_fed_asin_title&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>2.4GHz Antenna</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DTHJ1FS2?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>U.FL Mini PCI to SMA Female 20cm Lead</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0B9RXM7TB?ref=ppx_yo2ov_dt_b_fed_asin_title&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Mount - HDMI</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>HDMI Keystone coupler</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07Z8YS2Z7?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>HDMI Cable - 1m</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B09L4XKVQ5/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Mount - SDI</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>SDI Panel mount coupler</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0FSCXSPCB?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>HD-SDI Cable - 1m</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07Y9GPG8X/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Mount - BMD Converter</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>Blackmagic Design Bi-Directional SDI/HDMI 3G</td><td class="num">1</td><td><a href="https://www.thomann.co.uk/blackmagic_design_mc_bidirect._sdi_hdmi_3g.htm" target="_blank" rel="noopener">Thomann &#8599;</a></td></tr>
+      <tr><td>SDI Panel mount coupler</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B0FSCXSPCB?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>HD-SDI Cable - 1m, Right angle</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/gp/product/B0CZ3TBTJM/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>USB-C Cable - 1 Metre (cut and soldered to JST 2pin)</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07PLSDPYN/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Slider</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>Aluminium Extrusion - 8040 C</td><td class="num">1000 - 3000mm</td><td><a href="https://ooznest.co.uk/product/40x80mm-c-beam-t-v-slot-aluminium-extrusion-profile-silver-cut-to-size/?mtke=11" target="_blank" rel="noopener">Ooznest &#8599;</a></td></tr>
+      <tr><td>GT2 Pulley - 36 tooth</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07X8776QQ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_4" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GT2 Belt - 5m</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B08SJ5X2HZ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_9&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Idler - 6mm width, 3mm bore, 13mm diameter</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B0CD25SZNR?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Nema14 1.8 deg 65Ncm</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B00PNEQUZ2?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>V Slot Pulley Wheels 625zz</td><td class="num">16</td><td><a href="https://www.amazon.co.uk/sourcing-map-Printer-Rollers-High-Speed/dp/B0DNCP6TRB/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>XT60 Plug Connector Female and Male</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B085HF31K7?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GX12 2 Pin Aviation Connector &amp; Panel Socket</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DX5PVGJ9?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>GX12 4 Pin Aviation Connector &amp; Panel Socket</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DX6CD9LN?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Slider - HDMI</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>HDMI Keystone coupler</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07Z8YS2Z7?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>HDMI Cable, 2m - 4m</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B09ZRTQXXT/?th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Slider - SDI</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>SDI Panel mount coupler</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0FSCXSPCB?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>HD-SDI Cable, 1m - 4m</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07VRBYT1N/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Slider - BMD Converter</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>SDI Panel mount coupler</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B0FSCXSPCB?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>HD-SDI Cable, 2m - 4m</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B07VRBYT1N/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Hub</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>Seeed Studio XIAO ESP32S3</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0BYSB66S5?ref=ppx_yo2ov_dt_b_fed_asin_title&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Hub Display</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>Waveshare ESP32-S3 7inch Capacitive Touch LCD</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0D2NMCY7K/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>2.4GHz Antenna</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DTHJ1FS2?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>U.FL Mini PCI to SMA Female 20cm Lead</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0B9RXM7TB?ref=ppx_yo2ov_dt_b_fed_asin_title&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>USB-C Screw Hole Panel Mount</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B075R7QBQD/?th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Misc</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>2 Core Wire - 30m, 20awg</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0792Y2X4K/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>4 Core Wire - 10m, 24awg</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0CP6XLLX8/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+    <h3>Optional</h3>
+    <table class="bom">
+      <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
+      <tr><td>UGREEN Video Capture Card HDMI to USB C 1080P 60FPS Capture <span class="dim">(CV Tracking)</span></td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0CFQ2BMPZ?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+    </table>
+
+    <h2>Fasteners</h2>
+    <p>What each assembly needs. Inserts are heat-set threaded inserts; "CS" is
+    countersunk. The spreadsheet has the same data as a single cross-reference
+    matrix.</p>
+    <div class="fgrid">
+      <div class="fcard"><h4>Base + Topper + Ports</h4><ul><li>M3 x 12 <span class="num">&#215;8</span></li><li>M3 x 20 <span class="num">&#215;2</span></li><li>M3 x 45 <span class="num">&#215;6</span></li><li>M3 Counter Sunk x 10 <span class="num">&#215;4</span></li><li>M2.5 Insert <span class="num">&#215;4</span></li><li>M3 Insert <span class="num">&#215;16</span></li><li>M3 Washer <span class="num">&#215;8</span></li></ul></div>
+      <div class="fcard"><h4>Inner</h4><ul><li>M3 x 8 <span class="num">&#215;4</span></li><li>M3 Insert <span class="num">&#215;12</span></li></ul></div>
+      <div class="fcard"><h4>Upper</h4><ul><li>M3 x 10 <span class="num">&#215;4</span></li><li>M3 x 30 <span class="num">&#215;6</span></li><li>M3 Insert <span class="num">&#215;4</span></li><li>M3 Washer <span class="num">&#215;10</span></li></ul></div>
+      <div class="fcard"><h4>Camera Focus + Converter</h4><ul><li>M3 x 16 <span class="num">&#215;4</span></li><li>M3 Counter Sunk x 10 <span class="num">&#215;2</span></li><li>M5 x 25 <span class="num">&#215;2</span></li><li>M3 Insert <span class="num">&#215;4</span></li><li>M5 Nyloc Nut <span class="num">&#215;2</span></li></ul></div>
+      <div class="fcard"><h4>Side-Support</h4><ul><li>M3 x 30 <span class="num">&#215;2</span></li><li>M3 x 45 <span class="num">&#215;1</span></li><li>M3 Washer <span class="num">&#215;3</span></li></ul></div>
+      <div class="fcard"><h4>Side-Motor</h4><ul><li>M3 x 16 <span class="num">&#215;4</span></li><li>M3 x 30 <span class="num">&#215;2</span></li><li>M3 x 45 <span class="num">&#215;1</span></li><li>M3 Washer <span class="num">&#215;7</span></li></ul></div>
+      <div class="fcard"><h4>Camera</h4><ul><li>M8 x 25 <span class="num">&#215;1</span></li><li>M8 x 45 <span class="num">&#215;1</span></li><li>M8 Domed Nut <span class="num">&#215;2</span></li></ul></div>
+      <div class="fcard"><h4>Tripod Mount</h4><ul><li>M5 x 20 <span class="num">&#215;4</span></li><li>M5 x 30 <span class="num">&#215;4</span></li><li>M5 Nyloc Nut <span class="num">&#215;4</span></li><li>3/8 UNC Insert <span class="num">&#215;1</span></li></ul></div>
+      <div class="fcard"><h4>Comms Mount</h4><ul><li>M2 Counter Sunk x 6 <span class="num">&#215;3</span></li></ul></div>
+      <div class="fcard"><h4>Hub Display</h4><ul><li>M3 x 8 <span class="num">&#215;4</span></li><li>M3 Insert <span class="num">&#215;4</span></li><li>M3 Washer <span class="num">&#215;4</span></li></ul></div>
+      <div class="fcard"><h4>Rail End-Comms</h4><ul><li>M3 x 16 <span class="num">&#215;2</span></li><li>M3 x 25 <span class="num">&#215;1</span></li><li>M3 Counter Sunk x 10 <span class="num">&#215;4</span></li><li>M5 x 25 <span class="num">&#215;4</span></li><li>M3 Nyloc Nut <span class="num">&#215;7</span></li><li>M3 Insert <span class="num">&#215;4</span></li><li>3/8 UNC Insert <span class="num">&#215;1</span></li><li>M3 Washer <span class="num">&#215;2</span></li><li>M5 Washer <span class="num">&#215;4</span></li></ul></div>
+      <div class="fcard"><h4>Rail End</h4><ul><li>M5 x 25 <span class="num">&#215;4</span></li><li>M5 x 35 <span class="num">&#215;2</span></li><li>3/8 UNC Insert <span class="num">&#215;1</span></li></ul></div>
+      <div class="fcard"><h4>Rail Bottom</h4><ul><li>M3 x 25 <span class="num">&#215;2</span></li><li>M5 x 35 <span class="num">&#215;2</span></li><li>M5 x 45 <span class="num">&#215;2</span></li><li>M5 x 55 <span class="num">&#215;2</span></li><li>M5 Nyloc Nut <span class="num">&#215;6</span></li><li>M3 Washer <span class="num">&#215;2</span></li></ul></div>
+      <div class="fcard"><h4>Rail Top</h4><ul><li>M5 x 35 <span class="num">&#215;2</span></li><li>M5 x 45 <span class="num">&#215;2</span></li><li>M5 x 55 <span class="num">&#215;2</span></li><li>M5 Nyloc Nut <span class="num">&#215;6</span></li></ul></div>
+      <div class="fcard"><h4>Rail Side Drag</h4><ul><li>M5 x 20 <span class="num">&#215;2</span></li><li>M5 Nyloc Nut <span class="num">&#215;6</span></li></ul></div>
+      <div class="fcard"><h4>Rail Side Motor</h4><ul><li>M3 x 10 <span class="num">&#215;4</span></li><li>M5 Nyloc Nut <span class="num">&#215;4</span></li><li>M3 Washer <span class="num">&#215;4</span></li></ul></div>
+      <div class="fcard"><h4>Rail Drag Arm</h4><ul><li>M5 x 20 <span class="num">&#215;2</span></li><li>M3 Nyloc Nut <span class="num">&#215;2</span></li></ul></div>
+      <div class="fcard"><h4>Rail Drag Clip</h4><ul><li>M3 x 20 <span class="num">&#215;2</span></li><li>M3 Counter Sunk x 10 <span class="num">&#215;4</span></li><li>M3 Nyloc Nut <span class="num">&#215;4</span></li><li>M3 Washer <span class="num">&#215;2</span></li></ul></div>
+    </div>
+
+    <div class="tip"><b>Hardware files</b> STEP models for the pan/tilt head and slider
+    are in <code>Print Files/</code>, and the PCB fabrication files are in the repo
+    root (see <a href="building.html">Building the firmware</a>).</div>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>

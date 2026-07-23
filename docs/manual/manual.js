@@ -23,6 +23,7 @@ const PAGES = [
   { href: "pairing.html",       title: "Pairing & identity" },
   { href: "config.html",        title: "Configuration reference" },
   { href: "building.html",      title: "Building the firmware" },
+  { href: "bom.html",           title: "Bill of materials" },
   { href: "troubleshooting.html", title: "Troubleshooting" },
 ];
 
