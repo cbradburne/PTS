@@ -197,6 +197,20 @@ canvas.hsl-c{display:block;touch-action:none;}
 .dial-wrap canvas{display:block;touch-action:none;}
 .dial-lbl{font-size:10px;color:var(--dim);letter-spacing:.05em;text-transform:uppercase;}
 
+/* ---- game-controller view ---- */
+.gc-pos-grid{grid-template-columns:repeat(10,minmax(0,84px));justify-content:center;
+  flex:1 1 auto;align-content:center;}
+#gc-ctrl-row{display:flex;flex-direction:row;justify-content:center;align-items:center;
+  gap:22px;padding:6px 8px;background:var(--surf);border-top:1px solid var(--border);flex-shrink:0;}
+#gc-ctrl-row .ctrl-btn{flex:0 0 auto;padding:14px 30px;font-size:14px;}
+#gc-bottom{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:6px 10px;background:var(--surf);border-top:1px solid var(--border);flex-shrink:0;
+  font-size:11px;color:var(--dim);}
+#gc-bottom .gc-stat{flex:1;text-align:center;}
+#gc-estop{background:var(--red);border-color:var(--red);color:#fff;flex:0 0 auto;padding:10px 22px;}
+#gc-estop:active{background:var(--red-lit);}
+#gc-exit{background:var(--blue);border-color:var(--blue-lit);color:#fff;flex:0 0 auto;}
+
 /* ============================================================
    Extended view  (tablet / large screen)
    ============================================================ */
@@ -390,13 +404,39 @@ canvas.hsl-c{display:block;touch-action:none;}
       </div>
       <div class="joy-panel" id="joy-right-panel">
         <canvas class="jc" id="joy-right"></canvas>
-        <div class="joy-axes"><span>&#8592; PAN &#8594;</span><span>&#8593; TILT &#8595;</span></div>
       </div>
     </div>
   </div>
   <div class="stat-bar" style="display:flex;align-items:center;justify-content:space-between;">
+    <button class="view-toggle-btn" id="btn-to-gc-l">&#127918; GC</button>
     <div><span class="ws-dot" id="l-dot"></span><span id="l-stat">Connecting…</span></div>
     <button class="view-toggle-btn" id="btn-to-ext-l">&#8862; Extended</button>
+  </div>
+</div>
+
+<!-- =================================================== GAME-CONTROLLER -->
+<!-- Stripped-down landscape screen for when a Bluetooth pad handles motion:
+     pick the camera, recall/set/clear positions and set speeds; no on-screen
+     jog controls. -->
+<div id="gc-view" class="view">
+  <div class="cam-bar" id="gc-cam-bar"></div>
+  <div class="pos-grid gc-pos-grid" id="gc-pos-grid"></div>
+  <div id="gc-ctrl-row">
+    <div class="dial-wrap" id="gc-dial-sz-wrap">
+      <canvas id="gc-dial-sz"></canvas>
+      <span class="dial-lbl">Slider</span>
+    </div>
+    <button class="ctrl-btn" id="gc-clear">CLEAR</button>
+    <button class="ctrl-btn" id="gc-set">SET</button>
+    <div class="dial-wrap" id="gc-dial-pt-wrap">
+      <canvas id="gc-dial-pt"></canvas>
+      <span class="dial-lbl">Pan / Tilt</span>
+    </div>
+  </div>
+  <div id="gc-bottom">
+    <button class="view-toggle-btn" id="gc-exit">&#127918; GC</button>
+    <div class="gc-stat"><span class="ws-dot" id="gc-dot"></span><span id="gc-stat">Connecting…</span></div>
+    <button class="ctrl-btn" id="gc-estop">E-STOP</button>
   </div>
 </div>
 
@@ -634,6 +674,9 @@ function setPreset(which, val, sendToMount) {
         // Portrait speed dials
         if (which === 'pt' && dialPT) dialPT.update(val);
         if (which === 'sz' && dialSZ) dialSZ.update(val);
+        // Game-controller view dials
+        if (which === 'pt' && gcDialPT) gcDialPT.update(val);
+        if (which === 'sz' && gcDialSZ) gcDialSZ.update(val);
         // Extended detail dials
 
         // Extended positions-page dials
@@ -920,12 +963,12 @@ window.addEventListener('pageshow', e => {
 });
 
 function setWsSt(ok) {
-    ['p-dot','l-dot','ext-ws-dot'].forEach(id => {
+    ['p-dot','l-dot','gc-dot','ext-ws-dot'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.className = 'ws-dot' + (ok ? ' on' : '');
     });
     const txt = ok ? 'Connected to hub' : 'Reconnecting…';
-    ['p-stat','l-stat'].forEach(id => {
+    ['p-stat','l-stat','gc-stat'].forEach(id => {
         const el = document.getElementById(id); if (el) el.textContent = txt;
     });
 }
@@ -1208,7 +1251,7 @@ function refreshCamBtns() {
         const id = parseInt(btn.dataset.cam);
         btn.classList.toggle('sel', id === selCam);
     });
-    ['p-cam-bar','l-cam-bar','ext-pos-cam-bar'].forEach(barId => {
+    ['p-cam-bar','l-cam-bar','gc-cam-bar','ext-pos-cam-bar'].forEach(barId => {
         for (let i = 1; i <= NUM_MOUNTS; i++) {
             const dot = document.getElementById(`${barId}-dot${i}`);
             if (dot) dot.className = 'dot' + (camSt[i].connected ? ' on' : '');
@@ -1220,15 +1263,20 @@ function refreshCamBtns() {
 //  Portrait — position grid
 // ============================================================
 function buildPosGrid() {
-    const grid = document.getElementById('p-pos-grid');
-    grid.innerHTML = '';
-    for (let s = 0; s < NUM_SLOTS; s++) {
-        const btn = document.createElement('button');
-        btn.className = 'pos-btn';
-        btn.dataset.slot = s;
-        btn.addEventListener('click', () => onPosClick(s));
-        grid.appendChild(btn);
-    }
+    // Portrait grid and the game-controller grid share the same slot buttons and
+    // click handler; refreshPosGrid() paints both from the selected camera's state.
+    ['p-pos-grid', 'gc-pos-grid'].forEach(gridId => {
+        const grid = document.getElementById(gridId);
+        if (!grid) return;
+        grid.innerHTML = '';
+        for (let s = 0; s < NUM_SLOTS; s++) {
+            const btn = document.createElement('button');
+            btn.className = 'pos-btn';
+            btn.dataset.slot = s;
+            btn.addEventListener('click', () => onPosClick(s));
+            grid.appendChild(btn);
+        }
+    });
 }
 
 function refreshPosGrid() {
@@ -1238,10 +1286,14 @@ function refreshPosGrid() {
     // SET button: armed in set-mode, or when waiting for the user to confirm
     // look-at point B (slider has arrived; user re-aims then presses SET).
     const waitingSetB = la && cs.calibPhase === CP_WAIT_SET_B;
-    document.getElementById('btn-set').classList.toggle('armed', uiMode === 'set' || waitingSetB);
+    const setArmed = uiMode === 'set' || waitingSetB;
+    document.getElementById('btn-set').classList.toggle('armed', setArmed);
+    const gcSetBtn = document.getElementById('gc-set');
+    if (gcSetBtn) gcSetBtn.classList.toggle('armed', setArmed);
 
+    ['p-pos-grid', 'gc-pos-grid'].forEach(gridId => {
     for (let s = 0; s < NUM_SLOTS; s++) {
-        const btn = document.querySelector(`#p-pos-grid [data-slot="${s}"]`);
+        const btn = document.querySelector(`#${gridId} [data-slot="${s}"]`);
         if (!btn) continue;
 
         if (la) {
@@ -1286,6 +1338,7 @@ function refreshPosGrid() {
             btn.className = cls;
         }
     }
+    });
 }
 
 function onPosClick(slot) {
@@ -1382,8 +1435,21 @@ function setUiMode(m) {
     if (editBtnExt) editBtnExt.classList.toggle('armed', m === 'edit');
     const clearBtn = document.getElementById('btn-clear-p');
     if (clearBtn) clearBtn.classList.toggle('clear-armed', m === 'clear');
-    refreshPosGrid();   // refreshPosGrid manages btn-set armed state
+    const gcClearBtn = document.getElementById('gc-clear');
+    if (gcClearBtn) gcClearBtn.classList.toggle('clear-armed', m === 'clear');
+    refreshPosGrid();   // refreshPosGrid manages btn-set / gc-set armed state
     if (_extActive && _extPage === 'positions') refreshExtPositions();
+}
+
+// SET click — shared by the portrait and game-controller SET buttons: confirm
+// look-at point B when we're waiting for it, otherwise toggle set-mode.
+function doSetClick() {
+    const cs = camSt[selCam];
+    if (camIsLookAt(selCam) && cs.calibPhase === CP_WAIT_SET_B) {
+        wsSend(mkAddSubjectSetB(selCam));
+    } else {
+        setUiMode(uiMode === 'set' ? 'move' : 'set');
+    }
 }
 
 function updateCalibSheet(phase) {
@@ -1406,6 +1472,7 @@ function hideCalibSheet() {
 //  Speed Dial  (portrait — arc matches hub display; tap to cycle preset 1→4)
 // ============================================================
 let dialPT = null, dialSZ = null;
+let gcDialPT = null, gcDialSZ = null;
 
 class SpeedDial {
     // Arc geometry mirrors the LVGL hub-display dial:
@@ -1435,7 +1502,7 @@ class SpeedDial {
     }
 
     update(n) {
-        this.preset = Math.max(1, Math.min(4, n));
+        this.preset = Math.max(0, Math.min(4, n));   // 0 = dormant (e.g. slider-less mount)
         this.draw();
     }
 
@@ -1450,6 +1517,8 @@ class SpeedDial {
         const dr = sz * 0.028;  // dot radius
         const n  = this.preset;
         const N  = 5;           // 5 dots → 4 segments → 4 speed levels
+        const dormant = (n <= 0);                    // slider-less / disabled axis
+        const lit = dormant ? '#3a3a3a' : '#00aeef';
 
         const startA = (120 * Math.PI) / 180;   // 8-o'clock
         const sweepA = (300 * Math.PI) / 180;   // 300° clockwise to 2-o'clock
@@ -1466,13 +1535,15 @@ class SpeedDial {
         c.lineCap     = 'round';
         c.stroke();
 
-        // Filled indicator — covers segments 0 through n-1
-        c.beginPath();
-        c.arc(cx, cy, R, startA, fillA);
-        c.strokeStyle = '#00aeef';
-        c.lineWidth   = iw;
-        c.lineCap     = 'round';
-        c.stroke();
+        // Filled indicator — covers segments 0 through n-1 (none when dormant)
+        if (!dormant) {
+            c.beginPath();
+            c.arc(cx, cy, R, startA, fillA);
+            c.strokeStyle = lit;
+            c.lineWidth   = iw;
+            c.lineCap     = 'round';
+            c.stroke();
+        }
 
         // 5 dots on a wider ring (Rd) — sit outside the arc track; dot i lit when i <= n
         for (let i = 0; i < N; i++) {
@@ -1481,16 +1552,16 @@ class SpeedDial {
             const dy = cy + Rd * Math.sin(a);
             c.beginPath();
             c.arc(dx, dy, dr, 0, Math.PI * 2);
-            c.fillStyle = (i <= n) ? '#00aeef' : '#252525';
+            c.fillStyle = (!dormant && i <= n) ? lit : '#252525';
             c.fill();
         }
 
-        // Centre number
-        c.fillStyle      = '#00aeef';
+        // Centre number — a dash when dormant (mount has no slider)
+        c.fillStyle      = dormant ? '#555' : lit;
         c.font           = `bold ${Math.round(sz * 0.34)}px system-ui,sans-serif`;
         c.textAlign      = 'center';
         c.textBaseline   = 'middle';
-        c.fillText(n, cx, cy);
+        c.fillText(dormant ? '–' : n, cx, cy);
     }
 }
 
@@ -2005,8 +2076,10 @@ document.addEventListener('webkitfullscreenchange',  _onFsChange);
 //  Orientation
 // ============================================================
 let _curView = '';
+let _gcMode = false;
 
 function checkOrientation() {
+    if (_gcMode) return;   // game-controller view owns the screen until GC is toggled off
     const land = window.innerWidth > window.innerHeight;
     const next = land ? 'landscape' : 'portrait';
     if (next === _curView) return;
@@ -2093,6 +2166,31 @@ function _loadExtPref() {
 }
 function _saveExtPref(on) {
     try { localStorage.setItem(_EXT_KEY, on ? '1' : '0'); } catch(e) {}
+}
+
+function setGcView(on) {
+    _gcMode = on;
+    if (on) {
+        // Drop any on-screen jog widgets — the physical pad handles motion now.
+        [pHslZoom, pHslSlider, pJoy, hslZoom, hslSlider, joyRight]
+            .forEach(w => w && w.cancel && w.cancel());
+        _stopJogLoop();
+        _curView = 'gc';
+        document.getElementById('portrait-view').classList.remove('show');
+        document.getElementById('landscape-view').classList.remove('show');
+        document.getElementById('ext-view').classList.remove('show');
+        document.getElementById('gc-view').classList.add('show');
+        refreshCamBtns();
+        refreshPosGrid();
+        const cs = camSt[selCam];
+        setPreset('pt', cs.activePtPreset, false);
+        setPreset('sz', cs.activeSlPreset, false);
+        setWsSt(!!(ws && ws.readyState === WebSocket.OPEN));
+    } else {
+        _curView = '';
+        document.getElementById('gc-view').classList.remove('show');
+        checkOrientation();
+    }
 }
 
 function setExtView(on) {
@@ -2633,19 +2731,13 @@ let pHslSlider = null, pHslZoom = null;
 window.addEventListener('DOMContentLoaded', () => {
     makeCamBtns('p-cam-bar');
     makeCamBtns('l-cam-bar');
+    makeCamBtns('gc-cam-bar');
     buildPosGrid();
     refreshPosGrid();
     refreshCamBtns();
 
-    document.getElementById('btn-set').addEventListener('click', () => {
-        const cs = camSt[selCam];
-        if (camIsLookAt(selCam) && cs.calibPhase === CP_WAIT_SET_B) {
-            // Confirm look-at point B — Teensy will send CP_SOLVED when done.
-            wsSend(mkAddSubjectSetB(selCam));
-        } else {
-            setUiMode(uiMode === 'set' ? 'move' : 'set');
-        }
-    });
+    document.getElementById('btn-set').addEventListener('click', doSetClick);
+    document.getElementById('gc-set').addEventListener('click', doSetClick);
     document.getElementById('btn-edit').addEventListener('click',
         () => setUiMode(uiMode === 'edit' ? 'move' : 'edit'));
     document.getElementById('btn-edit-ext').addEventListener('click',
@@ -2656,6 +2748,15 @@ window.addEventListener('DOMContentLoaded', () => {
         () => wsSend(mkEStop(0x00)));
     document.getElementById('btn-estop-l').addEventListener('click',
         () => wsSend(mkEStop(0x00)));
+    // ---- Game-controller view ----
+    document.getElementById('gc-estop').addEventListener('click',
+        () => wsSend(mkEStop(0x00)));
+    document.getElementById('gc-clear').addEventListener('click',
+        () => setUiMode(uiMode === 'clear' ? 'move' : 'clear'));
+    document.getElementById('btn-to-gc-l').addEventListener('click',
+        () => setGcView(true));
+    document.getElementById('gc-exit').addEventListener('click',
+        () => setGcView(false));
 
     document.getElementById('calib-cancel-btn').addEventListener('click', () => {
         const cs = camSt[selCam];
@@ -2680,6 +2781,8 @@ window.addEventListener('DOMContentLoaded', () => {
     // Portrait speed dials
     dialPT = new SpeedDial('dial-pt', 'pt');
     dialSZ = new SpeedDial('dial-sz', 'sz');
+    gcDialPT = new SpeedDial('gc-dial-pt', 'pt');
+    gcDialSZ = new SpeedDial('gc-dial-sz', 'sz');
     setPreset('pt', 2, false);
     setPreset('sz', 2, false);
 
@@ -2733,6 +2836,8 @@ window.addEventListener('DOMContentLoaded', () => {
         if (_extActive) {
             if (_extPage === 'positions') sizeExtPosControls();
             else sizeExtControls();
+        } else if (_gcMode) {
+            // GC view is CSS-driven (fixed-size dials, CSS grid) — nothing to size.
         } else {
             checkOrientation();
             if (_curView === 'landscape') sizeJoysticks();
