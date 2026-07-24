@@ -130,10 +130,14 @@ figure.shot.missing::before {
 /* portrait (phone) screenshots: cap height and centre so they don't dominate */
 figure.shot.tall { text-align: center; }
 figure.shot.tall img { width: auto; max-width: 100%; max-height: 640px; margin: 0 auto; }
-/* round (mount AMOLED) screens: square, so cap harder and centre */
-figure.shot.round { text-align: center; background: #000; }
-figure.shot.round img { width: auto; max-width: 100%; max-height: 380px; margin: 0 auto; }
-figure.shot.round figcaption { background: var(--bg2); text-align: left; }
+/* round (mount AMOLED) screens: square artwork with transparent corners, so cap
+   harder and centre — and keep the panel background (never black) behind them,
+   otherwise the display's own black face merges with it and the round bezel
+   disappears. */
+figure.shot.round { text-align: center; }
+figure.shot.round img { width: auto; max-width: 100%; max-height: 380px;
+                        margin: 0 auto; padding: 14px 0; }
+figure.shot.round figcaption { text-align: left; }
 /* two figures side by side, stacking on narrow screens */
 .shotpair { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin: 18px 0; }
 .shotpair figure.shot { margin: 0; }
