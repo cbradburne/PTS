@@ -1,0 +1,254 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" font-family="Poppins, Montserrat, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif">
+<defs>
+<linearGradient id="cg0" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#569D44"/><stop offset="1" stop-color="#437B35"/></linearGradient>
+<linearGradient id="cg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#338BEB"/><stop offset="1" stop-color="#286CB8"/></linearGradient>
+<linearGradient id="cg2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#A59622"/><stop offset="1" stop-color="#81751B"/></linearGradient>
+<linearGradient id="cg3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F94A1"/><stop offset="1" stop-color="#25747E"/></linearGradient>
+<linearGradient id="cg4" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3044E4"/><stop offset="1" stop-color="#2635B2"/></linearGradient>
+<linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#303C4C"/><stop offset="1" stop-color="#28323F"/></linearGradient>
+<linearGradient id="dlg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#384E65"/><stop offset="1" stop-color="#2B3C4D"/></linearGradient>
+<filter id="glow" x="-12%" y="-12%" width="124%" height="124%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<rect width="1600" height="900" fill="#0B1118"/>
+<rect width="1600" height="108" fill="url(#tb)"/>
+<rect y="106" width="1600" height="2" fill="#19212C"/>
+<text x="32" y="63.0" fill="#E8EFF4" font-size="27" font-weight="500" letter-spacing="0.5">TCP: 0 WS: 2</text>
+<rect x="533.0" y="23.0" width="168" height="62" rx="12" fill="#3D93EE"/>
+<text x="617.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="600">Home</text>
+<rect x="716.0" y="23.0" width="168" height="62" rx="12" fill="#5B6874"/>
+<text x="800.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="500">Positions</text>
+<rect x="899.0" y="23.0" width="168" height="62" rx="12" fill="#5B6874"/>
+<text x="983.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="500">Config</text>
+<rect x="321.0" y="23.0" width="168" height="62" rx="12" fill="#5B6874"/>
+<text x="405.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="500">Mounts</text>
+<rect x="1268" y="23.0" width="300" height="62" rx="12" fill="#E8442A"/>
+<rect x="1342" y="42.0" width="24" height="24" rx="3" fill="#FFFFFF"/>
+<text x="1382" y="65.0" fill="#FFFFFF" font-size="30" font-weight="700" letter-spacing="1">E-STOP</text>
+<g transform="translate(24.0 128)">
+<rect x="1.5" y="1.5" width="293.0" height="745" rx="11" fill="url(#cg0)" stroke="#86E86A" stroke-width="3"/>
+<text x="22" y="59" fill="#FFFFFF" font-size="46" font-weight="700" letter-spacing="-0.5">CAM 1</text>
+<circle cx="264.0" cy="42" r="9" fill="#9BEF7E"/>
+<text x="22" y="96" fill="#A8EE94" font-size="23" font-weight="600" letter-spacing="0.6">CONNECTED</text>
+<text x="22" y="121" fill="#A8EE94" font-size="18" font-weight="500" opacity="0.9">-52 dBm</text>
+<text x="22" y="156" fill="#DCE9EE" font-size="25" font-weight="500" letter-spacing="0.4">IDLE</text>
+<line x1="22" y1="174" x2="274.0" y2="174" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<line x1="22" y1="451" x2="274.0" y2="451" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<path d="M 50.99 329.41 A 43 43 0 1 1 111.81 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 50.99 329.41 A 43 43 0 1 1 121.13 282.54" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="43.57" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="31.97" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="81.40" cy="245.50" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="130.83" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="119.23" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="81.4" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">3</text>
+<text x="81.4" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">SLIDER</text>
+<path d="M 184.19 329.41 A 43 43 0 1 1 245.01 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 184.19 329.41 A 43 43 0 0 1 214.60 256.00" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="176.77" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="165.17" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="214.60" cy="245.50" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="264.03" cy="278.53" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="252.43" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="214.6" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">2</text>
+<text x="214.6" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">PAN / TILT</text>
+<text x="148.0" y="531" text-anchor="middle" fill="#EAF4F8" font-size="23" font-weight="600" letter-spacing="2.2">POSITIONS</text>
+<circle cx="35.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="91.5" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="148.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="204.5" cy="593" r="18.5" fill="#8AE86A"/>
+<circle cx="261.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="35.0" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="91.5" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="148.0" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="204.5" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="261.0" cy="661" r="18.5" fill="#5D6B75"/>
+</g>
+<g transform="translate(338.0 128)">
+<rect x="1.5" y="1.5" width="293.0" height="745" rx="11" fill="url(#cg1)" stroke="#86E86A" stroke-width="3"/>
+<text x="22" y="59" fill="#FFFFFF" font-size="46" font-weight="700" letter-spacing="-0.5">CAM 2</text>
+<circle cx="264.0" cy="42" r="9" fill="#9BEF7E"/>
+<text x="22" y="96" fill="#A8EE94" font-size="23" font-weight="600" letter-spacing="0.6">CONNECTED</text>
+<text x="22" y="121" fill="#A8EE94" font-size="18" font-weight="500" opacity="0.9">-52 dBm</text>
+<text x="22" y="156" fill="#DCE9EE" font-size="25" font-weight="500" letter-spacing="0.4">IDLE</text>
+<line x1="22" y1="174" x2="274.0" y2="174" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<line x1="22" y1="451" x2="274.0" y2="451" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<path d="M 50.99 329.41 A 43 43 0 1 1 111.81 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 50.99 329.41 A 43 43 0 0 1 41.67 282.54" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="43.57" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="31.97" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="81.40" cy="245.50" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="130.83" cy="278.53" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="119.23" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="81.4" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">1</text>
+<text x="81.4" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">SLIDER</text>
+<path d="M 184.19 329.41 A 43 43 0 1 1 245.01 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 184.19 329.41 A 43 43 0 1 1 254.33 282.54" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="176.77" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="165.17" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="214.60" cy="245.50" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="264.03" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="252.43" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="214.6" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">3</text>
+<text x="214.6" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">PAN / TILT</text>
+<text x="148.0" y="531" text-anchor="middle" fill="#EAF4F8" font-size="23" font-weight="600" letter-spacing="2.2">POSITIONS</text>
+<circle cx="35.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="91.5" cy="593" r="18.5" fill="#8AE86A"/>
+<circle cx="148.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="204.5" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="261.0" cy="593" r="18.5" fill="#5D6B75"/>
+<circle cx="35.0" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="91.5" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="148.0" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="204.5" cy="661" r="18.5" fill="#8AE86A"/>
+<circle cx="261.0" cy="661" r="18.5" fill="#5D6B75"/>
+</g>
+<g transform="translate(652.0 128)">
+<rect x="1.5" y="1.5" width="293.0" height="745" rx="11" fill="url(#cg2)" stroke="#86E86A" stroke-width="3"/>
+<text x="22" y="59" fill="#FFFFFF" font-size="46" font-weight="700" letter-spacing="-0.5">CAM 3</text>
+<circle cx="264.0" cy="42" r="9" fill="#9BEF7E"/>
+<text x="22" y="96" fill="#A8EE94" font-size="23" font-weight="600" letter-spacing="0.6">CONNECTED</text>
+<text x="22" y="121" fill="#A8EE94" font-size="18" font-weight="500" opacity="0.9">-52 dBm</text>
+<text x="22" y="156" fill="#DCE9EE" font-size="25" font-weight="500" letter-spacing="0.4">IDLE</text>
+<line x1="22" y1="174" x2="274.0" y2="174" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<line x1="22" y1="451" x2="274.0" y2="451" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<path d="M 50.99 329.41 A 43 43 0 1 1 111.81 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 50.99 329.41 A 43 43 0 0 1 81.40 256.00" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="43.57" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="31.97" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="81.40" cy="245.50" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="130.83" cy="278.53" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="119.23" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="81.4" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">2</text>
+<text x="81.4" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">SLIDER</text>
+<path d="M 184.19 329.41 A 43 43 0 1 1 245.01 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 184.19 329.41 A 43 43 0 0 1 174.87 282.54" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="176.77" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="165.17" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="214.60" cy="245.50" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="264.03" cy="278.53" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="252.43" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="214.6" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">1</text>
+<text x="214.6" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">PAN / TILT</text>
+<text x="148.0" y="531" text-anchor="middle" fill="#EAF4F8" font-size="23" font-weight="600" letter-spacing="2.2">POSITIONS</text>
+<circle cx="35.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="91.5" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="148.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="204.5" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="261.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="35.0" cy="661" r="18.5" fill="#8AE86A"/>
+<circle cx="91.5" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="148.0" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="204.5" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="261.0" cy="661" r="18.5" fill="#5D6B75"/>
+</g>
+<g transform="translate(966.0 128)">
+<rect x="1.5" y="1.5" width="293.0" height="745" rx="11" fill="url(#cg3)" stroke="#86E86A" stroke-width="3"/>
+<text x="22" y="59" fill="#FFFFFF" font-size="46" font-weight="700" letter-spacing="-0.5">CAM 4</text>
+<circle cx="264.0" cy="42" r="9" fill="#9BEF7E"/>
+<text x="22" y="96" fill="#A8EE94" font-size="23" font-weight="600" letter-spacing="0.6">CONNECTED</text>
+<text x="22" y="121" fill="#A8EE94" font-size="18" font-weight="500" opacity="0.9">-52 dBm</text>
+<text x="22" y="156" fill="#DCE9EE" font-size="25" font-weight="500" letter-spacing="0.4">IDLE</text>
+<line x1="22" y1="174" x2="274.0" y2="174" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<line x1="22" y1="451" x2="274.0" y2="451" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<path d="M 50.99 329.41 A 43 43 0 1 1 111.81 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<circle cx="43.57" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="31.97" cy="278.53" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="81.40" cy="245.50" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="130.83" cy="278.53" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="119.23" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="81.4" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="0.45" font-size="36" font-weight="500">–</text>
+<text x="81.4" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">SLIDER</text>
+<path d="M 184.19 329.41 A 43 43 0 1 1 245.01 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 184.19 329.41 A 43 43 0 1 1 245.01 329.41" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="176.77" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="165.17" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="214.60" cy="245.50" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="264.03" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="252.43" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<text x="214.6" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">4</text>
+<text x="214.6" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">PAN / TILT</text>
+<text x="148.0" y="531" text-anchor="middle" fill="#EAF4F8" font-size="23" font-weight="600" letter-spacing="2.2">POSITIONS</text>
+<circle cx="35.0" cy="593" r="18.5" fill="#8AE86A"/>
+<circle cx="91.5" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="148.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="204.5" cy="593" r="18.5" fill="#5D6B75"/>
+<circle cx="261.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="35.0" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="91.5" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="148.0" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="204.5" cy="661" r="18.5" fill="#E9503A"/>
+<circle cx="261.0" cy="661" r="18.5" fill="#5D6B75"/>
+</g>
+<g transform="translate(1280.0 128)">
+<rect x="1.5" y="1.5" width="293.0" height="745" rx="11" fill="url(#cg4)" stroke="#86E86A" stroke-width="3"/>
+<text x="22" y="59" fill="#FFFFFF" font-size="46" font-weight="700" letter-spacing="-0.5">CAM 5</text>
+<circle cx="264.0" cy="42" r="9" fill="#9BEF7E"/>
+<text x="22" y="96" fill="#A8EE94" font-size="23" font-weight="600" letter-spacing="0.6">CONNECTED</text>
+<text x="22" y="121" fill="#A8EE94" font-size="18" font-weight="500" opacity="0.9">-52 dBm</text>
+<text x="22" y="156" fill="#DCE9EE" font-size="25" font-weight="500" letter-spacing="0.4">IDLE</text>
+<line x1="22" y1="174" x2="274.0" y2="174" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<line x1="22" y1="451" x2="274.0" y2="451" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+<path d="M 50.99 329.41 A 43 43 0 1 1 111.81 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 50.99 329.41 A 43 43 0 1 1 111.81 329.41" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="43.57" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="31.97" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="81.40" cy="245.50" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="130.83" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="119.23" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<text x="81.4" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">4</text>
+<text x="81.4" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">SLIDER</text>
+<path d="M 184.19 329.41 A 43 43 0 1 1 245.01 329.41" fill="none" stroke="#000000" stroke-opacity="0.30" stroke-width="12" stroke-linecap="round"/>
+<path d="M 184.19 329.41 A 43 43 0 0 1 214.60 256.00" fill="none" stroke="#C9EFFC" stroke-width="12" stroke-linecap="round"/>
+<circle cx="176.77" cy="336.83" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="165.17" cy="278.53" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="214.60" cy="245.50" r="3.8" fill="#C9EFFC" fill-opacity="0.95"/>
+<circle cx="264.03" cy="278.53" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<circle cx="252.43" cy="336.83" r="3.8" fill="#FFFFFF" fill-opacity="0.28"/>
+<text x="214.6" y="312.0" text-anchor="middle" fill="#BFEDFF" fill-opacity="1" font-size="36" font-weight="500">2</text>
+<text x="214.6" y="392" text-anchor="middle" fill="#EAF4F8" font-size="17" font-weight="600" letter-spacing="1.6">PAN / TILT</text>
+<text x="148.0" y="531" text-anchor="middle" fill="#EAF4F8" font-size="23" font-weight="600" letter-spacing="2.2">POSITIONS</text>
+<circle cx="35.0" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="91.5" cy="593" r="18.5" fill="#E9503A"/>
+<circle cx="148.0" cy="593" r="18.5" fill="#5D6B75"/>
+<circle cx="204.5" cy="593" r="18.5" fill="#5D6B75"/>
+<circle cx="261.0" cy="593" r="18.5" fill="#5D6B75"/>
+<circle cx="35.0" cy="661" r="18.5" fill="#8AE86A"/>
+<circle cx="91.5" cy="661" r="18.5" fill="#E9503A"/>
+<circle cx="148.0" cy="661" r="18.5" fill="#E9503A"/>
+<circle cx="204.5" cy="661" r="18.5" fill="#5D6B75"/>
+<circle cx="261.0" cy="661" r="18.5" fill="#5D6B75"/>
+</g>
+<rect width="1600" height="900" fill="#000000" fill-opacity="0.48"/>
+<rect x="190.0" y="60" width="1220" height="780" rx="14" fill="none" stroke="#3FB8E8" stroke-width="3" stroke-opacity="0.55" filter="url(#glow)"/>
+<rect x="190.0" y="60" width="1220" height="780" rx="14" fill="url(#dlg)" stroke="#3FB8E8" stroke-width="3"/>
+<text x="234.0" y="118" fill="#6EC6F0" font-size="31" font-weight="600" letter-spacing="2.6">PAIRED MOUNTS</text>
+<text x="234.0" y="193" fill="#FFFFFF" font-size="31" font-weight="700">CAM 1</text>
+<text x="410.0" y="178" fill="#FFFFFF" font-size="25" font-weight="700" letter-spacing="0.4">02:00:00:00:DE:01</text>
+<text x="410.0" y="212" fill="#4FD46A" font-size="25" font-weight="500" xml:space="preserve">ONLINE   -52 dBm</text>
+<rect x="1180.0" y="159" width="186" height="62" rx="9" fill="#E8442A"/>
+<text x="1273.0" y="200.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="700" letter-spacing="1.2">FORGET</text>
+<text x="234.0" y="300" fill="#FFFFFF" font-size="31" font-weight="700">CAM 2</text>
+<text x="410.0" y="285" fill="#FFFFFF" font-size="25" font-weight="700" letter-spacing="0.4">02:00:00:00:DE:02</text>
+<text x="410.0" y="319" fill="#4FD46A" font-size="25" font-weight="500" xml:space="preserve">ONLINE   -52 dBm</text>
+<rect x="1180.0" y="266" width="186" height="62" rx="9" fill="#E8442A"/>
+<text x="1273.0" y="307.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="700" letter-spacing="1.2">FORGET</text>
+<text x="234.0" y="407" fill="#FFFFFF" font-size="31" font-weight="700">CAM 3</text>
+<text x="410.0" y="392" fill="#FFFFFF" font-size="25" font-weight="700" letter-spacing="0.4">02:00:00:00:DE:03</text>
+<text x="410.0" y="426" fill="#4FD46A" font-size="25" font-weight="500" xml:space="preserve">ONLINE   -52 dBm</text>
+<rect x="1180.0" y="373" width="186" height="62" rx="9" fill="#E8442A"/>
+<text x="1273.0" y="414.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="700" letter-spacing="1.2">FORGET</text>
+<text x="234.0" y="514" fill="#FFFFFF" font-size="31" font-weight="700">CAM 4</text>
+<text x="410.0" y="499" fill="#FFFFFF" font-size="25" font-weight="700" letter-spacing="0.4">02:00:00:00:DE:04</text>
+<text x="410.0" y="533" fill="#4FD46A" font-size="25" font-weight="500" xml:space="preserve">ONLINE   -52 dBm</text>
+<rect x="1180.0" y="480" width="186" height="62" rx="9" fill="#E8442A"/>
+<text x="1273.0" y="521.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="700" letter-spacing="1.2">FORGET</text>
+<text x="234.0" y="621" fill="#FFFFFF" font-size="31" font-weight="700">CAM 5</text>
+<text x="410.0" y="606" fill="#FFFFFF" font-size="25" font-weight="700" letter-spacing="0.4">02:00:00:00:DE:05</text>
+<text x="410.0" y="640" fill="#4FD46A" font-size="25" font-weight="500" xml:space="preserve">ONLINE   -52 dBm</text>
+<rect x="1180.0" y="587" width="186" height="62" rx="9" fill="#E8442A"/>
+<text x="1273.0" y="628.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="700" letter-spacing="1.2">FORGET</text>
+<text x="234.0" y="726" fill="#DCE9EE" font-size="25" font-weight="500">Forget unbinds a slot. A live mount re-pairs itself in ~5 s</text>
+<text x="234.0" y="754" fill="#DCE9EE" font-size="25" font-weight="500">- Forget is for retired or replaced hardware.</text>
+<rect x="1146.0" y="732" width="220" height="64" rx="9" fill="#8A93A6"/>
+<text x="1256.0" y="775.0" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="600" letter-spacing="1.5">CLOSE</text>
+</svg>

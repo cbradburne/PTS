@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" font-family="Poppins, Montserrat, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif">
+<defs>
+<linearGradient id="cg0" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#569D44"/><stop offset="1" stop-color="#437B35"/></linearGradient>
+<linearGradient id="cg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#338BEB"/><stop offset="1" stop-color="#286CB8"/></linearGradient>
+<linearGradient id="cg2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#A59622"/><stop offset="1" stop-color="#81751B"/></linearGradient>
+<linearGradient id="cg3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F94A1"/><stop offset="1" stop-color="#25747E"/></linearGradient>
+<linearGradient id="cg4" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3044E4"/><stop offset="1" stop-color="#2635B2"/></linearGradient>
+<linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#303C4C"/><stop offset="1" stop-color="#28323F"/></linearGradient>
+<linearGradient id="dlg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#384E65"/><stop offset="1" stop-color="#2B3C4D"/></linearGradient>
+<filter id="glow" x="-12%" y="-12%" width="124%" height="124%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<rect width="1600" height="900" fill="#0B1118"/>
+<rect y="108" width="1600" height="792" fill="#122340"/>
+<rect x="172.0" y="118" width="243.2" height="70" rx="11" fill="#2E86E8" stroke="#7FC0FA" stroke-width="2" stroke-opacity="1"/>
+<text x="293.6" y="163.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="600">CAM 1</text>
+<rect x="425.2" y="118" width="243.2" height="70" rx="11" fill="#4F6B93" stroke="#90A8C4" stroke-width="2" stroke-opacity="0.5"/>
+<text x="546.8" y="163.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="600">CAM 2</text>
+<rect x="678.4" y="118" width="243.2" height="70" rx="11" fill="#4F6B93" stroke="#90A8C4" stroke-width="2" stroke-opacity="0.5"/>
+<text x="800.0" y="163.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="600">CAM 3</text>
+<rect x="931.6" y="118" width="243.2" height="70" rx="11" fill="#4F6B93" stroke="#90A8C4" stroke-width="2" stroke-opacity="0.5"/>
+<text x="1053.2" y="163.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="600">CAM 4</text>
+<rect x="1184.8" y="118" width="243.2" height="70" rx="11" fill="#4F6B93" stroke="#90A8C4" stroke-width="2" stroke-opacity="0.5"/>
+<text x="1306.4" y="163.0" text-anchor="middle" fill="#FFFFFF" font-size="27" font-weight="600">CAM 5</text>
+<clipPath id="rp"><rect x="0" y="0" width="770.0" height="682" rx="12"/></clipPath>
+<rect x="20" y="198" width="770.0" height="682" rx="12" fill="#1A3057" stroke="#4E7BB5" stroke-width="2"/>
+<rect x="810.0" y="198" width="770.0" height="682" rx="12" fill="#1A3057" stroke="#4E7BB5" stroke-width="2"/>
+<g transform="translate(20 198)">
+<text x="26" y="52" fill="#63A6E8" font-size="26" font-weight="600">Pan / Tilt Speeds (deg/s)</text>
+<text x="26" y="92" fill="#E8EFF6" font-size="25">Speed 1:</text>
+<line x1="160" y1="84" x2="615" y2="84" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="84" x2="169.1" y2="84" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="169.1" cy="84" r="13" fill="#FFFFFF"/>
+<text x="637" y="92" fill="#FFFFFF" font-size="26" font-weight="600">1 deg/s</text>
+<text x="26" y="163" fill="#E8EFF6" font-size="25">Speed 2:</text>
+<line x1="160" y1="155" x2="615" y2="155" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="155" x2="187.3" y2="155" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="187.3" cy="155" r="13" fill="#FFFFFF"/>
+<text x="637" y="163" fill="#FFFFFF" font-size="26" font-weight="600">3 deg/s</text>
+<text x="26" y="234" fill="#E8EFF6" font-size="25">Speed 3:</text>
+<line x1="160" y1="226" x2="615" y2="226" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="226" x2="223.7" y2="226" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="223.7" cy="226" r="13" fill="#FFFFFF"/>
+<text x="637" y="234" fill="#FFFFFF" font-size="26" font-weight="600">7 deg/s</text>
+<text x="26" y="305" fill="#E8EFF6" font-size="25">Speed 4:</text>
+<line x1="160" y1="297" x2="615" y2="297" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="297" x2="296.5" y2="297" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="296.5" cy="297" r="13" fill="#FFFFFF"/>
+<text x="637" y="305" fill="#FFFFFF" font-size="26" font-weight="600">15 deg/s</text>
+<text x="26" y="392" fill="#63A6E8" font-size="26" font-weight="600">Slider Speeds (mm/s)</text>
+<text x="26" y="432" fill="#E8EFF6" font-size="25">Speed 1:</text>
+<line x1="160" y1="424" x2="615" y2="424" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="424" x2="182.8" y2="424" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="182.8" cy="424" r="13" fill="#FFFFFF"/>
+<text x="637" y="432" fill="#FFFFFF" font-size="26" font-weight="600">5 mm/s</text>
+<text x="26" y="503" fill="#E8EFF6" font-size="25">Speed 2:</text>
+<line x1="160" y1="495" x2="615" y2="495" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="495" x2="228.2" y2="495" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="228.2" cy="495" r="13" fill="#FFFFFF"/>
+<text x="637" y="503" fill="#FFFFFF" font-size="26" font-weight="600">15 mm/s</text>
+<text x="26" y="574" fill="#E8EFF6" font-size="25">Speed 3:</text>
+<line x1="160" y1="566" x2="615" y2="566" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="566" x2="342.0" y2="566" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="342.0" cy="566" r="13" fill="#FFFFFF"/>
+<text x="637" y="574" fill="#FFFFFF" font-size="26" font-weight="600">40 mm/s</text>
+<text x="26" y="645" fill="#E8EFF6" font-size="25">Speed 4:</text>
+<line x1="160" y1="637" x2="615" y2="637" stroke="#3E76B4" stroke-width="5" stroke-linecap="round"/>
+<line x1="160" y1="637" x2="615.0" y2="637" stroke="#7CB6EE" stroke-width="7" stroke-linecap="round"/>
+<circle cx="615.0" cy="637" r="13" fill="#FFFFFF"/>
+<text x="637" y="645" fill="#FFFFFF" font-size="26" font-weight="600">100 mm/s</text>
+</g>
+<g transform="translate(810.0 198)" clip-path="url(#rp)">
+<rect x="752.0" y="12" width="5" height="420" rx="2.5" fill="#6A8FC0" fill-opacity="0.6"/>
+<text x="26" y="50" fill="#63A6E8" font-size="26" font-weight="600">Find Home</text>
+<rect x="26.0" y="93" width="350.0" height="70" rx="9" fill="#2E7FD8"/>
+<path d="M 139.1 127 L 152.1 115 L 165.1 127 L 161.2 127 L 161.2 138.4 L 143.0 138.4 L 143.0 127 Z" fill="#FFFFFF"/>
+<text x="177.1" y="137" fill="#FFFFFF" font-size="26" font-weight="600">Slider</text>
+<rect x="394.0" y="93" width="350.0" height="70" rx="9" fill="#2E7FD8"/>
+<path d="M 521.4 127 L 534.4 115 L 547.4 127 L 543.5 127 L 543.5 138.4 L 525.3 138.4 L 525.3 127 Z" fill="#FFFFFF"/>
+<text x="559.4" y="137" fill="#FFFFFF" font-size="26" font-weight="600">Zoom</text>
+<line x1="26" y1="247" x2="744.0" y2="247" stroke="#4A6E9E" stroke-width="1.5"/>
+<line x1="26" y1="490" x2="744.0" y2="490" stroke="#4A6E9E" stroke-width="1.5"/>
+<text x="26" y="289" fill="#63A6E8" font-size="26" font-weight="600">Set Reference</text>
+<rect x="26" y="330" width="718.0" height="72" rx="9" fill="#2E7FD8"/>
+<text x="385.0" y="375" text-anchor="middle" fill="#FFFFFF" font-size="26" font-weight="600">Set Ref 0/0</text>
+<text x="26" y="527" fill="#63A6E8" font-size="26" font-weight="600">Mount Options</text>
+<text x="26" y="595" fill="#FFFFFF" font-size="26" font-weight="600">Pan Invert</text>
+<rect x="638.0" y="565.0" width="92" height="44" rx="22.0" fill="#A8C4DE"/>
+<circle cx="660.0" cy="587.0" r="17" fill="#FFFFFF"/>
+<text x="26" y="688" fill="#FFFFFF" font-size="26" font-weight="600">Slider Invert</text>
+<rect x="638.0" y="658.0" width="92" height="44" rx="22.0" fill="#A8C4DE"/>
+<circle cx="660.0" cy="680.0" r="17" fill="#FFFFFF"/>
+</g>
+<rect width="1600" height="108" fill="url(#tb)"/>
+<rect y="106" width="1600" height="2" fill="#19212C"/>
+<text x="32" y="63.0" fill="#E8EFF4" font-size="27" font-weight="500" letter-spacing="0.5">TCP: 0 WS: 2</text>
+<rect x="533.0" y="23.0" width="168" height="62" rx="12" fill="#5B6874"/>
+<text x="617.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="500">Home</text>
+<rect x="716.0" y="23.0" width="168" height="62" rx="12" fill="#5B6874"/>
+<text x="800.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="500">Positions</text>
+<rect x="899.0" y="23.0" width="168" height="62" rx="12" fill="#3D93EE"/>
+<text x="983.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="600">Config</text>
+<rect x="321.0" y="23.0" width="168" height="62" rx="12" fill="#5B6874"/>
+<text x="405.0" y="64.0" text-anchor="middle" fill="#FFFFFF" font-size="29" font-weight="500">Mounts</text>
+<rect x="1268" y="23.0" width="300" height="62" rx="12" fill="#E8442A"/>
+<rect x="1342" y="42.0" width="24" height="24" rx="3" fill="#FFFFFF"/>
+<text x="1382" y="65.0" fill="#FFFFFF" font-size="30" font-weight="700" letter-spacing="1">E-STOP</text>
+</svg>

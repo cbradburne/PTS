@@ -8,7 +8,7 @@ slot on the site fills itself in (no HTML edits needed):
 | `hero.jpg` | Hero — the rig in production |
 | `mount-front.jpg` | Mounts — pan/tilt head on its rail |
 | `mount-screen.jpg` | Mounts — the round AMOLED status screen |
-| `hub-home.jpg` | Hub — the 7" touchscreen home screen |
+| `hub-home.svg` | Hub — the 7" touchscreen home screen |
 | `phone-landscape.png` | Hub — the web app on a phone |
 | `lookat-action.jpg` | Look-at — a move mid-travel |
 | `cv-window.png` | CV tracking — the tracking window with a lock-on target |
@@ -26,15 +26,16 @@ So far:
 | File | Where it appears |
 |---|---|
 | `rig-overview.jpg` | Getting started — a whole rig |
-| `hub-home.jpg` | Hub touchscreen — home screen (hero) |
-| `hub-positions.jpg` | Hub touchscreen — Positions screen |
-| `hub-detail.jpg` | Hub touchscreen — per-camera control |
-| `hub-config.jpg` | Hub touchscreen — Config screen |
-| `hub-pairing.jpg` | Hub touchscreen — Paired Mounts |
+| `hub-home.svg` | Hub touchscreen — home screen (hero) |
+| `hub-positions.svg` | Hub touchscreen — Positions screen |
+| `hub-detail.svg` | Hub touchscreen — per-camera control |
+| `hub-config.svg` | Hub touchscreen — Config screen |
+| `hub-pairing.svg` | Hub touchscreen — Paired Mounts |
 | `phone-portrait.png` | Web app — phone in portrait (hero) |
 | `phone-landscape.png` | Web app — phone in landscape |
 | `ipad-landscape.png` | Web app — extended view on a tablet |
 
-Hub-screen shots are photos of the 7" panel, so they're JPGs; the phone/tablet
-web-app shots are clean screen captures, so PNG. More slots will be added as
-manual sections are written.
+The hub screens are SVG recreations of the 7" console rather than photographs —
+they stay crisp at any size and are far smaller than a photo of a panel. The
+phone/tablet web-app shots are clean screen captures, so PNG. More slots will be
+added as manual sections are written.
