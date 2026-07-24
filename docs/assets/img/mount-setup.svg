@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" width="900" height="900" font-family="Poppins, Montserrat, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif">
+<defs>
+<linearGradient id="cg0" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#569D44"/><stop offset="1" stop-color="#437B35"/></linearGradient>
+<linearGradient id="cg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#338BEB"/><stop offset="1" stop-color="#286CB8"/></linearGradient>
+<linearGradient id="cg2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#A59622"/><stop offset="1" stop-color="#81751B"/></linearGradient>
+<linearGradient id="cg3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F94A1"/><stop offset="1" stop-color="#25747E"/></linearGradient>
+<linearGradient id="cg4" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3044E4"/><stop offset="1" stop-color="#2635B2"/></linearGradient>
+<linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#303C4C"/><stop offset="1" stop-color="#28323F"/></linearGradient>
+<linearGradient id="dlg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#384E65"/><stop offset="1" stop-color="#2B3C4D"/></linearGradient>
+<filter id="glow" x="-12%" y="-12%" width="124%" height="124%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<circle cx="450.0" cy="450.0" r="430" fill="#000000"/>
+<text x="450.0" y="121" text-anchor="middle" fill="#FFFFFF" font-size="32" font-weight="700" letter-spacing="3">SETUP</text>
+<text x="450.0" y="157" text-anchor="middle" fill="#FFFFFF" font-size="20" font-weight="700" letter-spacing="0.5">this: D8:FE:C9:3F:00:00</text>
+<text x="174.0" y="197" fill="#FFFFFF" font-size="22" font-weight="700" letter-spacing="1.5">CAMERA</text>
+<circle cx="221.0" cy="258" r="47" fill="#4E8F3E" stroke="#6DC857" stroke-width="4"/>
+<text x="221.0" y="270" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="700">1</text>
+<circle cx="335.5" cy="258" r="47" fill="#5C6B7E" stroke="#2E7ED6" stroke-width="4"/>
+<text x="335.5" y="270" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="700">2</text>
+<circle cx="450.0" cy="258" r="47" fill="#5C6B7E" stroke="#96881F" stroke-width="4"/>
+<text x="450.0" y="270" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="700">3</text>
+<circle cx="564.5" cy="258" r="47" fill="#5C6B7E" stroke="#2B8792" stroke-width="4"/>
+<text x="564.5" y="270" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="700">4</text>
+<circle cx="679.0" cy="258" r="47" fill="#5C6B7E" stroke="#2C3ECF" stroke-width="4"/>
+<text x="679.0" y="270" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="700">5</text>
+<text x="450.0" y="627" text-anchor="middle" fill="#FFFFFF" font-size="20" font-weight="600">No hubs found - is the hub powered?</text>
+<rect x="247.0" y="650" width="170.0" height="61" rx="10" fill="#5C6B7E" stroke="#8BB3D6" stroke-width="2.5"/>
+<text x="332.0" y="688" text-anchor="middle" fill="#FFFFFF" font-size="20" font-weight="700" letter-spacing="1">SCAN AGAIN</text>
+<rect x="431.0" y="650" width="104.0" height="61" rx="10" fill="#5C6B7E" stroke="#8BB3D6" stroke-width="2.5"/>
+<text x="483.0" y="688" text-anchor="middle" fill="#FFFFFF" font-size="20" font-weight="700" letter-spacing="1">SAVE</text>
+<rect x="549.0" y="650" width="104.0" height="61" rx="10" fill="#5C6B7E" stroke="#8BB3D6" stroke-width="2.5"/>
+<text x="601.0" y="688" text-anchor="middle" fill="#FFFFFF" font-size="20" font-weight="700" letter-spacing="1">BACK</text>
+</svg>

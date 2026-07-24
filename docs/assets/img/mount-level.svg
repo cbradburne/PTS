@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" width="900" height="900" font-family="Poppins, Montserrat, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif">
+<defs>
+<linearGradient id="cg0" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#569D44"/><stop offset="1" stop-color="#437B35"/></linearGradient>
+<linearGradient id="cg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#338BEB"/><stop offset="1" stop-color="#286CB8"/></linearGradient>
+<linearGradient id="cg2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#A59622"/><stop offset="1" stop-color="#81751B"/></linearGradient>
+<linearGradient id="cg3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F94A1"/><stop offset="1" stop-color="#25747E"/></linearGradient>
+<linearGradient id="cg4" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3044E4"/><stop offset="1" stop-color="#2635B2"/></linearGradient>
+<linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#303C4C"/><stop offset="1" stop-color="#28323F"/></linearGradient>
+<linearGradient id="dlg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#384E65"/><stop offset="1" stop-color="#2B3C4D"/></linearGradient>
+<filter id="glow" x="-12%" y="-12%" width="124%" height="124%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<circle cx="450.0" cy="450.0" r="430" fill="#000000"/>
+<text x="450.0" y="130.0" text-anchor="middle" fill="#FFFFFF" font-size="32" font-weight="700" letter-spacing="2.5">LEVEL</text>
+<circle cx="450.0" cy="450.0" r="300" fill="none" stroke="#BCAFD4" stroke-width="3"/>
+<line x1="138.0" y1="450.0" x2="762.0" y2="450.0" stroke="#BCAFD4" stroke-width="2.5"/>
+<line x1="450.0" y1="138.0" x2="450.0" y2="762.0" stroke="#BCAFD4" stroke-width="2.5"/>
+<circle cx="450.0" cy="450.0" r="97" fill="none" stroke="#E9A417" stroke-width="6"/>
+<circle cx="450.0" cy="450.0" r="41" fill="none" stroke="#0BC206" stroke-width="6"/>
+<circle cx="431.0" cy="351.0" r="16" fill="#FF2D1B" filter="url(#glow)"/>
+</svg>

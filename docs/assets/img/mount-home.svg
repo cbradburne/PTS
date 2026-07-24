@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" width="900" height="900" font-family="Poppins, Montserrat, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif">
+<defs>
+<linearGradient id="cg0" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#569D44"/><stop offset="1" stop-color="#437B35"/></linearGradient>
+<linearGradient id="cg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#338BEB"/><stop offset="1" stop-color="#286CB8"/></linearGradient>
+<linearGradient id="cg2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#A59622"/><stop offset="1" stop-color="#81751B"/></linearGradient>
+<linearGradient id="cg3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F94A1"/><stop offset="1" stop-color="#25747E"/></linearGradient>
+<linearGradient id="cg4" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3044E4"/><stop offset="1" stop-color="#2635B2"/></linearGradient>
+<linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#303C4C"/><stop offset="1" stop-color="#28323F"/></linearGradient>
+<linearGradient id="dlg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#384E65"/><stop offset="1" stop-color="#2B3C4D"/></linearGradient>
+<filter id="glow" x="-12%" y="-12%" width="124%" height="124%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<circle cx="450.0" cy="450.0" r="430" fill="#000000"/>
+<circle cx="450.0" cy="450.0" r="406" fill="none" stroke="#86E86A" stroke-width="8" stroke-opacity="0.5" filter="url(#glow)"/>
+<circle cx="450.0" cy="450.0" r="406" fill="none" stroke="#86E86A" stroke-width="8" />
+<path d="M 103.91 413.62 A 348 348 0 0 1 377.65 109.60" fill="none" stroke="#BCAFD4" stroke-width="38" stroke-linecap="round"/>
+<path d="M 103.91 413.62 A 348 348 0 0 1 276.00 148.62" fill="none" stroke="#4E8F3E" stroke-width="38" stroke-linecap="round"/>
+<circle cx="85.01" cy="411.64" r="8" fill="#4E8F3E"/>
+<circle cx="114.73" cy="300.73" r="8" fill="#4E8F3E"/>
+<circle cx="177.27" cy="204.43" r="8" fill="#4E8F3E"/>
+<circle cx="266.50" cy="132.17" r="8" fill="#4E8F3E"/>
+<circle cx="373.70" cy="91.02" r="8" fill="#DDD4EC"/>
+<path d="M 522.35 109.60 A 348 348 0 0 1 796.09 413.62" fill="none" stroke="#BCAFD4" stroke-width="38" stroke-linecap="round"/>
+<path d="M 708.61 217.14 A 348 348 0 0 1 796.09 413.62" fill="none" stroke="#4E8F3E" stroke-width="38" stroke-linecap="round"/>
+<circle cx="814.99" cy="411.64" r="8" fill="#4E8F3E"/>
+<circle cx="785.27" cy="300.73" r="8" fill="#4E8F3E"/>
+<circle cx="722.73" cy="204.43" r="8" fill="#4E8F3E"/>
+<circle cx="633.50" cy="132.17" r="8" fill="#DDD4EC"/>
+<circle cx="526.30" cy="91.02" r="8" fill="#DDD4EC"/>
+<text x="450.0" y="502" text-anchor="middle" fill="#4E8F3E" font-size="307" font-weight="700">1</text>
+<text x="450.0" y="540" text-anchor="middle" fill="#FFFFFF" font-size="34" font-weight="700" letter-spacing="2.5">IDLE</text>
+<circle cx="271.0" cy="648" r="36" fill="#E9503A" stroke="#8BB3D6" stroke-width="3"/>
+<text x="271.0" y="656" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">1</text>
+<circle cx="360.5" cy="648" r="36" fill="#E9503A" stroke="#8BB3D6" stroke-width="3"/>
+<text x="360.5" y="656" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">2</text>
+<circle cx="450.0" cy="648" r="36" fill="#E9503A" stroke="#8BB3D6" stroke-width="3"/>
+<text x="450.0" y="656" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">3</text>
+<circle cx="539.5" cy="648" r="36" fill="#8AE86A" stroke="#8BB3D6" stroke-width="3"/>
+<text x="539.5" y="656" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">4</text>
+<circle cx="629.0" cy="648" r="36" fill="#E9503A" stroke="#8BB3D6" stroke-width="3"/>
+<text x="629.0" y="656" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">5</text>
+<circle cx="271.0" cy="743" r="36" fill="#5D6B75" stroke="#8BB3D6" stroke-width="3"/>
+<text x="271.0" y="751" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">6</text>
+<circle cx="360.5" cy="743" r="36" fill="#5D6B75" stroke="#8BB3D6" stroke-width="3"/>
+<text x="360.5" y="751" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">7</text>
+<circle cx="450.0" cy="743" r="36" fill="#5D6B75" stroke="#8BB3D6" stroke-width="3"/>
+<text x="450.0" y="751" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">8</text>
+<circle cx="539.5" cy="743" r="36" fill="#5D6B75" stroke="#8BB3D6" stroke-width="3"/>
+<text x="539.5" y="751" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">9</text>
+<circle cx="629.0" cy="743" r="36" fill="#5D6B75" stroke="#8BB3D6" stroke-width="3"/>
+<text x="629.0" y="751" text-anchor="middle" fill="#FFFFFF" font-size="24" font-weight="600">10</text>
+</svg>
