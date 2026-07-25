@@ -50,7 +50,10 @@ a:hover { text-decoration: underline; }
   color: #56637a; padding: 18px 22px 6px;
 }
 
-main.doc { flex: 1 1 auto; max-width: 820px; padding: 40px 48px 80px; }
+/* Content column is capped for readability; auto side margins absorb the leftover
+   free space so it sits centred in whatever room is left beside the sidebar,
+   instead of hugging it on a wide screen. */
+main.doc { flex: 1 1 auto; max-width: 820px; margin: 0 auto; padding: 40px 48px 80px; }
 main.doc h1 { font-size: 34px; color: #fff; letter-spacing: -.01em; margin: 0 0 6px; }
 main.doc .subtitle { color: var(--dim); font-size: 17px; margin: 0 0 28px; }
 main.doc h2 {
