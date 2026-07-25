@@ -29,3 +29,7 @@ pc_app/data/config.json
 # They land in the CWD, so running the app or tools/cv_benchmark.py from the
 # repo can drop one in-tree.  Never commit them; they re-download on demand.
 *.pt
+
+# Video masters — encode to web MP4s and commit those, not the source
+# (binaries never delta-compress, so a master in history is permanent weight)
+docs/assets/img/*.mov

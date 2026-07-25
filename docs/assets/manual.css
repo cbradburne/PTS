@@ -121,6 +121,7 @@ main.doc td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertica
 figure.shot { margin: 20px 0; border: 1px solid var(--border); border-radius: 10px;
               overflow: hidden; background: var(--bg2); }
 figure.shot img { display: block; width: 100%; }
+figure.shot video { display: block; width: 100%; background: #000; }
 figure.shot figcaption { padding: 9px 14px; font-size: 13px; color: var(--dim);
                          border-top: 1px solid var(--border); }
 figure.shot.missing img { display: none; }

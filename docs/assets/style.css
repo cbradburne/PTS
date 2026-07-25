@@ -97,6 +97,7 @@ figure.shot {
   border: 1px solid var(--border); background: var(--bg2);
 }
 figure.shot img { display: block; width: 100%; }
+figure.shot video { display: block; width: 100%; background: #000; }
 figure.shot figcaption {
   padding: 10px 16px; font-size: 13.5px; color: var(--dim);
   border-top: 1px solid var(--border);
