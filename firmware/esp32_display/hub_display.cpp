@@ -2323,17 +2323,18 @@ static void build_detail_screen() {
         _det_pos_btn[s] = btn;
     }
 
-    // ── SET + CLEAR ───────────────────────────────────────────────
+    // ── CLEAR + SET ───────────────────────────────────────────────
     // centred: (800 - (110+16+110)) / 2 = 282
-    _det_set_btn = make_button(_scr_detail, "SET", C_ACCENT, ev_detail_set);
-    lv_obj_set_size(_det_set_btn, 110, 40);
-    lv_obj_set_pos(_det_set_btn, 282, 180);
-    _det_set_lbl = lv_obj_get_child(_det_set_btn, 0);
-
+    // CLEAR sits left of SET, matching the web app, GC screen and PC app.
     _det_clear_btn = make_button(_scr_detail, "CLEAR", C_SURF2, ev_detail_clear);
     lv_obj_set_size(_det_clear_btn, 110, 40);
-    lv_obj_set_pos(_det_clear_btn, 408, 180);
+    lv_obj_set_pos(_det_clear_btn, 282, 180);
     _det_clear_lbl = lv_obj_get_child(_det_clear_btn, 0);
+
+    _det_set_btn = make_button(_scr_detail, "SET", C_ACCENT, ev_detail_set);
+    lv_obj_set_size(_det_set_btn, 110, 40);
+    lv_obj_set_pos(_det_set_btn, 408, 180);
+    _det_set_lbl = lv_obj_get_child(_det_set_btn, 0);
 
     // ── Speed dials ───────────────────────────────────────────────
     // Two 120×120 arcs centred between the joysticks (x=190-590 free).

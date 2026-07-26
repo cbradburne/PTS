@@ -31,10 +31,10 @@
 <text x="1343.9" y="191" text-anchor="middle" fill="#DCE6F0" font-size="34" font-weight="500">9</text>
 <rect x="1428.6" y="118" width="141.4" height="128" rx="14" fill="#5C6B7E" stroke="#8BB3D6" stroke-width="4.5"/>
 <text x="1499.3" y="191" text-anchor="middle" fill="#DCE6F0" font-size="34" font-weight="500">10</text>
-<rect x="566.0" y="340" width="218" height="68" rx="10" fill="#2E7FD8"/>
-<text x="675.0" y="383" text-anchor="middle" fill="#FFFFFF" font-size="26" font-weight="600" letter-spacing="1.4">SET</text>
-<rect x="816.0" y="340" width="218" height="68" rx="10" fill="#5C6B7E"/>
-<text x="925.0" y="383" text-anchor="middle" fill="#FFFFFF" font-size="26" font-weight="600" letter-spacing="1.4">CLEAR</text>
+<rect x="566.0" y="340" width="218" height="68" rx="10" fill="#5C6B7E"/>
+<text x="675.0" y="383" text-anchor="middle" fill="#FFFFFF" font-size="26" font-weight="600" letter-spacing="1.4">CLEAR</text>
+<rect x="816.0" y="340" width="218" height="68" rx="10" fill="#2E7FD8"/>
+<text x="925.0" y="383" text-anchor="middle" fill="#FFFFFF" font-size="26" font-weight="600" letter-spacing="1.4">SET</text>
 <text x="255.0" y="520" text-anchor="middle" fill="#EAF4F8" font-size="22" font-weight="600" letter-spacing="2">ZOOM</text>
 <rect x="30" y="536" width="450" height="112" rx="18" fill="#5C6B7E"/>
 <rect x="203.0" y="542" width="104" height="100" rx="14" fill="#7FC4F0"/>
