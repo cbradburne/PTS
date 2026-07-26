@@ -365,8 +365,8 @@ canvas.hsl-c{display:block;touch-action:none;}
     <button class="ctrl-btn" id="btn-estop-p" style="flex:0 0 auto;padding:8px 14px;">E-STOP</button>
   </div>
   <div class="ctrl-bar">
-    <button class="ctrl-btn" id="btn-set">SET</button>
     <button class="ctrl-btn" id="btn-clear-p">CLEAR</button>
+    <button class="ctrl-btn" id="btn-set">SET</button>
   </div>
   <div class="stat-bar" style="display:flex;align-items:center;justify-content:space-between;">
     <div><span class="ws-dot" id="p-dot"></span><span id="p-stat">Connecting…</span></div>
