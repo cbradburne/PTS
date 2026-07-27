@@ -32,11 +32,56 @@
       <tr><td><strong>Slider</strong></td><td>Rail-limited</td><td>Travels the camera along a rail. Homes to its end stops. Optional — a mount can be built without one.</td></tr>
       <tr><td><strong>Zoom</strong></td><td>Lens-limited</td><td>Either a stepper on the lens ring, or <strong>LANC</strong> serial zoom on cameras that support it.</td></tr>
     </table>
+
+    <p>The slider is the one optional axis. Left off, the head becomes a compact
+    pan/tilt/zoom unit that clamps to whatever the venue already has — a balcony
+    rail, a pole, a lighting bar — and everything else works exactly the same:</p>
+
+    <div class="shotpair">
+      <figure class="shot">
+        <img src="../assets/img/mount-pole.jpg" alt="Mount clamped to a balcony rail"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>No slider — the head on a clamp, with the wireless bridge and
+        its antenna on the right.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="../assets/img/mount-pole2.jpg" alt="The same mount from the other side"
+             onerror="this.closest('figure').classList.add('missing')">
+        <figcaption>The other side: the tilt stepper, the pan bearing, and the
+        round status screen facing out.</figcaption>
+      </figure>
+    </div>
+
     <p>Motion runs on a <strong>Teensy 4.1 at 600 MHz</strong> through
     <strong>TMC2209</strong> silent stepper drivers, with smooth jog profiles and
     expo curves so slow moves stay controllable and fast ones stay smooth. A
     direction reversal is handled as one continuous ramp rather than a stop and
     restart.</p>
+
+    <figure class="shot">
+      <video src="../assets/img/slider-rail.mp4" poster="../assets/img/slider-rail.jpg"
+             controls loop muted playsinline preload="none"></video>
+      <figcaption>With a slider fitted: the head travelling its rail. The belt is
+      driven from one end, so nothing but the carriage moves.</figcaption>
+    </figure>
+
+    <p>And what that produces on a real job — a slow slider move across a live
+    performance, straight off the camera:</p>
+
+    <figure class="shot">
+      <video src="../assets/img/slider-production.mp4" poster="../assets/img/slider-production.jpg"
+             controls loop muted playsinline preload="none"></video>
+      <figcaption>A slider move during a live set. Silent steppers and a slow
+      ramp mean the rig can work through a quiet performance without being heard
+      or seen.</figcaption>
+    </figure>
+
+    <figure class="shot">
+      <video src="../assets/img/slider-venue.mp4" poster="../assets/img/slider-venue.jpg"
+             controls loop muted playsinline preload="none"></video>
+      <figcaption>The same rig from the back of the hall — an unattended camera
+      moving in front of a live audience.</figcaption>
+    </figure>
 
     <div class="note"><b>Pan and tilt are continuous</b> They have no hardware end
     stops, so on power-up the mount doesn't know their absolute angle. That's fine

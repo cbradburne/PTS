@@ -33,3 +33,4 @@ pc_app/data/config.json
 # Video masters — encode to web MP4s and commit those, not the source
 # (binaries never delta-compress, so a master in history is permanent weight)
 docs/assets/img/*.mov
+docs/assets/img/movingRail.mp4
