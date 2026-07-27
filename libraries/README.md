@@ -34,7 +34,8 @@ These libraries are built into the board packages and do **not** need to be inst
 
 ### esp32_hub (XIAO ESP32S3)
 - Board: `XIAO_ESP32S3`
-- Flash: 8MB, Partition: `Default 4MB with spiffs`
+- Flash: 8MB, Partition: `Default with spiffs (3MB APP/1.5MB SPIFFS)` — the
+  board default (`default_8MB`); the XIAO offers no 4MB scheme
 - USB CDC On Boot: Enabled
 
 ### esp32_display (Waveshare ESP32-S3-Touch-LCD-7)

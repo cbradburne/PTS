@@ -1792,9 +1792,12 @@ void send_heartbeat() {
 // STATUS keeps arriving.  The 2 s heartbeat guarantees the fail counter moves
 // even with no client traffic.
 static void check_self_recovery(uint32_t now) {
-    // A wedge-free 10 minutes clears the boot-loop streak.
-    if (_self_restart_streak && now >= HEALTHY_CLEAR_MS &&
-            (now - _last_wedge_ms) >= HEALTHY_CLEAR_MS) {
+    // The streak only exists to stop a ~40 s boot loop, and surviving this much
+    // uptime proves we aren't in one — so clear it on uptime alone.  Requiring
+    // 10 min *wedge-free* deadlocked a persistently wedged hub: the streak could
+    // never clear while the wedge kept stamping _last_wedge_ms, so restarts
+    // stayed disabled for good and the rig sat dead until someone power-cycled it.
+    if (_self_restart_streak && now >= HEALTHY_CLEAR_MS) {
         Serial.printf("[SELF] 10 min wedge-free — clearing self-restart streak (%lu)\n",
                       (unsigned long)_self_restart_streak);
         _self_restart_streak = 0;
@@ -1846,9 +1849,11 @@ static void check_self_recovery(uint32_t now) {
             if (!_restart_block_logged) {
                 _restart_block_logged = true;
                 Serial.printf("[SELF] Wedge persists but self-restart streak = %lu — "
-                              "further self-restarts disabled until 10 min healthy "
-                              "(power cycle if stuck)\n",
-                              (unsigned long)_self_restart_streak);
+                              "restarts held off until %lu min uptime "
+                              "(reinit still retrying every %lu s)\n",
+                              (unsigned long)_self_restart_streak,
+                              (unsigned long)(HEALTHY_CLEAR_MS / 60000UL),
+                              (unsigned long)(SELF_REINIT_COOLDOWN_MS / 1000UL));
             }
             return;
         }
@@ -1921,13 +1926,21 @@ void loop() {
     }
 
     // ---- ESP-NOW peer refresh (triggered by consecutive send failures) ----
+    // Only meaningful for a mount we can actually hear: if its STATUS keeps
+    // arriving while our sends fail, the peer entry may be stale and re-adding
+    // it can clear that.  A mount that simply isn't powered fails every send
+    // forever, so refreshing it churns del_peer/add_peer on the WiFi driver
+    // several times a second, permanently, for no possible gain — and that
+    // churn is shared state with the peers that do work.
     for (int i = 0; i < NUM_MOUNTS; i++) {
-        if (_espnow_need_refresh[i]) {
-            _espnow_need_refresh[i] = false;
-            Serial.printf("ESP-NOW: refreshing peer %d after %d consecutive send failures\n",
-                          i + 1, ESPNOW_MAX_CONSEC_FAILS);
-            refresh_espnow_peer(i);
-        }
+        if (!_espnow_need_refresh[i]) continue;
+        _espnow_need_refresh[i] = false;
+        bool alive = _mount_last_seen[i] &&
+                     (now - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS);
+        if (!alive) continue;   // absent mount — failures are expected, don't churn
+        Serial.printf("ESP-NOW: refreshing peer %d after %d consecutive send failures\n",
+                      i + 1, ESPNOW_MAX_CONSEC_FAILS);
+        refresh_espnow_peer(i);
     }
 
     // ---- Autonomous self-recovery (wedge ladder + maintenance restart) ----
