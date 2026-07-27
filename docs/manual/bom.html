@@ -18,8 +18,12 @@
   table.matrix thead th.rowh { background: var(--accent2); z-index: 2; }
   table.matrix tbody td { color: var(--dim); }
   table.matrix tbody td:not(:empty) { color: var(--text); font-weight: 600; }
-  table.matrix th.tot, table.matrix td.tot { position: sticky; right: 0; border-left: 2px solid var(--accent); font-weight: 700; color: var(--text); background: var(--bg2); }
-  table.matrix thead th.tot { background: var(--accent2); color: #fff; }
+  /* Total and Buy both pin to the right edge; Buy sits outermost, so Total is
+     offset by the Buy column's fixed width. */
+  table.matrix th.tot, table.matrix td.tot { position: sticky; right: 88px; border-left: 2px solid var(--accent); font-weight: 700; color: var(--text); background: var(--bg2); }
+  table.matrix th.lnk, table.matrix td.lnk { position: sticky; right: 0; width: 88px; min-width: 88px; background: var(--bg2); }
+  table.matrix td.lnk a { white-space: nowrap; }
+  table.matrix thead th.tot, table.matrix thead th.lnk { background: var(--accent2); color: #fff; }
   table.matrix tr.msep td { height: 7px; padding: 0; background: var(--bg); border-right: none; }
 </style>
 </head>
@@ -42,7 +46,7 @@
     built with — equivalents are fine.</div>
 
     <h2>Parts</h2>
-    <p>61 line items. The <strong>HDMI</strong>, <strong>SDI</strong> and
+    <p>63 line items. The <strong>HDMI</strong>, <strong>SDI</strong> and
     <strong>BMD converter</strong> groups are alternative video paths — pick the one
     that suits your camera, you don't need all three.</p>
     <h3>Circuit</h3>
@@ -72,14 +76,15 @@
       <tr><td>GT2 Pulley - 16 tooth, 5mm bore</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07SX1N19C/?th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>GT2 Belt - 580mm loop, 6mm wide</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07RCZPRG9?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_5" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>GT2 Belt - 350mm loop, 6mm wide</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/sourcing-map-Timing-Printing-Closed/dp/B0GVKNPKQV/?th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
-      <tr><td>Nema14 0.9 deg 36Ncm</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B00W98OYE4?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_2" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Nema17 0.9 deg 36Ncm</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B00W98OYE4?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_2" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>Nema14 Round Pancake Stepper Motor 0.9 deg</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0B9RVCDTJ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_3" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>GX12 2 Pin Aviation Connector &amp; Panel Socket</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DX5PVGJ9?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>Waveshare ESP32-S3 1.75inch AMOLED Round Touch Display</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0F7XTJ1ZL?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>Sticky Pads Heavy Duty 40x40mm</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0GQRJJPFN?ref=ppx_yo2ov_dt_b_fed_asin_title&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>2.4GHz Antenna</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DTHJ1FS2?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>U.FL Mini PCI to SMA Female 20cm Lead</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0B9RXM7TB?ref=ppx_yo2ov_dt_b_fed_asin_title&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
-      <tr><td>1/4 UNC Insert</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0B1F7NMJ5/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>1/4&quot; UNC Thumb Screw</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/gp/product/B0748CQ4RK/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>12V 8A Power Supply</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/gp/product/B0B5KL92RH/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
     </table>
     <h3>Mount - HDMI</h3>
     <table class="bom">
@@ -108,13 +113,12 @@
       <tr><td>GT2 Pulley - 36 tooth</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B07X8776QQ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_4" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>GT2 Belt - 5m</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B08SJ5X2HZ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_9&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>Idler - 6mm width, 3mm bore, 13mm diameter</td><td class="num">2</td><td><a href="https://www.amazon.co.uk/dp/B0CD25SZNR?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
-      <tr><td>Nema14 1.8 deg 65Ncm</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B00PNEQUZ2?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Nema17 1.8 deg 65Ncm</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B00PNEQUZ2?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>V Slot Pulley Wheels 625zz</td><td class="num">16</td><td><a href="https://www.amazon.co.uk/sourcing-map-Printer-Rollers-High-Speed/dp/B0DNCP6TRB/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>XT60 Plug Connector Female and Male</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B085HF31K7?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>GX12 2 Pin Aviation Connector &amp; Panel Socket</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DX5PVGJ9?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
       <tr><td>GX12 4 Pin Aviation Connector &amp; Panel Socket</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0DX6CD9LN?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&amp;th=1" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
-      <tr><td>1/4 UNC Insert</td><td class="num">4</td><td><a href="https://www.amazon.co.uk/dp/B0B1F7NMJ5/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
-      <tr><td>1/4 UNC x 1½&quot;</td><td class="num">2</td><td><span class="dim">&#8212;</span></td></tr>
+      <tr><td>Drag Chain R38 18X25mm 1.5m</td><td class="num">1-3</td><td><a href="https://www.amazon.co.uk/dp/B07MMCWWHC/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
     </table>
     <h3>Slider - HDMI</h3>
     <table class="bom">
@@ -157,6 +161,8 @@
     <table class="bom">
       <tr><th>Item</th><th class="num">Qty</th><th>Buy</th></tr>
       <tr><td>UGREEN Video Capture Card HDMI to USB C 1080P 60FPS Capture (CV Tracking)</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0CFQ2BMPZ?ref=ppx_yo2ov_dt_b_fed_asin_title" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>Soldering Iron Tips for Threaded Inserts</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0CS662NVK" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+      <tr><td>10ft - 1/2 inch Braided Cable Sleeve</td><td class="num">1</td><td><a href="https://www.amazon.co.uk/dp/B0D6QZSZ4P" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
     </table>
 
     <h2>Fasteners</h2>
@@ -167,41 +173,42 @@
     assembly.</p>
     <div class="matrix-wrap">
       <table class="matrix">
-        <thead><tr><th class="rowh">Fastener</th><th>Base + Topper + Ports</th><th>Inner</th><th>Upper</th><th>Camera Focus + Converter</th><th>Side-Support</th><th>Side-Motor</th><th>Camera</th><th>Tripod Mount</th><th>Comms Mount</th><th>Hub Display</th><th>Rail End-Comms</th><th>Rail End</th><th>Rail Bottom</th><th>Rail Top</th><th>Rail Side Drag</th><th>Rail Side Motor</th><th>Rail Drag Arm</th><th>Rail Drag Clip</th><th>Slider Tripod Mount</th><th class="tot">Total</th></tr></thead>
+        <thead><tr><th class="rowh">Fastener</th><th>Base + Topper + Ports</th><th>Inner</th><th>Upper</th><th>Camera Focus + Converter</th><th>Side-Support</th><th>Side-Motor</th><th>Camera</th><th>Tripod Mount</th><th>Comms Mount</th><th>Hub Display</th><th>Rail End-Comms</th><th>Rail End</th><th>Rail Bottom</th><th>Rail Top</th><th>Rail Side Drag</th><th>Rail Side Motor</th><th>Rail Drag Arm</th><th>Rail Drag Clip</th><th>Slider Tripod Mount</th><th class="tot">Total</th><th class="lnk">Buy</th></tr></thead>
         <tbody>
-        <tr><th class="rowh">M3 x 8</th><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">8</td></tr>
-        <tr><th class="rowh">M3 x 10</th><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td class="tot">8</td></tr>
-        <tr><th class="rowh">M3 x 12</th><td>8</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">8</td></tr>
-        <tr><th class="rowh">M3 x 16</th><td></td><td></td><td></td><td>4</td><td></td><td>4</td><td></td><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">10</td></tr>
-        <tr><th class="rowh">M3 x 20</th><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td></td><td class="tot">4</td></tr>
-        <tr><th class="rowh">M3 x 25</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">3</td></tr>
-        <tr><th class="rowh">M3 x 30</th><td></td><td></td><td>6</td><td></td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">10</td></tr>
-        <tr><th class="rowh">M3 x 45</th><td>6</td><td></td><td></td><td></td><td>1</td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">8</td></tr>
-        <tr class="msep"><td colspan="21"></td></tr>
-        <tr><th class="rowh">M2 Counter Sunk x 6</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">3</td></tr>
-        <tr><th class="rowh">M3 Counter Sunk x 10</th><td>4</td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td class="tot">14</td></tr>
-        <tr class="msep"><td colspan="21"></td></tr>
-        <tr><th class="rowh">M5 x 20</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td></td><td>2</td><td></td><td></td><td class="tot">8</td></tr>
-        <tr><th class="rowh">M5 x 25</th><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">10</td></tr>
-        <tr><th class="rowh">M5 x 30</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td></tr>
-        <tr><th class="rowh">M5 x 35</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td class="tot">6</td></tr>
-        <tr><th class="rowh">M5 x 45</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td></tr>
-        <tr><th class="rowh">M5 x 55</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td></tr>
-        <tr class="msep"><td colspan="21"></td></tr>
-        <tr><th class="rowh">1/4 UNC x 1½&quot;</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td class="tot">2</td></tr>
-        <tr class="msep"><td colspan="21"></td></tr>
-        <tr><th class="rowh">M8 x 25</th><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">1</td></tr>
-        <tr><th class="rowh">M8 x 45</th><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">1</td></tr>
-        <tr class="msep"><td colspan="21"></td></tr>
-        <tr><th class="rowh">M2.5 Insert</th><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td></tr>
-        <tr><th class="rowh">M3 Nyloc Nut</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>7</td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>4</td><td></td><td class="tot">13</td></tr>
-        <tr><th class="rowh">M3 Insert</th><td>16</td><td>12</td><td>4</td><td>4</td><td></td><td></td><td></td><td></td><td></td><td>4</td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">44</td></tr>
-        <tr><th class="rowh">M5 Nyloc Nut</th><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td>6</td><td>6</td><td>6</td><td>4</td><td></td><td></td><td></td><td class="tot">28</td></tr>
-        <tr><th class="rowh">M8 Domed Nut</th><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">2</td></tr>
-        <tr><th class="rowh">1/4 UNC Insert</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td></td><td>1</td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td class="tot">5</td></tr>
-        <tr class="msep"><td colspan="21"></td></tr>
-        <tr><th class="rowh">M3 Washer</th><td>8</td><td></td><td>10</td><td></td><td>3</td><td>7</td><td></td><td></td><td></td><td>4</td><td>2</td><td></td><td>2</td><td></td><td></td><td>4</td><td></td><td>2</td><td></td><td class="tot">42</td></tr>
-        <tr><th class="rowh">M5 Washer</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td></tr>
+        <tr><th class="rowh">M3 x 8</th><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">8</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DYP14R1H/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 x 10</th><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td class="tot">8</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DZ1M6HSH/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 x 12</th><td>8</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">8</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DZ1PLWD4/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 x 16</th><td></td><td></td><td></td><td>4</td><td></td><td>4</td><td></td><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">10</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DZ1NR6NB/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 x 20</th><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td></td><td class="tot">4</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DZ1PVK8Q/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 x 25</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">3</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DZ1P596F/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 x 30</th><td></td><td></td><td>6</td><td></td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">10</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DZ1MXJBG/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 x 45</th><td>6</td><td></td><td></td><td></td><td>1</td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">8</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0DZ1MY37R/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr class="msep"><td colspan="22"></td></tr>
+        <tr><th class="rowh">M2 Counter Sunk x 6</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">3</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0BR4WQP4R" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M2.5 Counter Sunk x 8</th><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">6</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0BR4WQP4R" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 Counter Sunk x 10</th><td>4</td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td class="tot">14</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0BR4WQP4R" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr class="msep"><td colspan="22"></td></tr>
+        <tr><th class="rowh">M5 x 20</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td></td><td>2</td><td></td><td></td><td class="tot">8</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0D6B63D9M/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M5 x 25</th><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">10</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0D6B553V8/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M5 x 30</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0D6B4VQQY/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M5 x 35</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td class="tot">6</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0D6B631ZL/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M5 x 45</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0D6B58X5N/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M5 x 55</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td><td class="lnk"><a href="https://www.amazon.co.uk/gp/product/B0D6B4PHN3/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr class="msep"><td colspan="22"></td></tr>
+        <tr><th class="rowh">1/4 UNC x 1½&quot;</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td class="tot">2</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B07KM41WMS" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr class="msep"><td colspan="22"></td></tr>
+        <tr><th class="rowh">M8 x 25</th><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">1</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B09XJJTD1T" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M8 x 45</th><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">1</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B09XJGZVPM" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr class="msep"><td colspan="22"></td></tr>
+        <tr><th class="rowh">M2.5 Insert</th><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0CS662NVK" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 Nyloc Nut</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>7</td><td></td><td></td><td></td><td></td><td></td><td>2</td><td>4</td><td></td><td class="tot">13</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0FC5N6KCW/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M3 Insert</th><td>16</td><td>12</td><td>4</td><td>4</td><td></td><td></td><td></td><td></td><td></td><td>4</td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">44</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0BS3LH9K9" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M5 Nyloc Nut</th><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td>6</td><td>6</td><td>6</td><td>4</td><td></td><td></td><td></td><td class="tot">28</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B09THKYY5R/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M8 Domed Nut</th><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">2</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0FBWVXTDG/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">1/4 UNC Insert</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>1</td><td></td><td></td><td>1</td><td>1</td><td></td><td></td><td></td><td></td><td></td><td></td><td>2</td><td class="tot">5</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0B1F7NMJ5/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr class="msep"><td colspan="22"></td></tr>
+        <tr><th class="rowh">M3 Washer</th><td>8</td><td></td><td>10</td><td></td><td>3</td><td>7</td><td></td><td></td><td></td><td>4</td><td>2</td><td></td><td>2</td><td></td><td></td><td>4</td><td></td><td>2</td><td></td><td class="tot">42</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0F638VSQD/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
+        <tr><th class="rowh">M5 Washer</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>4</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="tot">4</td><td class="lnk"><a href="https://www.amazon.co.uk/dp/B0BFCRFRRF/" target="_blank" rel="noopener">Amazon &#8599;</a></td></tr>
         </tbody>
       </table>
     </div>
