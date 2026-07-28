@@ -258,6 +258,22 @@ static void dispatch_disp_msg(uint8_t type, uint8_t len, const uint8_t *data);
 // Relay queue  (ESP-NOW callback → main loop, thread-safe)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ESP-NOW link budget
+// ---------------------------------------------------------------------------
+// Peers default to a fast PHY rate chosen for throughput.  These packets are a
+// few bytes, so throughput is irrelevant and range is everything: force 1 Mbps
+// with a long preamble, worth roughly 6-10 dB of link budget over the default.
+// Must be called for each peer, after esp_now_add_peer().
+static void espnow_peer_long_range(const uint8_t *mac) {
+    esp_now_rate_config_t rate = {};
+    rate.phymode = WIFI_PHY_MODE_11B;
+    rate.rate    = WIFI_PHY_RATE_1M_L;   // 1 Mbps, long preamble
+    rate.ersu    = false;
+    rate.dcm     = false;
+    esp_now_set_peer_rate_config(mac, &rate);
+}
+
 static void refresh_espnow_peer(uint8_t idx) {
     // Delete and re-add the peer to clear any stale internal send state that
     // accumulates while the mount is offline (failed-send state in the ESP-NOW
@@ -270,6 +286,7 @@ static void refresh_espnow_peer(uint8_t idx) {
     peer.ifidx   = WIFI_IF_AP;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
+    espnow_peer_long_range(peer.peer_addr);
     Serial.printf("ESP-NOW peer %d refreshed\n", idx + 1);
 }
 
@@ -1400,6 +1417,7 @@ static bool hub_espnow_rebuild() {
         peer.ifidx   = WIFI_IF_AP;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
+        espnow_peer_long_range(peer.peer_addr);
         _espnow_fails[i]    = 0;
         _espnow_fail_run[i] = 0;
     }
@@ -1764,7 +1782,9 @@ void setup() {
         peer.channel = AP_CHANNEL;
         peer.ifidx   = WIFI_IF_AP;
         peer.encrypt = false;
-        if (esp_now_add_peer(&peer) != ESP_OK)
+        if (esp_now_add_peer(&peer) == ESP_OK)
+            espnow_peer_long_range(peer.peer_addr);
+        else
             Serial.printf("WARNING: failed to add peer %d\n", i + 1);
     }
     disp_send_mount_table();   // seed the display's Mounts panel (it also
@@ -1810,7 +1830,7 @@ void setup() {
     _http_server.begin();
     Serial.println("Ready.");
 
-    esp_wifi_set_max_tx_power(78);
+    esp_wifi_set_max_tx_power(84);   // max (~20.5 dBm) — every dB counts at 50 m
 
     // Hardware watchdog — resets the chip if loop() stalls for > 30 s
     // (e.g. AsyncTCP deadlock, ESP-NOW stack hang, lwIP timeout).

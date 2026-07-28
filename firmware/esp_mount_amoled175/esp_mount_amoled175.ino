@@ -465,6 +465,22 @@ static const lv_coord_t SLOT2_CX[5] = { 141, 187, 233, 279, 325 };
 // ESP-NOW / Teensy helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ESP-NOW link budget
+// ---------------------------------------------------------------------------
+// Peers default to a fast PHY rate chosen for throughput.  These packets are a
+// few bytes, so throughput is irrelevant and range is everything: force 1 Mbps
+// with a long preamble, worth roughly 6-10 dB of link budget over the default.
+// Must be called for each peer, after esp_now_add_peer().
+static void espnow_peer_long_range(const uint8_t *mac) {
+    esp_now_rate_config_t rate = {};
+    rate.phymode = WIFI_PHY_MODE_11B;
+    rate.rate    = WIFI_PHY_RATE_1M_L;   // 1 Mbps, long preamble
+    rate.ersu    = false;
+    rate.dcm     = false;
+    esp_now_set_peer_rate_config(mac, &rate);
+}
+
 static void send_to_hub(CmdType cmd, const uint8_t *payload, uint8_t plen) {
     if (!_cfg_valid) return;   // unpaired — no hub to send to
     uint16_t n = build_packet(_tx_buf, _mount_id, ++_tx_seq, cmd, payload, plen);
@@ -569,14 +585,17 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
         _espnow_refresh_count = 0;
         _last_espnow_tx_ok_ms = millis();   // our send side is alive
     } else {
-        _espnow_fail_total++;                       // health telemetry (cumulative)
+        // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
+        _espnow_fail_total = _espnow_fail_total + 1;   // health telemetry (cumulative)
         Serial.printf("ESP-NOW send failed (%d)\n", (int)s);
         // After several consecutive failures the ESP-NOW stack internally marks
         // the hub peer as stale.  Refresh it so that when the hub powers back on
         // the very next heartbeat gets through without needing a mount reboot.
-        if (++_espnow_consec_fails >= 4) {
+        _espnow_consec_fails = _espnow_consec_fails + 1;
+        if (_espnow_consec_fails >= 4) {
             _espnow_consec_fails = 0;
-            if (++_espnow_refresh_count >= 3) {
+            _espnow_refresh_count = _espnow_refresh_count + 1;
+            if (_espnow_refresh_count >= 3) {
                 // Three peer refreshes with no recovery (~60 s) means the ESP-NOW
                 // stack itself is degraded (e.g. after many hours without a hub).
                 // A full deinit/reinit can't safely run in this WiFi-task callback,
@@ -609,6 +628,7 @@ static void espnow_peer_refresh() {
     peer.ifidx   = WIFI_IF_STA;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
+    espnow_peer_long_range(peer.peer_addr);
     Serial.printf("ESP-NOW hub peer refreshed (%d/3)\n", (int)_espnow_refresh_count);
 }
 
@@ -631,6 +651,7 @@ static void espnow_full_reinit() {
     peer.ifidx   = WIFI_IF_STA;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
+    espnow_peer_long_range(peer.peer_addr);
     _espnow_consec_fails  = 0;
     _espnow_refresh_count = 0;
     _espnow_need_refresh  = false;
@@ -1536,6 +1557,7 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_max_tx_power(84);   // max (~20.5 dBm) — the mount may be 50 m out
     esp_wifi_set_protocol(WIFI_IF_STA,
         WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     delay(200);
