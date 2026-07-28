@@ -714,6 +714,20 @@ class Bridge:
         acked_seq = (pkt.payload[0] << 8) | pkt.payload[1]
         with self._diag_lock:
             entry = self._pending_acks.pop(acked_seq, None)
+            # An ACK proves the mount is responding *now*, so anything we sent it
+            # earlier is lost, not outstanding.  Drop those too.
+            #
+            # Without this, one dropped ACK left a stale entry ageing for the full
+            # 60 s prune window, _oldest_overdue() reported it as an unacked
+            # command, and the wedge logic escalated to reinit-then-restart the
+            # hub — while that mount was demonstrably healthy and ACKing every
+            # subsequent command.  A single lost packet rebooted the hub, and the
+            # reboot is what actually dropped the mounts.
+            if entry is not None:
+                sent_at = entry[0]
+                for s in [s for s, (t, _n, m) in self._pending_acks.items()
+                          if m == entry[2] and t <= sent_at]:
+                    del self._pending_acks[s]
         if entry is None:
             return   # ACK for a periodic/quiet command we didn't track
         sent_t, name, mount = entry
