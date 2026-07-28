@@ -302,6 +302,11 @@ static volatile bool    _need_full_restart                 = false;
 static volatile uint8_t  _espnow_fail_run[NUM_MOUNTS] = {};
 // Cumulative send failures across all mounts since boot — health telemetry.
 static volatile uint32_t _espnow_fail_total = 0;
+// Per-mount cumulative send failures.  health_check() sums only the mounts it
+// can currently hear: a mount that isn't powered fails every send forever, and
+// counting that as a fault flags a rig running fewer than five mounts unhealthy
+// for as long as it runs.
+static volatile uint32_t _espnow_fail_cum[NUM_MOUNTS] = {};
 
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
     const uint8_t *mac_addr = info->des_addr;
@@ -313,6 +318,7 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
         } else {
             // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
             _espnow_fail_total = _espnow_fail_total + 1;   // health telemetry (cumulative)
+            _espnow_fail_cum[i] = _espnow_fail_cum[i] + 1;   // per-mount, for health_check()
             if (_espnow_fail_run[i] < 255) _espnow_fail_run[i] = _espnow_fail_run[i] + 1;
             _espnow_fails[i] = _espnow_fails[i] + 1;
             if (_espnow_fails[i] >= ESPNOW_MAX_CONSEC_FAILS) {
@@ -1302,6 +1308,7 @@ static uint32_t _health_last_ms      = 0;
 static uint32_t _health_anom_ms      = 0;
 static uint16_t _health_loop_max_ms  = 0;   // worst loop-iteration gap since last send
 static uint32_t _health_last_txfail  = 0;
+static uint32_t _health_fail_live    = 0;   // live-mount failures at last check
 static bool     _health_first_sent   = false;
 
 static void send_own_health(bool anomaly) {
@@ -1321,17 +1328,22 @@ static void send_own_health(bool anomaly) {
     Serial.write(buf, n);
     _health_last_ms     = millis();
     _health_loop_max_ms = 0;
-    _health_last_txfail = _espnow_fail_total;
+    _health_last_txfail = _health_fail_live;
     _health_first_sent  = true;
 }
 
 // Called from the 500 ms self-check tick.
 static void health_check(uint32_t now) {
+    uint32_t fail_live = 0;
+    for (int i = 0; i < NUM_MOUNTS; i++)
+        if (_mount_last_seen[i] && (now - _mount_last_seen[i]) < SELF_WEDGE_ALIVE_MS)
+            fail_live += _espnow_fail_cum[i];
     bool anomaly =
         (!_health_first_sent && now > 3000) ||
         (esp_get_free_heap_size() < HEALTH_LOW_HEAP_BYTES) ||
         (_health_loop_max_ms > HEALTH_LOOP_STALL_MS) ||
-        (_espnow_fail_total - _health_last_txfail >= HEALTH_TXFAIL_JUMP);
+        (fail_live - _health_last_txfail >= HEALTH_TXFAIL_JUMP);
+    _health_fail_live = fail_live;
     if (anomaly && (now - _health_anom_ms) >= HEALTH_ANOMALY_GAP_MS) {
         _health_anom_ms = now;
         send_own_health(true);

@@ -418,6 +418,11 @@ class Bridge:
                         for pkt in self._reader.packets():
                             self._rx_pkt_count += 1
                             self._dispatch(pkt)
+                        # The hub's own Serial.printf() diagnostics share this
+                        # link with the binary protocol, so surface them here —
+                        # in a raw terminal they're unreadable amongst the frames.
+                        for line in self._reader.text_lines():
+                            log.info(f"HUB SERIAL: {line}")
                 except Exception as e:
                     log.error(f"RX loop error: {e}")
                     time.sleep(0.1)   # never tight-spin if an error persists

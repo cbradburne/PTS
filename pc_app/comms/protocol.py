@@ -295,8 +295,15 @@ class PacketReader:
     parsed Packet objects.  Handles partial reads and framing.
     """
 
+    # Cap on retained inter-packet bytes, so a stream that never contains a
+    # newline can't grow this without bound.
+    _TEXT_MAX = 4096
+    # Minimum consecutive printable characters to count as a real message.
+    _TEXT_MIN_RUN = 12
+
     def __init__(self):
         self._buf = bytearray()
+        self._text = bytearray()   # bytes seen between frames — see text_lines()
 
     def feed(self, data: bytes) -> None:
         self._buf.extend(data)
@@ -310,11 +317,14 @@ class PacketReader:
                 # No start found — discard everything except a possible
                 # trailing 0xAA that might be the first byte of the next packet.
                 if self._buf and self._buf[-1] == PACKET_START_1:
+                    self._keep_text(self._buf[:-1])
                     self._buf = bytearray([PACKET_START_1])
                 else:
+                    self._keep_text(self._buf)
                     self._buf.clear()
                 break
             if idx > 0:
+                self._keep_text(self._buf[:idx])
                 del self._buf[:idx]
 
             # Need at least 3 bytes to read LEN
@@ -345,6 +355,41 @@ class PacketReader:
             if buf[i] == PACKET_START_1 and buf[i + 1] == PACKET_START_2:
                 return i
         return -1
+
+    def _keep_text(self, chunk) -> None:
+        self._text.extend(chunk)
+        if len(self._text) > self._TEXT_MAX:
+            del self._text[:-self._TEXT_MAX]
+
+    def text_lines(self) -> list[str]:
+        """Drain complete lines of plain text the device printed between frames.
+
+        The hub shares one USB serial link between this binary protocol and its
+        own Serial.printf() diagnostics, so those land in the gaps between
+        packets. They used to be discarded silently, which made the hub's log
+        unreadable in a terminal — the interesting lines are buried in binary.
+        Pulling them out here puts them in the PC app's log instead.
+        """
+        out = []
+        while True:
+            nl = self._text.find(b"\n")
+            if nl == -1:
+                break
+            raw = bytes(self._text[:nl])
+            del self._text[:nl + 1]
+            # A line often has binary debris stuck to it (a truncated frame that
+            # never completed), so pull out the printable runs rather than
+            # judging the line as a whole. Random binary almost never produces a
+            # long run of consecutive printable ASCII, real messages always do.
+            run = bytearray()
+            for b in raw + b"\x00":
+                if 32 <= b < 127 or b == 9:
+                    run.append(b)
+                else:
+                    if len(run) >= self._TEXT_MIN_RUN:
+                        out.append(run.decode("ascii", "replace").strip())
+                    run.clear()
+        return out
 
 
 # ---------------------------------------------------------------------------
