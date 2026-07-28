@@ -389,6 +389,10 @@ static uint16_t  _la_dir_seq = 0;       // sequence counter for hub-injected CMD
 #define SELF_WEDGE_ALIVE_MS      7000UL   // "mount is alive" = STATUS within this (AMOLED heartbeats every 5 s)
 #define SELF_WEDGE_MIN_FAILS     2        // uninterrupted send fails before the wedge clock starts
 #define SELF_REINIT_AFTER_MS     6000UL   // wedge age → full ESP-NOW reinit
+#define SELF_WIFI_REINIT_AFTER_MS 14000UL // wedge age → bounce WiFi (below ESP-NOW)
+// Own cooldown: stage 1's 30 s gap must not suppress this rung, or the 25 s
+// restart would always beat it and the WiFi bounce would never run at all.
+#define SELF_WIFI_REINIT_COOLDOWN_MS 90000UL
 #define SELF_REINIT_COOLDOWN_MS  30000UL  // min gap between reinits (PC- or self-triggered)
 #define SELF_RESTART_AFTER_MS    25000UL  // wedge age → esp_restart()
 #define SELF_RESTART_MAX_STREAK  3        // boot-loop guard: max consecutive self-restarts
@@ -409,6 +413,7 @@ RTC_NOINIT_ATTR static uint32_t _self_restart_streak;
 
 static uint32_t _tx_wedge_since_ms[NUM_MOUNTS] = {};  // 0 = no wedge clock running
 static uint32_t _last_reinit_ms       = 0;   // stamped by hub_espnow_full_reinit()
+static uint32_t _last_wifi_reinit_ms  = 0;   // stamped by hub_wifi_full_reinit()
 static uint32_t _last_wedge_ms        = 0;   // last time any wedge clock was active
 static uint32_t _last_client_cmd_ms   = 0;   // last command from any client (TCP/WS/serial/display)
 static uint8_t  _mount_last_state[NUM_MOUNTS];  // last STATUS state byte (0xFF = unknown)
@@ -1381,15 +1386,10 @@ static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
 // the hub→mount send wedge that peer-refresh alone cannot clear.  Mirrors the
 // AMOLED's espnow_full_reinit().  Runs from loop() (never a callback), so the
 // deinit/init is safe.  WiFi AP / TCP / WS are untouched.
-static void hub_espnow_full_reinit() {
-    _last_reinit_ms = millis();   // shared cooldown stamp: PC- and self-triggered
-    Serial.println("[ESP-NOW] Full reinit — start");
-    esp_now_deinit();
-    delay(50);
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[ESP-NOW] reinit FAILED — will retry on next request");
-        return;
-    }
+// Re-register the ESP-NOW callbacks and every bound peer.  Shared by both
+// recovery paths below.
+static bool hub_espnow_rebuild() {
+    if (esp_now_init() != ESP_OK) return false;
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);
     for (int i = 0; i < NUM_MOUNTS; i++) {
@@ -1400,9 +1400,52 @@ static void hub_espnow_full_reinit() {
         peer.ifidx   = WIFI_IF_AP;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
-        _espnow_fails[i] = 0;
+        _espnow_fails[i]    = 0;
+        _espnow_fail_run[i] = 0;
+    }
+    return true;
+}
+
+static void hub_espnow_full_reinit() {
+    _last_reinit_ms = millis();   // shared cooldown stamp: PC- and self-triggered
+    Serial.println("[ESP-NOW] Full reinit — start");
+    esp_now_deinit();
+    delay(50);
+    if (!hub_espnow_rebuild()) {
+        Serial.println("[ESP-NOW] reinit FAILED — will retry on next request");
+        return;
     }
     Serial.println("[ESP-NOW] Full reinit — done");
+}
+
+// Stage 1b: bounce the WiFi driver itself, not just ESP-NOW.
+//
+// ESP-NOW rides on the WiFi MAC's TX path, so esp_now_deinit()/init() leaves
+// that path untouched — which is why a reinit never cleared this wedge and the
+// ladder had nothing between it and rebooting the whole hub.  Stopping and
+// restarting WiFi resets the layer the wedge actually lives in, at the cost of
+// dropping the AP for a moment: WiFi clients reconnect on their own, and mounts
+// ride it out easily (their hub-silence watchdog is 10 s).
+static void hub_wifi_full_reinit() {
+    _last_reinit_ms      = millis();   // also suppress a stage-1 reinit right after
+    _last_wifi_reinit_ms = millis();
+    Serial.println("[WIFI] Full WiFi + ESP-NOW reinit — start");
+    esp_now_deinit();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(200);
+    WiFi.mode(WIFI_AP);
+    if (!WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET))
+        Serial.println("[WIFI] softAPConfig failed on reinit");
+    WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    delay(100);
+    if (!hub_espnow_rebuild()) {
+        Serial.println("[WIFI] ESP-NOW re-init FAILED after WiFi bounce");
+        return;
+    }
+    Serial.printf("[WIFI] Full reinit — done (AP %s ch %d)\n",
+                  WiFi.softAPIP().toString().c_str(), AP_CHANNEL);
 }
 
 // ---------------------------------------------------------------------------
@@ -1853,9 +1896,21 @@ static void check_self_recovery(uint32_t now) {
         return;
     }
 
-    // Stage 2: the reinit didn't clear it — restart the whole hub (the only
-    // confirmed cure; the wedge lives below the ESP-NOW layer).  25 s beats the
-    // PC app's 35 s escalation, so this fires first even with a PC attached.
+    // Stage 1b: the ESP-NOW reinit didn't clear it, so bounce WiFi itself.
+    // The wedge lives below ESP-NOW, so stage 1 cannot reach it — this is the
+    // rung that was missing, and the reason the ladder used to jump straight to
+    // rebooting the hub.  Costs a brief AP dropout; mounts don't notice.
+    if (worst_age >= SELF_WIFI_REINIT_AFTER_MS &&
+            (now - _last_wifi_reinit_ms) >= SELF_WIFI_REINIT_COOLDOWN_MS) {
+        Serial.printf("[SELF] Wedge on mount %d for %lu ms despite ESP-NOW reinit "
+                      "— bouncing WiFi\n", worst_i + 1, (unsigned long)worst_age);
+        send_hub_event(2, (uint8_t)(worst_i + 1), 0, wsec8, _espnow_fail_run[worst_i]);
+        hub_wifi_full_reinit();
+        return;
+    }
+
+    // Stage 2: neither reinit cleared it — restart the whole hub.  25 s beats
+    // the PC app's 35 s escalation, so this fires first even with a PC attached.
     if (worst_age >= SELF_RESTART_AFTER_MS) {
         if (_self_restart_streak >= SELF_RESTART_MAX_STREAK) {
             if (!_restart_block_logged) {
