@@ -304,6 +304,10 @@ canvas.hsl-c{display:block;touch-action:none;}
 .ext-cfg-act.home{background:var(--blue);border-color:var(--blue-lit);color:#fff;}
 .ext-cfg-act.home:disabled{background:var(--surf2);border-color:var(--border);color:var(--dim);}
 .ext-cfg-act.refbtn{background:var(--blue);border-color:var(--blue-lit);color:#fff;}
+.ext-cfg-limits{margin-top:12px;}
+.ext-cfg-limrow{display:flex;flex-direction:row;gap:6px;}
+.ext-cfg-act.limbtn{flex:1;width:auto;background:var(--orange);border-color:var(--orange);color:#fff;}
+.ext-cfg-act.limbtn:disabled{background:var(--surf2);border-color:var(--border);color:var(--dim);}
 .ext-cfg-act.refbtn:disabled{background:var(--surf2);border-color:var(--border);color:var(--dim);}
 /* Speed preset tables */
 .ext-spd-section{margin-bottom:10px;}
@@ -560,6 +564,7 @@ const CMD_CLEAR_POS          = 0x0D;
 const CMD_SET_ACTIVE_PRESET  = 0x0E;
 const CMD_GOTO_SLOT          = 0x10;
 const CMD_SET_ORIENTATION    = 0x07;  // 1B: orientation flags byte
+const CMD_FIND_LIMITS        = 0x06;  // 2B: axis(1) + stall_threshold(1)
 const CMD_FIND_HOME          = 0x13;  // 2B: axis(1) + stall_threshold(1)
 const CMD_SET_STALL_THRESHOLD = 0x14; // 2B: axis(1) + threshold(1) — persist StallGuard threshold
 const CMD_GET_CONFIG         = 0x12;  // no payload — request orientation + speeds
@@ -780,6 +785,14 @@ function mkSetSpeedPreset(id, group, preset, speed, accel) {
 function mkSetOrientation(id, oriByte) {
     const p = new Uint8Array(1); p[0] = oriByte & 0xFF;
     return buildPkt(id, CMD_SET_ORIENTATION, p);
+}
+
+// CMD_FIND_LIMITS: 2 bytes — axis (1B) + stall threshold (1B).  Measures the
+// full travel of the axis (both ends), where Find Home only seeks the min end.
+function mkFindLimits(id, axis) {
+    const stored = axis === AXIS_SLIDER ? camSt[id].slThresh : camSt[id].zmThresh;
+    const p = new Uint8Array(2); p[0] = axis; p[1] = (stored !== null) ? stored : 80;
+    return buildPkt(id, CMD_FIND_LIMITS, p);
 }
 
 // CMD_FIND_HOME: 2 bytes — axis (1B) + stall threshold (1B)
@@ -2598,6 +2611,35 @@ function buildExtConfig() {
         });
         card.appendChild(oriSec);
 
+        // ---- Find Limits (bottom) — measures full travel of each axis.
+        // The hub + a phone is a complete rig with no PC and no console, so this
+        // has to live here too; without it a phone-only setup can't set up a
+        // mount from scratch.
+        const limSec = document.createElement('div');
+        limSec.className = 'ext-cfg-limits';
+        limSec.innerHTML = '<div class="ext-spd-hdr">Find Limits</div>';
+        const limRow = document.createElement('div');
+        limRow.className = 'ext-cfg-limrow';
+        [
+            ['ext-cfg-lim-sl-'+i, 'Slider', AXIS_SLIDER],
+            ['ext-cfg-lim-zm-'+i, 'Zoom',   AXIS_ZOOM],
+        ].forEach(([id, lbl, axis]) => {
+            const b = document.createElement('button');
+            b.id = id; b.textContent = lbl;
+            b.className = 'ext-cfg-act limbtn';
+            const _i = i, _axis = axis;
+            b.addEventListener('click', () => {
+                if (!camSt[_i].connected) return;
+                if (!confirm('Find Limits drives ' + lbl.toLowerCase() +
+                             ' to BOTH ends of its travel on CAM ' + _i +
+                             '.\n\nMake sure the mount is clear to move.')) return;
+                wsSend(mkFindLimits(_i, _axis));
+            });
+            limRow.appendChild(b);
+        });
+        limSec.appendChild(limRow);
+        card.appendChild(limSec);
+
         container.appendChild(card);
     }
 }
@@ -2636,7 +2678,8 @@ function refreshExtConfig() {
         if (dot) dot.className = 'ext-cfg-dot' + (connected ? ' on' : '');
 
         // Action buttons
-        ['ext-cfg-home-sl-'+i, 'ext-cfg-home-zm-'+i, 'ext-cfg-ref-'+i].forEach(id => {
+        ['ext-cfg-home-sl-'+i, 'ext-cfg-home-zm-'+i, 'ext-cfg-ref-'+i,
+         'ext-cfg-lim-sl-'+i, 'ext-cfg-lim-zm-'+i].forEach(id => {
             const b = document.getElementById(id);
             if (b) b.disabled = !connected;
         });
