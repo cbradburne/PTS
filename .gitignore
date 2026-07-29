@@ -34,3 +34,6 @@ pc_app/data/config.json
 # (binaries never delta-compress, so a master in history is permanent weight)
 docs/assets/img/*.mov
 docs/assets/img/movingRail.mp4
+
+# Camera-original HEICs — web JPGs are committed instead
+docs/assets/img/Mount Hero/

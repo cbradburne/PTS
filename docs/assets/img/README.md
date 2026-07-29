@@ -5,7 +5,7 @@ slot on the site fills itself in (no HTML edits needed):
 
 | File | Where it appears |
 |---|---|
-| `hero.jpg` | Hero — the rig in production |
+| `hero.jpg` | Hero — the rig in production (landing page) |
 | `mount-pole.jpg` | Mounts — head on a clamp, built without the slider |
 | `mount-home.svg` | Mounts — the round AMOLED status screen |
 | `hub-home.svg` | Hub — the 7" touchscreen home screen |
@@ -59,6 +59,7 @@ So far:
 | `lookat-move.mp4` | Look-at — a full move, camera POV |
 | `lookat-reaim.mp4` | Look-at — re-aiming to a second subject mid-move |
 | `slider-rail.mp4` | The mounts — the head travelling its rail |
+| `mount-rail.jpg` | The mounts — the head on its slider rail |
 | `mount-pole.jpg` / `mount-pole2.jpg` | The mounts — the slider-less clamp build |
 | `slider-production.mp4` | The mounts — slider move during a live set |
 | `slider-venue.mp4` | The mounts — the same rig from the back of the hall |
