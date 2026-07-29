@@ -41,6 +41,7 @@
 #include <esp_task_wdt.h>
 #include <Wire.h>
 #include "../shared/protocol.h"
+#include "../shared/crash_report.h"
 #include "ui_types.h"   // ArcStrip struct — must be included before Arduino auto-prototypes
 
 // ---------------------------------------------------------------------------
@@ -1485,6 +1486,7 @@ static void ui_update() {
 void setup() {
     Serial.begin(115200);
     delay(200);
+    crash_report_print();   // report the previous panic, if any
 
     // Load runtime identity from NVS, then set the accent colour before any
     // UI calls.  Unpaired units get neutral grey and boot into SETUP.

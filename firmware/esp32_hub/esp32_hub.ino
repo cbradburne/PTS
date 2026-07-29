@@ -43,7 +43,8 @@
 #include <esp_system.h>   // esp_reset_reason()
 #include "../shared/disp_uart.h"
 #include "web_app.h"
-#include "hub_types.h"   // RelayMsg — must be last so it follows all other includes
+#include "hub_types.h"
+#include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
 
 // ---------------------------------------------------------------------------
 // Required Arduino board settings — enforced at compile time
@@ -1717,6 +1718,8 @@ void setup() {
     // restarted.  With timeout=0 writes return immediately when the buffer is full
     // — STATUS packets may be dropped but loop() never stalls.
     Serial.setTxTimeoutMs(0);
+
+    crash_report_print();   // report the previous panic, if any
 
     // Ignore the host's DTR/RTS so the PC reopening COM3 can't reset the hub.
     // That host-triggered reset (reset reason USB) was the root of the comms
