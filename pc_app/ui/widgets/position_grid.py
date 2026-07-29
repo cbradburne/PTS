@@ -360,6 +360,27 @@ class PositionGrid(QWidget):
                 self._apply_border(btn, mount_id, slot)
         self._refresh_row_labels(mount_id)
 
+    def _has_subject(self, mount_id: int, slot: int) -> bool:
+        """Is a look-at subject stored in this slot?
+
+        Taken from the slot_occupied bitmask, not the cached subject list. On a
+        look-at camera those bits ARE the stored subjects (see the hub's own
+        comment at esp32_hub.ino:826), and STATUS re-broadcasts them every
+        100 ms — so a dropped or discarded packet self-corrects on the next one.
+
+        The subject list is a one-shot reply to CMD_GET_SUBJECTS: lose that copy
+        and nothing refills it. set_look_at_mode() discards it whenever the mode
+        changes, which left every slot grey while the mount genuinely held the
+        subjects and look-at moves ran correctly — the web app and the hub
+        display, both reading the bitmask, showed them properly throughout.
+
+        Nothing in this widget reads the subject list for display any more —
+        names come from the label store. It is still cached (set_subjects) for
+        callers that want the coordinates, so it stays, but no on-screen state
+        depends on a one-shot packet arriving and surviving.
+        """
+        return bool(self._slot_occupied[mount_id] & (1 << slot))
+
     def set_subjects(self, mount_id: int, subjects: list) -> None:
         """Update the cached subject list for a slider mount (list of SubjectRecord or None)."""
         self._subjects[mount_id] = list(subjects[:8]) + [None] * max(0, 8 - len(subjects))
@@ -464,8 +485,7 @@ class PositionGrid(QWidget):
         # Border colour only — background never changes (same as non-look-at slots).
         # Green = stored + looking at, Red = stored + not looking at, Grey = empty.
         if self._look_at_mode[mount_id] and slot < 8:
-            subj = self._subjects[mount_id][slot] if slot < len(self._subjects[mount_id]) else None
-            has_subject  = subj is not None and getattr(subj, 'valid', False)
+            has_subject  = self._has_subject(mount_id, slot)
             is_active_la = has_subject and self._active_la_subj[mount_id] == slot
             if is_active_la:
                 border = BORDER_AT        # green — stored + camera currently looking at
@@ -548,9 +568,7 @@ class PositionGrid(QWidget):
 
             # Subject buttons (slots 0-7 on look-at mounts)
             if self._look_at_mode[mount_id]:
-                subj     = self._subjects[mount_id][slot] \
-                           if slot < len(self._subjects[mount_id]) else None
-                has_subj = subj is not None and getattr(subj, 'valid', False)
+                has_subj = self._has_subject(mount_id, slot)
                 if self._mode == MODE_CLEAR:
                     if has_subj:
                         self.clear_requested.emit(mount_id, slot)
