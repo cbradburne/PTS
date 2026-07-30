@@ -75,6 +75,11 @@ class ConfigDialog(QWidget):
         avail_h = scr.availableGeometry().height() if scr else 900
         self.resize(720, max(640, min(820, avail_h - 80)))
         self._build()
+        # Touchscreen numeric entry — a keypad beside the dialog, shown when a
+        # spin box takes focus.  Built after _build() so the fields exist.
+        if self._config.numeric_keypad:
+            from ui.numeric_keypad import NumericKeypad
+            NumericKeypad.install(self)
         # Connect live-update signal — fires when a mount responds to CMD_GET_CONFIG
         self._mm.config_report_received.connect(self._on_config_report)
         # Request config from all online mounts immediately
@@ -429,6 +434,11 @@ class ConfigDialog(QWidget):
         self._osk_check.setChecked(self._config.virtual_keyboard)
         form.addRow("Virtual keyboard:", self._osk_check)
 
+        self._keypad_check = QCheckBox(
+            "Show a numeric keypad beside this window when a value is selected")
+        self._keypad_check.setChecked(self._config.numeric_keypad)
+        form.addRow("Numeric keypad:", self._keypad_check)
+
         # ---- Camera & position names (save / load / defaults) ----
         names_box = QGroupBox("Camera && Position Names")
         names_vl  = QVBoxLayout(names_box)
@@ -780,6 +790,17 @@ class ConfigDialog(QWidget):
         self._config.virtual_keyboard  = self._osk_check.isChecked()
         from ui import virtual_keyboard
         virtual_keyboard.set_enabled(self._config.virtual_keyboard)  # live
+        # Numeric keypad — apply live too, so the effect is visible immediately
+        # rather than only on the next time Settings is opened.
+        self._config.numeric_keypad = self._keypad_check.isChecked()
+        kp = getattr(self, "_numeric_keypad", None)
+        if self._config.numeric_keypad and kp is None:
+            from ui.numeric_keypad import NumericKeypad
+            NumericKeypad.install(self)
+        elif not self._config.numeric_keypad and kp is not None:
+            kp.hide()
+            kp.deleteLater()
+            self._numeric_keypad = None
 
         # Per-mount — only apply settings for connected cameras.
         # Unconnected cameras have no authoritative values (checkboxes show stale
