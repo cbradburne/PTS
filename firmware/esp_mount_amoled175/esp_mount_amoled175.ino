@@ -503,8 +503,17 @@ static void send_preset_to_teensy(uint8_t group, uint8_t preset) {
 }
 
 
+// STATUS is 10 bytes — see build_status() in shared/protocol.h, which is the
+// canonical definition.  This hand-rolled copy emitted only 9 and so dropped
+// byte [9], the active look-at subject.  Clients that read the missing byte as
+// 0xFF ("no subject") had a stored location flicker red ten times a second
+// while the camera sat steady on it, and masked a second bug besides: the red
+// that should follow a manual move was arriving by accident from here rather
+// than from the mount actually deselecting the subject.
+//
+// Keep this in step with shared/protocol.h if the payload ever grows again.
 static void send_status_heartbeat() {
-    uint8_t p[9];
+    uint8_t p[10];
     p[0] = _ms.state;
     p[1] = _ms.flags;
     p[2] = _ms.pt_preset;
@@ -514,7 +523,8 @@ static void send_status_heartbeat() {
     p[6] = (_ms.slot_at >> 8) & 0xFF;
     p[7] =  _ms.slot_at & 0xFF;
     p[8] =  _ms.target_slot;
-    send_to_hub(CMD_STATUS, p, 9);
+    p[9] =  _ms.active_la_subject;   // 0-7, or 0xFF for none
+    send_to_hub(CMD_STATUS, p, sizeof(p));
     _last_heartbeat_ms = millis();
 }
 
@@ -693,6 +703,13 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
             upd(_ms.slot_occupied, (uint16_t)((pkt.payload[4]<<8)|pkt.payload[5]));
             upd(_ms.slot_at,       (uint16_t)((pkt.payload[6]<<8)|pkt.payload[7]));
             upd(_ms.target_slot,   pkt.payload[8]);
+        }
+        // Byte [9] is the Teensy's authoritative look-at subject.  Track it
+        // here as well as from CMD_LOOK_AT_STATUS: that one is event-driven, so
+        // relying on it alone let this copy drift from the Teensy's truth, and
+        // the heartbeat below then published the stale value.
+        if (pkt.payload_len >= 10) {
+            upd(_ms.active_la_subject, pkt.payload[9]);
         }
         if (changed) ui_update();
     }

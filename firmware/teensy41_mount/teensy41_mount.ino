@@ -899,6 +899,20 @@ static void dispatch(const ParsedPacket &pkt) {
             // adding deltas, so moveTo()'s orientation transform is not applied
             // twice (which would send uninvolved axes to their mirror position).
             mount.moveRel(d_pan, d_tilt, d_slider, d_zoom, preset);
+
+            // Same rule as CMD_JOG above: moving a physical axis by hand while
+            // in look-at mode means we are no longer aimed at the subject, so
+            // deselect it and let every UI go red.  The nudge arrows on the PC
+            // app and the web app send MOVE_REL, not JOG, so without this the
+            // border stayed green after the camera had been moved away — the
+            // operator had no way to see that pressing the slot would re-aim.
+            if (_cfg.look_at_mode &&
+                    mount.getState() != STATE_LOOK_AT_MOVE &&
+                    mount.getState() != STATE_LOOK_AT_PRE_AIM &&
+                    (d_pan != 0 || d_tilt != 0 || d_slider != 0)) {
+                mount.clearLaSubject();
+                send_look_at_status();
+            }
             break;
         }
 
