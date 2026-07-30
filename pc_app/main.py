@@ -111,6 +111,10 @@ def main() -> None:
     name_store.load_default(store, config)
     bridge   = Bridge()
     mm       = MountManager(bridge)
+    # Log axis travel to comms.log.  Silent while nothing moves; prints a
+    # summary per move, which is where slider travel/overshoot is measured.
+    from comms.position_log import PositionLogger
+    _poslog = PositionLogger(mm)
     joystick = JoystickHandler(deadzone=config.joystick_deadzone)
     joystick.init()
 
