@@ -391,7 +391,11 @@ class MountManager(QObject):
                 st.slot_occupied_mask = s.slot_occupied_mask
                 st.slot_at_mask       = s.slot_at_mask
                 st.target_slot        = s.target_slot
-                st.active_subject_id = s.active_la_subject  # 0-7 or 0xFF (none)
+                # Only when this STATUS actually carried byte [9].  A 9-byte
+                # STATUS says nothing about the look-at subject, so leave the
+                # last known value alone rather than clobbering it with "none".
+                if s.la_subject_present:
+                    st.active_subject_id = s.active_la_subject  # 0-7 or 0xFF (none)
 
                 if not was_connected:
                     self.mount_connected.emit(mid)

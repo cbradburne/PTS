@@ -486,6 +486,13 @@ class StatusPayload:
     slot_at_mask:         int = 0    # bits 0-9: mount is AT slot N
     target_slot:          int = 0xFF # slot currently being moved to (0xFF = none)
     active_la_subject:    int = 0xFF # active look-at subject (0-7, 0xFF = none)
+    # False when the sender used the 9-byte STATUS, which has no byte [9] and so
+    # carries no look-at subject at all.  ABSENT IS NOT "NONE": the mount bridge's
+    # send_status_heartbeat() hand-rolls a 9-byte STATUS while the shared
+    # build_status() sends 10, so both lengths arrive from one mount.  Reading the
+    # missing byte as 0xFF wiped a known subject on every short packet and made
+    # the stored-location border flicker red/green several times a second.
+    la_subject_present:  bool = False
 
     @property
     def at_min_limit(self) -> bool:
@@ -550,8 +557,11 @@ def decode_status(payload: bytes) -> StatusPayload:
     # ">BBBBHHB" = state, flags, pt_preset, sl_preset, occupied(16), at(16), target
     fields = struct.unpack(">BBBBHHB", payload[:9])
 
-    # Byte [9] (added in v2): active look-at subject (0-7, 0xFF = none)
-    active_la_subject = payload[9] if len(payload) >= 10 else 0xFF
+    # Byte [9] (added in v2): active look-at subject (0-7, 0xFF = none).
+    # Track presence separately — a short STATUS means "not reported", which
+    # callers must not confuse with "reported as none".
+    has_la_subject    = len(payload) >= 10
+    active_la_subject = payload[9] if has_la_subject else 0xFF
 
     return StatusPayload(
         state              = MountState(fields[0]),
@@ -562,6 +572,7 @@ def decode_status(payload: bytes) -> StatusPayload:
         slot_at_mask       = fields[5],
         target_slot        = fields[6],
         active_la_subject  = active_la_subject,
+        la_subject_present = has_la_subject,
     )
 
 
