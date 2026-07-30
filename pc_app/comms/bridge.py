@@ -191,6 +191,25 @@ class Bridge:
     # a few seconds is a large margin; the post-connect grace below covers the
     # slower cold-start ACKs (~1–3 s) seen right after a (re)connect.
     WEDGE_DETECT_S = 3.0
+    # A mount that has ACKED something within this window is NOT wedged, however
+    # many other commands are outstanding.  The discriminator has to be the ACK,
+    # not merely a packet arriving:
+    #
+    #   ACKing            → healthy.  A single lost ACK amid a steady stream is
+    #                       packet loss, not a wedge; escalating it restarts the
+    #                       hub and takes every mount down to cure nothing.
+    #   sending, no ACKs  → hub→mount SEND wedge.  The mount is alive and its
+    #                       health/STATUS keep arriving, but nothing we send
+    #                       reaches it.  This is the real, dominant fault, and a
+    #                       hub restart is the only confirmed cure — so this MUST
+    #                       escalate.  Gating on "have we heard from it" instead
+    #                       hid a rig-wide 4 h command outage on 2026-07-30 with
+    #                       every mount at 0.4% ACK and not one WEDGE logged.
+    #   fully silent      → mount-side fault, or gone.
+    #
+    # Healthy ACK cadence is one every ~3 s (the GET_CONFIG poll), so 15 s is a
+    # wide margin over normal loss yet still catches a send wedge promptly.
+    MOUNT_ACK_STALE_S = 15.0
     # Don't run wedge detection for this long after a (re)connect — the first
     # command on a cold pipe can legitimately take 1–3 s to ACK.
     POST_CONNECT_GRACE_S = 6.0
@@ -254,6 +273,11 @@ class Bridge:
         # so they still never appear here.
         self._acked_mounts: set[int] = set()
         self._rx_mounts: set[int] = set()   # mounts we've received any packet from
+        # mount_id → monotonic ts of its last ACK/NACK.  The liveness half of
+        # wedge detection: _acked_mounts says "ever answered", this says
+        # "answering now".  Deliberately NOT last-packet-received — a mount in a
+        # hub→mount send wedge keeps sending while receiving nothing.
+        self._mount_last_ack: dict[int, float] = {}
         self._tx_cmd_sent  = 0          # interesting commands written
         self._tx_cmd_acked = 0          # interesting commands ACKed/NACKed back
         self._last_forced_reconnect: float = 0.0
@@ -731,8 +755,10 @@ class Bridge:
         if entry is None:
             return   # ACK for a periodic/quiet command we didn't track
         sent_t, name, mount = entry
-        dt_ms = (time.monotonic() - sent_t) * 1000.0
+        now_t = time.monotonic()
+        dt_ms = (now_t - sent_t) * 1000.0
         self._tx_cmd_acked += 1
+        self._mount_last_ack[mount] = now_t
         # This mount has now proven it can respond — its future silence is a real
         # wedge signal, unlike a mount that has never been heard from.  (The ACK
         # also removes this seq from _pending_acks above, so it no longer counts
@@ -753,7 +779,14 @@ class Bridge:
                                WEDGE_DETECT_S the PC→hub command path is wedged.
                                Commands to mounts never heard from (absent) are
                                ignored — they would otherwise force a reconnect
-                               loop when not all mounts are connected.
+                               loop when not all mounts are connected.  Mounts
+                               that ACKed inside MOUNT_ACK_STALE_S are ignored
+                               too: a live mount with one lost ACK is not a
+                               wedge, and treating it as one restarts the hub
+                               (all mounts down) to cure a mount that was never
+                               ill.  A mount that is sending but not ACKing is
+                               NOT excused — that is the hub→mount send wedge
+                               and it has to escalate.
           oldest_mount       — mount_id that owns that oldest command (0 if none).
                                Lets the log attribute a wedge to a specific mount,
                                so with several connected we can see whether wedges
@@ -770,11 +803,14 @@ class Bridge:
                       if now - t > 60.0]:
                 del self._pending_acks[s]
             for t, _name, mt in self._pending_acks.values():
-                if mt in self._acked_mounts or mt in self._rx_mounts:
-                    age = now - t
-                    if age > oldest:
-                        oldest = age
-                        oldest_mount = mt
+                if mt not in self._acked_mounts and mt not in self._rx_mounts:
+                    continue                      # absent mount — never escalate
+                if now - self._mount_last_ack.get(mt, 0.0) < self.MOUNT_ACK_STALE_S:
+                    continue                      # still ACKing — not wedged
+                age = now - t
+                if age > oldest:
+                    oldest = age
+                    oldest_mount = mt
             pending = len(self._pending_acks)
         return oldest, oldest_mount, pending
 
