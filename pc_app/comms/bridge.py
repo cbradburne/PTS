@@ -814,6 +814,28 @@ class Bridge:
             pending = len(self._pending_acks)
         return oldest, oldest_mount, pending
 
+    def _hub_tx_proven_ok(self, now: float, exclude_mount: int) -> int:
+        """Return a mount_id (other than exclude_mount) that has ACKed inside
+        MOUNT_ACK_STALE_S, or 0 if none has.
+
+        An ACK from any other mount is proof the hub's ESP-NOW transmit path
+        works — the command reached that mount and its reply came back.  So a
+        single unreachable mount alongside a healthy one is a MOUNT-side fault,
+        and no hub-level recovery can help: reinit and restart both take every
+        other mount down for nothing.
+
+        Seen 2026-07-30 14:37: mount 4 went silent (bridge and Teensy together,
+        never returned, needed a power cycle) while mounts 1 and 5 sat at 100%
+        ACK throughout.  The ladder restarted a demonstrably healthy hub anyway.
+        The hub-wedge signature is different and unmistakable: EVERY mount stops
+        ACKing at once and the hub's own txfail counter stops advancing.
+        """
+        with self._diag_lock:
+            for mt, t in self._mount_last_ack.items():
+                if mt != exclude_mount and (now - t) < self.MOUNT_ACK_STALE_S:
+                    return mt
+        return 0
+
     def _monitor_loop(self) -> None:
         """Periodic health snapshot — diagnostic aid for the stall where the UI
         still shows the camera connected but commands stop reaching the hub.
@@ -857,6 +879,15 @@ class Bridge:
                     with self._lock:
                         if self._transport:
                             self._transport.mark_dead()
+                elif self._hub_tx_proven_ok(now, wedged_mount):
+                    # Another mount is ACKing, so the hub can transmit.  This is
+                    # one dead mount, not a hub wedge; no hub-level action can
+                    # reach it and both rungs would drop the healthy mounts too.
+                    log.warning("Mount %d unreachable %.1fs, but mount %d is still "
+                                "ACKing — hub TX is healthy, so this is mount-side. "
+                                "Not touching the hub; mount %d likely needs a power "
+                                "cycle.", wedged_mount, oldest,
+                                self._hub_tx_proven_ok(now, wedged_mount), wedged_mount)
                 else:
                     # Serial: the USB link is healthy when this fires (hub_rx still
                     # climbing) — this is a hub→mount ESP-NOW send wedge that reopening
