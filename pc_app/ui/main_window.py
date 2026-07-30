@@ -1369,6 +1369,16 @@ class MainWindow(QMainWindow):
         save_config(self._config)
         self._grid.set_has_slider(mount_id, cr.has_slider)
         self._grid.set_look_at_mode(mount_id, cr.look_at_mode)
+        # set_look_at_mode() clears the grid's own _active_la_subj, so drop our
+        # cached copy too or the two silently diverge and never recover: the
+        # STATUS sync above only pushes to the grid when the value CHANGES, so
+        # a cache that still reads "subject 1" leaves the grid stuck on -1 (red)
+        # for as long as the mount keeps reporting the same subject.  This
+        # CONFIG_REPORT arrives moments after connecting, so the symptom was a
+        # stored subject that came up red on every app start and stayed red.
+        # The Config→OK path at _apply_config() already does this; this one
+        # was missed.
+        self._active_la_subject[mount_id] = -1
         # Force a label refresh even if look_at_mode didn't change — covers the case
         # where refresh_button() was called during a disconnect/reconnect cycle and
         # overwrote ◄/► with "9"/"10" while _look_at_mode was already correct.
