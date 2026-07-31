@@ -19,6 +19,15 @@ build/
 *.bin.tmp
 .build/
 
+# Crash-investigation artefacts: archived ELFs (~20 MB each) and core dumps
+# pulled off a device.  Keep them locally — an ELF is the only thing that turns
+# a dump's addresses into source lines, and the matching one is easily lost —
+# but never commit them.  Binaries don't delta-compress, so one committed by
+# accident stays in history forever.  Same reasoning as the .mov rule below.
+*.elf
+*_coredump.bin
+elf 2*/
+
 # local browser-preview scratch (see .claude/launch.json)
 preview/
 
