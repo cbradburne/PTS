@@ -56,14 +56,25 @@ inline void crash_report_print() {
         Serial.printf("[COREDUMP] backtrace (%lu frames%s):\n",
                       (unsigned long)depth,
                       s->exc_bt_info.corrupted ? ", CORRUPTED" : "");
-        // One line, so it survives the PC app's line-based text extraction.
-        String bt;
+        // Print the frames a few per line, flushing as we go, rather than
+        // building one long String and emitting it in a single printf.
+        //
+        // That is what the first field capture did, and the frames never
+        // appeared: the reader saw "backtrace (13 frames):" followed straight
+        // by the end marker.  A ~150-character write at this point in boot has
+        // to fit the USB CDC TX buffer in one go with no host necessarily
+        // draining it yet, and String also puts the whole thing on the heap
+        // before any of it is sent.  Either can silently swallow the payload —
+        // and the frame addresses ARE the payload, the one thing this exists to
+        // recover.  Short writes with an explicit flush cannot lose them all.
         for (uint32_t i = 0; i < depth; i++) {
-            char f[12];
-            snprintf(f, sizeof(f), "0x%08lx ", (unsigned long)s->exc_bt_info.bt[i]);
-            bt += f;
+            if (i % 4 == 0) Serial.printf("[COREDUMP] bt");
+            Serial.printf(" 0x%08lx", (unsigned long)s->exc_bt_info.bt[i]);
+            if (i % 4 == 3 || i + 1 == depth) {
+                Serial.println();
+                Serial.flush();
+            }
         }
-        Serial.printf("[COREDUMP] %s\n", bt.c_str());
         Serial.println("[COREDUMP] ---- end ----");
     }
     free(s);
