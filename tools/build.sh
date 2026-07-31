@@ -86,8 +86,33 @@ if [ "${1:-}" = "flash" ]; then
     port="${3:-}"
     compile_one "$t" || exit 1
     if [ -z "$port" ]; then
-        port="$(arduino-cli board list 2>/dev/null | awk 'NR>1 && $1 ~ /dev/ {print $1; exit}')"
-        [ -z "$port" ] && { echo "no port found — pass one explicitly"; exit 1; }
+        # macOS always exposes /dev/cu.debug-console and
+        # /dev/cu.Bluetooth-Incoming-Port.  arduino-cli lists both as serial
+        # ports, they sort ahead of every real board, and the old "first /dev/
+        # line wins" therefore picked one of them on every Mac.  Neither is
+        # ever a flash target, so drop them by name.
+        cands="$(arduino-cli board list 2>/dev/null \
+                 | awk 'NR>1 && $1 ~ /^\/dev\// { print $1 }' \
+                 | grep -Ev 'debug-console|Bluetooth-Incoming-Port|wlan-debug|\.BLTH')"
+        # A real board is a USB serial device.  If any are present, ignore
+        # whatever else is still in the list.
+        usb="$(printf '%s\n' "$cands" \
+               | grep -E 'usbmodem|usbserial|wchusbserial|SLAB_USBtoUART')"
+        [ -n "$usb" ] && cands="$usb"
+        n="$(printf '%s\n' "$cands" | grep -c '[^[:space:]]')"
+        if [ "$n" -eq 0 ]; then
+            echo "no board port found — is it plugged in and not held by a serial monitor?"
+            echo "  tools/build.sh flash $t /dev/cu.usbmodemXXXX"
+            exit 1
+        fi
+        if [ "$n" -gt 1 ]; then
+            # Several boards attached: guessing risks flashing the wrong one,
+            # which on this rig means a mount running the hub's firmware.
+            echo "several candidate ports — pass one explicitly:"
+            printf '%s\n' "$cands" | sed 's/^/  /'
+            exit 1
+        fi
+        port="$cands"
         echo "auto-detected port: $port"
     fi
     exec arduino-cli upload --fqbn "$(fqbn_for "$t")" \
