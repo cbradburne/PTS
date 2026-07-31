@@ -115,6 +115,9 @@ class FindLimitsDialog(QDialog):
 
         self._close_btn = QPushButton("Close")
         self._close_btn.setFixedHeight(44)
+        # Wide enough for "Stop & Close" from the outset, so the row doesn't
+        # jump when the caption changes mid-run.
+        self._close_btn.setMinimumWidth(130)
         self._close_btn.clicked.connect(self._on_close)
 
         row.addWidget(self._action_btn)
@@ -129,10 +132,16 @@ class FindLimitsDialog(QDialog):
 
     def _apply_state(self) -> None:
         """The single place that sets both captions, so they cannot disagree
-        about whether a run is in progress."""
+        about whether a run is in progress.
+
+        Both said "Cancel" while running, which put two identical buttons side
+        by side with no way to tell which was which.  They do differ — one
+        stops and stays so the run can be retried, the other stops and leaves
+        — so the captions say so.
+        """
         if self._running:
-            self._action_btn.setText("Cancel")
-            self._close_btn.setText("Cancel")
+            self._action_btn.setText("Stop")
+            self._close_btn.setText("Stop && Close")   # && escapes the mnemonic
         else:
             self._action_btn.setText("Start")
             self._close_btn.setText("Close")
