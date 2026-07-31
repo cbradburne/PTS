@@ -346,10 +346,16 @@ class PositionGrid(QWidget):
                 self._apply_border(btn, mount_id, slot)
         self._refresh_row_labels(mount_id)
 
-    def set_look_at_mode(self, mount_id: int, look_at_mode: bool) -> None:
-        """Switch between look-at subject mode and standard position-slot mode."""
+    def set_look_at_mode(self, mount_id: int, look_at_mode: bool) -> bool:
+        """Switch between look-at subject mode and standard position-slot mode.
+
+        Returns True if the mode actually changed (and this therefore cleared
+        the cached subject state below).  Callers mirroring that state need to
+        know: this is called on every CONFIG_REPORT, which arrives every few
+        seconds from the GET_CONFIG poll, not just when something changes.
+        """
         if self._look_at_mode[mount_id] == look_at_mode:
-            return
+            return False
         # Clear stale subject state so it doesn't linger if look-at is re-enabled.
         self._active_la_subj[mount_id] = -1
         self._subjects[mount_id] = [None] * 8
@@ -359,6 +365,7 @@ class PositionGrid(QWidget):
             if btn:
                 self._apply_border(btn, mount_id, slot)
         self._refresh_row_labels(mount_id)
+        return True
 
     def _has_subject(self, mount_id: int, slot: int) -> bool:
         """Is a look-at subject stored in this slot?

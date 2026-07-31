@@ -1275,19 +1275,29 @@ class MainWindow(QMainWindow):
         the Teensy retargets pan/tilt immediately without stopping the slider.
         """
         st = self._mm.state(mount_id)
-        subjects = st.subjects if st else []
-        # Only activate if the subject has been calibrated
-        if slot < len(subjects) and subjects[slot] is not None and subjects[slot].valid:
+        # Presence comes from the STATUS bitmask, which the mount re-broadcasts
+        # every 100 ms, NOT from the cached SUBJECT_LIST.  That cache is a
+        # one-shot reply to CMD_GET_SUBJECTS and nothing refills it once it is
+        # dropped, so gating on it meant only the most recently calibrated
+        # subject could be selected — every earlier one silently ignored the
+        # click, with no send and no visible change.  ad80b8d moved the border
+        # colour and the grid's own click test onto the bitmask; this second
+        # gate was missed, so the button lit up correctly and still did nothing.
+        # On a look-at mount those bits ARE the stored subjects (esp32_hub.ino:826).
+        occupied = bool(st.slot_occupied_mask & (1 << slot)) if st else False
+        if occupied:
             if self._active_la_subject.get(mount_id) == slot:
                 # Tap again to deselect
                 self._active_la_subject[mount_id] = -1
             else:
                 self._active_la_subject[mount_id] = slot
-                # Always send CMD_SWITCH_SUBJECT so the Teensy retargets
-                # pan/tilt immediately if a look-at move is already running.
-                # The firmware handles this gracefully in any state (no-op
-                # when not in STATE_LOOK_AT_MOVE), so we don't need to gate
-                # on look_at_active (which could be stale by up to 100 ms).
+                # Always send CMD_SWITCH_SUBJECT — the firmware handles both
+                # states, so there is no need to gate on look_at_active (which
+                # can be up to 100 ms stale).  Mid-move it retargets pan/tilt on
+                # the next controller tick; when idle it calls aimAtSubject()
+                # and swings pan/tilt onto the subject from where it is
+                # (teensy41_mount.ino:1671-1690).  It is NOT a no-op when idle,
+                # as this comment previously claimed.
                 self._mm.send_switch_subject(mount_id, slot)
         self._grid.set_active_la_subject(mount_id, self._active_la_subject[mount_id])
 
@@ -1368,17 +1378,16 @@ class MainWindow(QMainWindow):
         mc.look_at_mode  = cr.look_at_mode
         save_config(self._config)
         self._grid.set_has_slider(mount_id, cr.has_slider)
-        self._grid.set_look_at_mode(mount_id, cr.look_at_mode)
-        # set_look_at_mode() clears the grid's own _active_la_subj, so drop our
-        # cached copy too or the two silently diverge and never recover: the
-        # STATUS sync above only pushes to the grid when the value CHANGES, so
-        # a cache that still reads "subject 1" leaves the grid stuck on -1 (red)
-        # for as long as the mount keeps reporting the same subject.  This
-        # CONFIG_REPORT arrives moments after connecting, so the symptom was a
-        # stored subject that came up red on every app start and stayed red.
-        # The Config→OK path at _apply_config() already does this; this one
-        # was missed.
-        self._active_la_subject[mount_id] = -1
+        # Invalidate our cached subject ONLY when the grid actually cleared its
+        # own — set_look_at_mode() now reports that.  CONFIG_REPORT is not a
+        # connect-time event: GET_CONFIG is polled every ~4 s, so resetting
+        # unconditionally fought the operator, wiping the selection every few
+        # seconds and letting the next STATUS re-assert whatever the MOUNT last
+        # had, which is the most recently calibrated subject.  Without this
+        # guard the two caches still diverge permanently on a real mode change,
+        # because the STATUS sync only pushes to the grid on a CHANGE.
+        if self._grid.set_look_at_mode(mount_id, cr.look_at_mode):
+            self._active_la_subject[mount_id] = -1
         # Force a label refresh even if look_at_mode didn't change — covers the case
         # where refresh_button() was called during a disconnect/reconnect cycle and
         # overwrote ◄/► with "9"/"10" while _look_at_mode was already correct.
