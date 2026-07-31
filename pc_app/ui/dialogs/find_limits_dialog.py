@@ -1,143 +1,184 @@
-"""
-FindLimitsDialog — guided wizard for finding slider and zoom limits via StallGuard.
+"""FindLimitsDialog — drive one axis to its end stops to measure its travel.
 
-Walks the operator through:
-  1. Select axis (Slider or Zoom)
-  2. Confirms the mount is clear to move
-  3. Sends FIND_LIMITS command and shows live progress
-  4. Displays result and stores limits
+One dialog per axis: the caller says which, so there is no axis picker and the
+heading names the axis outright ("Find Slider Limits").  The choice now lives
+on the camera's Config tab as separate Slider and Zoom buttons, matching the
+web app's extended config.
+
+Button behaviour is deliberately symmetrical, so whichever button is nearer
+the pointer does the sane thing:
+
+    idle      ->  [ Start ]   [ Close ]
+    running   ->  [ Cancel ]  [ Cancel ]     both stop the axis; the right one
+                                             also closes the dialog
+    finished  ->  [ Start ]   [ Close ]      Start re-runs, so a bad result can
+                                             be retried without reopening
+
+The measured travel stays on screen after a run — it is the useful output, and
+re-running replaces it rather than blanking it first.
 """
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QComboBox, QDialogButtonBox, QMessageBox
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot
+from PyQt6.QtCore import QTimer, pyqtSlot
+from PyQt6.QtGui import QFont
 
 from comms.mount_manager import MountManager
 from comms.protocol import Axis
+from ui.widgets.slider_travel_anim import SliderTravelAnim
+
+# The firmware has its own timeout; this only stops the UI sitting on
+# "searching" forever if nothing comes back.  10.5 min covers both ends of a
+# 3-metre slider at the slowest find speed.
+_TIMEOUT_MS = 630_000
+
+_AXIS_NAME = {Axis.SLIDER: "Slider", Axis.ZOOM: "Zoom"}
+
+
+def _h_rule() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.HLine)
+    f.setStyleSheet("color: #37474F;")
+    return f
 
 
 class FindLimitsDialog(QDialog):
 
-    def __init__(self, mount_id: int, mount_manager: MountManager, parent=None,
-                 has_slider: bool = True, lanc_zoom: bool = False,
-                 stall_threshold_slider: int = 80, stall_threshold_zoom: int = 80):
+    def __init__(self, mount_id: int, mount_manager: MountManager,
+                 axis: Axis, stall_threshold: int = 80, parent=None):
         super().__init__(parent)
-        self._mount_id   = mount_id
-        self._mm         = mount_manager
-        self._has_slider = has_slider
-        self._lanc_zoom  = lanc_zoom
-        self._stall_threshold_slider = max(1, stall_threshold_slider)
-        self._stall_threshold_zoom   = max(1, stall_threshold_zoom)
-        self._running    = False
-        self._result: tuple[int, int] | None = None
+        self._mount_id  = mount_id
+        self._mm        = mount_manager
+        self._axis      = axis
+        self._threshold = max(1, stall_threshold)
+        self._running   = False
 
-        self.setWindowTitle(f"Find Limits — Mount {mount_id}")
-        self.setMinimumWidth(380)
-        self._build()
+        name = _AXIS_NAME.get(axis, "Axis")
+        self.setWindowTitle(f"Find {name} Limits — Camera {mount_id}")
+        self.setMinimumWidth(420)
+        self._build(name)
 
-        # Listen for limits_found signal
         self._mm.limits_found.connect(self._on_limits_found)
+        self._timeout = QTimer(self)
+        self._timeout.setSingleShot(True)
+        self._timeout.setInterval(_TIMEOUT_MS)
+        self._timeout.timeout.connect(self._on_timeout)
 
-        # Timeout watchdog (firmware has its own, but we show UI feedback)
-        self._timeout_timer = QTimer(self)
-        self._timeout_timer.setSingleShot(True)
-        self._timeout_timer.setInterval(630000)  # 10.5 min — covers both ends of a 3-metre slider
-        self._timeout_timer.timeout.connect(self._on_timeout)
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
 
-    def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 16)
+    def _build(self, name: str) -> None:
+        vl = QVBoxLayout(self)
+        vl.setSpacing(12)
+        vl.setContentsMargins(16, 16, 16, 16)
 
-        # Axis selector — only show axes that are physically present and motor-driven
-        axis_row = QHBoxLayout()
-        axis_row.addWidget(QLabel("Axis:"))
-        self._axis_combo = QComboBox()
-        if self._has_slider:
-            self._axis_combo.addItem("Slider", Axis.SLIDER)
-        if not self._lanc_zoom:
-            self._axis_combo.addItem("Zoom", Axis.ZOOM)
-        axis_row.addWidget(self._axis_combo)
-        axis_row.addStretch()
-        layout.addLayout(axis_row)
+        self._heading = QLabel(f"Finding {name} Limits")
+        self._heading.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        vl.addWidget(self._heading)
+        vl.addWidget(_h_rule())
 
-        # Warning
-        warning = QLabel(
-            "⚠  Ensure the axis is free to move to both ends.\n"
-            "The mount will move slowly until it detects each end stop.\n"
-            "Keep clear of the mechanism during the procedure."
+        warn = QLabel(
+            f"The {name.lower()} will drive to each end stop until it stalls.  "
+            "Make sure it is clear to move along its whole travel before starting."
         )
-        warning.setWordWrap(True)
-        warning.setStyleSheet("color: #FFA726; font-size: 11px;")
-        layout.addWidget(warning)
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color:#FFB74D; font-size:11px;")
+        vl.addWidget(warn)
 
-        # Progress bar
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)    # indeterminate
-        self._progress.setTextVisible(False)
-        self._progress.setVisible(False)
-        layout.addWidget(self._progress)
+        self._anim = SliderTravelAnim()
+        vl.addWidget(self._anim)
 
-        # Status label
-        self._status_label = QLabel("")
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status_label.setStyleSheet("font-size: 12px; color: #CFD8DC;")
-        layout.addWidget(self._status_label)
+        self._status = QLabel("Ready.")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet("font-size:12px; color:#B0BEC5;")
+        vl.addWidget(self._status)
 
-        # If no axes are available, disable the start button and explain why
-        if self._axis_combo.count() == 0:
-            no_axes_label = QLabel(
-                "No motor-driven axes to calibrate on this mount.\n"
-                "(Slider is disabled; Zoom uses LANC serial control.)"
-            )
-            no_axes_label.setWordWrap(True)
-            no_axes_label.setStyleSheet("color: #EF5350; font-size: 11px;")
-            layout.addWidget(no_axes_label)
+        # Measured travel — kept on screen after a run; this is the output.
+        self._result = QLabel("")
+        self._result.setWordWrap(True)
+        self._result.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self._result.setStyleSheet("color:#4CAF50;")
+        vl.addWidget(self._result)
 
-        # Buttons
-        btn_row = QHBoxLayout()
-        self._start_btn = QPushButton("Start")
-        self._start_btn.setFixedHeight(44)
-        self._start_btn.setStyleSheet(
+        vl.addWidget(_h_rule())
+
+        row = QHBoxLayout()
+        self._action_btn = QPushButton("Start")
+        self._action_btn.setFixedHeight(44)
+        self._action_btn.setStyleSheet(
             "background:#1565C0; color:white; border:none; border-radius:6px;"
             "font-size:13px; font-weight:bold;")
-        self._start_btn.setEnabled(self._axis_combo.count() > 0)
-        self._start_btn.clicked.connect(self._start)
+        self._action_btn.clicked.connect(self._on_action)
 
-        self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.clicked.connect(self._cancel)
+        self._close_btn = QPushButton("Close")
+        self._close_btn.setFixedHeight(44)
+        self._close_btn.clicked.connect(self._on_close)
 
-        btn_row.addWidget(self._start_btn)
-        btn_row.addWidget(self._cancel_btn)
-        layout.addLayout(btn_row)
+        row.addWidget(self._action_btn)
+        row.addWidget(self._close_btn)
+        vl.addLayout(row)
+
+        self._apply_state()
 
     # ------------------------------------------------------------------
-    # Logic
+    # State
     # ------------------------------------------------------------------
+
+    def _apply_state(self) -> None:
+        """The single place that sets both captions, so they cannot disagree
+        about whether a run is in progress."""
+        if self._running:
+            self._action_btn.setText("Cancel")
+            self._close_btn.setText("Cancel")
+        else:
+            self._action_btn.setText("Start")
+            self._close_btn.setText("Close")
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    def _on_action(self) -> None:
+        if self._running:
+            self._stop("Cancelled.")
+        else:
+            self._start()
+
+    def _on_close(self) -> None:
+        # While running this reads "Cancel": stop the axis first, then close.
+        # Leaving a mount driving into a stop with nothing watching is the one
+        # outcome worth going out of the way to prevent.
+        if self._running:
+            self._stop("Cancelled.")
+        self.accept()
 
     def _start(self) -> None:
         self._running = True
-        self._start_btn.setEnabled(False)
-        self._axis_combo.setEnabled(False)
-        self._progress.setVisible(True)
-        self._status_label.setText("Searching for limits…")
+        self._status.setText(
+            f"Searching for {_AXIS_NAME.get(self._axis, 'axis').lower()} limits…")
+        self._status.setStyleSheet("font-size:12px; color:#B0BEC5;")
+        self._result.setText("")
+        self._anim.start(forward=True)
+        self._apply_state()
+        self._mm.send_find_limits(self._mount_id, self._axis, self._threshold)
+        self._timeout.start()
 
-        axis: Axis = self._axis_combo.currentData()
-        self._axis = axis
-        from comms.protocol import Axis as _Axis
-        threshold = (self._stall_threshold_slider if axis == _Axis.SLIDER
-                     else self._stall_threshold_zoom)
-        self._mm.send_find_limits(self._mount_id, axis, threshold)
-        self._timeout_timer.start()
-
-    def _cancel(self) -> None:
-        self._timeout_timer.stop()
+    def _stop(self, message: str) -> None:
+        self._timeout.stop()
         if self._running:
             self._mm.send_e_stop(self._mount_id)
-        self.reject()
+        self._running = False
+        self._anim.park(at_far_end=False)
+        self._status.setText(message)
+        self._status.setStyleSheet("font-size:12px; color:#EF5350;")
+        self._apply_state()
+
+    # ------------------------------------------------------------------
+    # Mount responses
+    # ------------------------------------------------------------------
 
     @pyqtSlot(int, int, int, int)
     def _on_limits_found(self, mount_id: int, axis: int,
@@ -147,26 +188,28 @@ class FindLimitsDialog(QDialog):
         if Axis(axis) != self._axis:
             return
 
-        self._timeout_timer.stop()
+        self._timeout.stop()
         self._running = False
-        self._progress.setVisible(False)
+        self._anim.park(at_far_end=True)
         travel = max_steps - min_steps
-        self._status_label.setText(
-            f"Done! Travel: {travel} steps  (min={min_steps}, max={max_steps})"
-        )
-        self._status_label.setStyleSheet("font-size:12px; color:#4CAF50;")
-        self._start_btn.setText("Close")
-        self._start_btn.setEnabled(True)
-        self._start_btn.clicked.disconnect()
-        self._start_btn.clicked.connect(self.accept)
+        self._status.setText("Done.")
+        self._status.setStyleSheet("font-size:12px; color:#B0BEC5;")
+        self._result.setText(
+            f"Travel: {travel} steps    (min {min_steps}, max {max_steps})")
+        self._apply_state()
 
     def _on_timeout(self) -> None:
         self._running = False
-        self._progress.setVisible(False)
-        self._status_label.setText("Timed out — no response from mount.")
-        self._status_label.setStyleSheet("font-size:12px; color:#EF5350;")
-        self._start_btn.setText("Retry")
-        self._start_btn.setEnabled(True)
-        self._axis_combo.setEnabled(True)
-        self._start_btn.clicked.disconnect()
-        self._start_btn.clicked.connect(self._start)
+        self._anim.park(at_far_end=False)
+        self._status.setText("Timed out — no response from the mount.")
+        self._status.setStyleSheet("font-size:12px; color:#EF5350;")
+        self._apply_state()
+
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event):
+        # Covers the window's own close button, which bypasses _on_close().
+        if self._running:
+            self._stop("Cancelled.")
+        self._anim.park()
+        super().closeEvent(event)

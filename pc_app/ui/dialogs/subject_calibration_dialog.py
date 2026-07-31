@@ -19,11 +19,12 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QProgressBar, QFrame, QWidget
 )
-from PyQt6.QtCore import Qt, pyqtSlot
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QRectF, QPointF
+from PyQt6.QtGui import QFont, QPainter, QPen, QBrush, QColor
 
 from comms.mount_manager import MountManager
 from comms.protocol import CalibPrompt
+from ui.widgets.slider_travel_anim import SliderTravelAnim
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,11 @@ class SubjectCalibrationDialog(QDialog):
         self._progress.setFixedHeight(8)
         vl.addWidget(self._progress)
 
+        # Slider travel animation — always present so the dialog doesn't
+        # resize as it starts and stops; parked when nothing is moving.
+        self._anim = SliderTravelAnim()
+        vl.addWidget(self._anim)
+
         # State heading
         self._heading = QLabel("Enter a name and click Start.")
         self._heading.setFont(QFont("Arial", 11, QFont.Weight.Bold))
@@ -202,6 +208,7 @@ class SubjectCalibrationDialog(QDialog):
         self._phase = None
         self._name_edit.setEnabled(True)
         self._name_edit.clear()
+        self._anim.park(at_far_end=False)
         self._heading.setText("Calibration aborted.  Enter a name and click Start.")
         self._detail.setText("")
         self._progress.setValue(0)
@@ -225,6 +232,20 @@ class SubjectCalibrationDialog(QDialog):
         self._heading.setText(heading)
         self._detail.setText(detail)
         self._progress.setValue(_STEP_MAP.get(prompt, 0))
+
+        # Drive the travel animation.  MOVING_TO_A runs toward the home end,
+        # MOVING_TO_B toward the far end; the waiting states park the carriage
+        # where the slider has actually stopped.
+        if prompt == CalibPrompt.MOVING_TO_A:
+            self._anim.start(forward=False)
+        elif prompt == CalibPrompt.MOVING_TO_B:
+            self._anim.start(forward=True)
+        elif prompt == CalibPrompt.WAIT_SET_A:
+            self._anim.park(at_far_end=False)
+        elif prompt == CalibPrompt.WAIT_SET_B:
+            self._anim.park(at_far_end=True)
+        else:                                   # SOLVED / ERROR
+            self._anim.park()
 
         if prompt == CalibPrompt.SOLVED:
             # Calibration done — refresh subject list on the manager
@@ -263,6 +284,7 @@ class SubjectCalibrationDialog(QDialog):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        self._anim.park()          # don't leave a 2 Hz timer running
         # If calibration is in progress, abort it
         p = self._phase
         if p is not None and p not in (CalibPrompt.SOLVED, CalibPrompt.ERROR):

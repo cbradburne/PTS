@@ -600,22 +600,23 @@ class ConfigDialog(QWidget):
     def _do_manual_ref(self, mount_id: int) -> None:
         self._mm.send_set_ref(mount_id, 0xFF)
 
-    def _open_find_limits(self, mount_id: int) -> None:
+    def _open_find_limits(self, mount_id: int, axis: Axis) -> None:
         from ui.dialogs.find_limits_dialog import FindLimitsDialog
         mc  = self._config.mount(mount_id)
         key = f"m{mount_id}"
-        # Read from live spinbox widgets — _on_config_report() keeps these in sync
-        # with whatever the mount last reported, so FindLimitsDialog gets the real
-        # live thresholds rather than the possibly-stale JSON default.
-        sg_sl = getattr(self, f"_{key}_sg_slider", None)
-        sg_zm = getattr(self, f"_{key}_sg_zoom",   None)
-        thresh_sl = sg_sl.value() if sg_sl is not None else mc.stall_threshold_slider
-        thresh_zm = sg_zm.value() if sg_zm is not None else mc.stall_threshold_zoom
-        dlg = FindLimitsDialog(mount_id, self._mm, self,
-                               has_slider=mc.has_slider,
-                               lanc_zoom=mc.lanc_zoom,
-                               stall_threshold_slider=thresh_sl,
-                               stall_threshold_zoom=thresh_zm)
+        # Read from the live spinbox — _on_config_report() keeps it in sync with
+        # whatever the mount last reported, so the dialog gets the real live
+        # threshold rather than the possibly-stale JSON default.  This matters
+        # more since the slider run current went to 2000 mA: StallGuard is
+        # tuned against a given current, so a stale threshold finds the wrong end.
+        if axis == Axis.SLIDER:
+            sg = getattr(self, f"_{key}_sg_slider", None)
+            threshold = sg.value() if sg is not None else mc.stall_threshold_slider
+        else:
+            sg = getattr(self, f"_{key}_sg_zoom", None)
+            threshold = sg.value() if sg is not None else mc.stall_threshold_zoom
+        dlg = FindLimitsDialog(mount_id, self._mm, axis,
+                               stall_threshold=threshold, parent=self)
         # Window-modal → sheet on macOS, so this sub-dialog doesn't animate the
         # app out of fullscreen the way application-modal exec() does.
         import sys
@@ -815,13 +816,38 @@ class ConfigDialog(QWidget):
         )
         limits_note.setWordWrap(True)
         limits_vl.addWidget(limits_note)
-        find_limits_btn = QPushButton("Find Limits…")
-        find_limits_btn.setFixedHeight(36)
+        # One button per axis, side by side, matching the web app's extended
+        # config — the axis picker inside the dialog was an extra step for a
+        # choice the operator has already made by the time they click.
         mid_capture = mount_id
-        find_limits_btn.clicked.connect(lambda: self._open_find_limits(mid_capture))
-        limits_vl.addWidget(find_limits_btn)
-        limits_box.setVisible(mc.has_slider)
-        has_slider_cb.toggled.connect(limits_box.setVisible)
+        btn_row = QHBoxLayout()
+        slider_btn = QPushButton("Slider")
+        zoom_btn   = QPushButton("Zoom")
+        for b, ax in ((slider_btn, Axis.SLIDER), (zoom_btn, Axis.ZOOM)):
+            b.setFixedHeight(36)
+            b.clicked.connect(
+                lambda _, m=mid_capture, a=ax: self._open_find_limits(m, a))
+            btn_row.addWidget(b)
+        limits_vl.addLayout(btn_row)
+
+        # Slider button follows the hardware checkbox; zoom is meaningless
+        # under LANC, where the camera drives its own lens and reports no
+        # step count to find limits on.
+        slider_btn.setVisible(mc.has_slider)
+        zoom_btn.setVisible(not mc.lanc_zoom)
+        has_slider_cb.toggled.connect(slider_btn.setVisible)
+        lanc_zoom_cb.toggled.connect(lambda on: zoom_btn.setVisible(not on))
+
+        # Derive from the checkbox STATE, not from the buttons' isVisible():
+        # during _build() nothing is shown yet, so isVisible() is False for
+        # every child regardless of its own flag, and reading it here hid the
+        # whole box permanently.
+        def _sync_limits_box(_=None, scb=has_slider_cb, lcb=lanc_zoom_cb,
+                             box=limits_box):
+            box.setVisible(scb.isChecked() or not lcb.isChecked())
+        has_slider_cb.toggled.connect(_sync_limits_box)
+        lanc_zoom_cb.toggled.connect(_sync_limits_box)
+        _sync_limits_box()
         layout.addWidget(limits_box)
 
         layout.addStretch()
