@@ -60,7 +60,11 @@
 
 #include <Preferences.h>
 
-#define HUB_SSID_PREFIX  "CamMount"   // scan filter — must match the hub's AP_SSID
+// Scan filter — MUST match AP_SSID_PREFIX in esp32_hub.ino.  Four characters,
+// so that a hub's location name ("Concert Hall", "Foyer") still fits the 16
+// usable characters of KnownHub::ssid and shows in full on the setup screen.
+// Was "CamMount", which left only seven and made named hubs unreadable.
+#define HUB_SSID_PREFIX  "PTS-"
 // Saved list, in NVS.  Mounts tour the building, so this is a HISTORY of every
 // hub/satellite the mount has been paired to — not a snapshot of what is nearby.
 // Requirement: at least 8, at most 16.  At 24 bytes an entry, 16 costs 388

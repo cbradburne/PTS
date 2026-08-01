@@ -41,6 +41,7 @@
 #include <ESPAsyncWebServer.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>   // esp_reset_reason()
+#include <esp_mac.h>      // esp_read_mac() — MAC-derived default hub name
 #include "../shared/disp_uart.h"
 #include "web_app.h"
 #include "hub_types.h"
@@ -80,7 +81,21 @@
 #endif
 #define DEMO_TRAVEL_MS   15000   // simulated travel time for a recall
 
-#define AP_SSID      "CamMount"
+// The AP SSID is how a mount identifies this unit: its setup screen is built
+// from a WiFi scan, before any ESP-NOW link exists, so the beacon is the only
+// channel available at that moment.  A friendly name therefore has to live in
+// the SSID itself — which is why it is composed at boot rather than fixed.
+//
+//   AP_SSID_PREFIX + location name   e.g. "PTS-Concert Hall"
+//
+// The prefix is the mount's scan filter (HUB_SSID_PREFIX in the mount sketch)
+// and MUST match it.  Kept to four characters because the mount stores only 16
+// usable characters per entry, leaving HUB_NAME_MAX for the name — enough for
+// "Concert Hall" exactly.
+#define AP_SSID_PREFIX  "PTS-"
+#define HUB_NAME_MAX    12
+static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Hub";
+
 #define AP_PASSWORD  "camctrl123"
 #define AP_CHANNEL   1
 
@@ -118,6 +133,61 @@ static bool mount_mac_valid(uint8_t idx) {
     if (idx >= NUM_MOUNTS) return false;
     const uint8_t *m = _mount_mac[idx];
     return (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]) != 0;
+}
+
+// ---------------------------------------------------------------------------
+// Hub location name  ("Concert Hall", "Foyer", ...)
+// ---------------------------------------------------------------------------
+// Stored in NVS and composed into the AP SSID at boot, because a mount picks
+// its hub from a WiFi scan and the beacon is the only thing it can read at that
+// point.  Capped at HUB_NAME_MAX so the whole SSID fits the 16 characters a
+// mount keeps per entry — a longer name would be silently truncated on the
+// mount's screen, which is worse than refusing it here.
+
+static char _hub_name[HUB_NAME_MAX + 1] = "";
+// Set by the /hubname POST handler; loop() bounces the AP once this passes,
+// so the reply reaches the browser before its connection is torn down.
+static uint32_t _hub_name_restart_ms = 0;
+
+// Compose AP_SSID from the stored name, falling back to a MAC-derived default
+// so a factory-fresh unit is still distinguishable in a building of them.
+static void hub_name_apply() {
+    if (_hub_name[0] == '\0') {
+        uint8_t mac[6] = {};
+        esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+        snprintf(_hub_name, sizeof(_hub_name), "Hub-%02X%02X", mac[4], mac[5]);
+    }
+    snprintf(AP_SSID, sizeof(AP_SSID), "%s%s", AP_SSID_PREFIX, _hub_name);
+}
+
+static void hub_name_load() {
+    _prefs.begin("mounts", false);
+    _prefs.getString("hubname", _hub_name, sizeof(_hub_name));
+    _prefs.end();
+    _hub_name[HUB_NAME_MAX] = '\0';
+    hub_name_apply();
+}
+
+// Returns false if the name is unusable; the caller reports that rather than
+// silently storing something the mount cannot display.
+static bool hub_name_set(const char *name) {
+    if (!name) return false;
+    char clean[HUB_NAME_MAX + 1] = {};
+    size_t j = 0;
+    for (size_t i = 0; name[i] && j < HUB_NAME_MAX; i++) {
+        // Printable ASCII only: the mount renders this on an LVGL label and a
+        // stray control character would corrupt the row.
+        if (name[i] >= 0x20 && name[i] < 0x7F) clean[j++] = name[i];
+    }
+    while (j > 0 && clean[j - 1] == ' ') clean[--j] = '\0';   // trim trailing space
+    if (j == 0) return false;
+    strncpy(_hub_name, clean, sizeof(_hub_name));
+    _hub_name[HUB_NAME_MAX] = '\0';
+    _prefs.begin("mounts", false);
+    _prefs.putString("hubname", _hub_name);
+    _prefs.end();
+    hub_name_apply();
+    return true;
 }
 
 // Slot index this MAC is bound to, or -1.
@@ -1750,6 +1820,9 @@ void setup() {
     Serial1.begin(DISP_UART_BAUD, SERIAL_8N1, DISP_RX_PIN, DISP_TX_PIN);
 
     // --- WiFi Access Point ---
+    // Name first: AP_SSID is composed from it, so loading afterwards would
+    // raise the AP under the default name until the next reboot.
+    hub_name_load();
     WiFi.mode(WIFI_AP);
     // softAPConfig() MUST be called before softAP() to take effect.
     if (!WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET))
@@ -1829,6 +1902,27 @@ void setup() {
         // flash pointer and streams it in small buffers — no large allocation.
         // sizeof-1 = the literal's length (the raw string has no interior NULs).
         req->send(200, "text/html", (const uint8_t *)WEB_APP_HTML, sizeof(WEB_APP_HTML) - 1);
+    });
+
+    // Hub location name.  Plain HTTP rather than a new protocol command: this
+    // is hub-local commissioning, so it needs no change to the wire protocol
+    // or its three mirrors.
+    _http_server.on("/hubname", HTTP_GET, [](AsyncWebServerRequest *req) {
+        char body[96];
+        snprintf(body, sizeof(body), "{\"name\":\"%s\",\"ssid\":\"%s\",\"max\":%d}",
+                 _hub_name, AP_SSID, HUB_NAME_MAX);
+        req->send(200, "application/json", body);
+    });
+    _http_server.on("/hubname", HTTP_POST, [](AsyncWebServerRequest *req) {
+        if (!req->hasParam("name", true)) { req->send(400, "text/plain", "no name"); return; }
+        String want = req->getParam("name", true)->value();
+        if (!hub_name_set(want.c_str())) { req->send(400, "text/plain", "bad name"); return; }
+        // Reply BEFORE bouncing the AP: raising it drops every WiFi client,
+        // including the browser waiting on this response.
+        char body[96];
+        snprintf(body, sizeof(body), "{\"name\":\"%s\",\"ssid\":\"%s\"}", _hub_name, AP_SSID);
+        req->send(200, "application/json", body);
+        _hub_name_restart_ms = millis() + 400;
     });
     _http_server.begin();
     Serial.println("Ready.");
@@ -1987,6 +2081,18 @@ void loop() {
     esp_task_wdt_reset();
 
     uint32_t now = millis();
+
+    // Deferred restart after a rename (see the /hubname POST handler).  A full
+    // restart rather than re-raising the AP in place: the SSID is baked into
+    // the AP, the ESP-NOW peers and the mounts' view of this hub, so a clean
+    // boot is the one path guaranteed to leave all of them consistent.  It is
+    // a commissioning action, so a few seconds of outage is the right trade.
+    if (_hub_name_restart_ms && (int32_t)(now - _hub_name_restart_ms) >= 0) {
+        _hub_name_restart_ms = 0;
+        Serial.printf("[HUB] Renamed to \"%s\" — restarting\n", AP_SSID);
+        Serial.flush();
+        esp_restart();
+    }
 
 #if DEMO_MODE
     demo_tick();   // feed synthetic STATUS into the normal relay path
