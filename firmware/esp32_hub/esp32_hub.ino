@@ -45,6 +45,7 @@
 #include "../shared/disp_uart.h"
 #include "web_app.h"
 #include "hub_types.h"
+#include "../shared/sat_link.h"
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
 
 // ---------------------------------------------------------------------------
@@ -667,6 +668,42 @@ struct ClientSlot {
 };
 static ClientSlot _slots[MAX_CLIENTS];
 
+// ---------------------------------------------------------------------------
+// Satellites
+// ---------------------------------------------------------------------------
+// A satellite is an ESP-NOW cell on the end of an Ethernet cable, serving
+// mounts too far away to hear this hub directly.  It connects to a DIFFERENT
+// port from the PC app: a client on 7777 is an observer, a satellite owns
+// mounts, and the port is what tells them apart without touching the protocol.
+//
+// Routing is LEARNED, never configured.  A mount decides which satellite to
+// attach to (strongest AP wins, in its own scan), so the hub finds out by
+// seeing whose uplink the mount's traffic arrives on.  Nothing to keep in step
+// by hand, and a mount that roams moves its own route with it.
+#define MAX_SATELLITES  6
+
+struct SatSlot {
+    WiFiClient   client;
+    SatEnvParser parser;
+    bool         active;
+};
+static SatSlot   _sat[MAX_SATELLITES];
+static WiFiServer _sat_server(SAT_LINK_PORT);
+
+// mount_id-1 -> satellite slot serving it, or -1 for "local ESP-NOW".
+static int8_t _mount_sat[NUM_MOUNTS];
+
+// A satellite dropping off must not strand its mounts pointing at a dead
+// socket: they revert to local ESP-NOW, which is also what happens if the
+// mount roams back into range of the hub itself.
+static void sat_release_mounts(int slot) {
+    for (int i = 0; i < NUM_MOUNTS; i++)
+        if (_mount_sat[i] == slot) {
+            _mount_sat[i] = -1;
+            Serial.printf("[SAT] mount %d back to local ESP-NOW\n", i + 1);
+        }
+}
+
 static AsyncWebServer _http_server(80);
 static AsyncWebSocket _ws("/ws");
 
@@ -1019,13 +1056,25 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
     uint8_t  raw[PKT_BUF_SIZE + 4];
     uint16_t raw_len = build_packet(raw, pkt.mount_id, pkt.seq, pkt.cmd,
                                     pkt.payload, pkt.payload_len);
+    // Route per mount: a mount attached to a satellite is unreachable by radio
+    // from here, and one that is not has no satellite to send through.
     if (pkt.mount_id == MOUNT_BROADCAST) {
-        for (int i = 0; i < NUM_MOUNTS; i++)
-            if (mount_mac_valid(i))
+        for (int i = 0; i < NUM_MOUNTS; i++) {
+            if (_mount_sat[i] >= 0) {
+                SatSlot &sl = _sat[_mount_sat[i]];
+                if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
+            } else if (mount_mac_valid(i)) {
                 esp_now_send(_mount_mac[i], raw, raw_len);
+            }
+        }
     } else if (pkt.mount_id >= 1 && pkt.mount_id <= NUM_MOUNTS) {
-        if (mount_mac_valid(pkt.mount_id - 1))
-            esp_now_send(_mount_mac[pkt.mount_id - 1], raw, raw_len);
+        int m = pkt.mount_id - 1;
+        if (_mount_sat[m] >= 0) {
+            SatSlot &sl = _sat[_mount_sat[m]];
+            if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
+        } else if (mount_mac_valid(m)) {
+            esp_now_send(_mount_mac[m], raw, raw_len);
+        }
     }
     // Intercept JOG to update display preset bars
     if (pkt.cmd == CMD_JOG && pkt.payload_len >= 10) {
@@ -1838,6 +1887,9 @@ void setup() {
         _slots[i].active = false;
     }
     _tcp_server.begin();
+    for (int i = 0; i < NUM_MOUNTS; i++) _mount_sat[i] = -1;   // local until proven otherwise
+    _sat_server.begin();
+    Serial.printf("Satellite listener on port %d\n", SAT_LINK_PORT);
     Serial.printf("TCP listening on port %d\n", TCP_PORT);
 
     // --- OSC control (Bitfocus Companion / QLab) ---
@@ -2133,6 +2185,67 @@ void loop() {
                 // state that may have accumulated while the PC was disconnected.
                 refresh_espnow_peer(i);
                 ui_send_to_mount(i + 1, CMD_GET_STATE, nullptr, 0);
+            }
+        }
+    }
+
+    // ---- Satellites ----
+    {
+        WiFiClient in = _sat_server.accept();
+        if (in) {
+            bool placed = false;
+            for (int i = 0; i < MAX_SATELLITES; i++) {
+                if (_sat[i].active && _sat[i].client.connected()) continue;
+                if (_sat[i].active) sat_release_mounts(i);
+                _sat[i].client = in;
+                sat_env_init(&_sat[i].parser);
+                _sat[i].active = true;
+                placed = true;
+                Serial.printf("[SAT] satellite %d connected from %s\n",
+                              i + 1, in.remoteIP().toString().c_str());
+                break;
+            }
+            if (!placed) { in.stop(); Serial.println("[SAT] no free slot"); }
+        }
+        for (int i = 0; i < MAX_SATELLITES; i++) {
+            if (!_sat[i].active) continue;
+            if (!_sat[i].client.connected()) {
+                _sat[i].client.stop();
+                _sat[i].active = false;
+                sat_release_mounts(i);
+                Serial.printf("[SAT] satellite %d disconnected\n", i + 1);
+                continue;
+            }
+            // Bounded per pass so one busy satellite cannot starve the loop —
+            // loopmax is health telemetry and a long iteration reads as a fault.
+            int budget = 512;
+            while (_sat[i].client.available() && budget-- > 0) {
+                int c = _sat[i].client.read();
+                if (c < 0) break;
+                SatEnv env;
+                if (!sat_env_feed(&_sat[i].parser, (uint8_t)c, &env)) continue;
+
+                // Learn the route from where the traffic actually arrived.
+                uint8_t mid = (env.frame_len >= 4 &&
+                               env.frame[0] == PKT_START_1 &&
+                               env.frame[1] == PKT_START_2) ? env.frame[3] : 0;
+                if (mid >= 1 && mid <= NUM_MOUNTS && _mount_sat[mid - 1] != i) {
+                    _mount_sat[mid - 1] = i;
+                    Serial.printf("[SAT] mount %d now via satellite %d\n", mid, i + 1);
+                }
+
+                // Inject exactly as the ESP-NOW callback would, so a
+                // satellite-attached mount is indistinguishable downstream —
+                // pairing, conflicts, display, WS rate-limiting and all.
+                if (env.frame_len > sizeof(RelayMsg::data)) continue;
+                RelayMsg msg;
+                int8_t idx  = mount_table_find(env.mac);
+                msg.len     = env.frame_len;
+                msg.rssi    = env.rssi;
+                msg.src_idx = (idx >= 0) ? (uint8_t)idx : 0xFF;
+                memcpy(msg.src_mac, env.mac, 6);
+                memcpy(msg.data, env.frame, env.frame_len);
+                xQueueSend(_relay_queue, &msg, 0);
             }
         }
     }

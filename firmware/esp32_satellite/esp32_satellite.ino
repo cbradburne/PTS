@@ -7,11 +7,13 @@
  *
  *   [mount] ──ESP-NOW──> [satellite] ──Ethernet/TCP──> [hub] ──> PC / web / display
  *
- * DELIBERATELY A DUMB PIPE.  Every packet already carries a mount_id and a CRC
- * and is self-framing, so the satellite never parses one: it learns which MAC a
- * mount_id lives at by watching what arrives, and forwards bytes both ways.  All
- * the intelligence stays in the hub, which means a satellite needs no update
- * when the protocol grows.
+ * AS CLOSE TO A DUMB PIPE AS THE HUB ALLOWS.  It reads exactly one field —
+ * mount_id at byte [3] — to know which peer a downlink frame is for, and never
+ * looks at a payload.  Uplink frames are wrapped in a small envelope carrying
+ * the mount's MAC and RSSI (shared/sat_link.h), because the hub pairs on MAC
+ * and drops anything it cannot bind; a pure byte pipe would make a
+ * satellite-attached mount unpairable.  Everything else stays in the hub, so a
+ * satellite needs no update when the protocol grows.
  *
  * The mount chooses ITS satellite, not the other way round: each one raises a
  * SoftAP called "PTS-<name>", the mount's existing scan picks the strongest of
@@ -31,6 +33,7 @@
 
 #include "../shared/protocol.h"
 #include "../shared/board_eth.h"
+#include "../shared/sat_link.h"
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -54,10 +57,9 @@ static Preferences _prefs;
 // ---------------------------------------------------------------------------
 // Uplink to the hub
 // ---------------------------------------------------------------------------
-// A dedicated port, NOT the 7777 the PC app uses.  The hub treats a 7777 client
-// as an observer; a satellite OWNS mounts and must be told apart.  Using the
-// port for that keeps it out of the wire protocol entirely.
-#define HUB_PORT        7778
+// Port and envelope format both come from shared/sat_link.h, so the two ends
+// cannot drift apart.
+#define HUB_PORT        SAT_LINK_PORT
 #define HUB_HOST_MAX    40
 static char     _hub_host[HUB_HOST_MAX] = "pts-hub.local";
 static WiFiClient _uplink;
@@ -117,7 +119,8 @@ static void peer_learn(uint8_t mount_id, const uint8_t *mac, uint32_t now) {
 // the TCP socket from here would be a cross-task use of WiFiClient, and calling
 // into the network stack from a radio callback is how the mount bridge's own
 // ESP-NOW reinit ended up faulting in ipc1.
-struct RxItem { uint8_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; uint8_t mac[6]; };
+struct RxItem { uint8_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16];
+                uint8_t mac[6]; int8_t rssi; };
 static QueueHandle_t _rx_q = nullptr;
 
 static void on_espnow_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
@@ -126,6 +129,9 @@ static void on_espnow_recv(const esp_now_recv_info_t *info, const uint8_t *data,
     it.len = (uint8_t)len;
     memcpy(it.data, data, len);
     memcpy(it.mac, info->src_addr, 6);
+    // The hub pairs on MAC and uses rssi==0 as its ghost guard, so both must
+    // survive the trip over Ethernet — see shared/sat_link.h.
+    it.rssi = (info->rx_ctrl && info->rx_ctrl->rssi) ? (int8_t)info->rx_ctrl->rssi : -1;
     BaseType_t hp = pdFALSE;
     xQueueSendFromISR(_rx_q, &it, &hp);
     if (hp) portYIELD_FROM_ISR();
@@ -140,7 +146,11 @@ static void drain_espnow_to_uplink(uint32_t now) {
     RxItem it;
     while (xQueueReceive(_rx_q, &it, 0) == pdTRUE) {
         peer_learn(frame_mount_id(it.data, it.len), it.mac, now);
-        if (_uplink.connected()) _uplink.write(it.data, it.len);
+        if (_uplink.connected()) {
+            uint8_t env[SAT_ENV_MAX];
+            uint16_t n = sat_env_build(env, it.mac, it.rssi, it.data, it.len);
+            if (n) _uplink.write(env, n);
+        }
         // Not connected: drop.  Buffering telemetry to replay later would
         // deliver a burst of stale STATUS the moment the hub reappears, and
         // STATUS is superseded every 100 ms anyway.
