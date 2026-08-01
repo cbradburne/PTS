@@ -61,7 +61,15 @@
 #include <Preferences.h>
 
 #define HUB_SSID_PREFIX  "CamMount"   // scan filter — must match the hub's AP_SSID
-#define MAX_KNOWN_HUBS   4
+// Saved list, in NVS.  Mounts tour the building, so this is a HISTORY of every
+// hub/satellite the mount has been paired to — not a snapshot of what is nearby.
+// Requirement: at least 8, at most 16.  At 24 bytes an entry, 16 costs 388
+// bytes of NVS, so there is no reason to sit below the ceiling.
+#define MAX_KNOWN_HUBS   16
+// Scan results and setup-screen rows.  Bounded by the 1.75" round panel, and
+// four is plenty: the scan keeps the STRONGEST four and drops the rest, and
+// there should never be more than that within range of one mount.
+#define MAX_SCAN_ROWS    4
 
 struct KnownHub {
     uint8_t mac[6];       // hub softAP BSSID == its ESP-NOW address
@@ -100,12 +108,29 @@ static void cfg_save() {
 }
 
 static void cfg_load() {
+    // Zero first: a short read leaves the unwritten tail as-is, and we want
+    // unused hub slots empty rather than stale.
+    memset(&_cfg, 0, sizeof(_cfg));
     _mount_prefs.begin("mcfg", false);
     size_t n = _mount_prefs.getBytes("cfg", &_cfg, sizeof(_cfg));
     _mount_prefs.end();
-    _cfg_valid = (n == sizeof(_cfg) && _cfg.magic == CFG_MAGIC &&
+
+    // Accept a SHORT read.  hubs[] is the last member, so a config written when
+    // MAX_KNOWN_HUBS was smaller is a valid prefix of the current layout — the
+    // saved entries land in exactly the right slots.  Insisting on an exact
+    // size, as this used to, meant raising MAX_KNOWN_HUBS unpaired every mount
+    // in the building and someone had to walk round with a stepladder.
+    //
+    // KnownHub's own layout must not change for this to hold: growing the ARRAY
+    // is compatible, changing the ELEMENT is not.
+    const size_t hdr      = offsetof(MountCfg, hubs);
+    const size_t slots_in = (n > hdr) ? (n - hdr) / sizeof(KnownHub) : 0;
+    _cfg_valid = (n >= hdr + sizeof(KnownHub) && n <= sizeof(_cfg) &&
+                  _cfg.magic == CFG_MAGIC &&
                   _cfg.mount_id >= 1 && _cfg.mount_id <= 5 &&
                   _cfg.n_hubs >= 1 && _cfg.n_hubs <= MAX_KNOWN_HUBS &&
+                  // don't trust an n_hubs claiming more entries than were read
+                  _cfg.n_hubs <= slots_in &&
                   _cfg.last_hub < _cfg.n_hubs);
     if (_cfg_valid) {
         _mount_id = _cfg.mount_id;
@@ -969,8 +994,8 @@ static void update_level_screen() {
 
 static lv_obj_t *_setup_scr        = nullptr;
 static lv_obj_t *_setup_id_btn[5]  = {};
-static lv_obj_t *_setup_hub_btn[MAX_KNOWN_HUBS] = {};
-static lv_obj_t *_setup_hub_lbl[MAX_KNOWN_HUBS] = {};
+static lv_obj_t *_setup_hub_btn[MAX_SCAN_ROWS] = {};
+static lv_obj_t *_setup_hub_lbl[MAX_SCAN_ROWS] = {};
 static lv_obj_t *_setup_scan_lbl   = nullptr;   // label inside the scan button
 static lv_obj_t *_setup_save_btn   = nullptr;
 static lv_obj_t *_setup_save_lbl   = nullptr;
@@ -979,8 +1004,8 @@ static uint8_t   _setup_sel_id     = 0;         // 1-5; 0 = not chosen yet
 static int8_t    _setup_sel_hub    = -1;        // index into _scan_hub[]
 static bool      _scan_running     = false;
 static uint8_t   _scan_n           = 0;
-static KnownHub  _scan_hub[MAX_KNOWN_HUBS];
-static int16_t   _scan_rssi[MAX_KNOWN_HUBS];
+static KnownHub  _scan_hub[MAX_SCAN_ROWS];
+static int16_t   _scan_rssi[MAX_SCAN_ROWS];
 
 #define COL_SETUP_SEL   lv_color_hex(0x2E7D32)   // selected button fill
 #define COL_SETUP_BTN   lv_color_hex(0x1E1E1E)   // idle button fill
@@ -992,7 +1017,7 @@ static void setup_refresh_widgets() {
             (_setup_sel_id == i + 1) ? COL_SETUP_SEL : COL_SETUP_BTN, 0);
     }
     // Hub rows: selected row green border
-    for (int i = 0; i < MAX_KNOWN_HUBS; i++) {
+    for (int i = 0; i < MAX_SCAN_ROWS; i++) {
         if (i < _scan_n) {
             char row[48];
             snprintf(row, sizeof(row), "%s  %02X:%02X  %d dB%s",
@@ -1053,12 +1078,12 @@ static void setup_poll_scan() {
         if (!ssid.startsWith(HUB_SSID_PREFIX)) continue;
         int16_t rssi = (int16_t)WiFi.RSSI(i);
         // Insert sorted by signal strength, strongest first
-        if (_scan_n >= MAX_KNOWN_HUBS && rssi <= _scan_rssi[MAX_KNOWN_HUBS - 1])
+        if (_scan_n >= MAX_SCAN_ROWS && rssi <= _scan_rssi[MAX_SCAN_ROWS - 1])
             continue;   // list full and this one is weaker than everything held
-        int pos = _scan_n < MAX_KNOWN_HUBS ? _scan_n : MAX_KNOWN_HUBS - 1;
+        int pos = _scan_n < MAX_SCAN_ROWS ? _scan_n : MAX_SCAN_ROWS - 1;
         while (pos > 0 && rssi > _scan_rssi[pos - 1]) pos--;
-        if (pos >= MAX_KNOWN_HUBS) continue;
-        for (int k = (int)((_scan_n < MAX_KNOWN_HUBS ? _scan_n : MAX_KNOWN_HUBS - 1)); k > pos; k--) {
+        if (pos >= MAX_SCAN_ROWS) continue;
+        for (int k = (int)((_scan_n < MAX_SCAN_ROWS ? _scan_n : MAX_SCAN_ROWS - 1)); k > pos; k--) {
             _scan_hub[k]  = _scan_hub[k - 1];
             _scan_rssi[k] = _scan_rssi[k - 1];
         }
@@ -1067,7 +1092,7 @@ static void setup_poll_scan() {
         strncpy(_scan_hub[pos].ssid, ssid.c_str(), 16);
         _scan_hub[pos].ssid[16] = '\0';
         _scan_rssi[pos] = rssi;
-        if (_scan_n < MAX_KNOWN_HUBS) _scan_n++;
+        if (_scan_n < MAX_SCAN_ROWS) _scan_n++;
     }
     WiFi.scanDelete();
     // The scan wanders across channels — go back to the active hub's channel
@@ -1097,17 +1122,27 @@ static void setup_apply_save() {
     int8_t found = -1;
     for (uint8_t i = 0; i < _cfg.n_hubs; i++)
         if (memcmp(_cfg.hubs[i].mac, sel.mac, 6) == 0) { found = (int8_t)i; break; }
+    // Move-to-front, so the array itself is the recency order and a full list
+    // evicts the hub paired longest ago.  It used to always overwrite the last
+    // slot, which made the earlier slots permanent and the last one a revolving
+    // door: a mount touring the building silently forgot whichever satellite it
+    // had paired most recently before this one.
+    //
+    // Ordering is only rewritten on an explicit pairing, never on a roam —
+    // hub_reacquire_poll() just updates last_hub, so following a stronger hub
+    // costs no NVS write beyond the one it already does.
+    uint8_t at;
     if (found >= 0) {
-        _cfg.hubs[found] = sel;              // refresh channel/ssid
-        _cfg.last_hub    = (uint8_t)found;
+        at = (uint8_t)found;                      // re-pair: promote it
     } else if (_cfg.n_hubs < MAX_KNOWN_HUBS) {
-        _cfg.hubs[_cfg.n_hubs] = sel;
-        _cfg.last_hub = _cfg.n_hubs;
+        at = _cfg.n_hubs;                         // room: grow by one
         _cfg.n_hubs++;
     } else {
-        _cfg.hubs[MAX_KNOWN_HUBS - 1] = sel; // full — replace the last entry
-        _cfg.last_hub = MAX_KNOWN_HUBS - 1;
+        at = MAX_KNOWN_HUBS - 1;                  // full: drop the oldest
     }
+    for (uint8_t i = at; i > 0; i--) _cfg.hubs[i] = _cfg.hubs[i - 1];
+    _cfg.hubs[0]  = sel;
+    _cfg.last_hub = 0;
     cfg_save();
 
     setup_show_status("Saved - restarting...");
@@ -1267,7 +1302,7 @@ static void setup_build() {
     }
 
     // ── Hub result rows ──────────────────────────────────────────────────
-    for (int i = 0; i < MAX_KNOWN_HUBS; i++) {
+    for (int i = 0; i < MAX_SCAN_ROWS; i++) {
         lv_obj_t *r = lv_obj_create(_setup_scr);
         lv_obj_set_size(r, 320, 36);
         lv_obj_set_pos(r, 73, 176 + i * 42);
