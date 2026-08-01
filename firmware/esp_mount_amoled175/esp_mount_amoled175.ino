@@ -60,11 +60,19 @@
 
 #include <Preferences.h>
 
-// Scan filter — MUST match AP_SSID_PREFIX in esp32_hub.ino.  Four characters,
-// so that a hub's location name ("Concert Hall", "Foyer") still fits the 16
-// usable characters of KnownHub::ssid and shows in full on the setup screen.
-// Was "CamMount", which left only seven and made named hubs unreadable.
-#define HUB_SSID_PREFIX  "PTS-"
+// Scan filter.  BOTH prefixes are accepted, deliberately:
+//
+//   "PTS-"      the named hubs and satellites (esp32_hub_eth).  Four characters
+//               so a location name ("Concert Hall", "Foyer") still fits the 16
+//               usable characters of KnownHub::ssid and shows in full.
+//   "CamMount"  the current production hub (esp32_hub), which is not renamed.
+//
+// Accepting both avoids a flag day: this mount firmware works against a rig
+// that has not been touched AND against a test hub on the new board, so the
+// two can be rolled out independently instead of everything having to change
+// in one go.  Drop "CamMount" once no unnamed hub remains.
+#define HUB_SSID_PREFIX      "PTS-"
+#define HUB_SSID_PREFIX_OLD  "CamMount"
 // Saved list, in NVS.  Mounts tour the building, so this is a HISTORY of every
 // hub/satellite the mount has been paired to — not a snapshot of what is nearby.
 // Requirement: at least 8, at most 16.  At 24 bytes an entry, 16 costs 388
@@ -1079,7 +1087,8 @@ static void setup_poll_scan() {
     _scan_n = 0;
     for (int i = 0; i < n; i++) {
         String ssid = WiFi.SSID(i);
-        if (!ssid.startsWith(HUB_SSID_PREFIX)) continue;
+        if (!ssid.startsWith(HUB_SSID_PREFIX) &&
+            !ssid.startsWith(HUB_SSID_PREFIX_OLD)) continue;
         int16_t rssi = (int16_t)WiFi.RSSI(i);
         // Insert sorted by signal strength, strongest first
         if (_scan_n >= MAX_SCAN_ROWS && rssi <= _scan_rssi[MAX_SCAN_ROWS - 1])

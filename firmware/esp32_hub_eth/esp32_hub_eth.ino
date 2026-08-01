@@ -1,4 +1,33 @@
 /*
+ * esp32_hub_eth — THE TEST HUB.  Not yet the production firmware.
+ *
+ * firmware/esp32_hub/ is what is running on the rig and must keep working.
+ * This folder is where its replacement is proven first, on the bench, before
+ * the two are swapped.
+ *
+ * Differences from esp32_hub:
+ *
+ *   - Waveshare ESP32-S3-ETH instead of the XIAO: Ethernet (W5500 over SPI,
+ *     PoE), which is what makes a wired backbone possible.  ETH bring-up is
+ *     non-blocking and harmless with no W5500 fitted, so this also runs on a
+ *     XIAO for testing everything else.
+ *   - A settable location name in the AP SSID: "PTS-Concert Hall".  The
+ *     production hub stays "CamMount"; the mount firmware accepts BOTH
+ *     prefixes so the two can be tested side by side.
+ *   - A satellite listener on port 7778 and per-mount routing, so mounts too
+ *     far to hear this hub can be served over Ethernet.
+ *
+ * web_app.h and hub_types.h are INCLUDED from ../esp32_hub/, not copied — a
+ * second copy of either is exactly how the 9-byte STATUS bug happened.
+ *
+ * Bench test with hub + display + mount:
+ *   1. tools/build.sh flash hubeth
+ *   2. Display comes up, mount pairs, positions recall — i.e. nothing regressed.
+ *   3. curl -d "name=Bench" http://<hub-ip>/hubname   → restarts as "PTS-Bench"
+ *   4. Long-press the mount, scan, confirm "PTS-Bench" is listed and pairs.
+ *   5. [ETH] lines appear if a W5500 is present; harmless if not.
+ */
+/*
  * esp32_hub.ino — WiFi AP + ESP-NOW hub  (Seeed Studio XIAO ESP32S3)
  *
  * This board handles all networking: WiFi AP, ESP-NOW to mounts, TCP and
@@ -22,7 +51,7 @@
  * Arduino IDE board settings for THIS board (XIAO ESP32S3):
  *   Board            : XIAO_ESP32S3
  *   USB CDC On Boot  : Enabled
- *   USB Mode         : USB-OTG (TinyUSB)   ← REQUIRED for Serial.enableReboot(false),
+ *   USB Mode         : Hardware CDC and JTAG  ← preferred: keeps auto-flash working,
  *                      which stops the PC from resetting the hub when it reopens the
  *                      port.  The default "Hardware CDC and JTAG" mode CANNOT do this.
  *                      NOTE: TinyUSB mode disables esptool auto-reset — to reflash, hold
@@ -41,9 +70,11 @@
 #include <ESPAsyncWebServer.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>   // esp_reset_reason()
+#include <esp_mac.h>      // esp_read_mac() — MAC-derived default hub name
 #include "../shared/disp_uart.h"
-#include "web_app.h"
-#include "hub_types.h"
+#include "../esp32_hub/web_app.h"
+#include "../esp32_hub/hub_types.h"
+#include "../shared/sat_link.h"
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
 
 // ---------------------------------------------------------------------------
@@ -57,8 +88,25 @@
 #if !ARDUINO_USB_CDC_ON_BOOT
   #error "Tools -> 'USB CDC On Boot' must be ENABLED (otherwise Serial is UART0, not USB)."
 #endif
-#if ARDUINO_USB_MODE != 0
-  #error "Tools -> 'USB Mode' must be 'USB-OTG (TinyUSB)' (required for Serial.enableReboot(false))."
+// Hardware CDC is the DEFAULT here, unlike esp32_hub, and is preferred:
+// TinyUSB mode makes auto-reset-into-bootloader unreliable, so flashing can
+// need the BOOT button — unacceptable on a unit sealed in an enclosure.
+//
+// The reason esp32_hub demands TinyUSB is Serial.enableReboot(false), which
+// stops the host reopening the port from resetting the hub (an 80x/night
+// reboot loop).  That API exists only on USBCDC — but HWCDC does not need it:
+// it has no reboot-on-DTR logic to disable, and its connected state comes from
+// USB SOF/plug detection rather than DTR, so the "hub goes mute without DTR"
+// caveat in bridge.py is a TinyUSB property, not a universal one.  The
+// enableReboot() call below is already #if-guarded and simply does not compile
+// in this mode.
+//
+// STILL WORTH WATCHING ON THE BENCH: if the hub reboots whenever the PC app
+// connects, reset reason USB, then this reasoning is wrong for the S3's
+// USB-Serial-JTAG peripheral and the fix is one FQBN change back to
+// USBMode=default.  It would be obvious immediately, not subtle.
+#if ARDUINO_USB_MODE == 0
+  #warning "Building in TinyUSB mode: flashing may need the BOOT button. USBMode=hwcdc is preferred here."
 #endif
 
 // ---------------------------------------------------------------------------
@@ -80,7 +128,21 @@
 #endif
 #define DEMO_TRAVEL_MS   15000   // simulated travel time for a recall
 
-#define AP_SSID      "CamMount"
+// The AP SSID is how a mount identifies this unit: its setup screen is built
+// from a WiFi scan, before any ESP-NOW link exists, so the beacon is the only
+// channel available at that moment.  A friendly name therefore has to live in
+// the SSID itself — which is why it is composed at boot rather than fixed.
+//
+//   AP_SSID_PREFIX + location name   e.g. "PTS-Concert Hall"
+//
+// The prefix is the mount's scan filter (HUB_SSID_PREFIX in the mount sketch)
+// and MUST match it.  Kept to four characters because the mount stores only 16
+// usable characters per entry, leaving HUB_NAME_MAX for the name — enough for
+// "Concert Hall" exactly.
+#define AP_SSID_PREFIX  "PTS-"
+#define HUB_NAME_MAX    12
+static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Hub";
+
 #define AP_PASSWORD  "camctrl123"
 #define AP_CHANNEL   1
 
@@ -120,6 +182,8 @@ static bool mount_mac_valid(uint8_t idx) {
     return (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]) != 0;
 }
 
+#include "../shared/hub_name.h"
+
 // Slot index this MAC is bound to, or -1.
 static int8_t mount_table_find(const uint8_t mac[6]) {
     for (int i = 0; i < NUM_MOUNTS; i++)
@@ -153,8 +217,19 @@ static void mount_table_load() {
 // XIAO ESP32S3: D6=GPIO43 (TX), D7=GPIO44 (RX)
 // On XIAO with native USB, Serial (USB CDC) is separate from UART hardware,
 // so GPIO43/44 are free for Serial1.
+// UART to the 7" display.  43/44 are the S3's native UART0 pins, free here
+// because the console is on native USB (CDCOnBoot), and broken out on both the
+// XIAO and — expected, unverified — the Waveshare ESP32-S3-ETH.  The S3 routes
+// UART through the GPIO matrix, so any free GPIO works; override here when
+// porting rather than hunting through setup().
+//
+// Do NOT pick from: 26-32 (SPI flash), 33-37 (octal PSRAM, if fitted),
+// 19/20 (USB D-/D+ — the PC app rides that), 0/3/45/46 (strapping), or the
+// W5500 pins in shared/board_eth.h.
+#ifndef DISP_TX_PIN
 #define DISP_TX_PIN  43
 #define DISP_RX_PIN  44
+#endif
 
 
 // Mutex protecting Serial1 (display UART) — both loop() and forward_to_mounts
@@ -639,6 +714,42 @@ struct ClientSlot {
 };
 static ClientSlot _slots[MAX_CLIENTS];
 
+// ---------------------------------------------------------------------------
+// Satellites
+// ---------------------------------------------------------------------------
+// A satellite is an ESP-NOW cell on the end of an Ethernet cable, serving
+// mounts too far away to hear this hub directly.  It connects to a DIFFERENT
+// port from the PC app: a client on 7777 is an observer, a satellite owns
+// mounts, and the port is what tells them apart without touching the protocol.
+//
+// Routing is LEARNED, never configured.  A mount decides which satellite to
+// attach to (strongest AP wins, in its own scan), so the hub finds out by
+// seeing whose uplink the mount's traffic arrives on.  Nothing to keep in step
+// by hand, and a mount that roams moves its own route with it.
+#define MAX_SATELLITES  6
+
+struct SatSlot {
+    WiFiClient   client;
+    SatEnvParser parser;
+    bool         active;
+};
+static SatSlot   _sat[MAX_SATELLITES];
+static WiFiServer _sat_server(SAT_LINK_PORT);
+
+// mount_id-1 -> satellite slot serving it, or -1 for "local ESP-NOW".
+static int8_t _mount_sat[NUM_MOUNTS];
+
+// A satellite dropping off must not strand its mounts pointing at a dead
+// socket: they revert to local ESP-NOW, which is also what happens if the
+// mount roams back into range of the hub itself.
+static void sat_release_mounts(int slot) {
+    for (int i = 0; i < NUM_MOUNTS; i++)
+        if (_mount_sat[i] == slot) {
+            _mount_sat[i] = -1;
+            Serial.printf("[SAT] mount %d back to local ESP-NOW\n", i + 1);
+        }
+}
+
 static AsyncWebServer _http_server(80);
 static AsyncWebSocket _ws("/ws");
 
@@ -991,13 +1102,25 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
     uint8_t  raw[PKT_BUF_SIZE + 4];
     uint16_t raw_len = build_packet(raw, pkt.mount_id, pkt.seq, pkt.cmd,
                                     pkt.payload, pkt.payload_len);
+    // Route per mount: a mount attached to a satellite is unreachable by radio
+    // from here, and one that is not has no satellite to send through.
     if (pkt.mount_id == MOUNT_BROADCAST) {
-        for (int i = 0; i < NUM_MOUNTS; i++)
-            if (mount_mac_valid(i))
+        for (int i = 0; i < NUM_MOUNTS; i++) {
+            if (_mount_sat[i] >= 0) {
+                SatSlot &sl = _sat[_mount_sat[i]];
+                if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
+            } else if (mount_mac_valid(i)) {
                 esp_now_send(_mount_mac[i], raw, raw_len);
+            }
+        }
     } else if (pkt.mount_id >= 1 && pkt.mount_id <= NUM_MOUNTS) {
-        if (mount_mac_valid(pkt.mount_id - 1))
-            esp_now_send(_mount_mac[pkt.mount_id - 1], raw, raw_len);
+        int m = pkt.mount_id - 1;
+        if (_mount_sat[m] >= 0) {
+            SatSlot &sl = _sat[_mount_sat[m]];
+            if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
+        } else if (mount_mac_valid(m)) {
+            esp_now_send(_mount_mac[m], raw, raw_len);
+        }
     }
     // Intercept JOG to update display preset bars
     if (pkt.cmd == CMD_JOG && pkt.payload_len >= 10) {
@@ -1750,6 +1873,9 @@ void setup() {
     Serial1.begin(DISP_UART_BAUD, SERIAL_8N1, DISP_RX_PIN, DISP_TX_PIN);
 
     // --- WiFi Access Point ---
+    // Name first: AP_SSID is composed from it, so loading afterwards would
+    // raise the AP under the default name until the next reboot.
+    hub_name_load();
     WiFi.mode(WIFI_AP);
     // softAPConfig() MUST be called before softAP() to take effect.
     if (!WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET))
@@ -1807,6 +1933,9 @@ void setup() {
         _slots[i].active = false;
     }
     _tcp_server.begin();
+    for (int i = 0; i < NUM_MOUNTS; i++) _mount_sat[i] = -1;   // local until proven otherwise
+    _sat_server.begin();
+    Serial.printf("Satellite listener on port %d\n", SAT_LINK_PORT);
     Serial.printf("TCP listening on port %d\n", TCP_PORT);
 
     // --- OSC control (Bitfocus Companion / QLab) ---
@@ -1829,6 +1958,27 @@ void setup() {
         // flash pointer and streams it in small buffers — no large allocation.
         // sizeof-1 = the literal's length (the raw string has no interior NULs).
         req->send(200, "text/html", (const uint8_t *)WEB_APP_HTML, sizeof(WEB_APP_HTML) - 1);
+    });
+
+    // Hub location name.  Plain HTTP rather than a new protocol command: this
+    // is hub-local commissioning, so it needs no change to the wire protocol
+    // or its three mirrors.
+    _http_server.on("/hubname", HTTP_GET, [](AsyncWebServerRequest *req) {
+        char body[96];
+        snprintf(body, sizeof(body), "{\"name\":\"%s\",\"ssid\":\"%s\",\"max\":%d}",
+                 _hub_name, AP_SSID, HUB_NAME_MAX);
+        req->send(200, "application/json", body);
+    });
+    _http_server.on("/hubname", HTTP_POST, [](AsyncWebServerRequest *req) {
+        if (!req->hasParam("name", true)) { req->send(400, "text/plain", "no name"); return; }
+        String want = req->getParam("name", true)->value();
+        if (!hub_name_set(want.c_str())) { req->send(400, "text/plain", "bad name"); return; }
+        // Reply BEFORE bouncing the AP: raising it drops every WiFi client,
+        // including the browser waiting on this response.
+        char body[96];
+        snprintf(body, sizeof(body), "{\"name\":\"%s\",\"ssid\":\"%s\"}", _hub_name, AP_SSID);
+        req->send(200, "application/json", body);
+        _hub_name_restart_ms = millis() + 400;
     });
     _http_server.begin();
     Serial.println("Ready.");
@@ -1988,6 +2138,18 @@ void loop() {
 
     uint32_t now = millis();
 
+    // Deferred restart after a rename (see the /hubname POST handler).  A full
+    // restart rather than re-raising the AP in place: the SSID is baked into
+    // the AP, the ESP-NOW peers and the mounts' view of this hub, so a clean
+    // boot is the one path guaranteed to leave all of them consistent.  It is
+    // a commissioning action, so a few seconds of outage is the right trade.
+    if (_hub_name_restart_ms && (int32_t)(now - _hub_name_restart_ms) >= 0) {
+        _hub_name_restart_ms = 0;
+        Serial.printf("[HUB] Renamed to \"%s\" — restarting\n", AP_SSID);
+        Serial.flush();
+        esp_restart();
+    }
+
 #if DEMO_MODE
     demo_tick();   // feed synthetic STATUS into the normal relay path
 #endif
@@ -2069,6 +2231,67 @@ void loop() {
                 // state that may have accumulated while the PC was disconnected.
                 refresh_espnow_peer(i);
                 ui_send_to_mount(i + 1, CMD_GET_STATE, nullptr, 0);
+            }
+        }
+    }
+
+    // ---- Satellites ----
+    {
+        WiFiClient in = _sat_server.accept();
+        if (in) {
+            bool placed = false;
+            for (int i = 0; i < MAX_SATELLITES; i++) {
+                if (_sat[i].active && _sat[i].client.connected()) continue;
+                if (_sat[i].active) sat_release_mounts(i);
+                _sat[i].client = in;
+                sat_env_init(&_sat[i].parser);
+                _sat[i].active = true;
+                placed = true;
+                Serial.printf("[SAT] satellite %d connected from %s\n",
+                              i + 1, in.remoteIP().toString().c_str());
+                break;
+            }
+            if (!placed) { in.stop(); Serial.println("[SAT] no free slot"); }
+        }
+        for (int i = 0; i < MAX_SATELLITES; i++) {
+            if (!_sat[i].active) continue;
+            if (!_sat[i].client.connected()) {
+                _sat[i].client.stop();
+                _sat[i].active = false;
+                sat_release_mounts(i);
+                Serial.printf("[SAT] satellite %d disconnected\n", i + 1);
+                continue;
+            }
+            // Bounded per pass so one busy satellite cannot starve the loop —
+            // loopmax is health telemetry and a long iteration reads as a fault.
+            int budget = 512;
+            while (_sat[i].client.available() && budget-- > 0) {
+                int c = _sat[i].client.read();
+                if (c < 0) break;
+                SatEnv env;
+                if (!sat_env_feed(&_sat[i].parser, (uint8_t)c, &env)) continue;
+
+                // Learn the route from where the traffic actually arrived.
+                uint8_t mid = (env.frame_len >= 4 &&
+                               env.frame[0] == PKT_START_1 &&
+                               env.frame[1] == PKT_START_2) ? env.frame[3] : 0;
+                if (mid >= 1 && mid <= NUM_MOUNTS && _mount_sat[mid - 1] != i) {
+                    _mount_sat[mid - 1] = i;
+                    Serial.printf("[SAT] mount %d now via satellite %d\n", mid, i + 1);
+                }
+
+                // Inject exactly as the ESP-NOW callback would, so a
+                // satellite-attached mount is indistinguishable downstream —
+                // pairing, conflicts, display, WS rate-limiting and all.
+                if (env.frame_len > sizeof(RelayMsg::data)) continue;
+                RelayMsg msg;
+                int8_t idx  = mount_table_find(env.mac);
+                msg.len     = env.frame_len;
+                msg.rssi    = env.rssi;
+                msg.src_idx = (idx >= 0) ? (uint8_t)idx : 0xFF;
+                memcpy(msg.src_mac, env.mac, 6);
+                memcpy(msg.data, env.frame, env.frame_len);
+                xQueueSend(_relay_queue, &msg, 0);
             }
         }
     }

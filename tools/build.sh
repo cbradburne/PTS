@@ -26,6 +26,11 @@ FQBN_AMOLED="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=def
 # Waveshare ESP32-S3-ETH.  GPIO33-37 are broken out on this board, so the module
 # is NOT octal-PSRAM; PSRAM stays disabled until the exact variant is confirmed.
 FQBN_SAT="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=disabled"
+# Hardware CDC, deliberately: TinyUSB mode can require the BOOT button to
+# flash, which is no good on a unit in an enclosure.  HWCDC has no
+# reboot-on-DTR behaviour to disable, so the enableReboot() the XIAO hub needs
+# is simply not required here.  See the note in esp32_hub_eth.ino.
+FQBN_HUBETH="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=disabled"
 FQBN_TEENSY="teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
 
 sketch_for() {
@@ -35,6 +40,7 @@ sketch_for() {
         display) echo "$REPO/firmware/esp32_display" ;;
         amoled)  echo "$REPO/firmware/esp_mount_amoled175" ;;
         sat)     echo "$REPO/firmware/esp32_satellite" ;;
+        hubeth)  echo "$REPO/firmware/esp32_hub_eth" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
         *)       echo "" ;;
     esac
@@ -47,6 +53,7 @@ fqbn_for() {
         display) echo "$FQBN_DISPLAY" ;;
         amoled)  echo "$FQBN_AMOLED" ;;
         sat)     echo "$FQBN_SAT" ;;
+        hubeth)  echo "$FQBN_HUBETH" ;;
         teensy)  echo "$FQBN_TEENSY" ;;
     esac
 }
@@ -124,7 +131,7 @@ if [ "${1:-}" = "flash" ]; then
         --input-dir "$OUT/$t" -p "$port" "$(sketch_for "$t")"
 fi
 
-targets="${*:-hub display amoled sat teensy}"
+targets="${*:-hub hubeth display amoled sat teensy}"
 fails=""
 for t in $targets; do
     compile_one "$t" || fails="$fails $t"
