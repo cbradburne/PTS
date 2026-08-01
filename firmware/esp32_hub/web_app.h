@@ -580,6 +580,10 @@ const CMD_STATUS             = 0x80;
 const CMD_CONFIG_REPORT      = 0x86;  // 75B: ori_byte(1) + speeds(72) + stall(2)
 const CMD_CALIB_PROMPT       = 0x93;  // 1B sub-state
 const CMD_LA_MOVE_DIR        = 0x94;  // hub-injected: direction(1) — 0=min/◀, 1=max/▶, 0xFF=stopped
+// STATUS target_slot: 8/9 mean the look-at arrows, and ONLY in look-at mode —
+// on any other mount they are ordinary position slots 9 and 10.
+const TARGET_SLOT_LA_MIN     = 8;
+const TARGET_SLOT_LA_MAX     = 9;
 // Pairing management (hub owns the mount table; these view/set/clear it)
 const CMD_GET_MOUNT_TABLE    = 0x9B;  // →hub, no payload: request a MOUNT_TABLE push
 const CMD_MOUNT_TABLE        = 0x9C;  // hub→: 30B = 5 × MAC(6); all-zero slot = unbound
@@ -1066,41 +1070,33 @@ function _onOnePkt(buf, off) {
             }
         }
 
-        // Look-at arrow state — track LOOK_AT_MOVE / JOGGING → IDLE transition.
+        // Look-at arrow state — driven by target_slot, which the MOUNT sets when
+        // a look-at move actually starts and clears when the controller releases
+        // the axes (arrival, E-stop or abort alike).
+        //
+        // This used to follow CMD_LA_MOVE_DIR, injected by the hub as it relayed
+        // the command — the hub's intent, not the mount's state — so a press lost
+        // on the radio left an arrow flashing for a move that never ran, with
+        // nothing able to correct it.  Reading the mount also retires the race
+        // window that held 'moving' while waiting for the Teensy to enter
+        // LOOK_AT_MOVE: target_slot only appears once it genuinely has.
         if (camIsLookAt(mountId)) {
-            const prev = cs.prevState;
-            const cur  = cs.state;
-            if (cur === STATE_LOOK_AT_MOVE || cur === STATE_JOGGING) {
-                // Move running — keep arrow as-is (flashing yellow).
-            } else if (prev === STATE_LOOK_AT_MOVE || prev === STATE_JOGGING) {
-                // Move/jog just finished — promote moving → done (green).
-                if      (cs.laArrow === 'left')  cs.laArrow = 'left-done';
-                else if (cs.laArrow === 'right') cs.laArrow = 'right-done';
-                else                             cs.laArrow = null;
-            } else if (cs.laArrow === 'left' || cs.laArrow === 'right') {
-                // Race window: command sent but Teensy not in LOOK_AT_MOVE yet.
-            } else if (cs.laArrow === 'left-done' || cs.laArrow === 'right-done') {
-                // Preserve green until explicit jog clears it.
+            if      (cs.targetSlot === TARGET_SLOT_LA_MIN) cs.laArrow = 'left';
+            else if (cs.targetSlot === TARGET_SLOT_LA_MAX) cs.laArrow = 'right';
+            else if (cs.laArrow === 'left')  cs.laArrow = 'left-done';
+            else if (cs.laArrow === 'right') cs.laArrow = 'right-done';
+            else if (cs.laArrow === 'left-done' || cs.laArrow === 'right-done') {
+                // Preserve green until an explicit jog clears it.
             } else if (cs.flags & FLAG_AT_MIN_LIMIT) {
-                cs.laArrow = 'left-done';   // reconnect restore: slider is at min end
+                cs.laArrow = 'left-done';   // fresh page load: slider is at min end
             } else if (cs.flags & FLAG_AT_MAX_LIMIT) {
-                cs.laArrow = 'right-done';  // reconnect restore: slider is at max end
+                cs.laArrow = 'right-done';  // fresh page load: slider is at max end
             } else {
                 cs.laArrow = null;
             }
         }
 
         refreshCamBtns();
-        if (mountId === selCam) refreshPosGrid();
-        if (_extActive) refreshExtAll();
-    }
-
-    if (cmd === CMD_LA_MOVE_DIR && plen >= 1 && mountId >= 1 && mountId <= NUM_MOUNTS) {
-        const dir = buf[off + 7];
-        const cs  = camSt[mountId];
-        if      (dir === 0) cs.laArrow = 'left';
-        else if (dir === 1) cs.laArrow = 'right';
-        else                cs.laArrow = null;
         if (mountId === selCam) refreshPosGrid();
         if (_extActive) refreshExtAll();
     }

@@ -3328,12 +3328,24 @@ void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
     _slots[i] = { slot_occupied, slot_at, target_slot, state };
 
     if (la) {
-        if (old_state == STATE_LOOK_AT_MOVE && state != STATE_LOOK_AT_MOVE) {
-            // Move just finished — promote moving → done so the arrow turns green.
-            if      (_la_arrow_state[i] == 0) _la_arrow_state[i] = 2;  // ◀ done
-            else if (_la_arrow_state[i] == 1) _la_arrow_state[i] = 3;  // ▶ done
+        // Arrow state from target_slot, which the MOUNT sets when a look-at
+        // move genuinely starts and clears when the controller releases the
+        // axes (arrival, E-stop or abort alike).  It used to be fed by
+        // hub_ui_notify_la_move_dir() from CMD_LA_MOVE_DIR — the hub echoing
+        // the command it had just relayed — so a press lost on the radio left
+        // an arrow flashing here for a move that never ran, with nothing able
+        // to correct it.  Deriving it from the relayed STATUS means the
+        // display cannot show motion the mount is not reporting.
+        int8_t want = _la_arrow_state[i];
+        if      (target_slot == TARGET_SLOT_LA_MIN) want = 0;   // ◀ moving
+        else if (target_slot == TARGET_SLOT_LA_MAX) want = 1;   // ▶ moving
+        else if (_la_arrow_state[i] == 0)           want = 2;   // ◀ done (green)
+        else if (_la_arrow_state[i] == 1)           want = 3;   // ▶ done (green)
+        if (want != _la_arrow_state[i]) {
+            _la_arrow_state[i]  = want;
             _la_refresh_pending = true;
-        } else if (state == STATE_JOGGING &&
+        }
+        if (state == STATE_JOGGING &&
                    (_la_arrow_state[i] == 0 || _la_arrow_state[i] == 1)) {
             // Manual slider jog while arrow is in "moving" state — clear to grey.
             // Do NOT clear "done" state (2/3 = green) — a brief post-move deceleration
@@ -3608,20 +3620,6 @@ void hub_ui_notify_look_at_status(uint8_t mount_id, uint8_t subject_id) {
     // The LVGL task reads this flag inside its mutex-hold section, so there is
     // no contention and no risk of the 100 ms timeout that previously caused
     // missed refreshes on the render-heavy positions screen.
-    _la_refresh_pending = true;
-}
-
-// ============================================================
-//  Look-at move direction — flash/green ◀/▶ arrow buttons
-// ============================================================
-
-void hub_ui_notify_la_move_dir(uint8_t mount_id, uint8_t direction) {
-    if (mount_id < 1 || mount_id > 5) return;
-    int i = mount_id - 1;
-    // int8_t write is atomic on Xtensa — safe from loop() without the mutex.
-    if      (direction == 0)    _la_arrow_state[i] = 0;   // ◀ moving
-    else if (direction == 1)    _la_arrow_state[i] = 1;   // ▶ moving
-    else                        _la_arrow_state[i] = -1;  // clear (stopped)
     _la_refresh_pending = true;
 }
 

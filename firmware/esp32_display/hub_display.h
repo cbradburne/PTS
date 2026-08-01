@@ -54,7 +54,6 @@ void hub_ui_update_config(uint8_t mount_id, const uint8_t *payload, uint8_t payl
 void hub_ui_notify_home_complete(uint8_t mount_id, uint8_t axis);
 void hub_ui_notify_calib_prompt(uint8_t mount_id, uint8_t sub_state);
 void hub_ui_notify_look_at_status(uint8_t mount_id, uint8_t subject_id);
-void hub_ui_notify_la_move_dir(uint8_t mount_id, uint8_t direction);
 void hub_ui_update_subject_mask(uint8_t mount_id, uint8_t mask);
 
 // ---- Pairing (stage 3) ----

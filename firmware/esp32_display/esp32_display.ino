@@ -190,9 +190,12 @@ static void dispatch_msg(uint8_t type, uint8_t len, const uint8_t *d) {
             break;
 
         case DISP_MSG_LA_MOVE_DIR:
-            // payload: [0] mount_id, [1] direction (0=min/◀, 1=max/▶, 0xFF=stopped)
-            if (len < 2) break;
-            hub_ui_notify_la_move_dir(d[0], d[1]);
+            // Ignored.  This carried the hub's echo of a look-at command it had
+            // just relayed, which asserted motion the hub could not verify — a
+            // press lost on the radio still lit an arrow here.  The arrows now
+            // come from target_slot in the mount's own STATUS
+            // (hub_ui_update_slots), so consuming this as well would let the
+            // unverifiable source overwrite the verified one.
             break;
 
         case DISP_MSG_MOUNT_TABLE:
