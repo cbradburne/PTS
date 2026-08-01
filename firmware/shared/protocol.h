@@ -39,6 +39,26 @@
 #define PACKET_MIN_SIZE     9
 #define PACKET_MAX_PAYLOAD  256   // raised: CMD_SUBJECT_LIST needs 232 bytes
 
+// ---------------------------------------------------------------------------
+// STATUS target_slot values
+// ---------------------------------------------------------------------------
+// 0-9 name the position slot a GOTO_SLOT move is heading for.
+//
+// On a LOOK-AT mount the grid has no position slots 9 and 10 — slots 0-7 are
+// the subjects and 8/9 are the guide arrows — so 8 and 9 are free to report a
+// running look-at slider move, and mean that ONLY when look_at_mode is set.
+// On any other mount 8 and 9 keep their ordinary meaning of position slots 9
+// and 10, so readers must check the mode before interpreting them.
+//
+// This exists so a client can see which arrow is genuinely running from the
+// MOUNT's own telemetry.  Previously the only direction signal was
+// CMD_LA_MOVE_DIR, which the hub injects when it relays the command — that
+// echoes the hub's intent, so a command lost on the radio still lit the arrow
+// for a move that never started.
+#define TARGET_SLOT_NONE    0xFF
+#define TARGET_SLOT_LA_MIN  8     // look-at slider move running toward min (left arrow)
+#define TARGET_SLOT_LA_MAX  9     // look-at slider move running toward max (right arrow)
+
 // CMD_STATE_REPORT payload size (10 slots × 16 bytes + 22 bytes metadata = 182)
 #define STATE_REPORT_PAYLOAD_LEN  182
 // CMD_SAVE_SPEEDS payload size (4 PT + 4 SL + 1 ZM) × 8 bytes = 72
@@ -297,7 +317,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  active_sl_preset;     // 1-4; which SL speed preset is currently active
     uint16_t slot_occupied_mask;   // bits 0-9: slot N is STORED or AT_POSITION
     uint16_t slot_at_mask;         // bits 0-9: slot N is AT_POSITION
-    uint8_t  target_slot;          // slot currently being moved to (0xFF = none)
+    uint8_t  target_slot;          // slot being moved to; see TARGET_SLOT_* below
     uint8_t  active_la_subject;    // active look-at subject (0-7, 0xFF = none)
 } PayloadStatus;                   // wire: 10 bytes
 

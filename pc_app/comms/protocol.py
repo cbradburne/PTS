@@ -31,6 +31,16 @@ MOUNT_BROADCAST = 0x00
 NUM_MOUNTS = 5
 NUM_POSITIONS = 10
 
+# STATUS target_slot values (mirror of shared/protocol.h).
+# 0-9 name the position slot a GOTO_SLOT move is heading for.  On a LOOK-AT
+# mount there are no position slots 9 and 10 — slots 0-7 are subjects and 8/9
+# are the guide arrows — so 8/9 instead report a running look-at slider move,
+# and mean that ONLY when the mount is in look-at mode.  Check the mode before
+# reading them.
+TARGET_SLOT_NONE   = 0xFF
+TARGET_SLOT_LA_MIN = 8    # look-at slider move running toward min (left arrow)
+TARGET_SLOT_LA_MAX = 9    # look-at slider move running toward max (right arrow)
+
 # Minimum bytes in a valid packet: start(2) + len(1) + mount_id(1) + seq(2) + cmd(1) + crc(2) = 9
 PACKET_MIN_SIZE = 9
 PACKET_MAX_PAYLOAD = 256   # raised: CMD_SUBJECT_LIST needs 232 bytes

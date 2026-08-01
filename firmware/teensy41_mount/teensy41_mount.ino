@@ -161,7 +161,7 @@ static uint8_t _active_pt_preset = 2;   // 1-4
 static uint8_t _active_sl_preset = 2;   // 1-4
 
 // Target slot for in-progress CMD_GOTO_SLOT move (0xFF = none)
-static uint8_t  _target_slot        = 0xFF;
+static uint8_t  _target_slot        = TARGET_SLOT_NONE;
 static uint8_t  _prev_motion_state  = STATE_IDLE;
 
 // ---------------------------------------------------------------------------
@@ -1660,6 +1660,12 @@ static void dispatch(const ParsedPacket &pkt) {
                                                pkt.seq, NACK_BUSY);
                 ESP_SERIAL.write(nack_buf, nack_len);
             } else {
+                // Report which arrow is running, from the mount's own state.
+                // Only on success: a client must never see an arrow lit for a
+                // move that did not start — that is the whole point of moving
+                // this off CMD_LA_MOVE_DIR, which the hub injects when it
+                // relays the command and so cannot know whether it arrived.
+                _target_slot = direction ? TARGET_SLOT_LA_MAX : TARGET_SLOT_LA_MIN;
                 Serial.printf("[LookAt] START OK  preset=%d  max_pt_dps=90\n", (int)preset);
             }
             break;
@@ -1767,11 +1773,27 @@ void loop() {
     {
         MountStatusSnapshot _s = mount.getStatus();
         uint8_t cur_state = (uint8_t)_s.state;
-        if (_target_slot != 0xFF) {
-            bool move_done = (_prev_motion_state == STATE_MOVING_TO_POS &&
-                              cur_state          != STATE_MOVING_TO_POS);
-            bool arrived   = !!(_slot_at & (1u << _target_slot));
-            if (move_done || arrived) _target_slot = 0xFF;
+        if (_target_slot != TARGET_SLOT_NONE) {
+            // 8 and 9 mean the look-at arrows ONLY in look-at mode.  On any
+            // other mount they are ordinary position slots 9 and 10, and must
+            // keep using the GOTO path below — without this gate a normal
+            // recall to slot 9 or 10 would be cleared by the wrong rule.
+            bool la_arrow = _cfg.look_at_mode &&
+                            (_target_slot == TARGET_SLOT_LA_MIN ||
+                             _target_slot == TARGET_SLOT_LA_MAX);
+            if (la_arrow) {
+                // Finished when the look-at controller gives up ownership,
+                // whether that is arrival, an E-stop or an abort — so the
+                // arrow cannot be left lit by any of them.
+                bool la_running = (cur_state == STATE_LOOK_AT_MOVE ||
+                                   cur_state == STATE_LOOK_AT_PRE_AIM);
+                if (!la_running) _target_slot = TARGET_SLOT_NONE;
+            } else {
+                bool move_done = (_prev_motion_state == STATE_MOVING_TO_POS &&
+                                  cur_state          != STATE_MOVING_TO_POS);
+                bool arrived   = !!(_slot_at & (1u << _target_slot));
+                if (move_done || arrived) _target_slot = TARGET_SLOT_NONE;
+            }
         }
         _prev_motion_state = cur_state;
     }
