@@ -1,0 +1,243 @@
+/*
+ * PTS satellite — an ESP-NOW cell on the end of an Ethernet cable.
+ *
+ * Waveshare ESP32-S3-ETH, the same board as the hub.  Runs wherever a mount is
+ * too far from the hub to hear it: mount 4 sat 50 m away at −85 dBm and spent
+ * a week dropping out, where a satellite in the same room puts it at −40.
+ *
+ *   [mount] ──ESP-NOW──> [satellite] ──Ethernet/TCP──> [hub] ──> PC / web / display
+ *
+ * DELIBERATELY A DUMB PIPE.  Every packet already carries a mount_id and a CRC
+ * and is self-framing, so the satellite never parses one: it learns which MAC a
+ * mount_id lives at by watching what arrives, and forwards bytes both ways.  All
+ * the intelligence stays in the hub, which means a satellite needs no update
+ * when the protocol grows.
+ *
+ * The mount chooses ITS satellite, not the other way round: each one raises a
+ * SoftAP called "PTS-<name>", the mount's existing scan picks the strongest of
+ * the hubs it knows, and the satellite simply serves whoever turns up.  That is
+ * why exactly one device ever transmits to a given mount, and why no
+ * duplicate-command protection is needed here.
+ *
+ * The AP also means a satellite's channel is its own: discovery is a WiFi scan
+ * across all channels, so neighbouring cells need not share one and distant
+ * mounts stop competing for airtime with local ones.
+ */
+
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <Preferences.h>
+
+#include "../shared/protocol.h"
+#include "../shared/board_eth.h"
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+// Must match HUB_SSID_PREFIX in the mount sketch — that is the scan filter, and
+// a mount cannot tell a satellite from a hub (nor should it).
+#define AP_SSID_PREFIX  "PTS-"
+#define HUB_NAME_MAX    12
+static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Sat";
+#define AP_PASSWORD     "camctrl123"
+
+// Channel is per-satellite, so cells do not have to share airtime.  Override
+// per unit; mounts find it by scanning, so nothing else needs telling.
+#ifndef AP_CHANNEL
+#define AP_CHANNEL      6
+#endif
+
+static Preferences _prefs;
+#include "../shared/hub_name.h"
+
+// ---------------------------------------------------------------------------
+// Uplink to the hub
+// ---------------------------------------------------------------------------
+// A dedicated port, NOT the 7777 the PC app uses.  The hub treats a 7777 client
+// as an observer; a satellite OWNS mounts and must be told apart.  Using the
+// port for that keeps it out of the wire protocol entirely.
+#define HUB_PORT        7778
+#define HUB_HOST_MAX    40
+static char     _hub_host[HUB_HOST_MAX] = "pts-hub.local";
+static WiFiClient _uplink;
+static uint32_t _uplink_next_try_ms = 0;
+static uint32_t _uplink_backoff_ms  = 1000;
+#define UPLINK_BACKOFF_MAX_MS  15000
+
+// ---------------------------------------------------------------------------
+// Mount peers — learned, never configured
+// ---------------------------------------------------------------------------
+// A mount announces itself by talking to us.  We remember which MAC each
+// mount_id came from so downlink packets can be addressed, and refresh the
+// timestamp on every frame so a mount that roams to another satellite ages out
+// here rather than being transmitted to forever.
+struct MountPeer {
+    uint8_t  mac[6];
+    uint32_t last_rx_ms;
+    bool     used;
+};
+static MountPeer _peer[NUM_MOUNTS];      // indexed by mount_id - 1
+#define PEER_STALE_MS  60000UL
+
+static void peer_forget_stale(uint32_t now) {
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        if (!_peer[i].used) continue;
+        if (now - _peer[i].last_rx_ms < PEER_STALE_MS) continue;
+        esp_now_del_peer(_peer[i].mac);
+        _peer[i].used = false;
+        Serial.printf("[PEER] mount %d aged out\n", i + 1);
+    }
+}
+
+static void peer_learn(uint8_t mount_id, const uint8_t *mac, uint32_t now) {
+    if (mount_id < 1 || mount_id > NUM_MOUNTS) return;
+    MountPeer &p = _peer[mount_id - 1];
+    bool changed = !p.used || memcmp(p.mac, mac, 6) != 0;
+    if (changed) {
+        if (p.used) esp_now_del_peer(p.mac);
+        memcpy(p.mac, mac, 6);
+        esp_now_peer_info_t info = {};
+        memcpy(info.peer_addr, mac, 6);
+        info.channel = AP_CHANNEL;
+        info.ifidx   = WIFI_IF_AP;      // we serve mounts on our OWN AP
+        info.encrypt = false;
+        esp_now_add_peer(&info);
+        p.used = true;
+        Serial.printf("[PEER] mount %d at %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      mount_id, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    p.last_rx_ms = now;
+}
+
+// ---------------------------------------------------------------------------
+// ESP-NOW  ->  uplink
+// ---------------------------------------------------------------------------
+// The receive callback runs in WiFi task context, so it only queues.  Touching
+// the TCP socket from here would be a cross-task use of WiFiClient, and calling
+// into the network stack from a radio callback is how the mount bridge's own
+// ESP-NOW reinit ended up faulting in ipc1.
+struct RxItem { uint8_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; uint8_t mac[6]; };
+static QueueHandle_t _rx_q = nullptr;
+
+static void on_espnow_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    if (!info || len <= 0 || len > (int)sizeof(((RxItem *)0)->data)) return;
+    RxItem it;
+    it.len = (uint8_t)len;
+    memcpy(it.data, data, len);
+    memcpy(it.mac, info->src_addr, 6);
+    BaseType_t hp = pdFALSE;
+    xQueueSendFromISR(_rx_q, &it, &hp);
+    if (hp) portYIELD_FROM_ISR();
+}
+
+// mount_id is byte [3] of the frame: [0xAA][0x55][LEN][MOUNT_ID]...
+static inline uint8_t frame_mount_id(const uint8_t *d, uint8_t len) {
+    return (len >= 4 && d[0] == PKT_START_1 && d[1] == PKT_START_2) ? d[3] : 0;
+}
+
+static void drain_espnow_to_uplink(uint32_t now) {
+    RxItem it;
+    while (xQueueReceive(_rx_q, &it, 0) == pdTRUE) {
+        peer_learn(frame_mount_id(it.data, it.len), it.mac, now);
+        if (_uplink.connected()) _uplink.write(it.data, it.len);
+        // Not connected: drop.  Buffering telemetry to replay later would
+        // deliver a burst of stale STATUS the moment the hub reappears, and
+        // STATUS is superseded every 100 ms anyway.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Uplink  ->  ESP-NOW
+// ---------------------------------------------------------------------------
+// Framing is recovered the same way every other node does it, so a partial TCP
+// read cannot desynchronise the stream.
+static uint8_t  _tcp_buf[PACKET_MAX_PAYLOAD + 16];
+static uint16_t _tcp_len = 0;
+
+static void forward_frame(const uint8_t *frame, uint16_t len) {
+    uint8_t mid = frame_mount_id(frame, len);
+    if (mid == MOUNT_BROADCAST) {
+        for (int i = 0; i < NUM_MOUNTS; i++)
+            if (_peer[i].used) esp_now_send(_peer[i].mac, frame, len);
+    } else if (mid >= 1 && mid <= NUM_MOUNTS && _peer[mid - 1].used) {
+        esp_now_send(_peer[mid - 1].mac, frame, len);
+    }
+    // A mount we have never heard from is not ours — silently ignored, so the
+    // hub can broadcast to all satellites without each one shouting into the
+    // void for mounts that live in another room.
+}
+
+static void drain_uplink_to_espnow() {
+    while (_uplink.available()) {
+        int c = _uplink.read();
+        if (c < 0) break;
+        if (_tcp_len == 0 && c != PKT_START_1) continue;             // hunt for 0xAA
+        if (_tcp_len == 1 && c != PKT_START_2) { _tcp_len = 0; continue; }
+        _tcp_buf[_tcp_len++] = (uint8_t)c;
+        if (_tcp_len >= 3) {
+            uint16_t want = 3 + _tcp_buf[2] + 2;      // hdr + LEN body + CRC
+            if (want > sizeof(_tcp_buf)) { _tcp_len = 0; continue; }
+            if (_tcp_len == want) { forward_frame(_tcp_buf, _tcp_len); _tcp_len = 0; }
+        }
+        if (_tcp_len >= sizeof(_tcp_buf)) _tcp_len = 0;
+    }
+}
+
+static void uplink_service(uint32_t now) {
+    if (_uplink.connected()) return;
+    if (_tcp_len) _tcp_len = 0;                 // stale half-frame from the drop
+    if (!eth_is_up() || now < _uplink_next_try_ms) return;
+
+    if (_uplink.connect(_hub_host, HUB_PORT, 2000)) {
+        _uplink.setNoDelay(true);               // jog latency matters more than packing
+        _uplink_backoff_ms = 1000;
+        Serial.printf("[UPLINK] connected to %s:%d\n", _hub_host, HUB_PORT);
+    } else {
+        _uplink_next_try_ms = now + _uplink_backoff_ms;
+        if (_uplink_backoff_ms < UPLINK_BACKOFF_MAX_MS) _uplink_backoff_ms *= 2;
+        Serial.printf("[UPLINK] %s:%d unreachable — retry in %lu ms\n",
+                      _hub_host, HUB_PORT, (unsigned long)_uplink_backoff_ms);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+void setup() {
+    Serial.begin(115200);
+    delay(200);
+    Serial.println("\n=== PTS satellite ===");
+
+    _prefs.begin("sat", false);
+    _prefs.getString("hubhost", _hub_host, sizeof(_hub_host));
+    _prefs.end();
+    if (_hub_host[0] == '\0') strncpy(_hub_host, "pts-hub.local", sizeof(_hub_host) - 1);
+
+    hub_name_load();                            // composes AP_SSID
+
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
+    esp_wifi_set_ps(WIFI_PS_NONE);              // latency over power
+    Serial.printf("AP  SSID : %s  (channel %d)\n", AP_SSID, AP_CHANNEL);
+    Serial.printf("AP  MAC  : %s\n", WiFi.softAPmacAddress().c_str());
+
+    _rx_q = xQueueCreate(24, sizeof(RxItem));
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[ESPNOW] init failed — restarting");
+        delay(500);
+        ESP.restart();
+    }
+    esp_now_register_recv_cb(on_espnow_recv);
+
+    eth_begin();
+    Serial.printf("Hub uplink: %s:%d\n", _hub_host, HUB_PORT);
+}
+
+void loop() {
+    uint32_t now = millis();
+    eth_report_once_if_down(now, 8000);
+    uplink_service(now);
+    drain_espnow_to_uplink(now);
+    if (_uplink.connected()) drain_uplink_to_espnow();
+    peer_forget_stale(now);
+}

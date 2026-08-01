@@ -1,7 +1,7 @@
 #!/bin/sh
 # build.sh — compile-test every firmware target with arduino-cli.
 #
-#   tools/build.sh                # compile all four targets
+#   tools/build.sh                # compile every target
 #   tools/build.sh hub display    # compile a subset
 #   tools/build.sh flash hub [port]   # compile + upload one target
 #
@@ -23,6 +23,9 @@ OUT="$REPO/.build"
 FQBN_HUB="esp32:esp32:XIAO_ESP32S3:USBMode=default,CDCOnBoot=default,PartitionScheme=default_8MB,FlashSize=8M"
 FQBN_DISPLAY="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
 FQBN_AMOLED="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
+# Waveshare ESP32-S3-ETH.  GPIO33-37 are broken out on this board, so the module
+# is NOT octal-PSRAM; PSRAM stays disabled until the exact variant is confirmed.
+FQBN_SAT="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=disabled"
 FQBN_TEENSY="teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
 
 sketch_for() {
@@ -31,6 +34,7 @@ sketch_for() {
         hubdemo) echo "$REPO/firmware/esp32_hub" ;;
         display) echo "$REPO/firmware/esp32_display" ;;
         amoled)  echo "$REPO/firmware/esp_mount_amoled175" ;;
+        sat)     echo "$REPO/firmware/esp32_satellite" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
         *)       echo "" ;;
     esac
@@ -42,6 +46,7 @@ fqbn_for() {
         hubdemo) echo "$FQBN_HUB" ;;
         display) echo "$FQBN_DISPLAY" ;;
         amoled)  echo "$FQBN_AMOLED" ;;
+        sat)     echo "$FQBN_SAT" ;;
         teensy)  echo "$FQBN_TEENSY" ;;
     esac
 }
@@ -119,7 +124,7 @@ if [ "${1:-}" = "flash" ]; then
         --input-dir "$OUT/$t" -p "$port" "$(sketch_for "$t")"
 fi
 
-targets="${*:-hub display amoled teensy}"
+targets="${*:-hub display amoled sat teensy}"
 fails=""
 for t in $targets; do
     compile_one "$t" || fails="$fails $t"

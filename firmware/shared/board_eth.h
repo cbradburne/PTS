@@ -4,14 +4,16 @@
 // ---------------------------------------------------------------------------
 // Both the hub and the satellites run this board, so the bring-up lives here.
 //
-// >> THE PIN MAP BELOW IS UNVERIFIED. <<
-// It has not been checked against a board or Waveshare's schematic.  Confirm
-// every line before the first flash.  Getting it wrong does not damage
-// anything — the W5500 simply never answers — and eth_begin() prints the exact
-// pins it used at boot, so a mismatch is one glance at the serial log:
+// Pin map confirmed against Waveshare's ESP32-S3-ETH pinout diagram.
+// eth_begin() still prints what it used at boot, so a board revision that moves
+// something shows up as one line in the log rather than a silent failure:
 //
-//   [ETH] W5500 on SPI  cs=14 int=13 rst=9  sck=12 miso=11 mosi=10
-//   [ETH] link down after 5000 ms — check the pin map in shared/board_eth.h
+//   [ETH] W5500 on SPI  cs=14 int=10 rst=9  sck=13 miso=12 mosi=11
+//
+// ALSO SPOKEN FOR on this board, do not reuse:
+//   GPIO 4,5,6,7   microSD slot (CS, MISO, MOSI, CLK)
+//   GPIO 19,20     USB D-/D+ — the PC app rides that link
+//   GPIO 43,44     UART0, used for the 7" display (confirmed broken out, free)
 //
 // The Arduino ESP32 core (3.x) drives the W5500 natively via ETH.begin(), so
 // there is no third-party Ethernet library to pin a version of.
@@ -20,12 +22,12 @@
 #include <SPI.h>
 
 #ifndef ETH_SPI_CS
-#define ETH_SPI_CS    14
-#define ETH_SPI_INT   13
-#define ETH_SPI_RST    9
-#define ETH_SPI_SCK   12
-#define ETH_SPI_MISO  11
-#define ETH_SPI_MOSI  10
+#define ETH_SPI_CS    14   // ETH_CS
+#define ETH_SPI_INT   10   // ETH_INT
+#define ETH_SPI_RST    9   // ETH_RST
+#define ETH_SPI_SCK   13   // ETH_CLK
+#define ETH_SPI_MISO  12   // ETH_MISO
+#define ETH_SPI_MOSI  11   // ETH_MOSI
 #endif
 
 // W5500 has no factory MAC, so one is derived from the ESP32's own — stable
