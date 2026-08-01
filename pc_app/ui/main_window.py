@@ -40,6 +40,7 @@ from .dialogs.config_dialog import ConfigDialog
 from . import virtual_keyboard
 from comms.bridge import Bridge
 from comms.mount_manager import MountManager
+from comms.protocol import (TARGET_SLOT_LA_MIN, TARGET_SLOT_LA_MAX)
 from comms.protocol import MountState, MountFlag, Axis
 from config.mount_config import AppConfig, save_config
 from config.position_store import PositionStore
@@ -524,7 +525,6 @@ class MainWindow(QMainWindow):
         # v2 — subject/calib signals from mount manager
         self._mm.subject_list_received.connect(self._on_subjects_updated)
         self._mm.calib_prompt_received.connect(self._on_calib_prompt)
-        self._mm.la_move_dir_received.connect(self._on_la_move_dir)
         self._mm.config_report_received.connect(self._on_config_report)
         self._mm.look_at_status_updated.connect(self._on_look_at_status_from_mount)
 
@@ -539,12 +539,6 @@ class MainWindow(QMainWindow):
         # accessing private grid members.
         self._la_arrow: dict[int, "str | None"] = {m: None for m in range(1, 6)}
 
-        # Previous STATUS MountState — used to detect LOOK_AT_MOVE/JOGGING → IDLE
-        # transitions so we can infer move completion without relying on AT_MIN/MAX flags.
-        self._la_prev_state: dict[int, MountState] = {
-            m: MountState.IDLE for m in range(1, 6)
-        }
-
         # Initial camera selection
         self._select_mount(1)
 
@@ -558,20 +552,6 @@ class MainWindow(QMainWindow):
         """Set the ◀/▶ border state in both the tracking dict and the grid."""
         self._la_arrow[mount_id] = state
         self._grid.set_la_arrow_state(mount_id, state)
-
-    @pyqtSlot(int, int)
-    def _on_la_move_dir(self, mount_id: int, direction: int) -> None:
-        """Hub-injected CMD_LA_MOVE_DIR received — fires for ALL clients' moves,
-        not just moves initiated locally.  This is the authoritative source for
-        arrow button flash state so all devices stay in sync."""
-        if direction == 0:
-            self._set_la_arrow(mount_id, 'left_moving')
-            self._la_prev_state[mount_id] = MountState.IDLE   # reset so transition fires cleanly
-        elif direction == 1:
-            self._set_la_arrow(mount_id, 'right_moving')
-            self._la_prev_state[mount_id] = MountState.IDLE
-        else:
-            self._set_la_arrow(mount_id, None)
 
     # ------------------------------------------------------------------
 
@@ -1002,47 +982,30 @@ class MainWindow(QMainWindow):
                 self._grid.set_active_la_subject(mount_id, new_subj)
 
         # ---- Look-at arrow button state (◀/▶ flash/green/grey) ----
+        #
+        # Driven by target_slot, which the MOUNT sets when a look-at move
+        # actually starts and clears when the controller releases the axes
+        # (arrival, E-stop or abort alike).  See TARGET_SLOT_* in protocol.py.
+        #
+        # This used to come from CMD_LA_MOVE_DIR, injected by the hub as it
+        # relayed the command — the hub's intent, not the mount's state, so a
+        # command lost on the radio still flashed an arrow for a move that was
+        # never running.  Reading the mount instead also removes the heuristics
+        # that propped that up: a race window waiting for the Teensy to enter
+        # LOOK_AT_MOVE, and an AT_MIN/AT_MAX flag fallback to guess direction.
+        # The mount now states both facts outright.
         if st.look_at_mode and st.has_slider:
-            flags     = st.flags
-            prev      = self._la_prev_state[mount_id]
             cur_arrow = self._la_arrow[mount_id]
-            self._la_prev_state[mount_id] = st.state
-
-            if st.state in (MountState.LOOK_AT_MOVE, MountState.JOGGING):
-                # Move/jog running — keep the flashing arrow as-is.
-                pass
-
-            elif prev in (MountState.LOOK_AT_MOVE, MountState.JOGGING):
-                # Move/jog just completed (prev→IDLE transition).
-                # Prefer AT_MIN/AT_MAX flags; fall back to arrow direction.
-                if flags & MountFlag.AT_MIN_LIMIT:
-                    self._set_la_arrow(mount_id, 'left_done')
-                elif flags & MountFlag.AT_MAX_LIMIT:
-                    self._set_la_arrow(mount_id, 'right_done')
-                elif cur_arrow == 'left_moving':
-                    self._set_la_arrow(mount_id, 'left_done')
-                elif cur_arrow == 'right_moving':
-                    self._set_la_arrow(mount_id, 'right_done')
-                else:
-                    self._set_la_arrow(mount_id, None)
-
-            elif cur_arrow in ('left_moving', 'right_moving'):
-                # Arrow is showing moving but state is IDLE and prev was also IDLE
-                # — this is the race window between pressing the button and the
-                # Teensy entering LOOK_AT_MOVE.  Don't clear yet; the next packet
-                # will either show LOOK_AT_MOVE (keep) or another IDLE (fall through).
-                pass
-
-            elif cur_arrow in ('left_done', 'right_done'):
-                # Slider has arrived — preserve green until an explicit jog clears it.
-                pass
-
-            elif flags & MountFlag.AT_MIN_LIMIT:
+            if st.target_slot == TARGET_SLOT_LA_MIN:
+                self._set_la_arrow(mount_id, 'left_moving')
+            elif st.target_slot == TARGET_SLOT_LA_MAX:
+                self._set_la_arrow(mount_id, 'right_moving')
+            elif cur_arrow == 'left_moving':
                 self._set_la_arrow(mount_id, 'left_done')
-            elif flags & MountFlag.AT_MAX_LIMIT:
+            elif cur_arrow == 'right_moving':
                 self._set_la_arrow(mount_id, 'right_done')
-            else:
-                self._set_la_arrow(mount_id, None)
+            # 'left_done'/'right_done'/None are left alone: green persists
+            # until a jog or the next move clears it, as before.
 
         # ---- Run sequence advancement ----
         rs = self._run_states[mount_id]
@@ -1142,7 +1105,6 @@ class MainWindow(QMainWindow):
 
         # Reset arrow state so stale yellow/green doesn't survive a reconnect.
         self._set_la_arrow(mount_id, None)
-        self._la_prev_state[mount_id] = MountState.IDLE
 
         # Zero speed dials so disconnected mounts are visually obvious.
         self._grid.set_mount_connected(mount_id, False)
@@ -1243,7 +1205,7 @@ class MainWindow(QMainWindow):
     def _on_slider_jog_start(self, mount_id: int, direction: int) -> None:
         """Arrow button pressed.  If a look-at subject is active, start a look-at
         move toward that slider limit; otherwise fall back to raw slider jog."""
-        # Arrow state is set by _on_la_move_dir when the hub echoes CMD_LA_MOVE_DIR
+        # Arrow state comes from the mount's target_slot in _on_status()
         # back to all clients (including this one), so all devices stay in sync.
         # No local optimistic update needed — the round-trip is <10 ms over loopback.
 
