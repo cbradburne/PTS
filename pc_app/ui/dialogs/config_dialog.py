@@ -945,6 +945,15 @@ class ConfigDialog(QWidget):
     # ------------------------------------------------------------------
 
     def _apply(self) -> None:
+        # PTS_CFGTABS built only some of the tabs, so most of the widgets this
+        # reads do not exist.  Nothing to save in that mode — just close, so OK
+        # does not abort the app mid-bisect.
+        if _diag_partial():
+            print("[CFGTEST] partial build — OK closes without saving")
+            self._result = 1
+            self.accepted.emit()
+            self.close()
+            return
         # General — connection
         if self._tcp_radio.isChecked():
             self._config.bridge_mode     = "tcp"
