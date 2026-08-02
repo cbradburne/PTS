@@ -54,17 +54,16 @@ class ConfigDialog(QWidget):
 
     def __init__(self, config: AppConfig, mount_manager: MountManager,
                  bridge: Bridge, position_store=None, parent=None):
-        # macOS: a SHEET.  Dialog, Tool and WindowModal have all been tried and
-        # all land on the desktop Space when the main window is in native
-        # fullscreen, dragging the operator out of it.  A sheet is attached to
-        # its parent window at the AppKit level, so it cannot be anywhere but
-        # the parent's Space — which is the actual guarantee we need, rather
-        # than another collection-behaviour hint that Qt may or may not set.
-        # Elsewhere Sheet has no special meaning, so keep Dialog there.
-        import sys as _sys
-        super().__init__(parent,
-                         Qt.WindowType.Sheet if _sys.platform == "darwin"
-                         else Qt.WindowType.Dialog)
+        # Exactly what CVWindow uses, because CVWindow has never had the macOS
+        # fullscreen problem: a parented QWidget with the Dialog flag, shown
+        # with show() + raise_() and NO activateWindow().
+        #
+        # The Sheet flag that briefly lived here was introduced while
+        # activateWindow() was still being called, so it was never tested
+        # without it — and Sheet has real costs (attached to the parent,
+        # cannot be moved).  Since the window that works uses Dialog, use
+        # Dialog, and keep the difference to CVWindow at zero.
+        super().__init__(parent, Qt.WindowType.Dialog)
         self._result = 0
         self._config  = config
         self._store   = position_store
