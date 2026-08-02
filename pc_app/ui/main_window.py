@@ -1157,8 +1157,12 @@ class MainWindow(QMainWindow):
         dlg.accepted.connect(self._on_config_accepted)
         dlg.finished.connect(lambda _: setattr(self, "_config_dlg", None))
         dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        # Deferred: called synchronously after show() these run BEFORE the
+        # window manager has finished placing the window, so the stacking order
+        # was applied to a window that then moved — which is how it kept ending
+        # up behind everything else on the desktop.  One event-loop turn later
+        # the placement is settled and the raise sticks.
+        QTimer.singleShot(0, lambda: (dlg.raise_(), dlg.activateWindow()))
 
     def _on_config_accepted(self) -> None:
         conn_now = (self._config.bridge_mode, self._config.bridge_host,

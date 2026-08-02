@@ -37,12 +37,15 @@ def _scrollable(inner: QWidget) -> QScrollArea:
     return scroll
 
 
-# NOTE: this is a QWidget, NOT a QDialog, on purpose.  On macOS a QDialog
-# opened over a native-fullscreen main window is placed on the *desktop* Space
-# (dragging the operator out of fullscreen), whereas a plain QWidget with the
-# Dialog window flag floats correctly on the fullscreen Space — exactly like
-# the CV window.  We re-provide the tiny QDialog surface we actually use
-# (accept()/reject() + accepted/finished signals) so callers are unchanged.
+# NOTE: a QWidget, NOT a QDialog, on purpose — a QDialog over a
+# native-fullscreen main window lands on the desktop Space and drags the
+# operator out of fullscreen.  We re-provide the small QDialog surface actually
+# used (accept()/reject() + accepted/finished) so callers are unchanged.
+#
+# The claim that once stood here — that a QWidget with the Dialog flag "floats
+# correctly on the fullscreen Space" — was WRONG.  It does the same thing, just
+# less obviously, which is why this kept coming back.  See __init__ for what
+# replaced it.
 class ConfigDialog(QWidget):
 
     accepted = pyqtSignal()      # emitted on OK (after settings are applied)
@@ -51,7 +54,17 @@ class ConfigDialog(QWidget):
 
     def __init__(self, config: AppConfig, mount_manager: MountManager,
                  bridge: Bridge, position_store=None, parent=None):
-        super().__init__(parent, Qt.WindowType.Dialog)
+        # macOS: a SHEET.  Dialog, Tool and WindowModal have all been tried and
+        # all land on the desktop Space when the main window is in native
+        # fullscreen, dragging the operator out of it.  A sheet is attached to
+        # its parent window at the AppKit level, so it cannot be anywhere but
+        # the parent's Space — which is the actual guarantee we need, rather
+        # than another collection-behaviour hint that Qt may or may not set.
+        # Elsewhere Sheet has no special meaning, so keep Dialog there.
+        import sys as _sys
+        super().__init__(parent,
+                         Qt.WindowType.Sheet if _sys.platform == "darwin"
+                         else Qt.WindowType.Dialog)
         self._result = 0
         self._config  = config
         self._store   = position_store
