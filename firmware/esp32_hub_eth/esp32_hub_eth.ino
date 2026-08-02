@@ -763,6 +763,51 @@ static PacketParser _serial_parser;
 // Forward declarations
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Addressed ESP-NOW send, skipping mounts that are not switched on
+// ---------------------------------------------------------------------------
+// mount_mac_valid() only asks "is this slot PAIRED?", so a paired-but-absent
+// mount was transmitted to for ever.  That is the NORMAL state on this rig —
+// five mounts, one permanent and the rest put out per event — so the firmware
+// has to handle it rather than the operator unpairing kit between shows.
+//
+// The cost was ~3 failed sends a second, around the clock, and the suspicion is
+// that the failure path leaks: the hub's TX stops accepting sends entirely
+// every 2-6 hours (txfail freezes, every mount stops ACKing) and only a full
+// restart clears it.  Failures per hour would then set how fast that arrives.
+// This does not prove the theory, but transmitting to a device known to be
+// absent is wrong regardless, and if the wedges thin out the theory is right.
+//
+// A live mount is heard from constantly (STATUS at 10 Hz, health every 10 s),
+// so 30 s of silence means genuinely gone.  It resumes on its own the moment
+// the mount is switched on, because the mount announces itself.
+//
+// NOTE: if the hub's own ESP-NOW RX ever wedged, every mount would look absent
+// and this would stop all sends.  That is acceptable — a hub that cannot hear
+// is not going to be heard either — and the PC app still sees the missing ACKs.
+#define MOUNT_PRESENT_MS  30000UL
+
+static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
+    if (idx < 0 || idx >= NUM_MOUNTS) return;
+    if (!mount_mac_valid(idx)) return;
+    uint32_t seen = _mount_last_seen[idx];
+    if (seen == 0 || (millis() - seen) > MOUNT_PRESENT_MS) return;   // not here
+
+    esp_err_t e = esp_now_send(_mount_mac[idx], raw, len);
+    if (e == ESP_OK) return;
+
+    // A REJECTED send never becomes a transmission, so it is invisible in the
+    // txfail counter — which counts sends that failed on air.  That is exactly
+    // what a frozen txfail looks like, so this is the line that would identify
+    // the wedge: ESP_ERR_ESPNOW_NO_MEM here means the stack has run out of TX
+    // buffers.  Rate-limited per mount so a persistent fault cannot bury the log.
+    static uint32_t last_log[NUM_MOUNTS] = {};
+    uint32_t now = millis();
+    if (now - last_log[idx] < 2000) return;
+    last_log[idx] = now;
+    Serial.printf("[ESPNOW] send to mount %d REJECTED: %s\n", idx + 1, esp_err_to_name(e));
+}
+
 static void forward_to_mounts(const ParsedPacket &pkt);
 #if DEMO_MODE
 // Defined further down (needs _relay_queue); ui_send_to_mount() calls it above.
@@ -788,10 +833,10 @@ static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
     if (mount_id == MOUNT_BROADCAST) {
         for (int i = 0; i < NUM_MOUNTS; i++)
             if (mount_mac_valid(i))
-                esp_now_send(_mount_mac[i], raw, raw_len);
+                espnow_send_if_present(i, raw, raw_len);
     } else if (mount_id >= 1 && mount_id <= NUM_MOUNTS) {
         if (mount_mac_valid(mount_id - 1))
-            esp_now_send(_mount_mac[mount_id - 1], raw, raw_len);
+            espnow_send_if_present(mount_id - 1, raw, raw_len);
     }
 }
 
@@ -1109,8 +1154,8 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
             if (_mount_sat[i] >= 0) {
                 SatSlot &sl = _sat[_mount_sat[i]];
                 if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
-            } else if (mount_mac_valid(i)) {
-                esp_now_send(_mount_mac[i], raw, raw_len);
+            } else {
+                espnow_send_if_present(i, raw, raw_len);   // gates on paired AND present
             }
         }
     } else if (pkt.mount_id >= 1 && pkt.mount_id <= NUM_MOUNTS) {
@@ -1118,8 +1163,8 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
         if (_mount_sat[m] >= 0) {
             SatSlot &sl = _sat[_mount_sat[m]];
             if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
-        } else if (mount_mac_valid(m)) {
-            esp_now_send(_mount_mac[m], raw, raw_len);
+        } else {
+            espnow_send_if_present(m, raw, raw_len);       // gates on paired AND present
         }
     }
     // Intercept JOG to update display preset bars
