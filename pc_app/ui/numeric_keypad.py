@@ -103,7 +103,12 @@ class NumericKeypad(QWidget):
         app.focusChanged.connect(self._on_focus_changed)
 
         owner.installEventFilter(self)
-        owner.destroyed.connect(self.deleteLater)
+        # Tear down explicitly rather than relying on deleteLater alone: the
+        # app-wide filter and the focusChanged connection below outlive this
+        # widget otherwise, leaving the application dispatching events at a
+        # dead object.  That is the classic source of an intermittent
+        # crash-on-exit, and one was seen once during testing.
+        owner.destroyed.connect(self._teardown)
         # focusChanged alone is not enough: a dialog opens with its first field
         # already focused, so tapping that field changes nothing and emits no
         # signal — the keypad would never appear for the very first value the
@@ -295,13 +300,6 @@ class NumericKeypad(QWidget):
     def _restore_owner_activation(self) -> None:
         if self._owner is None or not self._owner.isVisible():
             return
-        # Not on macOS.  WindowDoesNotAcceptFocus is honoured there, so this
-        # never has anything to hand back — and calling activateWindow() with
-        # the app in a native-fullscreen Space is itself a request to move the
-        # operator, which is the bug this whole thread has been chasing.
-        import sys as _sys
-        if _sys.platform == "darwin":
-            return
         if not self._owner.isActiveWindow():
             self._owner.activateWindow()
             t = self._target
@@ -433,6 +431,17 @@ class NumericKeypad(QWidget):
     def closeEvent(self, event):
         self._dismissed = True
         super().closeEvent(event)
+
+    def _teardown(self) -> None:
+        """Detach from the application before going away."""
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+            try:
+                app.focusChanged.disconnect(self._on_focus_changed)
+            except (TypeError, RuntimeError):
+                pass          # already disconnected, or app shutting down
+        self.deleteLater()
 
     # ── entry point ─────────────────────────────────────────────────────
     @classmethod

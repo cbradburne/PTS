@@ -22,56 +22,6 @@ from comms.mount_manager import MountManager
 from comms.protocol import AxisGroup, Axis, NUM_MOUNTS as _NUM_MOUNTS
 
 
-# TEMPORARY diagnostic — see ui/dialogs/config_probe.py for the story.
-# PTS_CFGSKIP=a,b,c disables parts of the real dialog so the macOS
-# fullscreen-Space bug can be bisected by SUBTRACTION.  Building a stand-in up
-# from nothing reached full parity without triggering it, so whatever is
-# responsible is something only the real thing does.
-#
-#   ports    _refresh_ports()  — enumerates serial ports through IOKit
-#   table    the mount-table fetch and refresh
-#   configs  _request_all_configs() — GET_CONFIG to every mount
-#   keypad   the numeric keypad
-#   signals  the MountManager signal connections
-#
-# Start with all of them, then add back one at a time:
-#   PTS_CFGSKIP=ports,table,configs,keypad,signals python3 main.py
-import os as _os
-_CFG_SKIP = {x.strip() for x in _os.environ.get("PTS_CFGSKIP", "").split(",") if x.strip()}
-def _skip(part: str) -> bool:
-    if _CFG_TABS is not None:
-        return True          # partial build — no widgets to update
-    if part in _CFG_SKIP:
-        print(f"[CFGTEST] skipping: {part}")
-        return True
-    return False
-
-# PTS_CFGTABS bisects the REAL _build() by tab group.  The stand-in probe now
-# contains every widget type and side effect the real dialog has and STILL will
-# not reproduce the bug, so the cause is in this file's own tab construction.
-#
-#   PTS_CFGTABS=none                 no tabs at all
-#   PTS_CFGTABS=general              only the General tab
-#   PTS_CFGTABS=mounts               only the Mounts (pairing) tab
-#   PTS_CFGTABS=cams                 only the five Camera tabs
-#   PTS_CFGTABS=general,cams         combinations
-#   (unset)                          everything — normal behaviour
-#
-# Setting it also forces every side effect off, because they reference widgets
-# that a partial build has not created.  The dialog will be non-functional;
-# open it, note whether you were thrown out of fullscreen, close it.
-_CFG_TABS_RAW = _os.environ.get("PTS_CFGTABS")
-_CFG_TABS = (None if _CFG_TABS_RAW is None
-             else {x.strip() for x in _CFG_TABS_RAW.split(",") if x.strip()})
-def _tabs_on(group: str) -> bool:
-    if _CFG_TABS is None:
-        return True
-    on = group in _CFG_TABS
-    print(f"[CFGTEST] tab group {group}: {'ON' if on else 'off'}")
-    return on
-def _diag_partial() -> bool:
-    return _CFG_TABS is not None
-
 
 def _scrollable(inner: QWidget) -> QScrollArea:
     """Wrap a tab's content so it scrolls instead of being squashed.
@@ -141,23 +91,20 @@ class ConfigDialog(QWidget):
         self._pos_labels: dict[int, dict] = {}
         self._pos_captions: dict[int, dict] = {}
         self._build()
-        if not _skip('signals'):
-            self._mm.position_updated.connect(self._on_position)
+        self._mm.position_updated.connect(self._on_position)
         # Touchscreen numeric entry — a keypad beside the dialog, shown when a
         # spin box takes focus.  Built after _build() so the fields exist.
-        if self._config.numeric_keypad and not _skip('keypad'):
+        if self._config.numeric_keypad:
             from ui.numeric_keypad import NumericKeypad
             NumericKeypad.install(self)
         # Connect live-update signal — fires when a mount responds to CMD_GET_CONFIG
-        if not _skip('signals'):
-            self._mm.config_report_received.connect(self._on_config_report)
-        if not _skip('configs'):
-            self._request_all_configs()
+        self._mm.config_report_received.connect(self._on_config_report)
+        # Request config from all online mounts immediately
+        self._request_all_configs()
         # Pairing table (hub-owned): live-refresh + request an initial push
-        if not _skip('table'):
-            self._mm.mount_table_updated.connect(self._refresh_mount_table)
-            self._refresh_mount_table(self._mm.mount_table())
-            self._mm.request_mount_table()
+        self._mm.mount_table_updated.connect(self._refresh_mount_table)
+        self._refresh_mount_table(self._mm.mount_table())
+        self._mm.request_mount_table()
 
     # ── QDialog-compatible surface (this is a QWidget — see class note) ──
     def accept(self) -> None:
@@ -272,14 +219,11 @@ class ConfigDialog(QWidget):
         # Explicit tab-index → mount map, so adding/reordering tabs can't
         # silently make _on_tab_changed request config for the wrong camera.
         self._tab_mount: dict[int, int] = {}
-        if _tabs_on('general'):
-            self._tabs.addTab(self._build_general_tab(), "General")
-        if _tabs_on('mounts'):
-            self._tabs.addTab(self._build_mounts_tab(),  "Mounts")
-        if _tabs_on('cams'):
-            for mid in range(1, 6):
-                idx = self._tabs.addTab(self._build_mount_tab(mid), f"Camera {mid}")
-                self._tab_mount[idx] = mid
+        self._tabs.addTab(self._build_general_tab(), "General")
+        self._tabs.addTab(self._build_mounts_tab(),  "Mounts")
+        for mid in range(1, 6):
+            idx = self._tabs.addTab(self._build_mount_tab(mid), f"Camera {mid}")
+            self._tab_mount[idx] = mid
 
         # Request config when the user switches to a mount tab
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -450,7 +394,7 @@ class ConfigDialog(QWidget):
         self._port_combo = QComboBox()
         self._refresh_ports_btn = QPushButton("Refresh")
         self._refresh_ports_btn.clicked.connect(self._refresh_ports)
-        if not _skip('ports'): self._refresh_ports()
+        self._refresh_ports()
         port_row.addWidget(self._port_combo)
         port_row.addWidget(self._refresh_ports_btn)
         serial_form.addRow("Serial port:", port_row)
@@ -953,15 +897,6 @@ class ConfigDialog(QWidget):
     # ------------------------------------------------------------------
 
     def _apply(self) -> None:
-        # PTS_CFGTABS built only some of the tabs, so most of the widgets this
-        # reads do not exist.  Nothing to save in that mode — just close, so OK
-        # does not abort the app mid-bisect.
-        if _diag_partial():
-            print("[CFGTEST] partial build — OK closes without saving")
-            self._result = 1
-            self.accepted.emit()
-            self.close()
-            return
         # General — connection
         if self._tcp_radio.isChecked():
             self._config.bridge_mode     = "tcp"
