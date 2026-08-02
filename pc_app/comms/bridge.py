@@ -210,6 +210,14 @@ class Bridge:
     # Healthy ACK cadence is one every ~3 s (the GET_CONFIG poll), so 15 s is a
     # wide margin over normal loss yet still catches a send wedge promptly.
     MOUNT_ACK_STALE_S = 15.0
+    # A mount heard from within this window is PRESENT.  Beyond it, it is off or
+    # gone, and nothing the hub does can help — restarting it would drop every
+    # other mount to cure a camera someone has unplugged.  A live mount sends
+    # STATUS at 10 Hz and health every 10 s, so 15 s of total silence is
+    # unambiguous.  Without this the ladder restarted the hub whenever the only
+    # deployed mount was switched off, which on a rig where mounts go out per
+    # event is an ordinary end-of-day action.
+    MOUNT_SILENT_S = 15.0
     # Don't run wedge detection for this long after a (re)connect — the first
     # command on a cold pipe can legitimately take 1–3 s to ACK.
     POST_CONNECT_GRACE_S = 6.0
@@ -273,11 +281,16 @@ class Bridge:
         # so they still never appear here.
         self._acked_mounts: set[int] = set()
         self._rx_mounts: set[int] = set()   # mounts we've received any packet from
-        # mount_id → monotonic ts of its last ACK/NACK.  The liveness half of
-        # wedge detection: _acked_mounts says "ever answered", this says
-        # "answering now".  Deliberately NOT last-packet-received — a mount in a
-        # hub→mount send wedge keeps sending while receiving nothing.
+        # Wedge detection needs BOTH of these, because three situations look
+        # the same from a missing ACK alone:
+        #   ACKing                  -> healthy
+        #   sending, but not ACKing -> hub→mount SEND wedge, must escalate
+        #   not sending at all      -> the mount is off or gone; the hub is fine
+        # _mount_last_ack answers the first, _mount_last_rx the third.  Keeping
+        # only the ACK timestamp made a switched-off mount indistinguishable
+        # from a wedge, and restarted the hub every time one was powered down.
         self._mount_last_ack: dict[int, float] = {}
+        self._mount_last_rx:  dict[int, float] = {}
         self._tx_cmd_sent  = 0          # interesting commands written
         self._tx_cmd_acked = 0          # interesting commands ACKed/NACKed back
         self._last_forced_reconnect: float = 0.0
@@ -533,6 +546,7 @@ class Bridge:
         # detected.  The hub sentinel (0xFE) and broadcast (0) are excluded.
         if 1 <= pkt.mount_id <= 5:
             self._rx_mounts.add(pkt.mount_id)
+            self._mount_last_rx[pkt.mount_id] = time.monotonic()
         self._note_rx_ack(pkt)
         self._note_hub_diag(pkt)
         self._note_hub_event(pkt)
@@ -807,6 +821,9 @@ class Bridge:
                     continue                      # absent mount — never escalate
                 if now - self._mount_last_ack.get(mt, 0.0) < self.MOUNT_ACK_STALE_S:
                     continue                      # still ACKing — not wedged
+                if now - self._mount_last_rx.get(mt, 0.0) > self.MOUNT_SILENT_S:
+                    continue                      # not talking at all — it is
+                                                  # switched off, not wedged
                 age = now - t
                 if age > oldest:
                     oldest = age
