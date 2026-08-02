@@ -39,10 +39,38 @@ from comms.protocol import AxisGroup, Axis, NUM_MOUNTS as _NUM_MOUNTS
 import os as _os
 _CFG_SKIP = {x.strip() for x in _os.environ.get("PTS_CFGSKIP", "").split(",") if x.strip()}
 def _skip(part: str) -> bool:
+    if _CFG_TABS is not None:
+        return True          # partial build — no widgets to update
     if part in _CFG_SKIP:
         print(f"[CFGTEST] skipping: {part}")
         return True
     return False
+
+# PTS_CFGTABS bisects the REAL _build() by tab group.  The stand-in probe now
+# contains every widget type and side effect the real dialog has and STILL will
+# not reproduce the bug, so the cause is in this file's own tab construction.
+#
+#   PTS_CFGTABS=none                 no tabs at all
+#   PTS_CFGTABS=general              only the General tab
+#   PTS_CFGTABS=mounts               only the Mounts (pairing) tab
+#   PTS_CFGTABS=cams                 only the five Camera tabs
+#   PTS_CFGTABS=general,cams         combinations
+#   (unset)                          everything — normal behaviour
+#
+# Setting it also forces every side effect off, because they reference widgets
+# that a partial build has not created.  The dialog will be non-functional;
+# open it, note whether you were thrown out of fullscreen, close it.
+_CFG_TABS_RAW = _os.environ.get("PTS_CFGTABS")
+_CFG_TABS = (None if _CFG_TABS_RAW is None
+             else {x.strip() for x in _CFG_TABS_RAW.split(",") if x.strip()})
+def _tabs_on(group: str) -> bool:
+    if _CFG_TABS is None:
+        return True
+    on = group in _CFG_TABS
+    print(f"[CFGTEST] tab group {group}: {'ON' if on else 'off'}")
+    return on
+def _diag_partial() -> bool:
+    return _CFG_TABS is not None
 
 
 def _scrollable(inner: QWidget) -> QScrollArea:
@@ -244,11 +272,14 @@ class ConfigDialog(QWidget):
         # Explicit tab-index → mount map, so adding/reordering tabs can't
         # silently make _on_tab_changed request config for the wrong camera.
         self._tab_mount: dict[int, int] = {}
-        self._tabs.addTab(self._build_general_tab(), "General")
-        self._tabs.addTab(self._build_mounts_tab(),  "Mounts")
-        for mid in range(1, 6):
-            idx = self._tabs.addTab(self._build_mount_tab(mid), f"Camera {mid}")
-            self._tab_mount[idx] = mid
+        if _tabs_on('general'):
+            self._tabs.addTab(self._build_general_tab(), "General")
+        if _tabs_on('mounts'):
+            self._tabs.addTab(self._build_mounts_tab(),  "Mounts")
+        if _tabs_on('cams'):
+            for mid in range(1, 6):
+                idx = self._tabs.addTab(self._build_mount_tab(mid), f"Camera {mid}")
+                self._tab_mount[idx] = mid
 
         # Request config when the user switches to a mount tab
         self._tabs.currentChanged.connect(self._on_tab_changed)
