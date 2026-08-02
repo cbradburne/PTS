@@ -1145,7 +1145,16 @@ class MainWindow(QMainWindow):
         # the macOS fullscreen wobble.
         self._conn_snapshot = (self._config.bridge_mode, self._config.bridge_host,
                                self._config.bridge_tcp_port, self._config.bridge_port)
-        dlg = ConfigDialog(self._config, self._mm, self._bridge, self._store, self)
+        # TEMPORARY: PTS_CFGTEST=<n> swaps in the bisect probe instead of the
+        # real dialog.  See ui/dialogs/config_probe.py; delete both once the
+        # macOS fullscreen-Space cause is known.
+        from .dialogs.config_probe import probe_level, ConfigProbe
+        _lvl = probe_level()
+        if _lvl is None:
+            dlg = ConfigDialog(self._config, self._mm, self._bridge, self._store, self)
+        else:
+            dlg = ConfigProbe(self._config, self._mm, self._bridge, self._store,
+                              self, level=_lvl)
         self._config_dlg = dlg
         dlg.names_changed.connect(self._reload_names_ui)
         # Shown exactly like the CV window (which floats correctly over macOS
