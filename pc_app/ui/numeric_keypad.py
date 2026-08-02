@@ -295,6 +295,13 @@ class NumericKeypad(QWidget):
     def _restore_owner_activation(self) -> None:
         if self._owner is None or not self._owner.isVisible():
             return
+        # Not on macOS.  WindowDoesNotAcceptFocus is honoured there, so this
+        # never has anything to hand back — and calling activateWindow() with
+        # the app in a native-fullscreen Space is itself a request to move the
+        # operator, which is the bug this whole thread has been chasing.
+        import sys as _sys
+        if _sys.platform == "darwin":
+            return
         if not self._owner.isActiveWindow():
             self._owner.activateWindow()
             t = self._target

@@ -1134,8 +1134,9 @@ class MainWindow(QMainWindow):
         # reason the CV window used .show()).  Result handled via the accepted
         # signal instead of exec()'s return value.
         if getattr(self, "_config_dlg", None):
+            # raise_ only, for the same reason as the open path below: making
+            # the window key would ask macOS to move the operator to it.
             self._config_dlg.raise_()
-            self._config_dlg.activateWindow()
             return
         # Snapshot the connection settings so _on_config_accepted only tears
         # down + rebuilds the link if they actually changed — otherwise every
@@ -1157,12 +1158,18 @@ class MainWindow(QMainWindow):
         dlg.accepted.connect(self._on_config_accepted)
         dlg.finished.connect(lambda _: setattr(self, "_config_dlg", None))
         dlg.show()
-        # Deferred: called synchronously after show() these run BEFORE the
-        # window manager has finished placing the window, so the stacking order
-        # was applied to a window that then moved — which is how it kept ending
-        # up behind everything else on the desktop.  One event-loop turn later
-        # the placement is settled and the raise sticks.
-        QTimer.singleShot(0, lambda: (dlg.raise_(), dlg.activateWindow()))
+        # raise_() ONLY — no activateWindow().  Making a window "key" at the
+        # AppKit level is what asks macOS to bring the operator TO it, and with
+        # the main window in a native-fullscreen Space that means being thrown
+        # to the desktop.  The Sheet flag fixed WHERE the window goes; this is
+        # what was still moving the user.  The CV window has always shown with
+        # show()+raise_() and no activate, and has never had the problem —
+        # this now matches it exactly.
+        #
+        # Deferred by one event-loop turn: run synchronously after show() the
+        # raise is applied before the window manager has finished placing the
+        # window, which is how it ended up behind everything else.
+        QTimer.singleShot(0, dlg.raise_)
 
     def _on_config_accepted(self) -> None:
         conn_now = (self._config.bridge_mode, self._config.bridge_host,
