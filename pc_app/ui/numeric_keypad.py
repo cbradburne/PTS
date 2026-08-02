@@ -70,7 +70,12 @@ class NumericKeypad(QWidget):
     def __init__(self, owner: QWidget) -> None:
         # Tool + FramelessWindowHint keeps it off the taskbar and undecorated;
         # StaysOnTop keeps it above the dialog it serves.
-        super().__init__(None,
+        # PARENTED to the dialog, not None.  A parentless top-level window
+        # cannot live in a macOS native-fullscreen Space, so the first time
+        # this appeared macOS switched the operator to the desktop to show it —
+        # with the Config sheet left correctly behind on the fullscreen Space.
+        # An owned Tool window follows its parent's Space instead.
+        super().__init__(owner,
                          Qt.WindowType.Tool
                          | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint
@@ -89,6 +94,7 @@ class NumericKeypad(QWidget):
         self._owner = owner
         self._target: QWidget | None = None
         self._dismissed = False   # Close pressed — stay hidden until focus moves
+        self._owner_shown_ms = 0  # see _on_focus_changed's opening grace
 
         self._build()
 
@@ -175,8 +181,16 @@ class NumericKeypad(QWidget):
             self._dismissed = False     # a different field — honour it again
         self._target = target
         self._caption.setText(self._label_for(target))
-        if not self._dismissed:
-            self._show_beside_owner()
+        if self._dismissed:
+            return
+        # Opening grace.  Showing the dialog auto-focuses its first spin box,
+        # which is not the operator asking for a keypad — it popped up unbidden
+        # every time Config was opened.  An explicit tap still shows it
+        # immediately; only this focus-driven path waits.
+        import time as _t
+        if self._owner_shown_ms and (_t.monotonic() - self._owner_shown_ms) < 0.4:
+            return
+        self._show_beside_owner()
 
     def _current_target(self) -> QWidget | None:
         """The field to type into, resolved live wherever possible.
@@ -390,6 +404,10 @@ class NumericKeypad(QWidget):
 
     def eventFilter(self, obj, event):
         et = event.type()
+        if obj is self._owner and et == QEvent.Type.Show:
+            import time as _t
+            self._owner_shown_ms = _t.monotonic()
+            return False
         if obj is self._owner and et in (QEvent.Type.Close, QEvent.Type.Hide):
             self.hide()
             return False
