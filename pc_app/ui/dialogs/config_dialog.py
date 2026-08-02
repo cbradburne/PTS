@@ -851,9 +851,16 @@ class ConfigDialog(QWidget):
             row_hl.addWidget(QLabel("  Accel (mm/s²):")); row_hl.addWidget(acc_spin)
             sl_form.addRow(f"Preset {i}:", row_w)
             sl_rows.append((spd_spin, acc_spin))
-        sl_box.setVisible(mc.has_slider)
         has_slider_cb.toggled.connect(sl_box.setVisible)
         layout.addWidget(sl_box)
+        # setVisible only AFTER addWidget.  On a widget that has no parent yet,
+        # setVisible(True) does not "make it visible later" — it SHOWS IT AS A
+        # TOP-LEVEL WINDOW.  Five camera tabs meant a burst of stray windows
+        # during construction, and on macOS they land on the desktop Space and
+        # take the operator with them.  That is the fullscreen bug: nothing to
+        # do with the Config window's own flags, which is why four fixes to
+        # those changed nothing.
+        sl_box.setVisible(mc.has_slider)
 
         # Speed preset — Zoom (single independent preset)
         zm_box  = QGroupBox("Zoom Speed Preset")
@@ -916,8 +923,9 @@ class ConfigDialog(QWidget):
             box.setVisible(scb.isChecked() or not lcb.isChecked())
         has_slider_cb.toggled.connect(_sync_limits_box)
         lanc_zoom_cb.toggled.connect(_sync_limits_box)
-        _sync_limits_box()
         layout.addWidget(limits_box)
+        _sync_limits_box()          # after addWidget — see the note above
+
 
         layout.addStretch()
         scroll.setWidget(inner)
