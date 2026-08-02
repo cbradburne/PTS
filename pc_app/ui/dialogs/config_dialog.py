@@ -22,6 +22,29 @@ from comms.mount_manager import MountManager
 from comms.protocol import AxisGroup, Axis, NUM_MOUNTS as _NUM_MOUNTS
 
 
+# TEMPORARY diagnostic — see ui/dialogs/config_probe.py for the story.
+# PTS_CFGSKIP=a,b,c disables parts of the real dialog so the macOS
+# fullscreen-Space bug can be bisected by SUBTRACTION.  Building a stand-in up
+# from nothing reached full parity without triggering it, so whatever is
+# responsible is something only the real thing does.
+#
+#   ports    _refresh_ports()  — enumerates serial ports through IOKit
+#   table    the mount-table fetch and refresh
+#   configs  _request_all_configs() — GET_CONFIG to every mount
+#   keypad   the numeric keypad
+#   signals  the MountManager signal connections
+#
+# Start with all of them, then add back one at a time:
+#   PTS_CFGSKIP=ports,table,configs,keypad,signals python3 main.py
+import os as _os
+_CFG_SKIP = {x.strip() for x in _os.environ.get("PTS_CFGSKIP", "").split(",") if x.strip()}
+def _skip(part: str) -> bool:
+    if part in _CFG_SKIP:
+        print(f"[CFGTEST] skipping: {part}")
+        return True
+    return False
+
+
 def _scrollable(inner: QWidget) -> QScrollArea:
     """Wrap a tab's content so it scrolls instead of being squashed.
 
@@ -90,20 +113,23 @@ class ConfigDialog(QWidget):
         self._pos_labels: dict[int, dict] = {}
         self._pos_captions: dict[int, dict] = {}
         self._build()
-        self._mm.position_updated.connect(self._on_position)
+        if not _skip('signals'):
+            self._mm.position_updated.connect(self._on_position)
         # Touchscreen numeric entry — a keypad beside the dialog, shown when a
         # spin box takes focus.  Built after _build() so the fields exist.
-        if self._config.numeric_keypad:
+        if self._config.numeric_keypad and not _skip('keypad'):
             from ui.numeric_keypad import NumericKeypad
             NumericKeypad.install(self)
         # Connect live-update signal — fires when a mount responds to CMD_GET_CONFIG
-        self._mm.config_report_received.connect(self._on_config_report)
-        # Request config from all online mounts immediately
-        self._request_all_configs()
+        if not _skip('signals'):
+            self._mm.config_report_received.connect(self._on_config_report)
+        if not _skip('configs'):
+            self._request_all_configs()
         # Pairing table (hub-owned): live-refresh + request an initial push
-        self._mm.mount_table_updated.connect(self._refresh_mount_table)
-        self._refresh_mount_table(self._mm.mount_table())
-        self._mm.request_mount_table()
+        if not _skip('table'):
+            self._mm.mount_table_updated.connect(self._refresh_mount_table)
+            self._refresh_mount_table(self._mm.mount_table())
+            self._mm.request_mount_table()
 
     # ── QDialog-compatible surface (this is a QWidget — see class note) ──
     def accept(self) -> None:
@@ -393,7 +419,7 @@ class ConfigDialog(QWidget):
         self._port_combo = QComboBox()
         self._refresh_ports_btn = QPushButton("Refresh")
         self._refresh_ports_btn.clicked.connect(self._refresh_ports)
-        self._refresh_ports()
+        if not _skip('ports'): self._refresh_ports()
         port_row.addWidget(self._port_combo)
         port_row.addWidget(self._refresh_ports_btn)
         serial_form.addRow("Serial port:", port_row)
