@@ -874,6 +874,27 @@ static void destroy_positions_screen();   // forward declaration
 static void build_positions_screen();     // forward declaration
 static void destroy_detail_screen();      // forward declaration
 static void build_detail_screen();        // forward declaration
+// Slot data staged by loop() (core 0) and applied by whichever side next holds
+// the LVGL mutex.
+//
+// hub_ui_update_slots() must never block: a wait there stalls Serial1.read()
+// and overflows the UART at 460800.  But it used to take the mutex BEFORE
+// recording anything, so a failed take discarded the mount's new state
+// outright — not deferred, lost.  The next update that did win the lock was
+// then compared against state from before the drop, so the screen converged
+// only when one happened to get through.
+//
+// The detail screen re-renders most and therefore holds the mutex longest,
+// which is why its borders lagged ~10 s while the home dots and Positions
+// screen — cheaper to repaint, so losing far fewer updates — looked instant.
+//
+// Payload first, flag last; the mutex acquisition is the barrier.  Same pattern
+// as _subject_mask and _mount_table.
+struct StagedSlots { uint16_t occ, at; uint8_t tgt, state; };
+static StagedSlots    _slots_in[5]    = {};
+static volatile bool  _slots_dirty[5] = { false, false, false, false, false };
+
+static void apply_slots_locked(int i);    // forward declaration
 static void refresh_detail_slots();       // forward declaration
 static void refresh_detail_dials();       // forward declaration
 
@@ -2924,6 +2945,15 @@ static void lvgl_task_fn(void *arg) {
             // style calls) and drives a full-screen re-render every time; the
             // targeted path makes ≤ 8 border-colour calls per look-at mount
             // and only touches the currently active screen.
+            // ── Slot updates that could not take the mutex ───────────────
+            // hub_ui_update_slots() stages and flags rather than blocking, so
+            // anything it could not apply is applied here, inside the mutex we
+            // already hold.  Without this the update is simply lost and the
+            // screen shows the mount's previous state until some later update
+            // happens to win the lock.
+            for (int i = 0; i < 5; i++)
+                if (_slots_dirty[i]) apply_slots_locked(i);
+
             if (_la_refresh_pending) {
                 _la_refresh_pending = false;
                 lv_obj_t *active_scr = lv_scr_act();
@@ -3305,17 +3335,14 @@ void hub_ui_update_preset(uint8_t mount_id, uint8_t pt_preset, uint8_t sz_preset
     xSemaphoreGive(_lvgl_mux);
 }
 
-void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
-                         uint16_t slot_at, uint8_t target_slot, uint8_t state) {
-    if (mount_id < 1 || mount_id > 5) return;
-    int i = mount_id - 1;
-    // Same gate as hub_ui_update_preset(): ignore slot data for a camera we
-    // don't believe is connected, so stray/stale frames can't paint phantom
-    // saved-position dots that outlive the (idempotence-gated) disconnect.
-    // A real camera is always marked connected by hub_ui_update_cam() first —
-    // the hub sends UPDATE_CAM before UPDATE_SLOTS from the same STATUS packet.
-    if (!_cam[i].connected) return;
-    if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
+
+// Caller must hold _lvgl_mux.
+static void apply_slots_locked(int i) {
+    uint16_t slot_occupied = _slots_in[i].occ;
+    uint16_t slot_at       = _slots_in[i].at;
+    uint8_t  target_slot   = _slots_in[i].tgt;
+    uint8_t  state         = _slots_in[i].state;
+    _slots_dirty[i] = false;
 
     // Snapshot old slot values before overwriting.
     bool     la        = cam_is_look_at(i);
@@ -3398,6 +3425,29 @@ void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
             refresh_positions_row((int)i);
     }
 
+}
+
+void hub_ui_update_slots(uint8_t mount_id, uint16_t slot_occupied,
+                         uint16_t slot_at, uint8_t target_slot, uint8_t state) {
+    if (mount_id < 1 || mount_id > 5) return;
+    int i = mount_id - 1;
+    // Same gate as hub_ui_update_preset(): ignore slot data for a camera we
+    // don't believe is connected, so stray/stale frames can't paint phantom
+    // saved-position dots that outlive the (idempotence-gated) disconnect.
+    // A real camera is always marked connected by hub_ui_update_cam() first —
+    // the hub sends UPDATE_CAM before UPDATE_SLOTS from the same STATUS packet.
+    if (!_cam[i].connected) return;
+
+    _slots_in[i].occ   = slot_occupied;
+    _slots_in[i].at    = slot_at;
+    _slots_in[i].tgt   = target_slot;
+    _slots_in[i].state = state;
+    _slots_dirty[i]    = true;          // flag last — see above
+
+    // Best effort: apply now if the mutex is free, otherwise the LVGL task
+    // picks it up from the dirty flag.  Either way the update is not lost.
+    if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
+    apply_slots_locked(i);
     xSemaphoreGive(_lvgl_mux);
 }
 
