@@ -43,6 +43,33 @@
 #define ETH_HOSTNAME "pts-node"
 #endif
 
+// ---------------------------------------------------------------------------
+// Static address (optional — DHCP is the default and the norm)
+// ---------------------------------------------------------------------------
+// Define these in the SKETCH, before including this header, never here: hub and
+// satellites share this file, and a static address set here would hand every
+// one of them the same IP.
+//
+//   #define ETH_STATIC_IP  "192.168.1.50"
+//   #define ETH_GATEWAY    "192.168.1.1"
+//
+// Useful when the DHCP server only serves registered MACs and this board is not
+// on the list yet — the chicken-and-egg where you need the lease to find the
+// board and the board to find the MAC.  A static address sidesteps it, at the
+// cost of being a second place the network is configured, so prefer getting the
+// MAC registered and deleting these again.
+#ifdef ETH_STATIC_IP
+  #ifndef ETH_GATEWAY
+    #error "ETH_STATIC_IP also needs ETH_GATEWAY (the router, for anything off-subnet)"
+  #endif
+  #ifndef ETH_SUBNET
+    #define ETH_SUBNET "255.255.255.0"
+  #endif
+  #ifndef ETH_DNS
+    #define ETH_DNS ETH_GATEWAY
+  #endif
+#endif
+
 static bool _eth_up = false;
 
 inline bool eth_is_up() { return _eth_up; }
@@ -51,6 +78,17 @@ inline void eth_on_event(arduino_event_id_t event) {
     switch (event) {
         case ARDUINO_EVENT_ETH_CONNECTED:
             Serial.println("[ETH] link up");
+#ifdef ETH_STATIC_IP
+            // With DHCP there is a GOT_IP event to wait for.  With a static
+            // address there may not be — the address was set before the link
+            // existed — so link-up IS the interface becoming usable.  Without
+            // this, _eth_up would stay false forever and the satellite uplink
+            // would never even attempt to connect, silently.
+            _eth_up = true;
+            Serial.printf("[ETH] %s  gw %s  (static)\n",
+                          ETH.localIP().toString().c_str(),
+                          ETH.gatewayIP().toString().c_str());
+#endif
             break;
         case ARDUINO_EVENT_ETH_GOT_IP:
             _eth_up = true;
@@ -93,6 +131,26 @@ inline bool eth_begin() {
     // without it and the lease list shows an anonymous espressif device.
     ETH.setHostname(ETH_HOSTNAME);
 
+#ifdef ETH_STATIC_IP
+    // Static address instead of DHCP.  config() has the same constraint as
+    // setHostname above: no netif, no effect, and it tells you by returning
+    // false rather than by failing loudly — so the result is reported.
+    {
+        IPAddress ip, gw, sn, dns;
+        bool parsed = ip.fromString(ETH_STATIC_IP) && gw.fromString(ETH_GATEWAY)
+                   && sn.fromString(ETH_SUBNET)    && dns.fromString(ETH_DNS);
+        if (!parsed) {
+            Serial.println("[ETH] static address strings are malformed - staying on DHCP");
+        } else if (ETH.config(ip, gw, sn, dns)) {
+            Serial.printf("[ETH] static %s  gw %s  mask %s  (DHCP off)\n",
+                          ip.toString().c_str(), gw.toString().c_str(),
+                          sn.toString().c_str());
+        } else {
+            Serial.println("[ETH] static config REJECTED - staying on DHCP");
+        }
+    }
+#endif
+
     // The MAC is printed HERE rather than alongside the IP, because a network
     // that only serves addresses to known MACs gives an unlisted board no lease
     // at all — waiting for an IP to reveal the MAC you need in order to be
@@ -105,16 +163,37 @@ inline bool eth_begin() {
     return true;
 }
 
-// Call periodically.  Only produces a one-shot warning: the link genuinely can
-// be down for a while (patching, switch reboot) without anything being wrong,
-// and a repeating error would bury the log the way the ANOMALY spam did.
+// How often to repeat the "still down" line.  It used to be one-shot, to keep a
+// link that is legitimately down for a while (patching, a switch reboot) from
+// burying the log the way the ANOMALY spam did.  But on a native-USB board the
+// only way to see a boot-time message is to reset with a monitor already
+// attached — and a reset re-enumerates USB, which drops the monitor.  So the
+// one message carrying the MAC was effectively unreachable.  Once a minute
+// costs nothing next to the packet stream and needs no reset to catch.
+#ifndef ETH_DOWN_REPEAT_MS
+#define ETH_DOWN_REPEAT_MS  60000UL
+#endif
+
+// Call periodically.  Separates the two ways Ethernet fails, because they have
+// nothing to do with each other: no link is a cable, a port or the pin map;
+// link but no lease is the DHCP server declining — which on a network that
+// only serves registered MACs means this board's Ethernet MAC is not on the
+// list.  So that line carries the MAC, since it is the answer to the problem
+// it is reporting.
 inline void eth_report_once_if_down(uint32_t since_boot_ms, uint32_t warn_after_ms) {
-    static bool warned = false;
-    if (_eth_up) { warned = false; return; }
-    if (!warned && since_boot_ms > warn_after_ms) {
-        warned = true;
-        Serial.printf("[ETH] no link/IP after %lu ms — check the cable, the switch "
-                      "port, and the pin map in shared/board_eth.h\n",
+    static uint32_t next_ms = 0;
+    if (_eth_up) { next_ms = 0; return; }
+    if (since_boot_ms < warn_after_ms) return;
+    if (next_ms && since_boot_ms < next_ms) return;
+    next_ms = since_boot_ms + ETH_DOWN_REPEAT_MS;
+
+    if (!ETH.linkUp()) {
+        Serial.printf("[ETH] no link after %lu ms - check the cable, the switch port, "
+                      "and the pin map in shared/board_eth.h\n",
                       (unsigned long)since_boot_ms);
+    } else {
+        Serial.printf("[ETH] link UP but no DHCP lease after %lu ms - register mac %s "
+                      "with the network (this is the Ethernet MAC, NOT the AP MAC)\n",
+                      (unsigned long)since_boot_ms, ETH.macAddress().c_str());
     }
 }

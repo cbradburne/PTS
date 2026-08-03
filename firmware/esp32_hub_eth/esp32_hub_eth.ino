@@ -96,6 +96,16 @@
 // defined by the time it is included.
 #include "../shared/sat_link.h"
 #define ETH_HOSTNAME SAT_HUB_HOSTNAME
+
+// Uncomment to give the hub a fixed address instead of asking DHCP for one.
+// Worth doing when the DHCP server only serves MACs on a list and this board is
+// not on it yet — otherwise the hub never gets an address, and the satellites
+// have nothing to resolve pts-hub.local to.  Pick something outside the DHCP
+// pool so nothing else is ever handed the same address.  Delete both lines once
+// the Ethernet MAC is registered; DHCP keeps the addressing in one place.
+// #define ETH_STATIC_IP  "192.168.1.50"
+// #define ETH_GATEWAY    "192.168.1.1"
+
 #include "../shared/board_eth.h"
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
 
