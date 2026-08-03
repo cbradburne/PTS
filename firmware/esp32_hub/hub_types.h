@@ -17,6 +17,10 @@ struct RelayMsg {
     int8_t   rssi;
     uint8_t  src_idx;     // bound slot 0-4, or 0xFF if the sender MAC is unbound
     uint8_t  src_mac[6];  // sender MAC — used by the pairing rules in loop()
+    // -1 = arrived on local ESP-NOW, else the satellite slot it was relayed by.
+    // Defaulted, so the XIAO hub — which has no satellites and never sets this
+    // — queues a defined value rather than whatever was on the stack.
+    int8_t   via_sat = -1;
 };
 
 // Raw bytes received from a WebSocket client — queued from the AsyncTCP task

@@ -69,6 +69,7 @@
 // Pairing management payload sizes (mirror the disp_uart.h DISP_MSG_* messages)
 #define MOUNT_TABLE_PAYLOAD_LEN    30   // 5 × MAC(6); an all-zero slot = unbound
 #define PAIR_CONFLICT_PAYLOAD_LEN  13   // cam(1) + new_mac(6) + old_mac(6)
+#define MOUNT_ROUTE_PAYLOAD_LEN     5   // one byte per cam: 0 = direct, N = via satellite N
 #define PAIR_DECIDE_PAYLOAD_LEN     8   // cam(1) + decision(1) + new_mac(6)
 
 // v2 look-at subject constants
@@ -189,6 +190,16 @@ typedef enum : uint8_t {
     CMD_PAIR_CONFLICT     = 0x9D,  // hub→clients, 13B: cam(1)+new_mac(6)+old_mac(6); cam=0 = dismiss
     CMD_PAIR_DECIDE       = 0x9E,  // client→hub, 8B: cam(1)+decision(1: 1=replace/set, 0=ignore)+new_mac(6)
     CMD_PAIR_FORGET       = 0x9F,  // client→hub, 1B: cam — clear (unbind) that slot (live mount re-pairs in ~5 s)
+    CMD_MOUNT_ROUTE       = 0xA0,  // hub→clients, 5B: one byte per cam — how the hub reaches it.
+                                   //   0        = direct, on the hub's own ESP-NOW radio
+                                   //   1..6     = relayed by that satellite (slot number)
+                                   // Kept separate from CMD_MOUNT_TABLE because a route changes
+                                   // whenever a mount roams, where a pairing almost never does.
+                                   // Pushed on every change and on CMD_GET_MOUNT_TABLE.
+                                   // Without it, RSSI is unreadable: it is measured wherever the
+                                   // frame arrived, so a mount can read -40 because a satellite
+                                   // is next to it, and drop to -85 for no visible reason when
+                                   // that satellite dies and it falls back to the hub.
 } CmdType;
 
 // CMD_HEALTH node_type values (payload byte [0])

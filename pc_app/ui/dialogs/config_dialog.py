@@ -103,8 +103,10 @@ class ConfigDialog(QWidget):
         self._request_all_configs()
         # Pairing table (hub-owned): live-refresh + request an initial push
         self._mm.mount_table_updated.connect(self._refresh_mount_table)
+        self._mm.mount_route_updated.connect(self._refresh_mount_route)
         self._refresh_mount_table(self._mm.mount_table())
-        self._mm.request_mount_table()
+        self._refresh_mount_route(self._mm.mount_route)
+        self._mm.request_mount_table()   # hub answers with the table AND the routes
 
     # ── QDialog-compatible surface (this is a QWidget — see class note) ──
     def accept(self) -> None:
@@ -560,6 +562,7 @@ class ConfigDialog(QWidget):
         # sends Qt off building font-family aliases (the startup warning).
         mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self._pair_mac_lbls:    dict[int, QLabel]      = {}
+        self._pair_via_lbls: dict = {}
         self._pair_forget_btns: dict[int, QPushButton] = {}
         for row, mid in enumerate(range(1, 6)):
             cam_lbl = QLabel(self._config.mount_label(mid))
@@ -569,13 +572,20 @@ class ConfigDialog(QWidget):
             mac_lbl.setFont(mono)
             mac_lbl.setStyleSheet("color: #8a97a8;")
             mac_lbl.setMinimumHeight(30)
+            # How the hub reaches this mount.  Blank when it is on the hub's
+            # own radio, which is the ordinary case and needs no decoration.
+            via_lbl = QLabel("")
+            via_lbl.setStyleSheet("color: #8a97a8; font-size: 11px;")
+            via_lbl.setMinimumHeight(30)
             forget_btn = QPushButton("Forget")
             forget_btn.setFixedHeight(30)
             forget_btn.clicked.connect(lambda checked, m=mid: self._mm.send_pair_forget(m))
             pair_grid.addWidget(cam_lbl,    row, 0)
             pair_grid.addWidget(mac_lbl,    row, 1)
-            pair_grid.addWidget(forget_btn, row, 2)
+            pair_grid.addWidget(via_lbl,    row, 2)
+            pair_grid.addWidget(forget_btn, row, 3)
             self._pair_mac_lbls[mid]    = mac_lbl
+            self._pair_via_lbls[mid]    = via_lbl
             self._pair_forget_btns[mid] = forget_btn
         pair_grid.setColumnStretch(1, 1)
         pair_vl.addLayout(pair_grid)
@@ -587,6 +597,19 @@ class ConfigDialog(QWidget):
     @staticmethod
     def _fmt_mac(mac: bytes) -> str:
         return ":".join(f"{b:02x}" for b in mac)
+
+    def _refresh_mount_route(self, route: list) -> None:
+        """Show which satellite relays each mount, if any.
+
+        Without this the RSSI in the log is unreadable: it is measured wherever
+        the frame arrived, so a mount reads -40 with a satellite beside it and
+        -85 when that satellite drops and it falls back to the hub — the same
+        mount, unmoved, with nothing else on screen to explain the change."""
+        for mid in range(1, 6):
+            via = route[mid - 1] if len(route) >= mid else 0
+            lbl = self._pair_via_lbls.get(mid)
+            if lbl is not None:
+                lbl.setText(f"via SAT {via}" if via else "")
 
     def _refresh_mount_table(self, table: list) -> None:
         """Update the Paired Mounts rows from the hub's table (5 × 6-byte MAC)."""

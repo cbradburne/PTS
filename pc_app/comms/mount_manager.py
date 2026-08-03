@@ -42,7 +42,7 @@ from .protocol import (
     MAX_SUBJECTS,
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
-    decode_mount_table, decode_pair_conflict, PairConflictPayload,
+    decode_mount_table, decode_mount_route, decode_pair_conflict, PairConflictPayload,
 )
 
 
@@ -133,6 +133,7 @@ class MountManager(QObject):
 
     # Pairing management (hub-owned mount table; nothing stored locally)
     mount_table_updated    = pyqtSignal(list)          # [5 × 6-byte MAC]; all-zero = unbound
+    mount_route_updated    = pyqtSignal(list)          # [5 × int]; 0 = direct, N = via satellite N
     pair_conflict          = pyqtSignal(object)        # PairConflictPayload; cam 0 = dismiss
 
     def __init__(self, bridge: Bridge, parent=None):
@@ -144,6 +145,8 @@ class MountManager(QObject):
         # Last mount table pushed by the hub (5 × 6-byte MAC; all-zero = unbound).
         # Mirror only — the hub is the source of truth.
         self._mount_table: list[bytes] = [b"\x00" * 6 for _ in range(NUM_MOUNTS)]
+        # 0 = the hub reaches that cam directly, N = relayed by satellite N.
+        self._mount_route: list[int] = [0] * NUM_MOUNTS
 
         bridge.on_packet(self._on_packet)
         self.destroyed.connect(lambda: bridge.off_packet(self._on_packet))
@@ -227,6 +230,14 @@ class MountManager(QObject):
     def mount_table(self) -> list[bytes]:
         """Last table the hub pushed (5 × 6-byte MAC; all-zero = unbound)."""
         return list(self._mount_table)
+
+    @property
+    def mount_route(self) -> list[int]:
+        """How the hub currently reaches each mount: 0 = its own radio,
+        N = relayed by satellite N.  The missing half of RSSI — that figure is
+        measured wherever the frame arrived, so it says nothing about distance
+        from the hub once satellites are in play."""
+        return list(self._mount_route)
 
     def send_set_limits(self, mount_id: int, axis: Axis,
                         min_steps: int, max_steps: int) -> None:
@@ -357,6 +368,16 @@ class MountManager(QObject):
                 self.mount_table_updated.emit(list(self._mount_table))
             except Exception as e:
                 log.error(f"MOUNT_TABLE decode failed: {e}")
+            return
+        if pkt.cmd == Cmd.MOUNT_ROUTE:
+            try:
+                route = decode_mount_route(pkt.payload)
+                changed = (route != self._mount_route)
+                self._mount_route = route
+                if changed:
+                    self.mount_route_updated.emit(list(route))
+            except Exception as e:
+                log.error(f"MOUNT_ROUTE decode failed: {e}")
             return
         if pkt.cmd == Cmd.PAIR_CONFLICT:
             try:

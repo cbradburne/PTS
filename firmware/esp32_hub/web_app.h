@@ -122,6 +122,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   background:transparent;color:var(--red);font-size:13px;font-weight:600;cursor:pointer;}
 .mnt-forget:active{background:var(--red);color:#fff;}
 .mnt-forget-sp{width:1px;}
+/* Route badge: quiet, because it is context for the RSSI rather than a
+   fault.  A mount reads -40 with a satellite beside it and -85 without,
+   and this is the only thing on screen that says which. */
+.mnt-via{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dim);
+  border:1px solid var(--dim);border-radius:6px;padding:3px 7px;margin-right:10px;
+  white-space:nowrap;flex-shrink:0;}
 /* ---- pairing-conflict sheet (shows over any page, like the hub display) ---- */
 #pair-sheet{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;
   flex-direction:column;align-items:center;justify-content:center;z-index:60;padding:16px;}
@@ -590,6 +596,7 @@ const CMD_MOUNT_TABLE        = 0x9C;  // hub→: 30B = 5 × MAC(6); all-zero slo
 const CMD_PAIR_CONFLICT      = 0x9D;  // hub→: 13B = cam(1)+new_mac(6)+old_mac(6); cam=0 = dismiss
 const CMD_PAIR_DECIDE        = 0x9E;  // →hub: 8B = cam(1)+decision(1: 1=replace, 0=ignore)+new_mac(6)
 const CMD_PAIR_FORGET        = 0x9F;  // →hub: 1B = cam — clear (unbind) that slot
+const CMD_MOUNT_ROUTE        = 0xA0;  // hub→: 5B = per-cam 0 = direct, N = via satellite N
 // CalibPrompt sub-states (mirrors protocol.h CalibPrompt enum)
 const CP_MOVING_TO_A = 0x01;  // slider moving to home — wait
 const CP_WAIT_SET_A  = 0x02;  // at home: aim then Set A
@@ -731,6 +738,7 @@ function mkGetConfig(id)  { return buildPkt(id, CMD_GET_CONFIG, null); }
 
 // ---- Pairing management (reads/writes the hub's mount table; nothing local) ----
 let mountTable   = [];      // 5 × [6 MAC bytes]; empty until the first MOUNT_TABLE
+let mountRoute = [];      // per-cam: 0 = direct, N = relayed by satellite N
 let pairConflict = null;    // {cam, newMac[6], oldMac[6]} while a conflict is live
 
 function macStr(m) {
@@ -757,6 +765,8 @@ function refreshMounts() {
            +   '<span class="mnt-cam">CAM ' + i + '</span>'
            +   '<span class="mnt-mac' + (mac ? '' : ' un') + '">'
            +     (mac || '— unpaired —') + '</span>'
+           +   (mountRoute[i - 1] ? '<span class="mnt-via">via SAT '
+                                        + mountRoute[i - 1] + '</span>' : '')
            +   (mac ? '<button class="mnt-forget" data-cam="' + i + '">Forget</button>'
                     : '<span class="mnt-forget-sp"></span>')
            + '</div>';
@@ -1167,6 +1177,12 @@ function _onOnePkt(buf, off) {
             cs.zmThresh = buf[base + 74];
         }
         if (_extActive && _extPage === 'config') refreshExtConfig();
+    }
+
+    if (cmd === CMD_MOUNT_ROUTE && plen >= 5) {
+        const base = off + 7;
+        mountRoute = Array.from(buf.subarray(base, base + NUM_MOUNTS));
+        if (_extActive && _extPage === 'mounts') refreshMounts();
     }
 
     if (cmd === CMD_MOUNT_TABLE && plen >= 30) {

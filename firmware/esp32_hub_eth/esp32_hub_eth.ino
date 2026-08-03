@@ -906,6 +906,7 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
     msg.src_idx = (idx >= 0) ? (uint8_t)idx : 0xFF;
     memcpy(msg.src_mac, recv_info->src_addr, 6);
     memcpy(msg.data, data, len);
+    msg.via_sat = -1;                  // arrived on our own radio
 
     xQueueSend(_relay_queue, &msg, 0);
 }
@@ -942,6 +943,20 @@ static void bcast_mount_table() {
     _ws.binaryAll(raw, (size_t)n);
 }
 
+// Which path the hub currently reaches each mount by: 0 = its own radio,
+// N = relayed by satellite N.  Sent on every change and whenever a client asks
+// for the mount table, so a client that connects after a roam does not show the
+// route as it was the last time it looked.
+static void send_mount_route() {
+    uint8_t buf[MOUNT_ROUTE_PAYLOAD_LEN];
+    for (int i = 0; i < NUM_MOUNTS; i++)
+        buf[i] = (_mount_sat[i] < 0) ? 0 : (uint8_t)(_mount_sat[i] + 1);
+    uint8_t raw[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_MOUNT_ROUTE, buf, sizeof(buf));
+    broadcast_to_all(raw, n);
+    _ws.binaryAll(raw, (size_t)n);
+}
+
 static void bcast_pair_conflict(uint8_t cam, const uint8_t *new_mac,
                                 const uint8_t *old_mac) {
     uint8_t buf[PAIR_CONFLICT_PAYLOAD_LEN] = {};
@@ -961,6 +976,7 @@ static bool handle_pairing_cmd(const ParsedPacket &pkt) {
     switch (pkt.cmd) {
     case CMD_GET_MOUNT_TABLE:
         bcast_mount_table();                       // refresh every client's view
+        send_mount_route();                        // ...and how each is reached
         return true;
     case CMD_PAIR_DECIDE:                           // set: replace (1) / ignore (0)
         if (pkt.payload_len >= PAIR_DECIDE_PAYLOAD_LEN)
@@ -1340,6 +1356,20 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
 
     _mount_rssi[msg.src_idx]      = msg.rssi;
     _mount_last_seen[msg.src_idx] = millis();
+
+    // Route follows the traffic, in both directions.  This is the only place
+    // _mount_sat[] is written, so a mount that returns to the hub's own radio
+    // is un-attributed by the same rule that attributed it — which is what the
+    // satellite-side-only version never did.
+    if (_mount_sat[msg.src_idx] != msg.via_sat) {
+        _mount_sat[msg.src_idx] = msg.via_sat;
+        if (msg.via_sat < 0)
+            Serial.printf("[SAT] mount %d back to local ESP-NOW\n", mount_id);
+        else
+            Serial.printf("[SAT] mount %d now via satellite %d\n",
+                          mount_id, msg.via_sat + 1);
+        send_mount_route();   // clients redraw the badge
+    }
 
     if (was_offline) {
         // Real connect transition — log it so the PC can compare a genuine
@@ -2426,14 +2456,15 @@ void loop() {
                 SatEnv env;
                 if (!sat_env_feed(&_sat[i].parser, (uint8_t)c, &env)) continue;
 
-                // Learn the route from where the traffic actually arrived.
-                uint8_t mid = (env.frame_len >= 4 &&
-                               env.frame[0] == PKT_START_1 &&
-                               env.frame[1] == PKT_START_2) ? env.frame[3] : 0;
-                if (mid >= 1 && mid <= NUM_MOUNTS && _mount_sat[mid - 1] != i) {
-                    _mount_sat[mid - 1] = i;
-                    Serial.printf("[SAT] mount %d now via satellite %d\n", mid, i + 1);
-                }
+                // Route is learned in ONE place, where the relay queue is
+                // drained, so local and satellite arrivals are handled by the
+                // same rule.  Attributing here only ever ADDED a satellite
+                // route and nothing removed it: a mount that roamed back to
+                // the hub's own radio kept the stale attribution, and since
+                // _mount_sat[] also decides where commands are SENT, they kept
+                // going out via a satellite that had aged the mount out of its
+                // peer table 60 s earlier.  STATUS still arrived locally, so
+                // the mount looked alive and simply ignored everything.
 
                 // Inject exactly as the ESP-NOW callback would, so a
                 // satellite-attached mount is indistinguishable downstream —
@@ -2446,6 +2477,7 @@ void loop() {
                 msg.src_idx = (idx >= 0) ? (uint8_t)idx : 0xFF;
                 memcpy(msg.src_mac, env.mac, 6);
                 memcpy(msg.data, env.frame, env.frame_len);
+                msg.via_sat = (int8_t)i;           // arrived over this satellite
                 xQueueSend(_relay_queue, &msg, 0);
             }
         }

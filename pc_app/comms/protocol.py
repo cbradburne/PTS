@@ -132,6 +132,7 @@ class Cmd(IntEnum):
     PAIR_CONFLICT     = 0x9D   # hub→clients, 13B: cam(1)+new_mac(6)+old_mac(6); cam=0 = dismiss
     PAIR_DECIDE       = 0x9E   # client→hub, 8B: cam(1)+decision(1: 1=replace, 0=ignore)+new_mac(6)
     PAIR_FORGET       = 0x9F   # client→hub, 1B: cam — clear (unbind) that slot
+    MOUNT_ROUTE       = 0xA0   # hub→clients, 5B: per-cam 0 = direct, N = via satellite N
 
 
 # CMD_HEALTH node_type values (payload byte [0])
@@ -1148,6 +1149,7 @@ def pkt_get_subjects(mount_id: int) -> bytes:
 HUB_SENTINEL              = 0xFE
 MOUNT_TABLE_PAYLOAD_LEN   = 30   # 5 × MAC(6)
 PAIR_CONFLICT_PAYLOAD_LEN = 13   # cam(1) + new_mac(6) + old_mac(6)
+MOUNT_ROUTE_PAYLOAD_LEN   = 5    # one byte per cam
 
 
 def pkt_get_mount_table() -> bytes:
@@ -1172,6 +1174,19 @@ def decode_mount_table(payload: bytes) -> list[bytes]:
     if len(payload) < MOUNT_TABLE_PAYLOAD_LEN:
         raise ParseError(f"MOUNT_TABLE payload too short: {len(payload)}")
     return [bytes(payload[i * 6:i * 6 + 6]) for i in range(NUM_MOUNTS)]
+
+
+def decode_mount_route(payload: bytes) -> list[int]:
+    """CMD_MOUNT_ROUTE → 5 ints: 0 = the hub reaches that cam on its own radio,
+    N = relayed by satellite N.
+
+    Worth surfacing because it is the missing half of RSSI.  Signal strength is
+    measured wherever the frame actually arrived, so a mount reads -40 when a
+    satellite is beside it and -85 when that satellite drops and it falls back
+    to the hub — the same mount, unmoved, with no other indication why."""
+    if len(payload) < MOUNT_ROUTE_PAYLOAD_LEN:
+        raise ParseError(f"MOUNT_ROUTE payload too short: {len(payload)}")
+    return [int(payload[i]) for i in range(NUM_MOUNTS)]
 
 
 @dataclass
