@@ -32,6 +32,7 @@
 #include <Preferences.h>
 
 #include "../shared/protocol.h"
+#define ETH_HOSTNAME "pts-sat"        // how this box appears to the DHCP server
 #include "../shared/board_eth.h"
 #include "../shared/sat_link.h"
 
@@ -42,8 +43,28 @@
 // a mount cannot tell a satellite from a hub (nor should it).
 #define AP_SSID_PREFIX  "PTS-"
 #define HUB_NAME_MAX    12
-static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Sat";
+static char AP_SSID[5 + HUB_NAME_MAX];      // composed at boot, see SAT_NAME
 #define AP_PASSWORD     "camctrl123"
+
+// Where this satellite is, as the operator reads it in the mount's setup list:
+// "PTS-Foyer".  Name it after the room — that name is the only thing on screen
+// when someone is choosing which cell a mount should join, so "Foyer" beats any
+// serial number.  Max 12 characters (the mount keeps 17 per entry, and "PTS-"
+// plus a terminator claims five); use _ for spaces.  Over-long names fail the
+// build below rather than being cut short out on a pole.
+//
+//   SAT_NAME="Concert_Hall" tools/build.sh flash sat
+//
+// Keeping it in the environment leaves no diff behind when you flash three
+// satellites in a row.  Uncommenting the line below works too and OVERRIDES the
+// build flag — the sketch is the later definition, so it wins and the compiler
+// warns about the redefinition.  Use one or the other, not both.
+//
+// #define SAT_NAME "Foyer"
+
+// Unnamed, a satellite is "PTS-Sat-A3F2" off its own MAC: unique, so two of
+// them never collide in a scan list, and honest about having no name yet.
+#define HUB_NAME_FALLBACK_PREFIX "Sat-"
 
 // Channel is per-satellite, so cells do not have to share airtime.  Override
 // per unit; mounts find it by scanning, so nothing else needs telling.
@@ -54,6 +75,13 @@ static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Sat";
 static Preferences _prefs;
 #include "../shared/hub_name.h"
 
+#ifdef SAT_NAME
+// A name too long to fit is truncated silently, and a satellite has no screen
+// to notice that on — so it fails the build instead of the deployment.
+static_assert(sizeof(SAT_NAME) - 1 <= HUB_NAME_MAX,
+              "SAT_NAME is longer than 12 characters - a mount would show it cut short");
+#endif
+
 // ---------------------------------------------------------------------------
 // Uplink to the hub
 // ---------------------------------------------------------------------------
@@ -61,7 +89,7 @@ static Preferences _prefs;
 // cannot drift apart.
 #define HUB_PORT        SAT_LINK_PORT
 #define HUB_HOST_MAX    40
-static char     _hub_host[HUB_HOST_MAX] = "pts-hub.local";
+static char     _hub_host[HUB_HOST_MAX] = SAT_HUB_MDNS_NAME;
 static WiFiClient _uplink;
 static uint32_t _uplink_next_try_ms = 0;
 static uint32_t _uplink_backoff_ms  = 1000;
@@ -221,9 +249,19 @@ void setup() {
     _prefs.begin("sat", false);
     _prefs.getString("hubhost", _hub_host, sizeof(_hub_host));
     _prefs.end();
-    if (_hub_host[0] == '\0') strncpy(_hub_host, "pts-hub.local", sizeof(_hub_host) - 1);
+    if (_hub_host[0] == '\0') strncpy(_hub_host, SAT_HUB_MDNS_NAME, sizeof(_hub_host) - 1);
 
-    hub_name_load();                            // composes AP_SSID
+    // The build names a satellite, and NVS is deliberately not consulted for
+    // it.  This is the hub's board: a unit demoted from hub to satellite still
+    // has that hub's name in storage, and reading it here would quietly bring
+    // up a satellite called "Concert Hall" with nothing on any screen to say
+    // why.  Leaving the stored name untouched also means it comes back if the
+    // box is ever promoted to hub again.
+#ifdef SAT_NAME
+    hub_name_use(SAT_NAME);
+#else
+    hub_name_apply();                           // unnamed: Sat-<MAC>
+#endif
 
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);

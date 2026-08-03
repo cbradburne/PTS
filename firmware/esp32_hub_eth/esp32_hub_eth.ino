@@ -74,7 +74,12 @@
 #include "../shared/disp_uart.h"
 #include "../esp32_hub/web_app.h"
 #include "../esp32_hub/hub_types.h"
+#include <ESPmDNS.h>
+// sat_link.h first: it owns the hostname, and board_eth.h needs it to have been
+// defined by the time it is included.
 #include "../shared/sat_link.h"
+#define ETH_HOSTNAME SAT_HUB_HOSTNAME
+#include "../shared/board_eth.h"
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
 
 // ---------------------------------------------------------------------------
@@ -1981,6 +1986,26 @@ void setup() {
     for (int i = 0; i < NUM_MOUNTS; i++) _mount_sat[i] = -1;   // local until proven otherwise
     _sat_server.begin();
     Serial.printf("Satellite listener on port %d\n", SAT_LINK_PORT);
+
+    // Ethernet, and with it the only route a satellite can reach us by.  The
+    // listener above binds every interface, so before this existed it was
+    // reachable solely over the SoftAP — which is the one network a satellite
+    // is never on.  Address comes from DHCP; nothing here waits for it, because
+    // a hub with the cable out must still run the rig over ESP-NOW.
+    eth_begin();
+
+    // Answering to "pts-hub.local" is what makes a DHCP address workable: the
+    // satellites resolve the name rather than holding an IP that changes under
+    // them.  mdns_init() does not need an interface to be up — the component
+    // follows them as they appear — so this is fine while the wire is still
+    // negotiating.  Announced on the SoftAP too, which costs nothing and lets
+    // the PC app reach a hub whose address nobody has written down.
+    if (MDNS.begin(SAT_HUB_HOSTNAME)) {
+        Serial.printf("mDNS       : %s\n", SAT_HUB_MDNS_NAME);
+    } else {
+        Serial.println("[MDNS] failed to start — satellites will resolve "
+                       SAT_HUB_MDNS_NAME " forever and never connect");
+    }
     Serial.printf("TCP listening on port %d\n", TCP_PORT);
 
     // --- OSC control (Bitfocus Companion / QLab) ---
@@ -2182,6 +2207,10 @@ void loop() {
     esp_task_wdt_reset();
 
     uint32_t now = millis();
+
+    // One-shot if the wire never comes up.  Silence here would look exactly
+    // like a satellite that is switched off, so it is worth a line in the log.
+    eth_report_once_if_down(now, 8000);
 
     // Deferred restart after a rename (see the /hubname POST handler).  A full
     // restart rather than re-raising the AP in place: the SSID is baked into

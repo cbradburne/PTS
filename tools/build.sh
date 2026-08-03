@@ -62,9 +62,25 @@ fqbn_for() {
 # with DEMO_MODE=1: it invents five mounts with stored positions so the display,
 # PC app and web app can all be photographed without a rig.  Flash "hub" to go
 # back to a real rig.  Demo builds never persist the pairing table.
+#
+# A satellite is named at build time, because it has no UI to be renamed
+# through — see SAT_NAME in esp32_satellite.ino:
+#
+#   SAT_NAME="Foyer" tools/build.sh flash sat
+#
+# Keeping it in the environment rather than the sketch means flashing three
+# satellites in a row leaves no diff behind, and none of them can inherit the
+# name of the one before it.
 props_for() {
     case "$1" in
         hubdemo) echo "compiler.cpp.extra_flags=-DDEMO_MODE=1" ;;
+        # arduino-cli hands extra_flags to the compiler verbatim — it does no
+        # unquoting — so these quotes are the C string's own delimiters and must
+        # NOT be escaped.  Escaping them compiles happily and bakes the quote
+        # characters into the SSID: PTS-"Foyer".  Use _ for spaces; a literal
+        # space here would be split into two arguments.
+        sat)     [ -n "${SAT_NAME:-}" ] &&
+                 echo "compiler.cpp.extra_flags=-DSAT_NAME=\"$SAT_NAME\"" ;;
         *)       echo "" ;;
     esac
 }

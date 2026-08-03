@@ -37,6 +37,12 @@
 #define ETH_PHY_ADDR   1
 #endif
 
+// Name this node answers to, and how it appears in the DHCP server's lease
+// list.  Set per sketch before including this header.
+#ifndef ETH_HOSTNAME
+#define ETH_HOSTNAME "pts-node"
+#endif
+
 static bool _eth_up = false;
 
 inline bool eth_is_up() { return _eth_up; }
@@ -78,8 +84,25 @@ inline bool eth_begin() {
     if (!ok) {
         Serial.println("[ETH] ETH.begin() failed — SPI wiring or pin map wrong "
                        "(see shared/board_eth.h)");
+        return false;
     }
-    return ok;
+
+    // Order matters both ways.  setHostname() needs the netif ETH.begin() has
+    // just created — called earlier it silently returns false — but it must
+    // land before the W5500 finishes negotiating, or the DHCP DISCOVER goes out
+    // without it and the lease list shows an anonymous espressif device.
+    ETH.setHostname(ETH_HOSTNAME);
+
+    // The MAC is printed HERE rather than alongside the IP, because a network
+    // that only serves addresses to known MACs gives an unlisted board no lease
+    // at all — waiting for an IP to reveal the MAC you need in order to be
+    // granted one is a circle that never closes.  This is also NOT the MAC
+    // printed as "AP MAC": the W5500 gets its own address derived from the
+    // ESP32's, and it is the only one that ever appears on the wire.
+    Serial.printf("[ETH] mac %s  host %s  (this is the address to register, "
+                  "not the AP MAC)\n",
+                  ETH.macAddress().c_str(), ETH_HOSTNAME);
+    return true;
 }
 
 // Call periodically.  Only produces a one-shot warning: the link genuinely can

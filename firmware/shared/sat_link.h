@@ -39,6 +39,15 @@
 // the distinction out of the wire protocol entirely.
 #define SAT_LINK_PORT     7778
 
+// The name the hub answers to, and the name a satellite dials.  Both ends read
+// it from here because a mismatch is invisible from either side: the hub logs a
+// healthy listener, the satellite logs a healthy AP, and the two never meet.
+// The address itself comes from DHCP and is expected to move — a spare board
+// swapped in after a failure gets a different one again — which is exactly why
+// the satellite resolves a name instead of holding an IP.
+#define SAT_HUB_HOSTNAME  "pts-hub"
+#define SAT_HUB_MDNS_NAME SAT_HUB_HOSTNAME ".local"
+
 #define SAT_ENV_MAGIC_1   0xA5
 #define SAT_ENV_MAGIC_2   0x5A
 #define SAT_ENV_HDR_LEN   10        // magic(2) + mac(6) + rssi(1) + len(1)
