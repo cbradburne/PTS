@@ -2,7 +2,7 @@
 /*
  * web_app.h — Mobile control web app, served by the hub over HTTP.
  *
- * Served at http://169.254.22.22/  once the phone connects to "CamMount" WiFi.
+ * Served at http://192.168.4.1/  once the phone connects to the hub's WiFi.
  * (The WebSocket below uses location.hostname, so it follows whatever IP the
  *  page was loaded from — no hard-coded address to keep in sync.)
  *

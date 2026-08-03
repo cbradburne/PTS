@@ -97,14 +97,21 @@
 #include "../shared/sat_link.h"
 #define ETH_HOSTNAME SAT_HUB_HOSTNAME
 
-// Uncomment to give the hub a fixed address instead of asking DHCP for one.
-// Worth doing when the DHCP server only serves MACs on a list and this board is
-// not on it yet — otherwise the hub never gets an address, and the satellites
-// have nothing to resolve pts-hub.local to.  Pick something outside the DHCP
-// pool so nothing else is ever handed the same address.  Delete both lines once
-// the Ethernet MAC is registered; DHCP keeps the addressing in one place.
-// #define ETH_STATIC_IP  "192.168.1.50"
-// #define ETH_GATEWAY    "192.168.1.1"
+// The hub's address on the wired (Dante) network.  Static rather than DHCP
+// because that network is link-local: 169.254.0.0/16 is the range devices use
+// when there is no DHCP server, so there is generally nothing there to ask.
+//
+// The gateway is deliberately 0.0.0.0.  A flat link-local network has no router
+// to send off-subnet traffic to, and naming one that does not exist would just
+// black-hole anything not on 169.254.  Everything this hub talks to over the
+// wire — the satellites — is on that subnet, and mDNS needs no DNS server, so
+// ETH_DNS follows the gateway and is unused.
+//
+// Comment all three out to use DHCP instead, once the Ethernet MAC printed at
+// boot has been registered with a network that serves one.
+#define ETH_STATIC_IP  "169.254.22.22"
+#define ETH_SUBNET     "255.255.0.0"
+#define ETH_GATEWAY    "0.0.0.0"
 
 #include "../shared/board_eth.h"
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
@@ -182,12 +189,16 @@ static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Hub";
 // connect to AP_IP — this is the hub's address on its own WiFi network.
 // (The directly-wired PC uses USB serial, so it's unaffected by this.)
 //
-// 169.254.x.x is link-local, chosen here for Dante audio-network compatibility.
-// >> BEFORE PUBLIC RELEASE: set AP_IP + AP_GATEWAY to 192.168.4.1 and AP_SUBNET
-//    to 255.255.255.0 — the standard SoftAP address used throughout the docs. <<
-static const IPAddress AP_IP     (169, 254, 22, 22);
-static const IPAddress AP_GATEWAY(169, 254, 22, 22);   // the AP is its own gateway
-static const IPAddress AP_SUBNET (255, 255,  0,  0);
+// The standard SoftAP address, and the one every doc, the manual and the PC
+// app's defaults have always quoted.  It used to be 169.254.22.22/16 for Dante
+// audio-network compatibility, which put the AP on link-local - and once this
+// hub gained Ethernet onto the Dante network itself, that /16 claimed the whole
+// wired range as well, leaving two interfaces matching the same destinations.
+// Dante reachability now belongs to the wire (ETH_STATIC_IP above); the AP is a
+// private /24 that overlaps nothing.
+static const IPAddress AP_IP     (192, 168, 4, 1);
+static const IPAddress AP_GATEWAY(192, 168, 4, 1);     // the AP is its own gateway
+static const IPAddress AP_SUBNET (255, 255, 255, 0);
 #define TCP_PORT     7777
 #define MAX_CLIENTS  4
 
@@ -2041,13 +2052,11 @@ void setup() {
     // a hub with the cable out must still run the rig over ESP-NOW.
     eth_begin();
 
-    // The wire and the AP must not share an address.  169.254.22.22 is the
-    // first IP anyone sees in this hub's boot log, which makes it exactly what
-    // gets copied into ETH_STATIC_IP - and then two interfaces hold one address
-    // on overlapping subnets, lwIP sends 169.254.x.x out whichever netif it
-    // matches first, and the satellite link breaks in a way that looks like
-    // anything but addressing.  ETH_STATIC_IP belongs on the LAN the satellites
-    // are on, which is not the AP's private range.
+    // The wire and the AP must not land on the same subnet.  They no longer do
+    // by default - the AP is 192.168.4.1/24 and the wire is link-local - but
+    // both are editable, in different files, and the symptom of getting it
+    // wrong is a satellite link that fails looking like anything but
+    // addressing.  Cheap to check every boot and say so.
     // Tested as SUBNET OVERLAP, not as an equal address.  AP_SUBNET is
     // 255.255.0.0, so the AP claims the whole of 169.254.0.0/16 - every address
     // in that range collides, not just the identical one, and picking a
