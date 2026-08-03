@@ -2041,6 +2041,31 @@ void setup() {
     // a hub with the cable out must still run the rig over ESP-NOW.
     eth_begin();
 
+    // The wire and the AP must not share an address.  169.254.22.22 is the
+    // first IP anyone sees in this hub's boot log, which makes it exactly what
+    // gets copied into ETH_STATIC_IP - and then two interfaces hold one address
+    // on overlapping subnets, lwIP sends 169.254.x.x out whichever netif it
+    // matches first, and the satellite link breaks in a way that looks like
+    // anything but addressing.  ETH_STATIC_IP belongs on the LAN the satellites
+    // are on, which is not the AP's private range.
+    // Tested as SUBNET OVERLAP, not as an equal address.  AP_SUBNET is
+    // 255.255.0.0, so the AP claims the whole of 169.254.0.0/16 - every address
+    // in that range collides, not just the identical one, and picking a
+    // different host number does not help.
+    IPAddress eip = ETH.localIP(), apip = WiFi.softAPIP();
+    if (eip[0] != 0) {
+        bool overlap = true;
+        for (int i = 0; i < 4; i++)
+            if ((eip[i] & AP_SUBNET[i]) != (apip[i] & AP_SUBNET[i])) { overlap = false; break; }
+        if (overlap)
+            Serial.printf("[ETH] WARNING: wire %s is inside the AP's subnet (%s/%s) - "
+                          "two interfaces now match the same destinations and traffic "
+                          "will leave by whichever lwIP checks first.  Put the wire on "
+                          "the satellites' LAN, or move the AP off this range.\n",
+                          eip.toString().c_str(), apip.toString().c_str(),
+                          AP_SUBNET.toString().c_str());
+    }
+
     // Answering to "pts-hub.local" is what makes a DHCP address workable: the
     // satellites resolve the name rather than holding an IP that changes under
     // them.  mdns_init() does not need an interface to be up — the component

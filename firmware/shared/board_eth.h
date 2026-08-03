@@ -79,15 +79,14 @@ inline void eth_on_event(arduino_event_id_t event) {
         case ARDUINO_EVENT_ETH_CONNECTED:
             Serial.println("[ETH] link up");
 #ifdef ETH_STATIC_IP
-            // With DHCP there is a GOT_IP event to wait for.  With a static
-            // address there may not be — the address was set before the link
-            // existed — so link-up IS the interface becoming usable.  Without
-            // this, _eth_up would stay false forever and the satellite uplink
-            // would never even attempt to connect, silently.
+            // Kept as insurance, not because it is known to be needed: a static
+            // address is set before the link exists, so there might be no
+            // GOT_IP to wait for, and _eth_up staying false would mean the
+            // satellite uplink never attempts a connection with nothing in the
+            // log to say why.  On a W5500 with core 3.3.11 GOT_IP does fire, so
+            // this is normally redundant — it does not print, or the address
+            // would appear twice on every link-up.
             _eth_up = true;
-            Serial.printf("[ETH] %s  gw %s  (static)\n",
-                          ETH.localIP().toString().c_str(),
-                          ETH.gatewayIP().toString().c_str());
 #endif
             break;
         case ARDUINO_EVENT_ETH_GOT_IP:
