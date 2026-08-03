@@ -187,6 +187,22 @@ static void cfg_load() {
 #define HUB_TIMEOUT_MS         5000
 #define HW_WDT_TIMEOUT_MS     30000          // hardware watchdog — reset if loop stalls
 #define ESPNOW_RESTART_MS     (2UL*60UL*1000UL) // restart after 2 min with no hub contact
+// ...but only a few times.  Restarting does not fix a one-way link — a
+// fresh-booted mount still could not receive (confirmed 2026-06-16) — so past
+// this count the restarts are pure cost: they blink the camera, throw away the
+// reacquire scan in progress, and reset every counter that would have shown
+// how long the mount had been isolated.  One rig logged 30 of them in an hour
+// on two mounts, which is where ~1550 [ANOMALY] reports each came from.
+// After giving up the mount stays awake and keeps scanning, which is the only
+// thing that can actually find it a way back.
+#define ESPNOW_RESTART_MAX      3
+#define ISOLATION_RTC_MAGIC     0xC0FFEE10UL
+// RTC_NOINIT survives esp_restart() but is undefined after a power-on or
+// brownout, so a magic word tells a preserved count from uninitialised RAM.
+// That is the behaviour we want: a power cycle is the operator intervening,
+// and it should hand the mount its full quota of attempts back.
+RTC_NOINIT_ATTR static uint32_t _iso_magic;
+RTC_NOINIT_ATTR static uint32_t _iso_restarts;
 #define STATUS_HEARTBEAT_MS    5000
 #define TEENSY_PROBE_MS        2000
 #define TOUCH_POLL_MS            50
@@ -1126,24 +1142,24 @@ static void setup_poll_scan() {
 }
 
 // SAVE: merge the chosen hub into the known-hubs list, persist, restart.
-static void setup_apply_save() {
-    if (_setup_sel_id < 1 || _setup_sel_hub < 0) return;
-    const KnownHub &sel = _scan_hub[_setup_sel_hub];
-
-    _cfg.magic    = CFG_MAGIC;
-    _cfg.mount_id = _setup_sel_id;
+// Put a hub at the front of the known list, promoting it if already there.
+// Shared by explicit pairing on the setup screen and by isolation adoption
+// below, because the EVICTION rule matters as much as the insertion and two
+// copies of it would drift.
+//
+// Move-to-front makes the array its own recency order, so a full list evicts
+// the hub paired longest ago.  It used to always overwrite the last slot, which
+// made the earlier slots permanent and the last one a revolving door: a mount
+// touring the building silently forgot whichever satellite it had paired most
+// recently before this one.
+//
+// Ordering is rewritten only when a hub is newly chosen, never on an ordinary
+// roam — hub_reacquire_poll() just updates last_hub, so following a stronger
+// hub costs no NVS write beyond the one it already does.
+static void hub_remember(const KnownHub &h) {
     int8_t found = -1;
     for (uint8_t i = 0; i < _cfg.n_hubs; i++)
-        if (memcmp(_cfg.hubs[i].mac, sel.mac, 6) == 0) { found = (int8_t)i; break; }
-    // Move-to-front, so the array itself is the recency order and a full list
-    // evicts the hub paired longest ago.  It used to always overwrite the last
-    // slot, which made the earlier slots permanent and the last one a revolving
-    // door: a mount touring the building silently forgot whichever satellite it
-    // had paired most recently before this one.
-    //
-    // Ordering is only rewritten on an explicit pairing, never on a roam —
-    // hub_reacquire_poll() just updates last_hub, so following a stronger hub
-    // costs no NVS write beyond the one it already does.
+        if (memcmp(_cfg.hubs[i].mac, h.mac, 6) == 0) { found = (int8_t)i; break; }
     uint8_t at;
     if (found >= 0) {
         at = (uint8_t)found;                      // re-pair: promote it
@@ -1154,8 +1170,17 @@ static void setup_apply_save() {
         at = MAX_KNOWN_HUBS - 1;                  // full: drop the oldest
     }
     for (uint8_t i = at; i > 0; i--) _cfg.hubs[i] = _cfg.hubs[i - 1];
-    _cfg.hubs[0]  = sel;
+    _cfg.hubs[0]  = h;
     _cfg.last_hub = 0;
+}
+
+static void setup_apply_save() {
+    if (_setup_sel_id < 1 || _setup_sel_hub < 0) return;
+    const KnownHub &sel = _scan_hub[_setup_sel_hub];
+
+    _cfg.magic    = CFG_MAGIC;
+    _cfg.mount_id = _setup_sel_id;
+    hub_remember(sel);
     cfg_save();
 
     setup_show_status("Saved - restarting...");
@@ -1200,6 +1225,10 @@ static void setup_exit() {
 
 #define REACQ_SILENT_MS  20000UL   // hub silence before we start scanning
 #define REACQ_PERIOD_MS  30000UL   // min gap between reacquire scans
+// How long fully isolated before the mount may adopt a hub it has never been
+// paired with.  Deliberately shorter than ESPNOW_RESTART_MS, so adoption gets
+// a chance BEFORE the isolation restart throws away the attempt.
+#define REACQ_ADOPT_MS   60000UL
 
 static uint32_t _reacq_last_ms = 0;
 
@@ -1237,9 +1266,47 @@ static void hub_reacquire_poll() {
             }
         }
     }
+    // Nothing known is in range.  A mount in that state cannot rescue itself
+    // today: the loop above only matches hubs it has already been paired with,
+    // so a satellite deployed specifically to reach it is invisible until
+    // somebody walks up to the mount and pairs it by hand.  On a rig where
+    // mounts tour the building that is the difference between a satellite
+    // fixing a mount and needing a ladder.
+    //
+    // So: if we have heard nothing at all for REACQ_ADOPT_MS, adopt the
+    // strongest AP whose SSID carries our prefix.  The prefix is the first
+    // guard; the second is at the far end, where the hub's pairing rules
+    // reject a device claiming a slot bound to a different MAC — so wandering
+    // onto a neighbouring rig's hub is refused there rather than trusted here.
+    KnownHub adopt = {};
+    bool     adopt_ok = false;
+    if (best < 0 && (nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS) {
+        int16_t adopt_db = -32768;
+        for (int i = 0; i < n; i++) {
+            String ssid = WiFi.SSID(i);
+            if (!ssid.startsWith(HUB_SSID_PREFIX) &&
+                !ssid.startsWith(HUB_SSID_PREFIX_OLD)) continue;
+            if ((int16_t)WiFi.RSSI(i) <= adopt_db) continue;
+            adopt_db = (int16_t)WiFi.RSSI(i);
+            memcpy(adopt.mac, WiFi.BSSID(i), 6);
+            adopt.channel = (uint8_t)WiFi.channel(i);
+            snprintf(adopt.ssid, sizeof(adopt.ssid), "%s", ssid.c_str());
+            adopt_ok = true;
+        }
+        if (adopt_ok)
+            Serial.printf("[REACQ] Isolated %lus — adopting \"%s\" %02X:%02X on ch %d (%d dB)\n",
+                          (unsigned long)((nowm - _last_hub_rx_ms) / 1000UL),
+                          adopt.ssid, adopt.mac[4], adopt.mac[5],
+                          (int)adopt.channel, (int)adopt_db);
+    }
+
     WiFi.scanDelete();
 
-    if (best >= 0) {
+    if (adopt_ok) {
+        hub_remember(adopt);
+        cfg_save();
+        cfg_apply_active_hub();
+    } else if (best >= 0) {
         bool hub_changed = (best != (int8_t)_cfg.last_hub);
         bool ch_changed  = (bestch != _cfg.hubs[best].channel);
         if (hub_changed || ch_changed) {
@@ -1553,6 +1620,19 @@ void setup() {
     delay(200);
     crash_report_print();   // report the previous panic, if any
 
+    // Validate the isolation-restart quota before anything can read it.
+    // RTC_NOINIT is not cleared by the bootloader, so after a power-on or
+    // brownout this holds whatever was in RAM — which could be a huge value
+    // that silently disables the restarts entirely, or a small one that spends
+    // a quota the operator has just reset by pulling the power.
+    if (_iso_magic != ISOLATION_RTC_MAGIC) {
+        _iso_magic    = ISOLATION_RTC_MAGIC;
+        _iso_restarts = 0;
+    } else if (_iso_restarts) {
+        Serial.printf("[ESPNOW] Resumed after isolation restart %lu of %d\n",
+                      (unsigned long)_iso_restarts, ESPNOW_RESTART_MAX);
+    }
+
     // Load runtime identity from NVS, then set the accent colour before any
     // UI calls.  Unpaired units get neutral grey and boot into SETUP.
     cfg_load();
@@ -1764,6 +1844,10 @@ void loop() {
 
     // ── Hub connection state ─────────────────────────────────────────────
     bool hub_ok = (millis() - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
+    // Contact restored — hand back the full quota, so a mount that recovers
+    // and is later isolated again gets to retry rather than staying passive
+    // because of an outage hours ago.
+    if (hub_ok && _iso_restarts) _iso_restarts = 0;
     if (hub_ok != _ms.hub_connected) {
         _ms.hub_connected = hub_ok;
         ui_update();
@@ -1780,8 +1864,23 @@ void loop() {
     bool rx_stale = (millis() - _last_hub_rx_ms       > ESPNOW_RESTART_MS);
     bool tx_stale = (millis() - _last_espnow_tx_ok_ms > ESPNOW_RESTART_MS);
     if (_cfg_valid && !_setup_active && !hub_ok && rx_stale && tx_stale) {
-        Serial.println("[ESPNOW] Mount isolated (no RX or TX) — restarting chip to recover stack");
-        esp_restart();
+        if (_iso_restarts < ESPNOW_RESTART_MAX) {
+            _iso_restarts++;
+            Serial.printf("[ESPNOW] Mount isolated (no RX or TX) — restarting chip to "
+                          "recover stack (attempt %lu of %d)\n",
+                          (unsigned long)_iso_restarts, ESPNOW_RESTART_MAX);
+            esp_restart();
+        } else {
+            // Restarting has been tried and did not help.  Stay up and keep
+            // scanning: hub_reacquire_poll() can adopt a satellite that was
+            // deployed to reach us, and it cannot do that from a boot loop.
+            static uint32_t last_note = 0;
+            if (millis() - last_note > 60000UL) {
+                last_note = millis();
+                Serial.printf("[ESPNOW] Still isolated after %d restarts — staying up "
+                              "and scanning instead of rebooting\n", ESPNOW_RESTART_MAX);
+            }
+        }
     }
 
     // ── Watchdog ─────────────────────────────────────────────────────────
