@@ -1571,7 +1571,7 @@ static void send_usb_diag() {
 }
 
 // ---- Uniform health telemetry (hub node) ----
-// One CMD_HEALTH to the PC over Serial every HEALTH_INTERVAL_MS, plus an
+// One CMD_HEALTH every HEALTH_INTERVAL_MS to EVERY client, plus an
 // immediate anomaly send on: first report, low heap, loop stall, or a jump in
 // ESP-NOW send failures.  The hub's own health rides USB (no radio cost).
 static uint32_t _health_last_ms      = 0;
@@ -1595,7 +1595,14 @@ static void send_own_health(bool anomaly) {
     h.node_u32      = _ghost_rx_drops;
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_health(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq, &h);
+    // To all clients, not only Serial.  This carries uptime, heap, loop time
+    // and the reset reason — the only view of whether the hub is healthy or
+    // has just rebooted.  Sending it over USB alone meant that running the PC
+    // app on TCP, which is what stops the host resetting the hub, silently
+    // traded away every means of noticing that the hub restarted at all.
     Serial.write(buf, n);
+    broadcast_to_all(buf, n);
+    _ws.binaryAll(buf, (size_t)n);
     _health_last_ms     = millis();
     _health_loop_max_ms = 0;
     _health_last_txfail = _health_fail_live;
@@ -1643,7 +1650,13 @@ static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_packet(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq,
                               CMD_HUB_EVENT, p, 9);
+    // Every client, not only Serial — see send_own_health().  These are the
+    // structured notable events (mount online, pairing, wedge ladder,
+    // restart imminent); losing them on TCP left the PC app blind to the
+    // hub's own account of what it was doing.
     Serial.write(buf, n);
+    broadcast_to_all(buf, n);
+    _ws.binaryAll(buf, (size_t)n);
 }
 
 // Full ESP-NOW reinit — tears down and rebuilds the whole ESP-NOW stack and all

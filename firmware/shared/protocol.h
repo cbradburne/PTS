@@ -148,7 +148,7 @@ typedef enum : uint8_t {
     CMD_HUB_RESTART       = 0x97,  // PC→hub: full esp_restart() of the hub.  The escalation when
                                    // the esp_now reinit (0x96) doesn't clear the wedge — replicates
                                    // the power cycle that's the only confirmed cure.  Hub-consumed.
-    CMD_HUB_EVENT         = 0x98,  // hub→USB-PC only: notable hub event for the PC log.  9-byte
+    CMD_HUB_EVENT         = 0x98,  // hub→all clients: notable hub event for the PC log.  9-byte
                                    // payload: kind(1)+mount_id(1)+rssi(1)+state(1)+flags(1)+uptime_s(u32).
                                    // kind 0 = mount came online (real connect; rssi/state/flags real)
                                    // kind 1 = ghost STATUS frame dropped (rssi==0 phantom-cam guard)
@@ -163,7 +163,10 @@ typedef enum : uint8_t {
                                    //          state=old cam, flags=MAC[5])
                                    // kind 7 = pairing conflict rejected (mount=claimed cam,
                                    //          state/flags = claimant MAC[4]/[5])
-                                   // Diagnostic only; sent ONLY over Serial, never TCP/WS.
+                                   // Diagnostic, but sent to ALL clients: running the PC app
+                                   // on TCP is what stops the host resetting the hub, and
+                                   // Serial-only telemetry made that trade away the ability
+                                   // to see the hub restart at all.
     CMD_POSITION          = 0x9A,  // mount → clients: live axis positions, 17-byte payload
                                    // (see PayloadPosition).  Adaptive rate: 5 Hz while any
                                    // axis is in motion, 1 Hz at rest; also sent immediately

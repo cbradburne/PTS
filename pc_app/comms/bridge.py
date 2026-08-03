@@ -296,6 +296,8 @@ class Bridge:
         self._last_forced_reconnect: float = 0.0
         self._last_hub_reinit_t: float = 0.0    # paces CMD_HUB_REINIT_ESPNOW sends
         self._last_hub_restart_t: float = 0.0   # paces CMD_HUB_RESTART escalation
+        # last uptime seen per node name — a decrease means it restarted
+        self._node_uptime: dict[str, int] = {}
         # Monotonic ts of the last (re)connect — starts the post-connect grace.
         self._last_connect_t: float = 0.0
         # Monotonic ts of the last ACK-tracked command written.  Lets the idle
@@ -627,6 +629,22 @@ class Bridge:
             who, h.uptime_s / 3600.0,
             h.free_heap // 1024, h.min_free_heap // 1024,
             h.loop_max_ms, h.tx_fail, h.rssi, h.node_u32, h.reset_reason)
+        # Any node whose uptime goes BACKWARDS has restarted.  Derived from
+        # CMD_HEALTH rather than the hub's USB byte counter, so it works on
+        # every transport and for every node — the counter-based HUB REBOOTED
+        # is USB-only, which meant that switching to TCP (the thing that stops
+        # the host resetting the hub) silently removed the only way to notice
+        # the hub rebooting.  This also covers reboots that happen while the
+        # app is closed: the first report after reconnecting shows a low uptime
+        # against the last one we saw.
+        prev = self._node_uptime.get(who)
+        if prev is not None and h.uptime_s < prev:
+            log.warning("NODE REBOOTED — %s uptime %.2fh -> %.2fh | reset reason: %s",
+                        who, prev / 3600.0, h.uptime_s / 3600.0,
+                        self._RESET_REASON_NAMES.get(h.reset_reason,
+                                                     f"code {h.reset_reason}"))
+        self._node_uptime[who] = h.uptime_s
+
         if h.anomaly:
             log.warning("%s [ANOMALY]", line)
         else:
@@ -884,9 +902,28 @@ class Bridge:
                 self._last_forced_reconnect = now   # paces this block to the cooldown
                 is_tcp = self._reconnect_params.get('type') == 'tcp'
                 self._log_wedge_side(now, wedged_mount)
-                if is_tcp:
+                # "Link or mount?" is asked FIRST, before anything
+                # transport-specific.  This check used to sit AFTER the is_tcp
+                # branch, so on TCP a single dead mount forced a reconnect every
+                # cooldown while every other mount ACKed normally — 456 of them
+                # in one hour, each tearing down a working socket and re-running
+                # the hub's accept path to reach a mount whose own radio is the
+                # fault.  Reconnecting cannot fix a mount-side problem on any
+                # transport, so the discrimination must not be transport-specific.
+                if self._hub_tx_proven_ok(now, wedged_mount):
+                    # Another mount is ACKing, so the hub can transmit.  This is
+                    # one dead mount, not a hub wedge; no hub-level action can
+                    # reach it and every rung below would drop the healthy mounts
+                    # too — including, on TCP, whatever a satellite is relaying.
+                    log.warning("Mount %d unreachable %.1fs, but mount %d is still "
+                                "ACKing — hub TX is healthy, so this is mount-side. "
+                                "Not touching the hub; mount %d likely needs a power "
+                                "cycle.", wedged_mount, oldest,
+                                self._hub_tx_proven_ok(now, wedged_mount), wedged_mount)
+                elif is_tcp:
                     # TCP: reconnecting re-runs the hub's accept() path, which
-                    # refreshes the mount ESP-NOW peers — a real recovery action.
+                    # refreshes the mount ESP-NOW peers — a real recovery action,
+                    # but only once the fault is known NOT to be mount-side.
                     log.warning("Command link wedged on mount %d — oldest tracked command "
                                 "unacked %.1fs (> %.1fs); forcing reconnect",
                                 wedged_mount, oldest, self.WEDGE_DETECT_S)
@@ -896,15 +933,6 @@ class Bridge:
                     with self._lock:
                         if self._transport:
                             self._transport.mark_dead()
-                elif self._hub_tx_proven_ok(now, wedged_mount):
-                    # Another mount is ACKing, so the hub can transmit.  This is
-                    # one dead mount, not a hub wedge; no hub-level action can
-                    # reach it and both rungs would drop the healthy mounts too.
-                    log.warning("Mount %d unreachable %.1fs, but mount %d is still "
-                                "ACKing — hub TX is healthy, so this is mount-side. "
-                                "Not touching the hub; mount %d likely needs a power "
-                                "cycle.", wedged_mount, oldest,
-                                self._hub_tx_proven_ok(now, wedged_mount), wedged_mount)
                 else:
                     # Serial: the USB link is healthy when this fires (hub_rx still
                     # climbing) — this is a hub→mount ESP-NOW send wedge that reopening
