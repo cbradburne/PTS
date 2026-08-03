@@ -24,8 +24,13 @@ REM in esp32_satellite.ino.
 
 setlocal enabledelayedexpansion
 
-set "REPO=%~dp0.."
+REM Resolved to a full path, and arduino-cli is given an ABSOLUTE --build-path,
+REM exactly as build.sh does.  A relative one is resolved against the working
+REM directory - a difference from the sh script that buys nothing and is one
+REM more thing to suspect when a link fails.
+for %%i in ("%~dp0..") do set "REPO=%%~fi"
 pushd "%REPO%" || (echo cannot find repo root & exit /b 1)
+set "OUT=%REPO%\.build"
 
 set "DO_FLASH="
 set "TARGET=%~1"
@@ -51,10 +56,17 @@ if "%FQBN%"=="" (
 )
 
 echo -- %TARGET%  %FQBN%
-arduino-cli compile --fqbn %FQBN% --libraries libraries ^
-    --build-path .build\%TARGET% --warnings default %SKETCH%
+arduino-cli compile --fqbn %FQBN% --libraries "%REPO%\libraries" --build-path "%OUT%\%TARGET%" --warnings default "%REPO%\%SKETCH%"
 if errorlevel 1 (
+    echo.
     echo COMPILE FAILED: %TARGET%
+    echo.
+    echo If that was "undefined reference to app_main" or "to millis", the core
+    echo archive is missing from the link - a stale build cache, not your sketch.
+    echo Clear both caches and run this again:
+    echo.
+    echo     arduino-cli cache clean
+    echo     rmdir /s /q "%OUT%\%TARGET%"
     goto :fail
 )
 
@@ -65,10 +77,10 @@ REM the thing worth quoting when reporting a crash.  A dirty tree reuses the
 REM parent commit's name, so commit before flashing if you have edited anything.
 set "SHA=nogit"
 for /f "delims=" %%i in ('git rev-parse --short HEAD 2^>nul') do set "SHA=%%i"
-set "KEEP=.build\keep\%TARGET%-%SHA%"
+set "KEEP=%OUT%\keep\%TARGET%-%SHA%"
 if not exist "%KEEP%" mkdir "%KEEP%"
-copy /y ".build\%TARGET%\%SKETCHNAME%.elf" "%KEEP%\" >nul 2>&1
-copy /y ".build\%TARGET%\%SKETCHNAME%.bin" "%KEEP%\" >nul 2>&1
+copy /y "%OUT%\%TARGET%\%SKETCHNAME%.elf" "%KEEP%\" >nul 2>&1
+copy /y "%OUT%\%TARGET%\%SKETCHNAME%.bin" "%KEEP%\" >nul 2>&1
 echo    kept ELF + bin in %KEEP%
 
 if not defined DO_FLASH goto :done
@@ -83,7 +95,7 @@ if "%PORT%"=="" (
 )
 
 echo -- uploading to %PORT%
-arduino-cli upload --fqbn %FQBN% --input-dir .build\%TARGET% -p %PORT% %SKETCH%
+arduino-cli upload --fqbn %FQBN% --input-dir "%OUT%\%TARGET%" -p %PORT% "%REPO%\%SKETCH%"
 if errorlevel 1 (
     echo UPLOAD FAILED - is the PC app or a serial monitor holding %PORT%?
     goto :fail
