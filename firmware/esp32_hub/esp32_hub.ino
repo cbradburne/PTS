@@ -690,6 +690,10 @@ static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
 
 static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
                            const uint8_t *data, int len) {
+    // Belt and braces for the ordering in setup(): this is live from the moment
+    // the callback is registered, and a NULL queue is an assert rather than a
+    // dropped frame.  One compare against a rig that boot-loops.
+    if (!_relay_queue) return;
     if (len <= 0 || len > (int)sizeof(RelayMsg::data)) return;
     // Table lookup from the WiFi task while loop() may be binding a slot is a
     // benign race: worst case one message classifies as unknown and the
@@ -1760,6 +1764,24 @@ void setup() {
     Serial.printf("AP  IP   : %s\n", WiFi.softAPIP().toString().c_str());
     Serial.printf("AP  MAC  : %s\n", WiFi.softAPmacAddress().c_str());
 
+    // --- Relay queue ---
+    // BEFORE ESP-NOW, not after.  esp_now_register_recv_cb() makes
+    // on_espnow_recv live immediately; it runs in the wifi task and ends in
+    // xQueueSend(_relay_queue, ...).  A frame arriving before the queue exists
+    // is xQueueSend(NULL), which FreeRTOS does not tolerate:
+    //
+    //   assert failed: xQueueGenericSend queue.c:936 (pxQueue)   task 'wifi'
+    //
+    // The window used to run from the callback registration, through an NVS
+    // read and one esp_now_add_peer() per paired mount, down to here.  With a
+    // single mount on the bench it nearly always closed in time.  With five
+    // mounts sending STATUS at 10 Hz it is ~50 chances a second to lose, and
+    // the hub boot looped - 3 of 7 boots died here in one capture.  It also
+    // explains commanded restarts reporting PANIC instead of SW: the restart
+    // worked, then setup lost this race and the panic is what rebooted it.
+    _relay_queue   = xQueueCreate(RELAY_QUEUE_DEPTH, sizeof(RelayMsg));
+    _ws_rx_queue   = xQueueCreate(WS_RX_QUEUE_DEPTH, sizeof(WsRxMsg));
+
     // --- ESP-NOW ---
     if (esp_now_init() != ESP_OK) {
         Serial.println("ERROR: ESP-NOW init failed — halting.");
@@ -1792,10 +1814,6 @@ void setup() {
     }
     disp_send_mount_table();   // seed the display's Mounts panel (it also
                                // requests this itself when it boots later)
-
-    // --- Relay queue ---
-    _relay_queue   = xQueueCreate(RELAY_QUEUE_DEPTH, sizeof(RelayMsg));
-    _ws_rx_queue   = xQueueCreate(WS_RX_QUEUE_DEPTH, sizeof(WsRxMsg));
 
 #if DEMO_MODE
     demo_init();   // invent five mounts (after the queue exists)
