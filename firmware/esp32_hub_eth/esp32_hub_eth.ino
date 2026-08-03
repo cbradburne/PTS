@@ -28,35 +28,52 @@
  *   5. [ETH] lines appear if a W5500 is present; harmless if not.
  */
 /*
- * esp32_hub.ino — WiFi AP + ESP-NOW hub  (Seeed Studio XIAO ESP32S3)
+ * esp32_hub_eth.ino — WiFi AP + ESP-NOW hub  (Waveshare ESP32-S3-ETH)
  *
- * This board handles all networking: WiFi AP, ESP-NOW to mounts, TCP and
- * WebSocket to PC/phone clients.  Display output is forwarded to a separate
- * Waveshare ESP32-S3-Touch-LCD-7 board over UART using the disp_uart protocol.
+ * This board handles all networking: WiFi AP, ESP-NOW to mounts, Ethernet to
+ * the satellites, TCP and WebSocket to PC/phone clients.  Display output is
+ * forwarded to a separate Waveshare ESP32-S3-Touch-LCD-7 board over UART using
+ * the disp_uart protocol.
  *
  * Architecture:
  *   [PC 1]    ── TCP (port 7777) ──┐
  *   [PC 2]    ── TCP (port 7777) ──┤
- *   [PC USB]  ── Serial 921600   ──┤── XIAO ESP32S3 Hub ──┬── Mount 1 ESP32
+ *   [PC USB]  ── Serial 921600   ──┤── S3-ETH Hub ────────┬── Mount 1 ESP32
  *   [Phone]   ── WS  (port 80)   ──┘   (WiFi AP+ESP-NOW)  ├── Mount 2 ESP32
- *   [Tablet]  ── WS  (port 80)              │             ├── Mount 3 ESP32
- *                                           │ UART        ├── Mount 4 ESP32
- *                                     Waveshare display   └── Mount 5 ESP32
+ *   [Tablet]  ── WS  (port 80)         │        │         ├── Mount 3 ESP32
+ *                                UART  │        │ Ethernet├── Mount 4 ESP32
+ *                    Waveshare display ┘        │         └── Mount 5 ESP32
+ *                                          [satellites] ───── distant mounts
  *
  * UART wiring to display (3 wires):
- *   XIAO D6 / GPIO43 (TX)  →  Waveshare GPIO13 (RX)
- *   XIAO D7 / GPIO44 (RX)  ←  Waveshare GPIO12 (TX)
- *   XIAO GND               —  Waveshare GND
+ *   Hub GPIO43 (TX)  →  Waveshare display GPIO13 (RX)
+ *   Hub GPIO44 (RX)  ←  Waveshare display GPIO12 (TX)
+ *   Hub GND          —  Waveshare display GND
  *
- * Arduino IDE board settings for THIS board (XIAO ESP32S3):
- *   Board            : XIAO_ESP32S3
+ * Arduino IDE board settings for THIS board (Waveshare ESP32-S3-ETH).  These
+ * must match FQBN_HUBETH in tools/build.sh — the scripted build is the one
+ * that gets flashed, and a Tools-menu difference produces a different binary
+ * from the same source:
+ *   Board            : ESP32S3 Dev Module
  *   USB CDC On Boot  : Enabled
- *   USB Mode         : Hardware CDC and JTAG  ← preferred: keeps auto-flash working,
- *                      which stops the PC from resetting the hub when it reopens the
- *                      port.  The default "Hardware CDC and JTAG" mode CANNOT do this.
- *                      NOTE: TinyUSB mode disables esptool auto-reset — to reflash, hold
- *                      BOOT, tap RESET, release, then upload.  The USB VID/PID also
- *                      changes, so Windows may assign a new COM port (update the PC config).
+ *   USB Mode         : Hardware CDC and JTAG
+ *   Flash Size       : 16MB (128Mb)
+ *   Partition Scheme : 8M with spiffs (3MB APP/1.5MB SPIFFS)
+ *   PSRAM            : Disabled
+ *
+ * On the USB mode, which is a real trade-off and not a free choice.  The S3
+ * wires the host's DTR/RTS straight to reset and boot0 in silicon — that is
+ * precisely what lets esptool flash this board with no BOOT button.  The same
+ * wire means the PC can reset the hub simply by opening or closing the port,
+ * and NOTHING in firmware can prevent it: enableReboot() exists only on the
+ * TinyUSB USBCDC class, not on HWCDC.
+ *
+ * So: Hardware CDC keeps flashing button-free and accepts that the host can
+ * reset the hub.  USB-OTG (TinyUSB) can refuse the reset via
+ * Serial.enableReboot(false) — which is why esp32_hub.ino on the XIAO demands
+ * it — but then reflashing needs BOOT held, RESET tapped, released, upload.
+ * The VID/PID changes too, so Windows may hand out a new COM port.
+ * Hardware CDC is chosen here because this board lives in an enclosure.
  *
  * Requires libraries:
  *   mathieucarbou/ESPAsyncWebServer  (ESP-IDF v5 compatible fork)
@@ -219,7 +236,9 @@ static void mount_table_load() {
 // UART link to display board
 // ---------------------------------------------------------------------------
 
-// XIAO ESP32S3: D6=GPIO43 (TX), D7=GPIO44 (RX)
+// Hub UART to the display: GPIO43 (TX), GPIO44 (RX) — the same pins on
+// the XIAO (D6/D7) and on the Waveshare S3-ETH, which is why this moved
+// between the two boards unchanged.
 // On XIAO with native USB, Serial (USB CDC) is separate from UART hardware,
 // so GPIO43/44 are free for Serial1.
 // UART to the 7" display.  43/44 are the S3's native UART0 pins, free here
@@ -1914,7 +1933,7 @@ void setup() {
     // meaningful across software resets — zero the self-restart streak on any
     // non-software boot.
     if (esp_reset_reason() != ESP_RST_SW) _self_restart_streak = 0;
-    Serial.println("\n=== ESP32 Camera Mount Hub (XIAO) ===");
+    Serial.println("\n=== PTS Camera Mount Hub (ESP32-S3-ETH) ===");
     Serial.printf("Reset reason: %d  (self-restart streak: %lu)\n",
                   (int)_reset_reason, (unsigned long)_self_restart_streak);
 
