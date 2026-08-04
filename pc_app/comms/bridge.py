@@ -298,6 +298,10 @@ class Bridge:
         self._last_hub_restart_t: float = 0.0   # paces CMD_HUB_RESTART escalation
         # last uptime seen per node name — a decrease means it restarted
         self._node_uptime: dict[str, int] = {}
+        # Same thing across restarts of THIS app: {node: {uptime_s, reset, at}}.
+        self._node_state_prev: dict = self._node_state_load()
+        self._node_state_cur:  dict = {}
+        self._node_state_written: float = 0.0
         # Monotonic ts of the last (re)connect — starts the post-connect grace.
         self._last_connect_t: float = 0.0
         # Monotonic ts of the last ACK-tracked command written.  Lets the idle
@@ -559,6 +563,52 @@ class Bridge:
             except Exception as e:
                 log.error(f"Packet callback error: {e}")
 
+    # A node up X seconds when we last looked must be up at least X + elapsed
+    # now.  The slack absorbs clock skew and the couple of seconds between a
+    # health packet being built on the node and timestamped here; it is far
+    # smaller than any real reboot, which resets uptime to zero.
+    NODE_UPTIME_TOLERANCE_S = 120.0
+    NODE_STATE_WRITE_EVERY_S = 30.0
+
+    @staticmethod
+    def _node_state_path():
+        from pathlib import Path
+        return Path.home() / "Documents" / "PTS" / "node_state.json"
+
+    def _node_state_load(self) -> dict:
+        """Last-seen uptime per node from previous runs.  Best effort: a missing
+        or corrupt file simply means the first report after start is not
+        checked, which is the behaviour we had before."""
+        try:
+            import json
+            with open(self._node_state_path(), "r") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _node_state_save(self, who: str, uptime_s: int, reset_reason: int) -> None:
+        """Record and periodically persist.  Throttled because health arrives
+        every few seconds per node and this is a convenience, not a ledger —
+        losing the last few seconds of it costs nothing."""
+        self._node_state_cur[who] = {"uptime_s": int(uptime_s),
+                                     "reset": int(reset_reason),
+                                     "at": time.time()}
+        now = time.monotonic()
+        if now - self._node_state_written < self.NODE_STATE_WRITE_EVERY_S:
+            return
+        self._node_state_written = now
+        try:
+            import json
+            path = self._node_state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w") as fh:
+                json.dump(self._node_state_cur, fh)
+            tmp.replace(path)      # atomic — never leave a half-written file
+        except Exception as e:
+            log.debug("node_state save skipped: %s", e)
+
     # esp_reset_reason() codes (ESP-IDF) → name, for the hub reboot log.
     _RESET_REASON_NAMES = {
         0: "UNKNOWN", 1: "POWERON", 2: "EXT", 3: "SW(esp_restart)",
@@ -637,13 +687,34 @@ class Bridge:
         # the hub rebooting.  This also covers reboots that happen while the
         # app is closed: the first report after reconnecting shows a low uptime
         # against the last one we saw.
+        rname = self._RESET_REASON_NAMES.get(h.reset_reason, f"code {h.reset_reason}")
+
+        # Within this session an exact comparison is enough.
         prev = self._node_uptime.get(who)
         if prev is not None and h.uptime_s < prev:
             log.warning("NODE REBOOTED — %s uptime %.2fh -> %.2fh | reset reason: %s",
-                        who, prev / 3600.0, h.uptime_s / 3600.0,
-                        self._RESET_REASON_NAMES.get(h.reset_reason,
-                                                     f"code {h.reset_reason}"))
+                        who, prev / 3600.0, h.uptime_s / 3600.0, rname)
+        elif prev is None:
+            # First report this session.  Compare against what was persisted,
+            # allowing for the wall-clock time since: a node up X seconds then,
+            # and still running, must be up at least X + elapsed now.
+            #
+            # Without this a reboot during any gap in our own coverage is
+            # invisible — and the gap that matters most is the app being closed
+            # or restarted.  One capture missed a mount self-restarting and
+            # vanishing for 57 minutes purely because the app was reopened in
+            # the middle of it, which is exactly when you least want the
+            # detector to go quiet.
+            was = self._node_state_prev.get(who)
+            if was:
+                elapsed  = max(0.0, time.time() - was.get("at", 0.0))
+                expected = was.get("uptime_s", 0) + elapsed
+                if h.uptime_s + self.NODE_UPTIME_TOLERANCE_S < expected:
+                    log.warning("NODE REBOOTED (while we were not watching) — %s "
+                                "uptime %.2fh, expected ~%.2fh | reset reason: %s",
+                                who, h.uptime_s / 3600.0, expected / 3600.0, rname)
         self._node_uptime[who] = h.uptime_s
+        self._node_state_save(who, h.uptime_s, h.reset_reason)
 
         if h.anomaly:
             log.warning("%s [ANOMALY]", line)

@@ -139,7 +139,13 @@ static void peer_forget_stale(uint32_t now) {
         if (now - _peer[i].last_rx_ms < PEER_STALE_MS) continue;
         esp_now_del_peer(_peer[i].mac);
         _peer[i].used = false;
-        Serial.printf("[PEER] mount %d aged out\n", i + 1);
+        // Worth a loud line: from this moment the hub's commands for that mount
+        // arrive here and are discarded, while the hub goes on believing we
+        // serve it.  If this appears while the mount is still alive, the uplink
+        // stopped and the downlink went with it.
+        Serial.printf("[PEER] mount %d aged out after %lu ms silent — its downlink "
+                      "is now dropped here until it transmits again\n",
+                      i + 1, (unsigned long)PEER_STALE_MS);
     }
 }
 
@@ -216,17 +222,57 @@ static void drain_espnow_to_uplink(uint32_t now) {
 static uint8_t  _tcp_buf[PACKET_MAX_PAYLOAD + 16];
 static uint16_t _tcp_len = 0;
 
+// Downlink counters.  A satellite that quietly stops delivering looks exactly
+// like a mount that stopped listening, and the difference is only visible from
+// here: the hub cannot see this side, and on TCP the PC app cannot see even the
+// hub's console.  One rig lost 31% of its commands to a mount for an hour with
+// nothing anywhere recording a single dropped frame.
+static uint32_t _dn_sent = 0, _dn_no_peer = 0, _dn_send_err = 0;
+static uint32_t _dn_last_report_ms = 0;
+#define DN_REPORT_MS  30000UL
+
 static void forward_frame(const uint8_t *frame, uint16_t len) {
     uint8_t mid = frame_mount_id(frame, len);
     if (mid == MOUNT_BROADCAST) {
-        for (int i = 0; i < NUM_MOUNTS; i++)
-            if (_peer[i].used) esp_now_send(_peer[i].mac, frame, len);
-    } else if (mid >= 1 && mid <= NUM_MOUNTS && _peer[mid - 1].used) {
-        esp_now_send(_peer[mid - 1].mac, frame, len);
+        for (int i = 0; i < NUM_MOUNTS; i++) {
+            if (!_peer[i].used) continue;
+            if (esp_now_send(_peer[i].mac, frame, len) == ESP_OK) _dn_sent++;
+            else                                                  _dn_send_err++;
+        }
+        return;
     }
-    // A mount we have never heard from is not ours — silently ignored, so the
-    // hub can broadcast to all satellites without each one shouting into the
-    // void for mounts that live in another room.
+    if (mid < 1 || mid > NUM_MOUNTS) return;      // not a mount frame at all
+
+    if (!_peer[mid - 1].used) {
+        // A mount we have never heard from is not ours — the hub broadcasts to
+        // every satellite, and each one ignores the mounts that live in another
+        // room.  But it is ALSO what a mount that has aged out of our table
+        // looks like, and that is a fault: the hub still believes we serve it,
+        // so its commands arrive here and stop, unacknowledged and unlogged.
+        // Counted, and reported below, so the two can be told apart.
+        _dn_no_peer++;
+        return;
+    }
+    esp_err_t e = esp_now_send(_peer[mid - 1].mac, frame, len);
+    if (e == ESP_OK) {
+        _dn_sent++;
+    } else {
+        _dn_send_err++;
+        Serial.printf("[DOWN] mount %d send failed: %s\n", mid, esp_err_to_name(e));
+    }
+}
+
+// Called from loop().  Silent while nothing is being dropped, so this cannot
+// bury the log the way an unconditional heartbeat would.
+static void downlink_report(uint32_t now) {
+    if (now - _dn_last_report_ms < DN_REPORT_MS) return;
+    _dn_last_report_ms = now;
+    if (!_dn_no_peer && !_dn_send_err) return;
+    Serial.printf("[DOWN] %lu delivered, %lu dropped (mount not in our peer "
+                  "table), %lu send errors\n",
+                  (unsigned long)_dn_sent, (unsigned long)_dn_no_peer,
+                  (unsigned long)_dn_send_err);
+    _dn_no_peer = _dn_send_err = 0;
 }
 
 static void drain_uplink_to_espnow() {
@@ -311,4 +357,5 @@ void loop() {
     drain_espnow_to_uplink(now);
     if (_uplink.connected()) drain_uplink_to_espnow();
     peer_forget_stale(now);
+    downlink_report(now);
 }
