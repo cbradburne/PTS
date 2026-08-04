@@ -186,6 +186,24 @@ static void peer_learn(uint8_t mount_id, const uint8_t *mac, uint32_t now) {
 }
 
 // ---------------------------------------------------------------------------
+// Throughput diagnostics
+// ---------------------------------------------------------------------------
+// The downlink was sustaining ~1.3 frames/s while ~2.1/s arrived, so 40% of the
+// commands for a mount were being shed - and a deeper queue would not have
+// helped, because a queue absorbs bursts and this is a steady shortfall.
+//
+// Two candidates, and these separate them.  Either the radio accepts almost
+// nothing per pass (nomem climbing, pumped-per-pass ~1), or the loop itself is
+// too slow to pump often enough (loop rate low, nomem near zero) - most likely
+// starved by drain_espnow_to_uplink(), which does a TCP write per uplink frame
+// while a mount streams STATUS at ~10 Hz.
+static uint32_t _loop_count   = 0;   // passes since the last report
+static uint32_t _loop_max_us  = 0;   // slowest single pass
+static uint32_t _dn_nomem     = 0;   // esp_now_send() refusals
+static uint32_t _up_writes    = 0;   // TCP writes made for uplink frames
+static uint32_t _up_write_us  = 0;   // time spent in them
+
+// ---------------------------------------------------------------------------
 // ESP-NOW  ->  uplink
 // ---------------------------------------------------------------------------
 // The receive callback runs in WiFi task context, so it only queues.  Touching
@@ -222,7 +240,12 @@ static void drain_espnow_to_uplink(uint32_t now) {
         if (_uplink.connected()) {
             uint8_t env[SAT_ENV_MAX];
             uint16_t n = sat_env_build(env, it.mac, it.rssi, it.data, it.len);
-            if (n) _uplink.write(env, n);
+            if (n) {
+                uint32_t t0 = micros();
+                _uplink.write(env, n);
+                _up_write_us += (micros() - t0);
+                _up_writes++;
+            }
         }
         // Not connected: drop.  Buffering telemetry to replay later would
         // deliver a burst of stale STATUS the moment the hub reappears, and
@@ -248,6 +271,7 @@ static uint32_t _dn_sent = 0, _dn_no_peer = 0, _dn_send_err = 0;
 static volatile uint32_t _dn_acked = 0, _dn_unacked = 0;
 static uint32_t _dn_last_report_ms = 0;
 static uint32_t _dn_last_ok_ms     = 0;   // last accepted send
+
 #define DN_NOMEM_DROP_MS      250UL      // stop holding a stale frame
 #define DN_NOMEM_RECOVER_MS  5000UL      // stack is wedged, rebuild it
 #define DN_REPORT_MS  30000UL
@@ -360,6 +384,7 @@ static void dn_pump(uint32_t now) {
         }
         esp_err_t e = esp_now_send(_peer[f.idx].mac, f.data, f.len);
         if (e == ESP_ERR_ESPNOW_NO_MEM) {
+            _dn_nomem++;
             // Saturated.  Holding position is right for a moment - the radio
             // is busy and will drain - but it must not be forever.  Written as
             // a bare "return", it was: the driver stopped accepting frames and
@@ -417,6 +442,17 @@ static void forward_frame(const uint8_t *frame, uint16_t len) {
 static void downlink_report(uint32_t now) {
     if (now - _dn_last_report_ms < DN_REPORT_MS) return;
     _dn_last_report_ms = now;
+    // Throughput first: printed unconditionally alongside any downlink trouble,
+    // because "how fast can this box actually push frames" is the question the
+    // shed count cannot answer on its own.
+    uint32_t secs = DN_REPORT_MS / 1000UL;
+    Serial.printf("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
+                  "uplink %lu writes, %lu us total\n",
+                  (unsigned long)(_loop_count / (secs ? secs : 1)),
+                  (unsigned long)_loop_max_us, (unsigned long)_dn_nomem,
+                  (unsigned long)_up_writes, (unsigned long)_up_write_us);
+    _loop_count = _loop_max_us = _dn_nomem = _up_writes = _up_write_us = 0;
+
     if (!_dn_no_peer && !_dn_send_err && !_dn_overflow && !_dn_unacked) return;
     Serial.printf("[DOWN] %lu sent (%lu acked by the mount, %lu NOT acked), "
                   "%lu dropped (no peer), %lu send errors, %lu shed (queue full)\n",
@@ -506,6 +542,7 @@ void setup() {
 }
 
 void loop() {
+    uint32_t _t0 = micros();
     uint32_t now = millis();
     eth_report_once_if_down(now, 8000);
     uplink_service(now);
@@ -514,4 +551,8 @@ void loop() {
     peer_forget_stale(now);
     dn_pump(now);
     downlink_report(now);
+
+    _loop_count++;
+    uint32_t _dt = micros() - _t0;
+    if (_dt > _loop_max_us) _loop_max_us = _dt;
 }
