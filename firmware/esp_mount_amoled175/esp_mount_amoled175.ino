@@ -119,6 +119,35 @@ static void cfg_save() {
     _mount_prefs.end();
 }
 
+// ---------------------------------------------------------------------------
+// Deferred config save
+// ---------------------------------------------------------------------------
+// cfg_save() writes the whole MountCfg — 16 hub records, ~390 bytes — through
+// NVS, and a flash erase/write of that size blocks for a good fraction of a
+// second.  Calling it straight from hub_reacquire_poll(), which runs in loop(),
+// put that stall in the path of every jog, look-at update and CV correction:
+// one mount showed 213 ms loop peaks against 9-11 ms on mounts that were not
+// roaming.  On a motion controller that is a visible hitch, not a statistic.
+//
+// What a roam actually changes is which hub we prefer and its channel — a
+// CACHE.  It is rediscovered by scanning on the next boot regardless, so
+// writing it the instant it changes buys almost nothing, and a mount flapping
+// between two hubs would write flash every time it moved.
+//
+// So: mark it dirty and write once the choice has held still, and only while
+// the mount is idle.  Explicit pairing does NOT use this — that is a
+// deliberate act by an operator and must survive the power being pulled a
+// second later.
+#define CFG_SAVE_SETTLE_MS  30000UL
+static bool     _cfg_dirty       = false;
+static uint32_t _cfg_dirty_since = 0;
+
+static void cfg_save_deferred() {
+    _cfg_dirty       = true;
+    _cfg_dirty_since = millis();
+}
+
+
 static void cfg_load() {
     // Zero first: a short read leaves the unwritten tail as-is, and we want
     // unused hub slots empty rather than stale.
@@ -364,6 +393,15 @@ static MsState _ms = {
     .active_la_subject = 0xFF,
     .hub_connected    = false,
 };
+// Called from loop().
+static void cfg_save_poll() {
+    if (!_cfg_dirty) return;
+    if (millis() - _cfg_dirty_since < CFG_SAVE_SETTLE_MS) return;
+    if (_ms.state != STATE_IDLE) return;      // never mid-move
+    _cfg_dirty = false;
+    cfg_save();
+    Serial.println("[CFG] Roam settled — saved");
+}
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -1343,7 +1381,7 @@ static void hub_reacquire_poll() {
         if (hub_changed || ch_changed) {
             _cfg.hubs[best].channel = bestch;
             _cfg.last_hub           = (uint8_t)best;
-            cfg_save();
+            cfg_save_deferred();      // a roam is a cache update, not a commitment
             cfg_apply_active_hub();
             Serial.printf("[REACQ] Following hub \"%s\" %02X:%02X on ch %d (%d dB)%s\n",
                           _cfg.hubs[best].ssid, _hub_mac[4], _hub_mac[5],
@@ -1846,6 +1884,7 @@ void loop() {
     // ── SETUP scan poller + hub reacquire ────────────────────────────────
     setup_poll_scan();
     hub_reacquire_poll();
+    cfg_save_poll();
 
     // ── Display dim timeout (never while SETUP is open) ──────────────────
     if (!_dimmed && !_setup_active &&
