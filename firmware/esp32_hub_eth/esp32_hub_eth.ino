@@ -280,7 +280,25 @@ static void mount_table_load() {
 // Mutex protecting Serial1 (display UART) — both loop() and forward_to_mounts
 // (called from loop) write to it, so no real concurrency issue, but explicit
 // for clarity if this ever moves to a separate task.
-static portMUX_TYPE _disp_mux = portMUX_INITIALIZER_UNLOCKED;
+// A MUTEX, not a spinlock.  Every one of these critical sections wraps
+// disp_uart_send(), which does three Serial1.write() calls — and a write blocks
+// when the TX buffer is full, waiting for the UART interrupt to drain it.
+// portENTER_CRITICAL() disables interrupts, so that ISR could not run: the write
+// waited for space only an interrupt could free, with interrupts off.  The
+// interrupt watchdog then reset the hub at 300 ms — reset reason INT_WDT, seen
+// three times, always under load and never reproducibly.
+//
+// A mutex gives the same mutual exclusion (the three writes stay one frame)
+// while leaving interrupts enabled, so the UART drains and the write returns.
+// Every caller is reached from loop(), never an ISR or the WiFi/AsyncTCP task,
+// which is what makes a blocking primitive legal here.
+static SemaphoreHandle_t _disp_mux = nullptr;
+
+// Tolerates being called before setup() creates the mutex — some display sends
+// happen during bring-up, and a missed lock there is harmless because nothing
+// else is running yet.
+static inline void disp_lock()   { if (_disp_mux) xSemaphoreTake(_disp_mux, portMAX_DELAY); }
+static inline void disp_unlock() { if (_disp_mux) xSemaphoreGive(_disp_mux); }
 
 // ---------------------------------------------------------------------------
 // Display send helpers
@@ -288,15 +306,15 @@ static portMUX_TYPE _disp_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void disp_update_cam(uint8_t mount_id, uint8_t state, uint8_t flags, int8_t rssi) {
     uint8_t buf[4] = { mount_id, state, flags, (uint8_t)rssi };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_UPDATE_CAM, buf, sizeof(buf));
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 static void disp_set_disconnected(uint8_t mount_id) {
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_SET_DISCONNECTED, &mount_id, 1);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 // Network-client mirrors of the two display pushes below (defined later, after
@@ -314,9 +332,9 @@ static void bcast_pair_conflict(uint8_t cam, const uint8_t *new_mac,
 static void disp_send_mount_table() {
     uint8_t buf[NUM_MOUNTS * 6];
     memcpy(buf, _mount_mac, sizeof(buf));
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_MOUNT_TABLE, buf, sizeof(buf));
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
     bcast_mount_table();                        // ...and to TCP / WS / USB clients
 }
 
@@ -327,24 +345,24 @@ static void disp_send_pair_conflict(uint8_t cam, const uint8_t *new_mac,
     buf[0] = cam;
     if (new_mac) memcpy(buf + 1, new_mac, 6);
     if (old_mac) memcpy(buf + 7, old_mac, 6);
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_PAIR_CONFLICT, buf, sizeof(buf));
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
     bcast_pair_conflict(cam, new_mac, old_mac);   // ...and to TCP / WS / USB clients
 }
 
 static void disp_update_preset(uint8_t mount_id, uint8_t pt, uint8_t sz) {
     uint8_t buf[3] = { mount_id, pt, sz };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_UPDATE_PRESET, buf, sizeof(buf));
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 static void disp_update_clients(uint8_t tcp_count, uint8_t ws_count) {
     uint8_t buf[2] = { tcp_count, ws_count };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_UPDATE_CLIENTS, buf, sizeof(buf));
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 static void disp_update_slots(uint8_t mount_id, uint16_t slot_occupied,
@@ -356,9 +374,9 @@ static void disp_update_slots(uint8_t mount_id, uint16_t slot_occupied,
         target_slot,
         state
     };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_UPDATE_SLOTS, buf, sizeof(buf));
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 static void refresh_espnow_peer(uint8_t idx);
@@ -1024,9 +1042,9 @@ static void intercept_la_move_dir(uint8_t mount_id, uint8_t dir) {
     _la_dir[mount_id - 1] = (int8_t)dir;
     // Display board (UART)
     uint8_t dbuf[2] = { mount_id, dir };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_LA_MOVE_DIR, dbuf, 2);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
     // TCP / serial clients + WebSocket clients
     uint8_t raw[PKT_BUF_SIZE + 4];
     uint16_t rlen = build_packet(raw, mount_id, ++_la_dir_seq,
@@ -1274,18 +1292,18 @@ static void disp_limits_found(uint8_t mount_id, const uint8_t *payload9) {
     uint8_t buf[10];
     buf[0] = mount_id;
     memcpy(buf + 1, payload9, 9);
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_LIMITS_FOUND, buf, 10);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 // Forward CMD_HOME_COMPLETE from a mount to the display board via DISP_UART.
 // payload: 1-byte axis.
 static void disp_home_complete(uint8_t mount_id, uint8_t axis) {
     uint8_t buf[2] = { mount_id, axis };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_HOME_COMPLETE, buf, 2);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 // Forward CMD_CONFIG_REPORT from a mount to the display board via DISP_UART.
@@ -1294,9 +1312,9 @@ static void disp_config_report(uint8_t mount_id, const uint8_t *payload75) {
     uint8_t buf[76];
     buf[0] = mount_id;
     memcpy(buf + 1, payload75, 75);
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_CONFIG_REPORT, buf, 76);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 // Extract 8-bit subject validity mask from a SUBJECT_LIST payload and send
@@ -1310,26 +1328,26 @@ static void disp_subject_mask(uint8_t mount_id, const uint8_t *payload232) {
         if (payload232[i * SUBJECT_RECORD_LEN]) mask |= (1u << i);
     }
     uint8_t buf[2] = { mount_id, mask };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_SUBJECT_MASK, buf, 2);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 // Forward CMD_LOOK_AT_STATUS subject_id to the display board via DISP_UART.
 // payload: 14-byte LOOK_AT_STATUS; subject_id is at payload[12].
 static void disp_look_at_status(uint8_t mount_id, uint8_t subject_id) {
     uint8_t buf[2] = { mount_id, subject_id };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_LOOK_AT_STATUS, buf, 2);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 // Forward CMD_CALIB_PROMPT sub_state to the display board via DISP_UART.
 static void disp_calib_prompt(uint8_t mount_id, uint8_t sub_state) {
     uint8_t buf[2] = { mount_id, sub_state };
-    portENTER_CRITICAL(&_disp_mux);
+    disp_lock();
     disp_uart_send(Serial1, DISP_MSG_CALIB_PROMPT, buf, 2);
-    portEXIT_CRITICAL(&_disp_mux);
+    disp_unlock();
 }
 
 static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &pkt) {
@@ -2010,6 +2028,7 @@ void setup() {
     // non-software boot.
     if (esp_reset_reason() != ESP_RST_SW) _self_restart_streak = 0;
     Serial.println("\n=== PTS Camera Mount Hub (ESP32-S3-ETH) ===");
+    _disp_mux = xSemaphoreCreateMutex();
     Serial.printf("Reset reason: %d  (self-restart streak: %lu)\n",
                   (int)_reset_reason, (unsigned long)_self_restart_streak);
 
