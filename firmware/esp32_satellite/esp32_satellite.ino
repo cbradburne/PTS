@@ -231,14 +231,79 @@ static uint32_t _dn_sent = 0, _dn_no_peer = 0, _dn_send_err = 0;
 static uint32_t _dn_last_report_ms = 0;
 #define DN_REPORT_MS  30000UL
 
+// ---------------------------------------------------------------------------
+// Downlink pacing
+// ---------------------------------------------------------------------------
+// esp_now_send() was called fire-and-forget, one per frame off the wire, with
+// no send callback and nothing watching whether the previous frame had left.
+// A mount that is not listening — because it has roamed to the hub, which is on
+// a different AP channel — never acknowledges, so each frame occupies the
+// driver for its full retry period and the queue backs up.  The result is
+// bursts of ESP_ERR_ESPNOW_NO_MEM, and those frames are simply lost: 76 of them
+// in one 30-minute window, every one a command the operator issued.
+//
+// So: a small ring, one frame in flight, released by the send callback.  This
+// does not make an absent mount reachable — nothing here can — but it stops a
+// burst aimed at one mount from being discarded outright, and it stops the
+// driver being hammered while it is already saturated.
+#define DN_QUEUE_DEPTH   16
+struct DnFrame { uint8_t mac[6]; uint16_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; };
+static DnFrame  _dn_q[DN_QUEUE_DEPTH];
+static uint8_t  _dn_head = 0, _dn_tail = 0;
+static volatile bool _dn_in_flight = false;
+static uint32_t _dn_sent_ms = 0;
+static uint32_t _dn_overflow = 0;
+#define DN_IN_FLIGHT_TIMEOUT_MS  200   // a send that never reports back
+
+static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
+    (void)info; (void)status;          // delivery is the mount's business, not ours
+    _dn_in_flight = false;
+}
+
+// Push onto the ring.  Dropping the OLDEST on overflow, not the newest: these
+// are control commands, and the most recent one is the operator's latest
+// intention — a stale jog is worth less than the stop that followed it.
+static void dn_enqueue(const uint8_t *mac, const uint8_t *frame, uint16_t len) {
+    if (len > sizeof(((DnFrame *)0)->data)) return;
+    uint8_t next = (uint8_t)((_dn_head + 1) % DN_QUEUE_DEPTH);
+    if (next == _dn_tail) {
+        _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
+        _dn_overflow++;
+    }
+    memcpy(_dn_q[_dn_head].mac, mac, 6);
+    memcpy(_dn_q[_dn_head].data, frame, len);
+    _dn_q[_dn_head].len = len;
+    _dn_head = next;
+}
+
+// Called from loop().  One frame at a time, next only once the driver has
+// reported the last one done — or timed out, so a lost callback cannot wedge
+// the queue permanently.
+static void dn_pump(uint32_t now) {
+    if (_dn_head == _dn_tail) return;
+    if (_dn_in_flight) {
+        if (now - _dn_sent_ms < DN_IN_FLIGHT_TIMEOUT_MS) return;
+        _dn_in_flight = false;                 // assume lost, carry on
+    }
+    DnFrame &f = _dn_q[_dn_tail];
+    esp_err_t e = esp_now_send(f.mac, f.data, f.len);
+    if (e == ESP_ERR_ESPNOW_NO_MEM) return;    // still saturated — hold position
+    _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
+    if (e == ESP_OK) {
+        _dn_sent++;
+        _dn_in_flight = true;
+        _dn_sent_ms   = now;
+    } else {
+        _dn_send_err++;
+        Serial.printf("[DOWN] send failed: %s\n", esp_err_to_name(e));
+    }
+}
+
 static void forward_frame(const uint8_t *frame, uint16_t len) {
     uint8_t mid = frame_mount_id(frame, len);
     if (mid == MOUNT_BROADCAST) {
-        for (int i = 0; i < NUM_MOUNTS; i++) {
-            if (!_peer[i].used) continue;
-            if (esp_now_send(_peer[i].mac, frame, len) == ESP_OK) _dn_sent++;
-            else                                                  _dn_send_err++;
-        }
+        for (int i = 0; i < NUM_MOUNTS; i++)
+            if (_peer[i].used) dn_enqueue(_peer[i].mac, frame, len);
         return;
     }
     if (mid < 1 || mid > NUM_MOUNTS) return;      // not a mount frame at all
@@ -253,13 +318,7 @@ static void forward_frame(const uint8_t *frame, uint16_t len) {
         _dn_no_peer++;
         return;
     }
-    esp_err_t e = esp_now_send(_peer[mid - 1].mac, frame, len);
-    if (e == ESP_OK) {
-        _dn_sent++;
-    } else {
-        _dn_send_err++;
-        Serial.printf("[DOWN] mount %d send failed: %s\n", mid, esp_err_to_name(e));
-    }
+    dn_enqueue(_peer[mid - 1].mac, frame, len);
 }
 
 // Called from loop().  Silent while nothing is being dropped, so this cannot
@@ -267,12 +326,12 @@ static void forward_frame(const uint8_t *frame, uint16_t len) {
 static void downlink_report(uint32_t now) {
     if (now - _dn_last_report_ms < DN_REPORT_MS) return;
     _dn_last_report_ms = now;
-    if (!_dn_no_peer && !_dn_send_err) return;
+    if (!_dn_no_peer && !_dn_send_err && !_dn_overflow) return;
     Serial.printf("[DOWN] %lu delivered, %lu dropped (mount not in our peer "
-                  "table), %lu send errors\n",
+                  "table), %lu send errors, %lu shed from a full queue\n",
                   (unsigned long)_dn_sent, (unsigned long)_dn_no_peer,
-                  (unsigned long)_dn_send_err);
-    _dn_no_peer = _dn_send_err = 0;
+                  (unsigned long)_dn_send_err, (unsigned long)_dn_overflow);
+    _dn_no_peer = _dn_send_err = _dn_overflow = 0;
 }
 
 static void drain_uplink_to_espnow() {
@@ -345,6 +404,7 @@ void setup() {
         ESP.restart();
     }
     esp_now_register_recv_cb(on_espnow_recv);
+    esp_now_register_send_cb(on_espnow_sent);   // paces dn_pump()
 
     eth_begin();
     Serial.printf("Hub uplink: %s:%d\n", _hub_host, HUB_PORT);
@@ -357,5 +417,6 @@ void loop() {
     drain_espnow_to_uplink(now);
     if (_uplink.connected()) drain_uplink_to_espnow();
     peer_forget_stale(now);
+    dn_pump(now);
     downlink_report(now);
 }

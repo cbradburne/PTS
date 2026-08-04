@@ -1225,23 +1225,45 @@ static void setup_exit() {
 
 #define REACQ_SILENT_MS  20000UL   // hub silence before we start scanning
 #define REACQ_PERIOD_MS  30000UL   // min gap between reacquire scans
+// A mount used to look for a better hub ONLY once its current one had gone
+// quiet.  So a momentary satellite outage dropped it back to the distant hub -
+// which answers, weakly - and it stayed there, never rescanning, never noticing
+// the satellite beside it was 30 dB stronger, until it degraded into isolation.
+// One mount spent 57 minutes off the air that way with a healthy satellite in
+// the same room.
+//
+// So it now also scans while healthy, far less often, and switches only on a
+// margin large enough that two comparable hubs cannot make it oscillate.
+#define REACQ_HEALTHY_PERIOD_MS  (5UL * 60UL * 1000UL)
+#define REACQ_UPGRADE_MARGIN_DB  15
 // How long fully isolated before the mount may adopt a hub it has never been
 // paired with.  Deliberately shorter than ESPNOW_RESTART_MS, so adoption gets
 // a chance BEFORE the isolation restart throws away the attempt.
 #define REACQ_ADOPT_MS   60000UL
 
 static uint32_t _reacq_last_ms = 0;
+static bool     _reacq_was_silent = false;   // why this scan was started
 
 static void hub_reacquire_poll() {
     if (!_cfg_valid || _setup_active || _scan_running) { _reacq_scanning = false; return; }
 
     uint32_t nowm = millis();
     if (!_reacq_scanning) {
-        if ((nowm - _last_hub_rx_ms) > REACQ_SILENT_MS &&
-                (nowm - _reacq_last_ms) > REACQ_PERIOD_MS) {
-            _reacq_last_ms  = nowm;
-            _reacq_scanning = true;
-            Serial.println("[REACQ] Hub silent — scanning for known hubs");
+        bool silent = (nowm - _last_hub_rx_ms) > REACQ_SILENT_MS;
+        // A scan takes the radio off-channel for a second or two.  When the hub
+        // has already gone quiet that costs nothing — we are not hearing it
+        // anyway — but the healthy periodic scan must never happen mid-move: on
+        // a camera rig those seconds are when an operator might press stop, and
+        // deafness is not something to schedule into a live shot.  Waiting for
+        // idle only delays the upgrade to the next tick.
+        bool safe_to_scan = silent || (_ms.state == STATE_IDLE);
+        uint32_t period = silent ? REACQ_PERIOD_MS : REACQ_HEALTHY_PERIOD_MS;
+        if (safe_to_scan && (nowm - _reacq_last_ms) > period) {
+            _reacq_last_ms   = nowm;
+            _reacq_scanning  = true;
+            _reacq_was_silent = silent;
+            Serial.println(silent ? "[REACQ] Hub silent — scanning for known hubs"
+                                  : "[REACQ] Periodic check for a stronger hub");
             WiFi.scanDelete();
             WiFi.scanNetworks(true /*async*/, false);
         }
@@ -1254,11 +1276,13 @@ static void hub_reacquire_poll() {
 
     int8_t  best   = -1;
     int16_t bestdb = -32768;
+    int16_t curdb  = -32768;    // the hub we are on, measured in THIS scan
     uint8_t bestch = 0;
     for (int i = 0; i < n; i++) {
         const uint8_t *bssid = WiFi.BSSID(i);
         for (uint8_t k = 0; k < _cfg.n_hubs; k++) {
             if (memcmp(bssid, _cfg.hubs[k].mac, 6) != 0) continue;
+            if (k == _cfg.last_hub) curdb = (int16_t)WiFi.RSSI(i);
             if ((int16_t)WiFi.RSSI(i) > bestdb) {
                 bestdb = (int16_t)WiFi.RSSI(i);
                 best   = (int8_t)k;
@@ -1307,7 +1331,14 @@ static void hub_reacquire_poll() {
         cfg_save();
         cfg_apply_active_hub();
     } else if (best >= 0) {
-        bool hub_changed = (best != (int8_t)_cfg.last_hub);
+        // Switching hub is free when the current one has gone quiet — we have
+        // nothing to lose.  While it is still answering it must be a clear
+        // upgrade, measured in the same scan so the two numbers are comparable,
+        // or a mount sitting between two similar hubs would ping-pong and spend
+        // its life re-pairing instead of working.
+        bool hub_changed = (best != (int8_t)_cfg.last_hub) &&
+                           (_reacq_was_silent ||
+                            bestdb > curdb + REACQ_UPGRADE_MARGIN_DB);
         bool ch_changed  = (bestch != _cfg.hubs[best].channel);
         if (hub_changed || ch_changed) {
             _cfg.hubs[best].channel = bestch;
