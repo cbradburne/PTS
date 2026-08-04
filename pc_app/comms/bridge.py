@@ -785,8 +785,15 @@ class Bridge:
         frozen, our bytes aren't arriving → host-side (Windows USB-CDC OUT halt).
         If it's still climbing, bytes arrive but aren't forwarded → hub-side."""
         if self._hub_diag_rx_t is None:
-            log.warning("WEDGE mount=%d host/hub: no HUB_DIAG received — hub firmware "
-                        "may predate the diagnostic; cannot split host vs hub", mount)
+            # Say what is actually unknown.  "Firmware may predate the
+            # diagnostic" was written when USB was the only transport and was
+            # simply wrong once the hub was current but the packet was still
+            # Serial-only — it sent people looking at the wrong thing.
+            log.warning("WEDGE mount=%d host/hub: no HUB_DIAG received, so we cannot "
+                        "tell whether our bytes are reaching the hub. Either the hub "
+                        "predates the diagnostic, or it is current but not sending it "
+                        "on this transport (it was Serial-only before 2026-08-04).",
+                        mount)
             return
         since_diag = now - self._hub_diag_rx_t
         since_adv  = (now - self._hub_rx_last_advance_t

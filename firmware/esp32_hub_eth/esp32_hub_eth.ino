@@ -1593,7 +1593,14 @@ static void send_usb_diag() {
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_packet(buf, 0xFE /*hub sentinel mount_id*/, ++_usb_diag_seq,
                               CMD_HUB_DIAG, payload, 13);
+    // To all clients — the last of the three hub-telemetry messages to stop
+    // being Serial-only.  Without it the PC app on TCP reports "no HUB_DIAG
+    // received - hub firmware may predate the diagnostic", which is both
+    // alarming and wrong: the firmware is current, the packet simply never
+    // left by the door the client was listening at.
     Serial.write(buf, n);
+    broadcast_to_all(buf, n);
+    _ws.binaryAll(buf, (size_t)n);
 }
 
 // ---- Uniform health telemetry (hub node) ----
@@ -2577,9 +2584,18 @@ void loop() {
             continue;
         }
         while (_slots[i].client.available()) {
+            // Counted here as well as on the USB path.  This pair answers one
+            // question for the PC app - "are my bytes reaching the hub?" - and
+            // it is the answer that splits a host-side wedge from a hub-side
+            // one.  Counting only USB meant that running the PC app over TCP,
+            // which is what stops the host resetting the hub, froze the counter
+            // at zero and retired the diagnostic without saying so.
+            _usb_rx_bytes++;
             ParsedPacket pkt;
-            if (pkt_feed(&_slots[i].parser, _slots[i].client.read(), &pkt))
+            if (pkt_feed(&_slots[i].parser, _slots[i].client.read(), &pkt)) {
+                _usb_rx_pkts++;
                 forward_to_mounts(pkt);
+            }
         }
     }
 
