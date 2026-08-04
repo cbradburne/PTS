@@ -247,6 +247,9 @@ static uint32_t _dn_sent = 0, _dn_no_peer = 0, _dn_send_err = 0;
 // Accepted by the radio vs actually acknowledged by the mount.
 static volatile uint32_t _dn_acked = 0, _dn_unacked = 0;
 static uint32_t _dn_last_report_ms = 0;
+static uint32_t _dn_last_ok_ms     = 0;   // last accepted send
+#define DN_NOMEM_DROP_MS      250UL      // stop holding a stale frame
+#define DN_NOMEM_RECOVER_MS  5000UL      // stack is wedged, rebuild it
 #define DN_REPORT_MS  30000UL
 
 // ---------------------------------------------------------------------------
@@ -318,6 +321,31 @@ static void dn_enqueue(uint8_t idx, const uint8_t *frame, uint16_t len) {
 // because sends to an absent mount burned their full retry period first.  The
 // peer is now checked at send time, so that case is gone and the guard costs
 // far more than it saves.
+// Rebuild the ESP-NOW stack and re-register the peers we know about.  The
+// satellite had no recovery at all: if the driver stopped accepting frames it
+// stayed that way, and the only symptom was a downlink that went quiet.
+static void espnow_recover() {
+    Serial.println("[DOWN] ESP-NOW stalled — reinitialising the stack");
+    esp_now_deinit();
+    delay(50);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[DOWN] ESP-NOW reinit FAILED — will retry");
+        return;
+    }
+    esp_now_register_recv_cb(on_espnow_recv);
+    esp_now_register_send_cb(on_espnow_sent);
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        if (!_peer[i].used) continue;
+        esp_now_peer_info_t info = {};
+        memcpy(info.peer_addr, _peer[i].mac, 6);
+        info.channel = AP_CHANNEL;
+        info.ifidx   = WIFI_IF_AP;
+        info.encrypt = false;
+        esp_now_add_peer(&info);
+    }
+    Serial.println("[DOWN] ESP-NOW reinitialised, peers restored");
+}
+
 static void dn_pump(uint32_t now) {
     (void)now;
     while (_dn_head != _dn_tail) {
@@ -331,10 +359,30 @@ static void dn_pump(uint32_t now) {
             continue;
         }
         esp_err_t e = esp_now_send(_peer[f.idx].mac, f.data, f.len);
-        if (e == ESP_ERR_ESPNOW_NO_MEM) return;   // saturated — hold, retry next pass
+        if (e == ESP_ERR_ESPNOW_NO_MEM) {
+            // Saturated.  Holding position is right for a moment - the radio
+            // is busy and will drain - but it must not be forever.  Written as
+            // a bare "return", it was: the driver stopped accepting frames and
+            // the satellite relayed nothing for fifteen minutes, sent frozen,
+            // ~52 commands shed every 30 s, and every other counter reading
+            // zero.  A silent permanent stall is the worst thing this box can
+            // do, so it is now bounded twice over.
+            if (now - _dn_last_ok_ms > DN_NOMEM_DROP_MS) {
+                // Shift the head so the queue can move even while the radio
+                // refuses; a command this old is stale anyway.
+                _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
+                _dn_send_err++;
+            }
+            if (now - _dn_last_ok_ms > DN_NOMEM_RECOVER_MS) {
+                _dn_last_ok_ms = now;      // one attempt per interval
+                espnow_recover();
+            }
+            return;
+        }
         _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
         if (e == ESP_OK) {
             _dn_sent++;
+            _dn_last_ok_ms = now;
         } else {
             _dn_send_err++;
             Serial.printf("[DOWN] send failed: %s\n", esp_err_to_name(e));
@@ -449,6 +497,9 @@ void setup() {
     }
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);   // paces dn_pump()
+    // Start the stall clock now.  Left at 0, the first NO_MEM after boot would
+    // read as a five-second stall and trigger a pointless stack rebuild.
+    _dn_last_ok_ms = millis();
 
     eth_begin();
     Serial.printf("Hub uplink: %s:%d\n", _hub_host, HUB_PORT);
