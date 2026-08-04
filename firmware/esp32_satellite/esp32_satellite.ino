@@ -244,6 +244,8 @@ static uint16_t _tcp_len = 0;
 // hub's console.  One rig lost 31% of its commands to a mount for an hour with
 // nothing anywhere recording a single dropped frame.
 static uint32_t _dn_sent = 0, _dn_no_peer = 0, _dn_send_err = 0;
+// Accepted by the radio vs actually acknowledged by the mount.
+static volatile uint32_t _dn_acked = 0, _dn_unacked = 0;
 static uint32_t _dn_last_report_ms = 0;
 #define DN_REPORT_MS  30000UL
 
@@ -277,8 +279,16 @@ static uint32_t _dn_sent_ms = 0;
 static uint32_t _dn_overflow = 0;
 #define DN_IN_FLIGHT_TIMEOUT_MS  200   // a send that never reports back
 
+// The status here is the ONLY place delivery is visible.  esp_now_send()
+// returning ESP_OK means the radio accepted the frame, nothing more; whether
+// the mount acknowledged it at the MAC layer is reported only in this callback.
+// Discarding it — as this did — left "0 send errors" being printed while 70% of
+// commands were never reaching the mount, which reads as the satellite being
+// healthy and the mount being at fault.
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
-    (void)info; (void)status;          // delivery is the mount's business, not ours
+    (void)info;
+    if (status == ESP_NOW_SEND_SUCCESS) _dn_acked++;
+    else                                _dn_unacked++;
     _dn_in_flight = false;
 }
 
@@ -356,12 +366,13 @@ static void forward_frame(const uint8_t *frame, uint16_t len) {
 static void downlink_report(uint32_t now) {
     if (now - _dn_last_report_ms < DN_REPORT_MS) return;
     _dn_last_report_ms = now;
-    if (!_dn_no_peer && !_dn_send_err && !_dn_overflow) return;
-    Serial.printf("[DOWN] %lu delivered, %lu dropped (mount not in our peer "
-                  "table), %lu send errors, %lu shed from a full queue\n",
-                  (unsigned long)_dn_sent, (unsigned long)_dn_no_peer,
+    if (!_dn_no_peer && !_dn_send_err && !_dn_overflow && !_dn_unacked) return;
+    Serial.printf("[DOWN] %lu sent (%lu acked by the mount, %lu NOT acked), "
+                  "%lu dropped (no peer), %lu send errors, %lu shed (queue full)\n",
+                  (unsigned long)_dn_sent, (unsigned long)_dn_acked,
+                  (unsigned long)_dn_unacked, (unsigned long)_dn_no_peer,
                   (unsigned long)_dn_send_err, (unsigned long)_dn_overflow);
-    _dn_no_peer = _dn_send_err = _dn_overflow = 0;
+    _dn_no_peer = _dn_send_err = _dn_overflow = _dn_unacked = 0;
 }
 
 static void drain_uplink_to_espnow() {
