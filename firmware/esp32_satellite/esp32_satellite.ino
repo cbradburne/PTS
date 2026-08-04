@@ -264,7 +264,7 @@ static uint32_t _dn_last_report_ms = 0;
 // does not make an absent mount reachable — nothing here can — but it stops a
 // burst aimed at one mount from being discarded outright, and it stops the
 // driver being hammered while it is already saturated.
-#define DN_QUEUE_DEPTH   16
+#define DN_QUEUE_DEPTH   32
 // Holds the mount INDEX, not a copy of its MAC.  A queued frame outlives the
 // moment it was queued, and peer_forget_stale() deletes peers 60 s after a
 // mount goes quiet — so a MAC captured at enqueue time can name a peer that no
@@ -274,10 +274,7 @@ static uint32_t _dn_last_report_ms = 0;
 struct DnFrame { uint8_t idx; uint16_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; };
 static DnFrame  _dn_q[DN_QUEUE_DEPTH];
 static uint8_t  _dn_head = 0, _dn_tail = 0;
-static volatile bool _dn_in_flight = false;
-static uint32_t _dn_sent_ms = 0;
 static uint32_t _dn_overflow = 0;
-#define DN_IN_FLIGHT_TIMEOUT_MS  200   // a send that never reports back
 
 // The status here is the ONLY place delivery is visible.  esp_now_send()
 // returning ESP_OK means the radio accepted the frame, nothing more; whether
@@ -289,7 +286,6 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
     (void)info;
     if (status == ESP_NOW_SEND_SUCCESS) _dn_acked++;
     else                                _dn_unacked++;
-    _dn_in_flight = false;
 }
 
 // Push onto the ring.  Dropping the OLDEST on overflow, not the newest: these
@@ -308,34 +304,41 @@ static void dn_enqueue(uint8_t idx, const uint8_t *frame, uint16_t len) {
     _dn_head = next;
 }
 
-// Called from loop().  One frame at a time, next only once the driver has
-// reported the last one done — or timed out, so a lost callback cannot wedge
-// the queue permanently.
+// Called from loop().  Sends as many as the radio will take, stopping only when
+// it says NO_MEM — which is the backpressure signal, and the right one.
+//
+// This used to send ONE frame per loop pass and then wait for the send
+// callback, while drain_uplink_to_espnow() enqueues a whole burst from the hub
+// in that same pass.  Enqueue was unbounded, dequeue was one: a burst simply
+// filled the 32-deep ring and everything after it was shed.  That cost 150
+// commands in a 30-second window while every frame that DID go out was
+// acknowledged by the mount — the radio was never the problem, the pacing was.
+//
+// The one-in-flight rule was there to avoid NO_MEM, which only ever appeared
+// because sends to an absent mount burned their full retry period first.  The
+// peer is now checked at send time, so that case is gone and the guard costs
+// far more than it saves.
 static void dn_pump(uint32_t now) {
-    if (_dn_head == _dn_tail) return;
-    if (_dn_in_flight) {
-        if (now - _dn_sent_ms < DN_IN_FLIGHT_TIMEOUT_MS) return;
-        _dn_in_flight = false;                 // assume lost, carry on
-    }
-    DnFrame &f = _dn_q[_dn_tail];
-    // The mount may have aged out while this frame waited.  Drop it rather than
-    // send to a peer that no longer exists: it cannot be delivered either way,
-    // and holding it would stall everything behind it for a mount that is gone.
-    if (f.idx >= NUM_MOUNTS || !_peer[f.idx].used) {
+    (void)now;
+    while (_dn_head != _dn_tail) {
+        DnFrame &f = _dn_q[_dn_tail];
+        // The mount may have aged out while this frame waited.  Drop it rather
+        // than send to a peer that no longer exists: it cannot be delivered
+        // either way, and holding it stalls everything behind it.
+        if (f.idx >= NUM_MOUNTS || !_peer[f.idx].used) {
+            _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
+            _dn_no_peer++;
+            continue;
+        }
+        esp_err_t e = esp_now_send(_peer[f.idx].mac, f.data, f.len);
+        if (e == ESP_ERR_ESPNOW_NO_MEM) return;   // saturated — hold, retry next pass
         _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
-        _dn_no_peer++;
-        return;
-    }
-    esp_err_t e = esp_now_send(_peer[f.idx].mac, f.data, f.len);
-    if (e == ESP_ERR_ESPNOW_NO_MEM) return;    // still saturated — hold position
-    _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
-    if (e == ESP_OK) {
-        _dn_sent++;
-        _dn_in_flight = true;
-        _dn_sent_ms   = now;
-    } else {
-        _dn_send_err++;
-        Serial.printf("[DOWN] send failed: %s\n", esp_err_to_name(e));
+        if (e == ESP_OK) {
+            _dn_sent++;
+        } else {
+            _dn_send_err++;
+            Serial.printf("[DOWN] send failed: %s\n", esp_err_to_name(e));
+        }
     }
 }
 
