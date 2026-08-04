@@ -832,6 +832,26 @@ static PacketParser _serial_parser;
 // is not going to be heard either — and the PC app still sees the missing ACKs.
 #define MOUNT_PRESENT_MS  30000UL
 
+// How a mount is reached, decided in ONE place.  A mount attached to a
+// satellite is out of radio range from here — that is why it has a satellite —
+// so anything sent to it must go over the wire.
+//
+// ui_send_to_mount() used to skip this and always use ESP-NOW, which meant
+// every hub-display button press aimed at a satellite-attached mount went out
+// on a radio that mount cannot hear.  It failed silently from the operator's
+// side, and the failures fed the wedge detector, which escalated to restarting
+// the hub: 61 escalations on one rig, all naming the satellite mount, and each
+// restart dropped the satellite link and took that mount down for real.
+static void send_to_mount_routed(int idx, const uint8_t *raw, uint16_t len) {
+    if (idx < 0 || idx >= NUM_MOUNTS) return;
+    if (_mount_sat[idx] >= 0) {
+        SatSlot &sl = _sat[_mount_sat[idx]];
+        if (sl.active && sl.client.connected()) sl.client.write(raw, len);
+        return;
+    }
+    espnow_send_if_present(idx, raw, len);
+}
+
 static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
     if (idx < 0 || idx >= NUM_MOUNTS) return;
     if (!mount_mac_valid(idx)) return;
@@ -878,10 +898,10 @@ static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
     if (mount_id == MOUNT_BROADCAST) {
         for (int i = 0; i < NUM_MOUNTS; i++)
             if (mount_mac_valid(i))
-                espnow_send_if_present(i, raw, raw_len);
+                send_to_mount_routed(i, raw, raw_len);
     } else if (mount_id >= 1 && mount_id <= NUM_MOUNTS) {
         if (mount_mac_valid(mount_id - 1))
-            espnow_send_if_present(mount_id - 1, raw, raw_len);
+            send_to_mount_routed(mount_id - 1, raw, raw_len);
     }
 }
 
@@ -1215,22 +1235,10 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
     // Route per mount: a mount attached to a satellite is unreachable by radio
     // from here, and one that is not has no satellite to send through.
     if (pkt.mount_id == MOUNT_BROADCAST) {
-        for (int i = 0; i < NUM_MOUNTS; i++) {
-            if (_mount_sat[i] >= 0) {
-                SatSlot &sl = _sat[_mount_sat[i]];
-                if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
-            } else {
-                espnow_send_if_present(i, raw, raw_len);   // gates on paired AND present
-            }
-        }
+        for (int i = 0; i < NUM_MOUNTS; i++)
+            send_to_mount_routed(i, raw, raw_len);
     } else if (pkt.mount_id >= 1 && pkt.mount_id <= NUM_MOUNTS) {
-        int m = pkt.mount_id - 1;
-        if (_mount_sat[m] >= 0) {
-            SatSlot &sl = _sat[_mount_sat[m]];
-            if (sl.active && sl.client.connected()) sl.client.write(raw, raw_len);
-        } else {
-            espnow_send_if_present(m, raw, raw_len);       // gates on paired AND present
-        }
+        send_to_mount_routed(pkt.mount_id - 1, raw, raw_len);
     }
     // Intercept JOG to update display preset bars
     if (pkt.cmd == CMD_JOG && pkt.payload_len >= 10) {
@@ -2228,6 +2236,16 @@ static void check_self_recovery(uint32_t now) {
     uint32_t worst_age = 0;
     int      worst_i   = -1;
     for (int i = 0; i < NUM_MOUNTS; i++) {
+        // A satellite-relayed mount is NOT judged by this radio.  It is alive
+        // (its STATUS arrives over the wire) and unreachable from here by
+        // design — being out of radio range is precisely why it has a
+        // satellite — so "alive but our sends fail" describes it permanently.
+        // This detector predates satellites and read that as a wedge: one rig
+        // logged 61 escalations, every single one naming the satellite-attached
+        // mount, and restarted the hub 12 times chasing a fault that did not
+        // exist.  Each restart then dropped the satellite link and took that
+        // mount down for real.
+        if (_mount_sat[i] >= 0) { _tx_wedge_since_ms[i] = 0; continue; }
         bool alive   = _mount_last_seen[i] &&
                        (now - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS);
         bool failing = _espnow_fail_run[i] >= SELF_WEDGE_MIN_FAILS;
@@ -2248,6 +2266,38 @@ static void check_self_recovery(uint32_t now) {
         }
     }
     if (worst_i < 0) return;
+
+    // Is it us, or is it that mount?  Any OTHER live mount with no run of send
+    // failures means frames are leaving this radio and being acknowledged — so
+    // the one that is failing has a receive problem of its own, and nothing
+    // below can reach it.
+    //
+    // Every rung is hub-wide: a full ESP-NOW reinit, a WiFi bounce, a reboot.
+    // Spending any of them on a mount-side fault drops the mounts that ARE
+    // working — including whatever a satellite is relaying — to no purpose.
+    // One rig restarted the hub 12 times in 30 minutes chasing two mounts whose
+    // own receivers were dead, taking a healthy satellite-attached mount down
+    // with it each time.  The PC app already makes exactly this distinction
+    // before it escalates; the hub was still escalating blind.
+    bool tx_proven_ok = false;
+    for (int k = 0; k < NUM_MOUNTS; k++) {
+        if (k == worst_i) continue;
+        bool k_alive = _mount_last_seen[k] &&
+                       (now - _mount_last_seen[k] < SELF_WEDGE_ALIVE_MS);
+        if (k_alive && _espnow_fail_run[k] == 0) { tx_proven_ok = true; break; }
+    }
+    if (tx_proven_ok) {
+        static uint32_t last_note = 0;
+        if (now - last_note > 60000UL) {
+            last_note = now;
+            Serial.printf("[SELF] Mount %d unreachable %lu ms, but another mount is "
+                          "acknowledging — this radio is fine, so the fault is at "
+                          "mount %d.  Holding off; it needs a power cycle or a "
+                          "satellite in range.\n",
+                          worst_i + 1, (unsigned long)worst_age, worst_i + 1);
+        }
+        return;
+    }
 
     uint32_t wsec = worst_age / 1000UL;
     uint8_t  wsec8 = (wsec > 255) ? 255 : (uint8_t)wsec;
