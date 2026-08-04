@@ -21,6 +21,22 @@
  * why exactly one device ever transmits to a given mount, and why no
  * duplicate-command protection is needed here.
  *
+ * Arduino IDE board settings (Waveshare ESP32-S3-ETH).  These must match
+ * FQBN_SAT in tools/build.sh — the scripted build is the one normally flashed,
+ * and a Tools-menu difference produces a different binary from the same source:
+ *   Board            : ESP32S3 Dev Module
+ *   USB CDC On Boot  : Enabled
+ *   USB Mode         : Hardware CDC and JTAG
+ *   Flash Size       : 16MB (128Mb)
+ *   Partition Scheme : 8M with spiffs (3MB APP/1.5MB SPIFFS)
+ *   PSRAM            : Disabled          <-- NOT "OPI PSRAM"
+ *
+ * That last one is the trap.  The mounts and the 7" display are also "ESP32S3
+ * Dev Module" but need OPI PSRAM, and the IDE remembers the setting per board
+ * type, not per sketch — so opening this straight after flashing a mount leaves
+ * PSRAM enabled on a module that has none.  Naming the satellite means editing
+ * SAT_NAME below, since the IDE has no way to pass the build flag build.sh uses.
+ *
  * The AP also means a satellite's channel is its own: discovery is a WiFi scan
  * across all channels, so neighbouring cells need not share one and distant
  * mounts stop competing for airtime with local ones.
