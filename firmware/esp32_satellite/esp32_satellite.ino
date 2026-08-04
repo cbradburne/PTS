@@ -263,7 +263,13 @@ static uint32_t _dn_last_report_ms = 0;
 // burst aimed at one mount from being discarded outright, and it stops the
 // driver being hammered while it is already saturated.
 #define DN_QUEUE_DEPTH   16
-struct DnFrame { uint8_t mac[6]; uint16_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; };
+// Holds the mount INDEX, not a copy of its MAC.  A queued frame outlives the
+// moment it was queued, and peer_forget_stale() deletes peers 60 s after a
+// mount goes quiet — so a MAC captured at enqueue time can name a peer that no
+// longer exists by the time it is sent, and esp_now_send() then fails with
+// ESP_ERR_ESPNOW_NOT_FOUND.  Resolving the peer at SEND time means the check
+// and the send cannot disagree.
+struct DnFrame { uint8_t idx; uint16_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; };
 static DnFrame  _dn_q[DN_QUEUE_DEPTH];
 static uint8_t  _dn_head = 0, _dn_tail = 0;
 static volatile bool _dn_in_flight = false;
@@ -279,16 +285,16 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
 // Push onto the ring.  Dropping the OLDEST on overflow, not the newest: these
 // are control commands, and the most recent one is the operator's latest
 // intention — a stale jog is worth less than the stop that followed it.
-static void dn_enqueue(const uint8_t *mac, const uint8_t *frame, uint16_t len) {
+static void dn_enqueue(uint8_t idx, const uint8_t *frame, uint16_t len) {
     if (len > sizeof(((DnFrame *)0)->data)) return;
     uint8_t next = (uint8_t)((_dn_head + 1) % DN_QUEUE_DEPTH);
     if (next == _dn_tail) {
         _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
         _dn_overflow++;
     }
-    memcpy(_dn_q[_dn_head].mac, mac, 6);
     memcpy(_dn_q[_dn_head].data, frame, len);
     _dn_q[_dn_head].len = len;
+    _dn_q[_dn_head].idx = idx;
     _dn_head = next;
 }
 
@@ -302,7 +308,15 @@ static void dn_pump(uint32_t now) {
         _dn_in_flight = false;                 // assume lost, carry on
     }
     DnFrame &f = _dn_q[_dn_tail];
-    esp_err_t e = esp_now_send(f.mac, f.data, f.len);
+    // The mount may have aged out while this frame waited.  Drop it rather than
+    // send to a peer that no longer exists: it cannot be delivered either way,
+    // and holding it would stall everything behind it for a mount that is gone.
+    if (f.idx >= NUM_MOUNTS || !_peer[f.idx].used) {
+        _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
+        _dn_no_peer++;
+        return;
+    }
+    esp_err_t e = esp_now_send(_peer[f.idx].mac, f.data, f.len);
     if (e == ESP_ERR_ESPNOW_NO_MEM) return;    // still saturated — hold position
     _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
     if (e == ESP_OK) {
@@ -319,7 +333,7 @@ static void forward_frame(const uint8_t *frame, uint16_t len) {
     uint8_t mid = frame_mount_id(frame, len);
     if (mid == MOUNT_BROADCAST) {
         for (int i = 0; i < NUM_MOUNTS; i++)
-            if (_peer[i].used) dn_enqueue(_peer[i].mac, frame, len);
+            if (_peer[i].used) dn_enqueue((uint8_t)i, frame, len);
         return;
     }
     if (mid < 1 || mid > NUM_MOUNTS) return;      // not a mount frame at all
@@ -334,7 +348,7 @@ static void forward_frame(const uint8_t *frame, uint16_t len) {
         _dn_no_peer++;
         return;
     }
-    dn_enqueue(_peer[mid - 1].mac, frame, len);
+    dn_enqueue((uint8_t)(mid - 1), frame, len);
 }
 
 // Called from loop().  Silent while nothing is being dropped, so this cannot
