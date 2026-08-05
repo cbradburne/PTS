@@ -580,6 +580,11 @@ static bool     _restart_block_logged = false;  // rate-limits the streak-exceed
 static uint8_t  _mount_pt_preset[NUM_MOUNTS]  = {2, 2, 2, 2, 2};
 static uint8_t  _mount_sl_preset[NUM_MOUNTS]  = {2, 2, 2, 2, 2};
 static uint8_t  _mount_la_subject[NUM_MOUNTS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+// Slot state, cached for the OSC feedback.  It was previously forwarded
+// straight to the display and not retained — nothing else needed it.
+static uint16_t _mount_slot_occ[NUM_MOUNTS] = {};
+static uint16_t _mount_slot_at[NUM_MOUNTS]  = {};
+static uint8_t  _mount_target[NUM_MOUNTS]   = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // ---------------------------------------------------------------------------
 // Pairing rules  (called from loop() for the first parsed packet per message)
@@ -1449,6 +1454,9 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
         uint16_t slot_occ = ((uint16_t)pkt.payload[4] << 8) | pkt.payload[5];
         uint16_t slot_at  = ((uint16_t)pkt.payload[6] << 8) | pkt.payload[7];
         uint8_t  tgt      = pkt.payload[8];
+        _mount_slot_occ[msg.src_idx] = slot_occ;
+        _mount_slot_at[msg.src_idx]  = slot_at;
+        _mount_target[msg.src_idx]   = tgt;
         disp_update_slots(mount_id, slot_occ, slot_at, tgt, state);
     }
 
@@ -1802,7 +1810,116 @@ static uint32_t _osc_jog_until[NUM_MOUNTS] = {};   // 0 = no active OSC jog
 static uint32_t _osc_last_stream_ms        = 0;
 static int8_t   _osc_subject_sel[NUM_MOUNTS] = {-1, -1, -1, -1, -1};
 
+// ---------------------------------------------------------------------------
+// OSC feedback  —  reply to whoever last commanded us
+// ---------------------------------------------------------------------------
+// OSC is connectionless, so there is no session to reply on.  We remember the
+// source of the last accepted command and send state changes back there: a
+// Companion surface that has just driven the rig is by definition reachable,
+// and needs no configuration at either end.
+//
+// Port: the source port by default, which is what "reply to sender" means and
+// works for any client using one bound socket.  Some controllers transmit from
+// an ephemeral port and listen on a fixed one; set OSC_REPLY_PORT to that
+// number if yours does.
+#ifndef OSC_REPLY_PORT
+#define OSC_REPLY_PORT  0            // 0 = reply to the source port
+#endif
+static IPAddress _osc_peer_ip;
+static uint16_t  _osc_peer_port = 0;
+
 static int osc_pad4(int n) { return (n + 3) & ~3; }
+
+// One OSC message, one int argument.  Enough for every feedback below, and it
+// keeps the encoder small enough to read in one go.
+static void osc_send_int(const char *addr, int32_t val) {
+    if (!_osc_peer_port) return;                    // nobody has talked to us yet
+    uint8_t pkt[96];
+    int alen = (int)strlen(addr) + 1;
+    int apad = osc_pad4(alen);
+    if (apad + 8 > (int)sizeof(pkt)) return;
+    memset(pkt, 0, apad);
+    memcpy(pkt, addr, alen);
+    int o = apad;
+    pkt[o++] = ','; pkt[o++] = 'i'; pkt[o++] = 0; pkt[o++] = 0;
+    write_be32(pkt + o, (uint32_t)val); o += 4;
+    uint16_t port = OSC_REPLY_PORT ? OSC_REPLY_PORT : _osc_peer_port;
+    _osc_udp.beginPacket(_osc_peer_ip, port);
+    _osc_udp.write(pkt, o);
+    _osc_udp.endPacket();
+}
+
+// Last values sent, so only changes go out.  A surface with fifty buttons does
+// not want fifty packets a second, and Companion redraws on receipt.
+static uint8_t  _fb_state[NUM_MOUNTS]    = {};
+static uint8_t  _fb_active[NUM_MOUNTS]   = {};
+static uint8_t  _fb_target[NUM_MOUNTS]   = {};
+static uint16_t _fb_occupied[NUM_MOUNTS] = {};
+static uint16_t _fb_at[NUM_MOUNTS]       = {};
+static uint8_t  _fb_pt[NUM_MOUNTS]       = {};
+static uint8_t  _fb_sl[NUM_MOUNTS]       = {};
+static bool     _fb_valid[NUM_MOUNTS]    = {};
+static uint32_t _fb_last_full_ms = 0;
+#define OSC_FB_FULL_MS  5000UL       // resend everything this often
+
+// Emit whatever has changed for one mount.  force = send the lot, for a
+// surface that has just appeared and knows nothing.
+static void osc_feedback_mount(int i, bool force) {
+    if (!_osc_peer_port) return;
+    char a[48];
+    uint8_t  st  = _mount_last_state[i];
+    uint8_t  tgt = (_mount_target[i] == 0xFF) ? 0 : (uint8_t)(_mount_target[i] + 1);
+    uint16_t occ = _mount_slot_occ[i];
+    uint16_t at  = _mount_slot_at[i];
+    uint8_t  act = (_mount_last_seen[i] &&
+                    (millis() - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS)) ? 1 : 0;
+    uint8_t  pt  = _mount_pt_preset[i];
+    uint8_t  sl  = _mount_sl_preset[i];
+    bool all = force || !_fb_valid[i];
+
+    if (all || st != _fb_state[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/state", i + 1);  osc_send_int(a, st);
+    }
+    if (all || act != _fb_active[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/active", i + 1); osc_send_int(a, act);
+    }
+    if (all || tgt != _fb_target[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/target", i + 1); osc_send_int(a, tgt);
+    }
+    if (all || pt != _fb_pt[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/speed/pt", i + 1); osc_send_int(a, pt);
+    }
+    if (all || sl != _fb_sl[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/speed/sl", i + 1); osc_send_int(a, sl);
+    }
+    // Per-slot rather than a bitmask: a Companion button binds straight to one
+    // address and colours itself, with no bitwise expression to get wrong.
+    // Fifty addresses instead of five, but they only move when a slot does.
+    for (int sN = 0; sN < NUM_POSITIONS; sN++) {
+        uint16_t bit = (uint16_t)(1u << sN);
+        if (all || ((occ ^ _fb_occupied[i]) & bit)) {
+            snprintf(a, sizeof(a), "/pts/cam/%d/slot/%d/occupied", i + 1, sN + 1);
+            osc_send_int(a, (occ & bit) ? 1 : 0);
+        }
+        if (all || ((at ^ _fb_at[i]) & bit)) {
+            snprintf(a, sizeof(a), "/pts/cam/%d/slot/%d/at", i + 1, sN + 1);
+            osc_send_int(a, (at & bit) ? 1 : 0);
+        }
+    }
+    _fb_state[i] = st; _fb_active[i] = act; _fb_target[i] = tgt;
+    _fb_occupied[i] = occ; _fb_at[i] = at; _fb_pt[i] = pt; _fb_sl[i] = sl;
+    _fb_valid[i] = true;
+}
+
+// Called from loop().  Changes go out promptly; everything is resent slowly so
+// a surface that joins late, or misses a UDP packet, converges without asking.
+static void osc_feedback_poll(uint32_t now) {
+    if (!_osc_peer_port) return;
+    bool full = (now - _fb_last_full_ms >= OSC_FB_FULL_MS);
+    if (full) _fb_last_full_ms = now;
+    for (int i = 0; i < NUM_MOUNTS; i++) osc_feedback_mount(i, full);
+}
+
 
 // Read a NUL-terminated, 4-byte-padded OSC string at ofs.  Returns the string
 // (guaranteed NUL-terminated within the buffer) or nullptr; *next = following offset.
@@ -1994,8 +2111,28 @@ static void osc_poll() {
     int psize;
     while ((psize = _osc_udp.parsePacket()) > 0) {
         static uint8_t rx[512];
+        // Remember who this came from BEFORE handling it — that is where
+        // feedback goes, and a controller that has just commanded the rig is by
+        // definition reachable.  Captured per packet so a second surface taking
+        // over simply starts receiving.
+        IPAddress  from_ip   = _osc_udp.remoteIP();
+        uint16_t   from_port = _osc_udp.remotePort();
         int n = _osc_udp.read(rx, sizeof(rx));
-        if (n > 0) osc_handle_packet(rx, n);
+        if (n > 0) {
+            bool new_peer = (from_ip != _osc_peer_ip || from_port != _osc_peer_port);
+            _osc_peer_ip   = from_ip;
+            _osc_peer_port = from_port;
+            if (new_peer) {
+                Serial.printf("[OSC] feedback -> %s:%d\n",
+                              from_ip.toString().c_str(),
+                              OSC_REPLY_PORT ? OSC_REPLY_PORT : from_port);
+                // A surface we have not seen before knows nothing; send the lot
+                // so its buttons are right immediately rather than after the
+                // next change.
+                for (int i = 0; i < NUM_MOUNTS; i++) _fb_valid[i] = false;
+            }
+            osc_handle_packet(rx, n);
+        }
     }
     uint32_t now = millis();
     if (now - _osc_last_stream_ms >= OSC_JOG_STREAM_MS) {
@@ -2594,6 +2731,7 @@ void loop() {
 
     // ---- OSC control (Companion / QLab) → mounts ----
     osc_poll();
+    osc_feedback_poll(now);
 
     // ---- TCP clients → mounts ----
     for (int i = 0; i < MAX_CLIENTS; i++) {

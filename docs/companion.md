@@ -65,6 +65,35 @@ cue like `/pts/cam/2/goto 4` fires a camera recall in the cue stack, exactly
 in time with lighting and sound.  (QLab sends numbers as floats — the server
 accepts that.)
 
+## Feedback (hub → Companion)
+
+The hub replies to **whoever last sent it a command** — no configuration at
+either end, and a second surface starts receiving as soon as it takes over.
+Messages go to that sender's IP and source port; if your controller transmits
+from an ephemeral port and listens on a fixed one, set `OSC_REPLY_PORT` in
+`esp32_hub_eth.ino` to that number.
+
+All arguments are a single int.
+
+| Address                          | Value | Meaning |
+|----------------------------------|-------|---------|
+| `/pts/cam/N/active`              | 0/1   | Mount is online (STATUS seen recently) |
+| `/pts/cam/N/state`               | int   | Mount state — 0 IDLE, others per `MountState` |
+| `/pts/cam/N/target`              | 0-10  | Slot being moved to, 0 = not moving to one |
+| `/pts/cam/N/speed/pt`            | 1-4   | Active pan/tilt speed preset |
+| `/pts/cam/N/speed/sl`            | 1-4   | Active slider speed preset |
+| `/pts/cam/N/slot/M/occupied`     | 0/1   | Slot M has a stored position |
+| `/pts/cam/N/slot/M/at`           | 0/1   | Mount is physically at slot M |
+
+`occupied` and `at` are per slot rather than a bitmask so a button can bind
+straight to one address and colour itself, with no bitwise expression to get
+wrong.  Between them they give the same three-colour picture the display and
+the web app show: stored, moving-to, arrived.
+
+Only changes are sent, so a rig at rest is silent.  Everything is resent every
+5 s regardless, so a surface that joins late — or misses a UDP packet — catches
+up on its own without having to ask.
+
 ## Safety notes
 
 - Jogs started over OSC are re-streamed at 20 Hz by whichever server received
