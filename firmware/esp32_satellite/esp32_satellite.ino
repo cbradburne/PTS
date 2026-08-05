@@ -107,9 +107,18 @@ static char AP_SSID[5 + HUB_NAME_MAX];      // composed at boot, see SAT_NAME
 #define HUB_NAME_FALLBACK_PREFIX "Sat-"
 
 // Channel is per-satellite, so cells do not have to share airtime.  Override
-// per unit; mounts find it by scanning, so nothing else needs telling.
+// per unit; mounts find it by scanning, so nothing else needs telling — a
+// channel change needs no re-pairing, because a mount matches its hub by BSSID
+// and updates the stored channel when it moves.
+//
+// 11 rather than 6 on the strength of the boot survey, which counted 49 APs in
+// this venue: 17 on ch1, 20 on ch6, 12 on ch11.  Note the survey ALSO showed
+// this is at best a partial explanation — the hub sits on ch1 with 17
+// neighbours and its mounts lose nothing at all, so three fewer APs cannot be
+// the whole of a 1% send-failure rate.  Taken because it is the quietest of the
+// three and free, not because it is known to be the cause.
 #ifndef AP_CHANNEL
-#define AP_CHANNEL      6
+#define AP_CHANNEL      11
 #endif
 
 static Preferences _prefs;
