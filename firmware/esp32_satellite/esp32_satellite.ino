@@ -797,6 +797,12 @@ void loop() {
     client_link_service(now);
     drain_ws_to_hub();
     if (_client_link.connected()) drain_hub_to_ws();
+    // Required every loop by the mathieucarbou fork, and omitting it is not
+    // subtle: closed clients are never freed, DEFAULT_MAX_WS_CLIENTS (8) fills
+    // after a handful of reconnects, and every new connection is then closed
+    // the moment it opens.  A phone shows "reconnecting" on a loop while the
+    // client IDs climb — which is precisely what it did.
+    _ws.cleanupClients();
 
     downlink_report(now);
 
