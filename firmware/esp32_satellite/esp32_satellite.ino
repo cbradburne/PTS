@@ -46,6 +46,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <Preferences.h>
+#include <lwip/sockets.h>   // SOL_SOCKET / SO_SNDTIMEO for the uplink send timeout
 
 #include "../shared/protocol.h"
 #define ETH_HOSTNAME "pts-sat"
@@ -202,6 +203,7 @@ static uint32_t _loop_max_us  = 0;   // slowest single pass
 static uint32_t _dn_nomem     = 0;   // esp_now_send() refusals
 static uint32_t _up_writes    = 0;   // TCP writes made for uplink frames
 static uint32_t _up_write_us  = 0;   // time spent in them
+static uint32_t _up_dropped   = 0;   // uplink frames the hub would not take
 
 // ---------------------------------------------------------------------------
 // ESP-NOW  ->  uplink
@@ -242,9 +244,13 @@ static void drain_espnow_to_uplink(uint32_t now) {
             uint16_t n = sat_env_build(env, it.mac, it.rssi, it.data, it.len);
             if (n) {
                 uint32_t t0 = micros();
-                _uplink.write(env, n);
+                size_t w = _uplink.write(env, n);
                 _up_write_us += (micros() - t0);
                 _up_writes++;
+                // A short write means the timeout fired: the hub is not reading
+                // fast enough.  Counted rather than retried — retrying is what
+                // blocks, and this frame is telemetry that will be superseded.
+                if (w != n) _up_dropped++;
             }
         }
         // Not connected: drop.  Buffering telemetry to replay later would
@@ -447,11 +453,12 @@ static void downlink_report(uint32_t now) {
     // shed count cannot answer on its own.
     uint32_t secs = DN_REPORT_MS / 1000UL;
     Serial.printf("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
-                  "uplink %lu writes, %lu us total\n",
+                  "uplink %lu writes, %lu us total, %lu dropped\n",
                   (unsigned long)(_loop_count / (secs ? secs : 1)),
                   (unsigned long)_loop_max_us, (unsigned long)_dn_nomem,
-                  (unsigned long)_up_writes, (unsigned long)_up_write_us);
-    _loop_count = _loop_max_us = _dn_nomem = _up_writes = _up_write_us = 0;
+                  (unsigned long)_up_writes, (unsigned long)_up_write_us,
+                  (unsigned long)_up_dropped);
+    _loop_count = _loop_max_us = _dn_nomem = _up_writes = _up_write_us = _up_dropped = 0;
 
     if (!_dn_no_peer && !_dn_send_err && !_dn_overflow && !_dn_unacked) return;
     Serial.printf("[DOWN] %lu sent (%lu acked by the mount, %lu NOT acked), "
@@ -502,6 +509,19 @@ static void uplink_service(uint32_t now) {
 
     if (_uplink.connect(_hub_host, HUB_PORT, 2000)) {
         _uplink.setNoDelay(true);               // jog latency matters more than packing
+        // Bound the send.  A TCP write blocks while the far end is not draining
+        // the socket, and that is not a theoretical risk here: one loop pass was
+        // measured at 67.7 SECONDS, with 77 s of a 95 s window spent inside
+        // _uplink.write().  While blocked the satellite reads nothing, so the
+        // mount's frames sit unprocessed, its peer entry ages out at 60 s, and
+        // the downlink pump never runs — every symptom we spent the morning
+        // chasing, caused by the box being stuck in one call.
+        //
+        // A short timeout turns that into a dropped telemetry frame, which is
+        // the right trade: STATUS is superseded every 100 ms, and the same
+        // reasoning already justifies dropping it when the uplink is down.
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };   // 200 ms
+        _uplink.setSocketOption(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         _uplink_backoff_ms = 1000;
         Serial.printf("[UPLINK] connected to %s:%d\n", _hub_host, HUB_PORT);
     } else {
