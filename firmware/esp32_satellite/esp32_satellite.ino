@@ -462,6 +462,17 @@ static void downlink_report(uint32_t now) {
     _dn_no_peer = _dn_send_err = _dn_overflow = _dn_unacked = 0;
 }
 
+// Reads whatever the hub has sent and hands each complete frame to
+// forward_frame().  Pumps as it goes: this used to enqueue the ENTIRE burst and
+// leave dn_pump() to run afterwards, once, at the end of the loop pass — so a
+// hub sending more than DN_QUEUE_DEPTH frames back-to-back overflowed the ring
+// before a single one had been transmitted, and the excess was shed.
+//
+// That was the whole of the shedding.  The instrumentation ruled out both of
+// the things I suspected: the loop runs ~12,000 times a second and the radio
+// never once refused a frame (0 nomem).  Neither could have been the cause; the
+// queue was simply being filled faster than the one drain per pass could empty
+// it, inside a single pass.
 static void drain_uplink_to_espnow() {
     while (_uplink.available()) {
         int c = _uplink.read();
@@ -472,7 +483,13 @@ static void drain_uplink_to_espnow() {
         if (_tcp_len >= 3) {
             uint16_t want = 3 + _tcp_buf[2] + 2;      // hdr + LEN body + CRC
             if (want > sizeof(_tcp_buf)) { _tcp_len = 0; continue; }
-            if (_tcp_len == want) { forward_frame(_tcp_buf, _tcp_len); _tcp_len = 0; }
+            if (_tcp_len == want) {
+                forward_frame(_tcp_buf, _tcp_len);
+                _tcp_len = 0;
+                // Drain as we fill.  Cheap — the radio is accepting frames, so
+                // this normally sends the one just queued and returns.
+                dn_pump(millis());
+            }
         }
         if (_tcp_len >= sizeof(_tcp_buf)) _tcp_len = 0;
     }
