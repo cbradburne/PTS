@@ -88,6 +88,7 @@
 #include <esp_task_wdt.h>
 #include <esp_system.h>   // esp_reset_reason()
 #include <esp_mac.h>      // esp_read_mac() — MAC-derived default hub name
+#include <lwip/sockets.h> // SOL_SOCKET / SO_SNDTIMEO for the satellite link
 #include "../shared/disp_uart.h"
 #include "../esp32_hub/web_app.h"
 #include "../esp32_hub/hub_types.h"
@@ -2518,6 +2519,20 @@ void loop() {
                 if (_sat[i].active && _sat[i].client.connected()) continue;
                 if (_sat[i].active) sat_release_mounts(i);
                 _sat[i].client = in;
+                // Bound the send, for the same reason the satellite bounds its
+                // own: a TCP write blocks while the far end is not draining,
+                // and these two write to each other.  A satellite stuck in its
+                // own write stops reading, our writes then fill its buffer, and
+                // both ends sit blocked writing with neither reading - a
+                // deadlock that on this side would stall the loop serving all
+                // five mounts, not just the one behind the satellite.
+                //
+                // 200 ms, and a short write is simply a command not delivered
+                // to a satellite that is not listening anyway.
+                {
+                    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+                    in.setSocketOption(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+                }
                 sat_env_init(&_sat[i].parser);
                 _sat[i].active = true;
                 placed = true;
