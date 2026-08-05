@@ -502,6 +502,13 @@ static QueueHandle_t _ws_rx_queue;
 
 static int8_t    _mount_rssi[NUM_MOUNTS]      = {};
 static uint32_t  _mount_last_seen[NUM_MOUNTS] = {};
+// Paces the rig-wide refresh a client connection triggers — see the accept path.
+#define ACCEPT_BURST_MIN_MS  5000UL
+// Seeded one interval in the past (unsigned wrap) so the FIRST client of a
+// session is never the one made to wait.  Plain 0 would suppress the burst for
+// any connection inside the hub's first 5 seconds — and mounts beacon on their
+// own, so they can already be known by then.
+static uint32_t  _last_accept_burst_ms = 0 - ACCEPT_BURST_MIN_MS;
 
 // ---- Ghost STATUS-frame guard ----
 // After long uptime the WiFi RX path can deliver corrupt/"ghost" frames whose
@@ -2651,13 +2658,30 @@ void loop() {
             }
         }
         if (!placed) { incoming.stop(); Serial.println("Max TCP clients reached"); }
-        
-        for (int i = 0; i < NUM_MOUNTS; i++) {
-            if (_mount_last_seen[i] > 0) {
-                // Refresh ESP-NOW peer before querying — clears any stale send
-                // state that may have accumulated while the PC was disconnected.
-                refresh_espnow_peer(i);
-                ui_send_to_mount(i + 1, CMD_GET_STATE, nullptr, 0);
+
+        // Rate-limited, because this is a RIG-WIDE burst on a per-client event:
+        // an ESP-NOW peer teardown plus a 182-byte state dump for every mount,
+        // and the replies go to every client, not just the new one.
+        //
+        // That was safe when a client meant a PC app connecting once a session.
+        // It stopped being safe when a satellite began holding a client link on
+        // behalf of phones: each reconnect fired the burst, and the burst
+        // starved the very link whose failure had caused the reconnect.  One rig
+        // showed every uplink write to the hub refused for a 30-second window
+        // while this churned.
+        //
+        // A genuinely new client still gets its state — it only waits if
+        // another client was served within the interval, in which case the data
+        // it needs has just been broadcast anyway.
+        if (now - _last_accept_burst_ms >= ACCEPT_BURST_MIN_MS) {
+            _last_accept_burst_ms = now;
+            for (int i = 0; i < NUM_MOUNTS; i++) {
+                if (_mount_last_seen[i] > 0) {
+                    // Refresh ESP-NOW peer before querying — clears any stale send
+                    // state that may have accumulated while the PC was disconnected.
+                    refresh_espnow_peer(i);
+                    ui_send_to_mount(i + 1, CMD_GET_STATE, nullptr, 0);
+                }
             }
         }
     }
