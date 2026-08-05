@@ -983,11 +983,38 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
 
 // Sends to USB serial and TCP clients.  WebSocket is handled separately in the
 // relay loop with per-mount rate limiting to avoid overflowing the WS send queue.
+// Dropped frames per client, reported below.  A slow client losing status
+// frames is not interesting; a client losing them steadily is.
+static uint32_t _bcast_dropped = 0, _bcast_sent = 0;
+
 static void broadcast_to_all(const uint8_t *data, uint16_t len) {
     Serial.write(data, len);
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (_slots[i].active && _slots[i].client.connected())
-            _slots[i].client.write(data, len);
+        if (_slots[i].active && _slots[i].client.connected()) {
+            // Raw non-blocking send, NOT client.write().  NetworkClient::write()
+            // cannot be bounded: its send() already passes MSG_DONTWAIT, so
+            // SO_SNDTIMEO is never consulted, and it instead retries around a
+            // select() with a 1-second timeout up to ten times — and a partial
+            // write RESETS that retry count.  One client that stops reading
+            // therefore stalls this loop for ten seconds, and two for twenty.
+            //
+            // This is the hottest path in the firmware: every relayed frame
+            // passes through it.  Blocking here does not merely delay one
+            // client, it stops the hub reading ANYTHING — mounts, satellites,
+            // the PC app — for the duration.  The rig showed exactly that:
+            // "hub last received PC bytes 19.9s ago | last diag 19.9s ago",
+            // mounts declared unreachable, and phones on a satellite's AP
+            // losing their WebSocket while the hub was wedged inside write().
+            //
+            // Dropping a frame for a client that cannot keep up is the correct
+            // trade: status is superseded within 200 ms, and the alternative is
+            // to punish every other node for one slow reader.  The satellite
+            // uplink was converted to this first and its drops went to zero.
+            int fd = _slots[i].client.fd();
+            int w  = (fd >= 0) ? ::send(fd, data, len, MSG_DONTWAIT) : -1;
+            _bcast_sent++;
+            if (w != (int)len) _bcast_dropped++;
+        }
     }
 }
 
@@ -2805,6 +2832,20 @@ void loop() {
     if (now - _last_usb_diag_ms >= USB_DIAG_INTERVAL_MS) {
         _last_usb_diag_ms = now;
         send_usb_diag();
+    }
+
+    // Broadcast drops, reported only when they happen.  A steady trickle means
+    // a client is not draining its socket; silence means every client is
+    // keeping up and the non-blocking send costs nothing.
+    static uint32_t _last_bcast_report_ms = 0;
+    if (now - _last_bcast_report_ms >= 30000UL) {
+        _last_bcast_report_ms = now;
+        if (_bcast_dropped)
+            Serial.printf("[BCAST] %lu of %lu client writes dropped "
+                          "(slow reader — frames shed, loop NOT blocked)\n",
+                          (unsigned long)_bcast_dropped,
+                          (unsigned long)_bcast_sent);
+        _bcast_dropped = _bcast_sent = 0;
     }
 
     // ---- WebSocket RX → mounts (drained here, not in AsyncTCP callback) ----
