@@ -176,6 +176,34 @@ static AsyncWebSocket _ws("/ws");
 
 // The second link, to the hub's client port, carrying the phones' traffic.
 static WiFiClient _client_link;
+
+// Hub address, cached from the first successful connection.
+//
+// "pts-hub.local" is resolved by an mDNS multicast query, and connect() runs
+// that query INSIDE the call: the 2000 ms timeout argument bounds the TCP
+// handshake, not the lookup.  The rig showed the lookup taking 9.1 seconds with
+// the main loop stopped dead inside it — nothing relayed, nothing drained, no
+// WebSocket serviced.  At boot that is merely slow.  On a reconnect it is an
+// outage, and reconnects are exactly when it happens.
+//
+// So pay for the name once.  Reconnects use the address and are bounded by the
+// timeout; the name is consulted again only if the address stops working, which
+// is precisely when the hub has actually moved.
+static IPAddress _hub_ip;
+static bool      _hub_ip_valid = false;
+
+static bool hub_connect(WiFiClient &c, uint16_t port) {
+    bool ok = _hub_ip_valid ? c.connect(_hub_ip,   port, 2000)
+                            : c.connect(_hub_host, port, 2000);
+    if (ok && !_hub_ip_valid) {
+        _hub_ip = c.remoteIP(); _hub_ip_valid = true;
+        Serial.printf("[NET] %s is %s — cached, reconnects skip the lookup\n",
+                      _hub_host, _hub_ip.toString().c_str());
+    } else if (!ok && _hub_ip_valid) {
+        _hub_ip_valid = false;        // stale — fall back to the name next try
+    }
+    return ok;
+}
 static uint32_t   _cl_next_try_ms = 0;
 static uint32_t   _cl_backoff_ms  = 1000;
 static uint8_t    _cl_buf[PACKET_MAX_PAYLOAD + 16];
@@ -213,14 +241,16 @@ static void on_ws_event(AsyncWebSocket *, AsyncWebSocketClient *client,
 }
 
 // Connect (and reconnect) the client link.  Same backoff shape as the satellite
-// link, and equally non-blocking: a hub that is down must never hold up the
-// relay.
+// link.  The backoff keeps a DOWN hub from being retried tightly, but note that
+// connect() itself blocks for up to the 2000 ms timeout — and for far longer
+// than that if it has to resolve the name, which is why hub_connect() caches
+// the address.
 static void client_link_service(uint32_t now) {
     if (_client_link.connected()) return;
     if (_cl_len) _cl_len = 0;                  // stale half-frame from the drop
     if (!eth_is_up() || now < _cl_next_try_ms) return;
 
-    if (_client_link.connect(_hub_host, SAT_HUB_CLIENT_PORT, 2000)) {
+    if (hub_connect(_client_link, SAT_HUB_CLIENT_PORT)) {
         _client_link.setNoDelay(true);
         _cl_backoff_ms = 1000;
         Serial.printf("[WEB] hub client link up (%s:%d)\n",
@@ -740,7 +770,7 @@ static void uplink_service(uint32_t now) {
     if (_tcp_len) _tcp_len = 0;                 // stale half-frame from the drop
     if (!eth_is_up() || now < _uplink_next_try_ms) return;
 
-    if (_uplink.connect(_hub_host, HUB_PORT, 2000)) {
+    if (hub_connect(_uplink, HUB_PORT)) {
         _uplink.setNoDelay(true);               // jog latency matters more than packing
         // NOTE: setting SO_SNDTIMEO here would do nothing.  NetworkClient's
         // send() passes MSG_DONTWAIT, so the option is never consulted — the
