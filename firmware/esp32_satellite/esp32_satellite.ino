@@ -302,7 +302,54 @@ static uint32_t _ws_status_ms[NUM_MOUNTS] = {};
 // _ws_full counts frames we declined to queue because the queue was already
 // full.  If that stays at 0 while clients still drop, queue pressure is NOT
 // the cause and the answer is at the WiFi layer — see the AP station events.
-static uint32_t _ws_sent = 0, _ws_full = 0;
+static uint32_t _ws_sent = 0, _ws_full = 0, _ws_pkts = 0;
+
+// Coalescing buffer, hub -> phones.
+//
+// Measured on the rig: 44-70 WebSocket messages per second at one phone, each
+// its own TCP segment and its own 802.11 frame with its own ACK, on a channel
+// shared with twelve other APs and with this board's own ESP-NOW.  The send
+// queue backed up (45-64 queue-full per 30 s) and the main loop went from a
+// 19 ms worst pass to 64 ms the moment a phone connected.
+//
+// The hub never had this problem because it forwards a whole relay message at a
+// time, several packets to a frame.  Splitting that stream into one frame per
+// packet — which this did, on the false premise that the web app needed it —
+// multiplied the frame count for no gain.  onPkt() in web_app.h walks the whole
+// buffer and always has:
+//
+//     "The hub may concatenate multiple Teensy packets into one WebSocket
+//      frame ... Walk the entire buffer so every packet is processed."
+//
+// So batch them again.  40 ms adds nothing a viewer can perceive to a status
+// display, and control travels the other way, untouched by this.
+#define WS_COALESCE_MS   40
+#define WS_COALESCE_MAX  1024
+
+static uint8_t  _ws_agg[WS_COALESCE_MAX];
+static uint16_t _ws_agg_len   = 0;
+static uint32_t _ws_agg_since = 0;
+
+static void ws_flush() {
+    if (!_ws_agg_len) return;
+    if (_ws.count()) {
+        // Skip rather than queue when full: the client is set to drop-not-close,
+        // so this only decides where the frame is discarded — and makes the
+        // pressure countable.
+        if (_ws.availableForWriteAll()) { _ws.binaryAll(_ws_agg, _ws_agg_len); _ws_sent++; }
+        else _ws_full++;
+    }
+    _ws_agg_len = 0;
+}
+
+static void ws_queue(const uint8_t *f, uint16_t len) {
+    if (len > WS_COALESCE_MAX) return;                 // cannot batch; drop
+    if (_ws_agg_len + len > WS_COALESCE_MAX) ws_flush();
+    if (_ws_agg_len == 0) _ws_agg_since = millis();
+    memcpy(_ws_agg + _ws_agg_len, f, len);
+    _ws_agg_len += len;
+    _ws_pkts++;
+}
 
 struct WsCli { uint32_t id, at, sent; };
 static WsCli _ws_cli[4] = {};
@@ -340,8 +387,10 @@ static bool ws_should_send(const uint8_t *f, uint16_t len) {
     return true;
 }
 
-// hub -> phones.  The hub writes a byte stream; the web app expects one packet
-// per WebSocket frame, so it is reframed here rather than forwarded raw.
+// hub -> phones.  The hub writes a byte stream, so packet boundaries are
+// recovered here — but they are then re-batched by ws_queue() rather than sent
+// one frame per packet.  The web app parses several packets from one frame and
+// always could; sending them individually was pure overhead.
 static void drain_hub_to_ws() {
     while (_client_link.available()) {
         int c = _client_link.read();
@@ -353,14 +402,8 @@ static void drain_hub_to_ws() {
             uint16_t want = 3 + _cl_buf[2] + 2;        // hdr + LEN body + CRC
             if (want > sizeof(_cl_buf)) { _cl_len = 0; continue; }
             if (_cl_len == want) {
-                if (_ws.count() && ws_should_send(_cl_buf, _cl_len)) {
-                    // Skip rather than queue when full.  The client is set to
-                    // drop-not-close, so this only changes where the frame is
-                    // discarded — but it makes the pressure countable.
-                    if (_ws.availableForWriteAll()) {
-                        _ws.binaryAll(_cl_buf, _cl_len); _ws_sent++;
-                    } else _ws_full++;
-                }
+                if (_ws.count() && ws_should_send(_cl_buf, _cl_len))
+                    ws_queue(_cl_buf, _cl_len);
                 _cl_len = 0;
             }
         }
@@ -715,13 +758,14 @@ static void downlink_report(uint32_t now) {
     // shed count cannot answer on its own.
     uint32_t secs = DN_REPORT_MS / 1000UL;
     Serial.printf("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
-                  "uplink %lu writes, %lu dropped | ws %lu sent, %lu queue-full\n",
+                  "uplink %lu writes, %lu dropped | ws %lu pkts in %lu frames, %lu queue-full\n",
                   (unsigned long)(_loop_count / (secs ? secs : 1)),
                   (unsigned long)_loop_max_us, (unsigned long)_dn_nomem,
                   (unsigned long)_up_writes, (unsigned long)_up_dropped,
-                  (unsigned long)_ws_sent, (unsigned long)_ws_full);
+                  (unsigned long)_ws_pkts, (unsigned long)_ws_sent,
+                  (unsigned long)_ws_full);
     _loop_count = _loop_max_us = _dn_nomem = _up_writes = _up_dropped = 0;
-    _ws_sent = _ws_full = 0;
+    _ws_sent = _ws_full = _ws_pkts = 0;
 
     if (!_dn_no_peer && !_dn_send_err && !_dn_overflow && !_dn_unacked) return;
     Serial.printf("[DOWN] %lu sent (%lu acked by the mount, %lu NOT acked), "
@@ -917,6 +961,11 @@ void loop() {
     client_link_service(now);
     drain_ws_to_hub();
     if (_client_link.connected()) drain_hub_to_ws();
+
+    // Flush a partial batch once it has waited long enough.  Without this, the
+    // last packets before a lull would sit in the buffer until the next one
+    // arrived — which for a rig sitting idle is indefinitely.
+    if (_ws_agg_len && millis() - _ws_agg_since >= WS_COALESCE_MS) ws_flush();
     // Required every loop by the mathieucarbou fork, and omitting it is not
     // subtle: closed clients are never freed, DEFAULT_MAX_WS_CLIENTS (8) fills
     // after a handful of reconnects, and every new connection is then closed
