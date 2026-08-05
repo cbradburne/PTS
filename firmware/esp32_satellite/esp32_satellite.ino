@@ -46,7 +46,8 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <Preferences.h>
-#include <lwip/sockets.h>   // SOL_SOCKET / SO_SNDTIMEO for the uplink send timeout
+#include <lwip/sockets.h>   // raw non-blocking send() for both TCP links
+#include <ESPAsyncWebServer.h>
 
 #include "../shared/protocol.h"
 #define ETH_HOSTNAME "pts-sat"
@@ -75,6 +76,7 @@
 
 #include "../shared/board_eth.h"
 #include "../shared/sat_link.h"
+#include "../esp32_hub/web_app.h"   // the page itself — shared, never copied
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -143,6 +145,123 @@ static WiFiClient _uplink;
 static uint32_t _uplink_next_try_ms = 0;
 static uint32_t _uplink_backoff_ms  = 1000;
 #define UPLINK_BACKOFF_MAX_MS  15000
+
+// ---------------------------------------------------------------------------
+// Web app bridge  —  phones on this satellite's AP reach the hub through here
+// ---------------------------------------------------------------------------
+// An operator standing by a satellite is, by definition, a long way from the
+// hub — so the hub's own AP is out of reach exactly where the web app is most
+// wanted.  Bridging the AP onto the wired network would fix that and is not
+// allowed here, and rightly: it would put an untrusted WiFi network on the
+// Dante LAN.
+//
+// Instead the satellite serves the page itself and opens a SECOND connection to
+// the hub, on its ordinary client port, as a perfectly ordinary client.  Phones
+// never touch the wired network; the hub needs no change at all, because it
+// already accepts clients speaking the raw protocol there.
+//
+//   [phone] --WiFi/WS--> [satellite] --TCP 7777--> [hub]
+//
+// The page comes from esp32_hub/web_app.h, not a copy, so the two surfaces
+// cannot drift.  The URL is http://192.168.4.1 either way — a SoftAP defaults
+// to that address, hub or satellite — so nothing in the documentation changes.
+//
+// This does make the satellite less of a dumb pipe than its header claims, and
+// that is a deliberate trade for a real constraint rather than a drift.  It is
+// also isolated: every failure path here leaves the ESP-NOW relay untouched,
+// because a satellite that stops relaying is a mount off the air, while a
+// satellite that stops serving a web page is an inconvenience.
+static AsyncWebServer _http(80);
+static AsyncWebSocket _ws("/ws");
+
+// The second link, to the hub's client port, carrying the phones' traffic.
+static WiFiClient _client_link;
+static uint32_t   _cl_next_try_ms = 0;
+static uint32_t   _cl_backoff_ms  = 1000;
+static uint8_t    _cl_buf[PACKET_MAX_PAYLOAD + 16];
+static uint16_t   _cl_len = 0;
+
+// WS receive queue.  on_ws_event runs in the AsyncTCP task; touching the socket
+// from there would be a cross-task use of WiFiClient, so it only enqueues and
+// loop() does the work — the same rule the ESP-NOW receive path follows.
+struct WsRx { uint16_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; };
+static QueueHandle_t _ws_rx_q = nullptr;
+
+static void on_ws_event(AsyncWebSocket *, AsyncWebSocketClient *client,
+                        AwsEventType type, void *arg, uint8_t *data, size_t len) {
+    if (type == WS_EVT_CONNECT) {
+        // Drop frames rather than close a client whose queue is full: updates
+        // are superseded every 100 ms, and a phone that hiccups should not be
+        // disconnected mid-show.
+        client->setCloseClientOnQueueFull(false);
+        Serial.printf("[WEB] client %u connected from %s\n",
+                      client->id(), client->remoteIP().toString().c_str());
+    } else if (type == WS_EVT_DISCONNECT) {
+        Serial.printf("[WEB] client %u disconnected\n", client->id());
+    } else if (type == WS_EVT_DATA) {
+        AwsFrameInfo *info = (AwsFrameInfo *)arg;
+        if (info->final && info->index == 0 && info->len == len
+                        && info->opcode == WS_BINARY
+                        && len <= sizeof(((WsRx *)0)->data) && _ws_rx_q) {
+            WsRx m;
+            m.len = (uint16_t)len;
+            memcpy(m.data, data, len);
+            xQueueSend(_ws_rx_q, &m, 0);      // non-blocking; drop if full
+        }
+    }
+}
+
+// Connect (and reconnect) the client link.  Same backoff shape as the satellite
+// link, and equally non-blocking: a hub that is down must never hold up the
+// relay.
+static void client_link_service(uint32_t now) {
+    if (_client_link.connected()) return;
+    if (_cl_len) _cl_len = 0;                  // stale half-frame from the drop
+    if (!eth_is_up() || now < _cl_next_try_ms) return;
+
+    if (_client_link.connect(_hub_host, SAT_HUB_CLIENT_PORT, 2000)) {
+        _client_link.setNoDelay(true);
+        _cl_backoff_ms = 1000;
+        Serial.printf("[WEB] hub client link up (%s:%d)\n",
+                      _hub_host, SAT_HUB_CLIENT_PORT);
+    } else {
+        _cl_next_try_ms = now + _cl_backoff_ms;
+        if (_cl_backoff_ms < UPLINK_BACKOFF_MAX_MS) _cl_backoff_ms *= 2;
+    }
+}
+
+// phones -> hub.  Raw non-blocking send for the reason documented on the uplink:
+// NetworkClient::write() cannot be bounded and will happily block for a minute.
+static void drain_ws_to_hub() {
+    if (!_ws_rx_q) return;
+    WsRx m;
+    while (xQueueReceive(_ws_rx_q, &m, 0) == pdTRUE) {
+        if (!_client_link.connected()) continue;       // drop; nothing to queue for
+        int fd = _client_link.fd();
+        if (fd >= 0) ::send(fd, m.data, m.len, MSG_DONTWAIT);
+    }
+}
+
+// hub -> phones.  The hub writes a byte stream; the web app expects one packet
+// per WebSocket frame, so it is reframed here rather than forwarded raw.
+static void drain_hub_to_ws() {
+    while (_client_link.available()) {
+        int c = _client_link.read();
+        if (c < 0) break;
+        if (_cl_len == 0 && c != PKT_START_1) continue;
+        if (_cl_len == 1 && c != PKT_START_2) { _cl_len = 0; continue; }
+        _cl_buf[_cl_len++] = (uint8_t)c;
+        if (_cl_len >= 3) {
+            uint16_t want = 3 + _cl_buf[2] + 2;        // hdr + LEN body + CRC
+            if (want > sizeof(_cl_buf)) { _cl_len = 0; continue; }
+            if (_cl_len == want) {
+                if (_ws.count()) _ws.binaryAll(_cl_buf, _cl_len);
+                _cl_len = 0;
+            }
+        }
+        if (_cl_len >= sizeof(_cl_buf)) _cl_len = 0;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Mount peers — learned, never configured
@@ -641,6 +760,26 @@ void setup() {
 
     eth_begin();
     Serial.printf("Hub uplink: %s:%d\n", _hub_host, HUB_PORT);
+
+    // ---- Web app for phones on this satellite's AP ----
+    // Last in setup() deliberately: everything the relay needs is already
+    // running by here, so if any of this misbehaves the satellite still does
+    // its actual job.
+    _ws_rx_q = xQueueCreate(16, sizeof(WsRx));
+    _ws.onEvent(on_ws_event);
+    _http.addHandler(&_ws);
+    _http.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
+        // The (const uint8_t*, len) overload, NOT the const char* one — see the
+        // long note at the matching handler in esp32_hub_eth.ino.  The char*
+        // form copies the whole 130 KB page into one contiguous heap block,
+        // which fails on a chip already holding WiFi, ESP-NOW and AsyncTCP and
+        // ships a blank 200 instead of an error.
+        req->send(200, "text/html", (const uint8_t *)WEB_APP_HTML,
+                  sizeof(WEB_APP_HTML) - 1);
+    });
+    _http.begin();
+    Serial.printf("Web app   : http://%s/  (join WiFi \"%s\")\n",
+                  WiFi.softAPIP().toString().c_str(), AP_SSID);
 }
 
 void loop() {
@@ -652,6 +791,13 @@ void loop() {
     if (_uplink.connected()) drain_uplink_to_espnow();
     peer_forget_stale(now);
     dn_pump(now);
+
+    // Web app bridge.  After the relay work, never before it: a phone refreshing
+    // a page must not delay a mount's commands.
+    client_link_service(now);
+    drain_ws_to_hub();
+    if (_client_link.connected()) drain_hub_to_ws();
+
     downlink_report(now);
 
     _loop_count++;

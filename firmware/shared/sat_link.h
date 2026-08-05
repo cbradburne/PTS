@@ -39,6 +39,11 @@
 // the distinction out of the wire protocol entirely.
 #define SAT_LINK_PORT     7778
 
+// The hub's ordinary client port — the one the PC app and the web app speak on.
+// A satellite that serves the web app connects here as a normal client, in
+// addition to its satellite link above, so both ends must agree on it.
+#define SAT_HUB_CLIENT_PORT  7777
+
 // The name the hub answers to, and the name a satellite dials.  Both ends read
 // it from here because a mismatch is invisible from either side: the hub logs a
 // healthy listener, the satellite logs a healthy AP, and the two never meet.

@@ -200,7 +200,7 @@ static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Hub";
 static const IPAddress AP_IP     (192, 168, 4, 1);
 static const IPAddress AP_GATEWAY(192, 168, 4, 1);     // the AP is its own gateway
 static const IPAddress AP_SUBNET (255, 255, 255, 0);
-#define TCP_PORT     7777
+#define TCP_PORT     SAT_HUB_CLIENT_PORT   // shared/sat_link.h — satellites dial it too
 #define MAX_CLIENTS  4
 
 // ---------------------------------------------------------------------------
