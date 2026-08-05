@@ -242,6 +242,38 @@ static void drain_ws_to_hub() {
     }
 }
 
+// Per-mount STATUS throttle for the WebSocket, mirroring the hub's.  Its own
+// comment explains why, and it is not a performance nicety:
+//
+//   "rate-limit to 5 Hz when idle.  This prevents TCP ACK starvation that
+//    previously caused lwIP to close the connection."
+//
+// The hub found that and fixed it before the web app shipped.  Forwarding the
+// raw TCP stream to binaryAll() here reproduced it exactly: a phone that
+// connected, was buried in STATUS at full rate from every mount, and had its
+// socket closed under it within a second — over and over, with the page showing
+// "reconnecting" and the client IDs climbing.  The frames were not the phone's
+// to refuse; lwIP dropped the connection.
+//
+// STATUS is the firehose and the only thing throttled.  Everything else -
+// acks, state reports, subject lists, pairing, hub telemetry - passes straight
+// through, because none of it repeats at 10 Hz per mount.
+#define WS_STATUS_INTERVAL_MS  200          // 5 Hz, same as the hub
+static uint32_t _ws_status_ms[NUM_MOUNTS] = {};
+
+// True if this frame should reach the phones now.
+static bool ws_should_send(const uint8_t *f, uint16_t len) {
+    if (len < 7) return false;
+    uint8_t mid = f[3];
+    uint8_t cmd = f[6];
+    if (cmd != CMD_STATUS) return true;                 // not the firehose
+    if (mid < 1 || mid > NUM_MOUNTS) return true;
+    uint32_t t = millis();
+    if (t - _ws_status_ms[mid - 1] < WS_STATUS_INTERVAL_MS) return false;
+    _ws_status_ms[mid - 1] = t;
+    return true;
+}
+
 // hub -> phones.  The hub writes a byte stream; the web app expects one packet
 // per WebSocket frame, so it is reframed here rather than forwarded raw.
 static void drain_hub_to_ws() {
@@ -255,7 +287,8 @@ static void drain_hub_to_ws() {
             uint16_t want = 3 + _cl_buf[2] + 2;        // hdr + LEN body + CRC
             if (want > sizeof(_cl_buf)) { _cl_len = 0; continue; }
             if (_cl_len == want) {
-                if (_ws.count()) _ws.binaryAll(_cl_buf, _cl_len);
+                if (_ws.count() && ws_should_send(_cl_buf, _cl_len))
+                    _ws.binaryAll(_cl_buf, _cl_len);
                 _cl_len = 0;
             }
         }
