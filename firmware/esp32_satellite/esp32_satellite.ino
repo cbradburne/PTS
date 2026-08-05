@@ -581,6 +581,43 @@ void setup() {
     Serial.printf("AP  SSID : %s  (channel %d)\n", AP_SSID, AP_CHANNEL);
     Serial.printf("AP  MAC  : %s\n", WiFi.softAPmacAddress().c_str());
 
+    // One-shot channel survey.  A mount talking to this satellite was failing
+    // ~10 sends a minute while two mounts on the hub's channel failed none at
+    // all, and the obvious difference is which channel each cell sits on - but
+    // "channel 6 is usually busy" is folklore, not a measurement.  So count
+    // what is actually on the air here and let the number choose.
+    //
+    // Done once, at boot, before any mount has attached: a scan takes the radio
+    // off-channel for a second or two, which is free now and would not be later.
+    {
+        int n = WiFi.scanNetworks(false /*blocking*/, false /*no hidden*/);
+        if (n > 0) {
+            uint8_t per_ch[14] = {};
+            int8_t  best_rssi[14];
+            for (int c = 0; c < 14; c++) best_rssi[c] = -128;
+            for (int i = 0; i < n; i++) {
+                int c = WiFi.channel(i);
+                if (c < 1 || c > 13) continue;
+                per_ch[c]++;
+                if ((int8_t)WiFi.RSSI(i) > best_rssi[c]) best_rssi[c] = (int8_t)WiFi.RSSI(i);
+            }
+            // Report the three non-overlapping channels plus our own, since
+            // those are the only realistic choices.
+            Serial.printf("[SURVEY] %d APs seen | ch1: %d (max %d dBm) | "
+                          "ch6: %d (max %d dBm) | ch11: %d (max %d dBm)\n",
+                          n, per_ch[1], best_rssi[1], per_ch[6], best_rssi[6],
+                          per_ch[11], best_rssi[11]);
+            Serial.printf("[SURVEY] we are on channel %d with %d other AP(s) "
+                          "on it%s\n", AP_CHANNEL, per_ch[AP_CHANNEL],
+                          per_ch[AP_CHANNEL] ? " — try a quieter one if sends keep failing" : "");
+        } else {
+            Serial.println("[SURVEY] no other APs visible — channel choice is unlikely to matter");
+        }
+        WiFi.scanDelete();
+        // The scan leaves the radio wherever it finished; put it back.
+        esp_wifi_set_channel(AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    }
+
     _rx_q = xQueueCreate(24, sizeof(RxItem));
     if (esp_now_init() != ESP_OK) {
         Serial.println("[ESPNOW] init failed — restarting");
