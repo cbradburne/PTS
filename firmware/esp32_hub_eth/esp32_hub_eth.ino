@@ -865,7 +865,22 @@ static void send_to_mount_routed(int idx, const uint8_t *raw, uint16_t len) {
     if (idx < 0 || idx >= NUM_MOUNTS) return;
     if (_mount_sat[idx] >= 0) {
         SatSlot &sl = _sat[_mount_sat[idx]];
-        if (sl.active && sl.client.connected()) sl.client.write(raw, len);
+        if (sl.active && sl.client.connected()) {
+            // A single non-blocking send, NOT NetworkClient::write().  That
+            // function waits in select() for 1 s at a time, up to 10 retries,
+            // and a PARTIAL write resets the retry count - so a satellite that
+            // is draining slowly can hold the caller for a minute or more.  It
+            // cannot be bounded with SO_SNDTIMEO either: its send() passes
+            // MSG_DONTWAIT, so that option is never consulted.
+            //
+            // On the satellite that cost one mount.  Here it would hold up the
+            // loop serving all five, the display and every client, because one
+            // satellite stopped reading.  If the frame will not go now it does
+            // not go: the mount behind that satellite is unreachable either
+            // way, and the rest of the rig keeps running.
+            int sfd = sl.client.fd();
+            if (sfd >= 0) ::send(sfd, raw, len, MSG_DONTWAIT);
+        }
         return;
     }
     espnow_send_if_present(idx, raw, len);
@@ -2519,20 +2534,10 @@ void loop() {
                 if (_sat[i].active && _sat[i].client.connected()) continue;
                 if (_sat[i].active) sat_release_mounts(i);
                 _sat[i].client = in;
-                // Bound the send, for the same reason the satellite bounds its
-                // own: a TCP write blocks while the far end is not draining,
-                // and these two write to each other.  A satellite stuck in its
-                // own write stops reading, our writes then fill its buffer, and
-                // both ends sit blocked writing with neither reading - a
-                // deadlock that on this side would stall the loop serving all
-                // five mounts, not just the one behind the satellite.
-                //
-                // 200 ms, and a short write is simply a command not delivered
-                // to a satellite that is not listening anyway.
-                {
-                    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
-                    in.setSocketOption(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-                }
+                // NOTE: SO_SNDTIMEO would be pointless here - NetworkClient's
+                // send() passes MSG_DONTWAIT so it is never consulted.  The
+                // send is bounded in send_to_mount_routed() instead, by using
+                // the raw fd.
                 sat_env_init(&_sat[i].parser);
                 _sat[i].active = true;
                 placed = true;
