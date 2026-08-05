@@ -194,10 +194,11 @@ static void on_ws_event(AsyncWebSocket *, AsyncWebSocketClient *client,
         // are superseded every 100 ms, and a phone that hiccups should not be
         // disconnected mid-show.
         client->setCloseClientOnQueueFull(false);
+        ws_cli_open(client->id());
         Serial.printf("[WEB] client %u connected from %s\n",
                       client->id(), client->remoteIP().toString().c_str());
     } else if (type == WS_EVT_DISCONNECT) {
-        Serial.printf("[WEB] client %u disconnected\n", client->id());
+        ws_cli_close(client->id());
     } else if (type == WS_EVT_DATA) {
         AwsFrameInfo *info = (AwsFrameInfo *)arg;
         if (info->final && info->index == 0 && info->len == len
@@ -261,6 +262,41 @@ static void drain_ws_to_hub() {
 #define WS_STATUS_INTERVAL_MS  200          // 5 Hz, same as the hub
 static uint32_t _ws_status_ms[NUM_MOUNTS] = {};
 
+// ---- WebSocket diagnostics -------------------------------------------------
+// Phones were connecting and vanishing inside a second, and the two obvious
+// explanations are indistinguishable from the outside: the send queue backing
+// up (our fault, fix the rate) or the AP dropping the station (RF, fix the
+// placement or channel).  Both produce "client N connected / client N
+// disconnected" and nothing else.  These separate them.
+//
+// _ws_full counts frames we declined to queue because the queue was already
+// full.  If that stays at 0 while clients still drop, queue pressure is NOT
+// the cause and the answer is at the WiFi layer — see the AP station events.
+static uint32_t _ws_sent = 0, _ws_full = 0;
+
+struct WsCli { uint32_t id, at, sent; };
+static WsCli _ws_cli[4] = {};
+
+static void ws_cli_open(uint32_t id) {
+    for (auto &c : _ws_cli)
+        if (c.id == 0) { c = { id, millis(), _ws_sent }; return; }
+    _ws_cli[0] = { id, millis(), _ws_sent };      // table full — reuse
+}
+
+// Lifetime and how much we actually pushed at it, which is the number that says
+// whether it drowned or was cut off while idle.
+static void ws_cli_close(uint32_t id) {
+    for (auto &c : _ws_cli)
+        if (c.id == id) {
+            Serial.printf("[WEB] client %u disconnected after %lu ms, "
+                          "%lu frames sent\n", id,
+                          (unsigned long)(millis() - c.at),
+                          (unsigned long)(_ws_sent - c.sent));
+            c.id = 0; return;
+        }
+    Serial.printf("[WEB] client %u disconnected\n", id);
+}
+
 // True if this frame should reach the phones now.
 static bool ws_should_send(const uint8_t *f, uint16_t len) {
     if (len < 7) return false;
@@ -287,8 +323,14 @@ static void drain_hub_to_ws() {
             uint16_t want = 3 + _cl_buf[2] + 2;        // hdr + LEN body + CRC
             if (want > sizeof(_cl_buf)) { _cl_len = 0; continue; }
             if (_cl_len == want) {
-                if (_ws.count() && ws_should_send(_cl_buf, _cl_len))
-                    _ws.binaryAll(_cl_buf, _cl_len);
+                if (_ws.count() && ws_should_send(_cl_buf, _cl_len)) {
+                    // Skip rather than queue when full.  The client is set to
+                    // drop-not-close, so this only changes where the frame is
+                    // discarded — but it makes the pressure countable.
+                    if (_ws.availableForWriteAll()) {
+                        _ws.binaryAll(_cl_buf, _cl_len); _ws_sent++;
+                    } else _ws_full++;
+                }
                 _cl_len = 0;
             }
         }
@@ -643,11 +685,13 @@ static void downlink_report(uint32_t now) {
     // shed count cannot answer on its own.
     uint32_t secs = DN_REPORT_MS / 1000UL;
     Serial.printf("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
-                  "uplink %lu writes, %lu dropped\n",
+                  "uplink %lu writes, %lu dropped | ws %lu sent, %lu queue-full\n",
                   (unsigned long)(_loop_count / (secs ? secs : 1)),
                   (unsigned long)_loop_max_us, (unsigned long)_dn_nomem,
-                  (unsigned long)_up_writes, (unsigned long)_up_dropped);
+                  (unsigned long)_up_writes, (unsigned long)_up_dropped,
+                  (unsigned long)_ws_sent, (unsigned long)_ws_full);
     _loop_count = _loop_max_us = _dn_nomem = _up_writes = _up_dropped = 0;
+    _ws_sent = _ws_full = 0;
 
     if (!_dn_no_peer && !_dn_send_err && !_dn_overflow && !_dn_unacked) return;
     Serial.printf("[DOWN] %lu sent (%lu acked by the mount, %lu NOT acked), "
@@ -735,6 +779,19 @@ void setup() {
 #else
     hub_name_apply();                           // unnamed: Sat-<MAC>
 #endif
+
+    // Station events, because a phone leaving the AP and a phone whose
+    // WebSocket died look identical from the application's side.  The reason
+    // code distinguishes them and is the difference between "fix the code" and
+    // "move the satellite": 8 is the station leaving of its own accord, 4 is an
+    // inactivity timeout, 15 a 4-way handshake failure, 2 an auth expiry.  The
+    // last three are RF, not software.
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+        const uint8_t *m = info.wifi_ap_stadisconnected.mac;
+        Serial.printf("[AP] station %02X:%02X:%02X:%02X:%02X:%02X left "
+                      "(reason %u)\n", m[0], m[1], m[2], m[3], m[4], m[5],
+                      (unsigned)info.wifi_ap_stadisconnected.reason);
+    }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
 
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
