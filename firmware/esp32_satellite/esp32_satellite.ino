@@ -166,6 +166,22 @@ static void peer_forget_stale(uint32_t now) {
     }
 }
 
+// Same 11b / 1 Mbps long-preamble rate the hub and the mounts already use for
+// their peers - roughly 6-10 dB of link budget over the default.  The satellite
+// was the only node on the rig NOT doing this, so its downlink was the least
+// robust hop in a chain where every other one had been deliberately hardened.
+// An oversight from writing this as a "dumb pipe": the pipe still has a radio.
+// Must be called for each peer, after esp_now_add_peer(), and again after any
+// reinit - the rate config does not survive esp_now_deinit().
+static void espnow_peer_long_range(const uint8_t *mac) {
+    esp_now_rate_config_t rate = {};
+    rate.phymode = WIFI_PHY_MODE_11B;
+    rate.rate    = WIFI_PHY_RATE_1M_L;
+    rate.ersu    = false;
+    rate.dcm     = false;
+    esp_now_set_peer_rate_config(mac, &rate);
+}
+
 static void peer_learn(uint8_t mount_id, const uint8_t *mac, uint32_t now) {
     if (mount_id < 1 || mount_id > NUM_MOUNTS) return;
     MountPeer &p = _peer[mount_id - 1];
@@ -179,6 +195,7 @@ static void peer_learn(uint8_t mount_id, const uint8_t *mac, uint32_t now) {
         info.ifidx   = WIFI_IF_AP;      // we serve mounts on our OWN AP
         info.encrypt = false;
         esp_now_add_peer(&info);
+        espnow_peer_long_range(mac);
         p.used = true;
         Serial.printf("[PEER] mount %d at %02X:%02X:%02X:%02X:%02X:%02X\n",
                       mount_id, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -383,6 +400,7 @@ static void espnow_recover() {
         info.ifidx   = WIFI_IF_AP;
         info.encrypt = false;
         esp_now_add_peer(&info);
+        espnow_peer_long_range(_peer[i].mac);
     }
     Serial.println("[DOWN] ESP-NOW reinitialised, peers restored");
 }
