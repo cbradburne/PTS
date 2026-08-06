@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="nocturne.css" />
+<style>
+  html, body { margin: 0; background: var(--color-bg); color: var(--color-text); font-family: var(--font-body); }
+  a { color: var(--color-accent-400); text-decoration: none; }
+  a:hover { color: var(--color-accent-300); }
+  svg text { font-family: var(--font-body); }
+</style>
+<script>window.OM_SCENES = '[{"name":"Establish","dur":4.5},{"name":"Flatten","dur":3.5},{"name":"Sweep","dur":11},{"name":"Elevation","dur":5.5},{"name":"Rewind","dur":3.5}]';</script>
+<script>window.OM_PLAYBACK = '{"mode":"loop"}';</script>
+<script>window.TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "sliderLength": 3,
+  "subjectDistance": 1.5,
+  "faceHeight": 1.62,
+  "pivotHeight": 0.34,
+  "showFan": true,
+  "showGrid": true,
+  "motionEditor": true
+}/*EDITMODE-END*/;</script>
+</helmet>
+<x-import component-from-global-scope="RigPiece" from="./animations-v2.jsx ./tweaks-panel.jsx ./rig.jsx" hint-size="100%,100%"></x-import>
+</x-dc>
+</body>
+</html>

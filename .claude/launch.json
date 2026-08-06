@@ -14,7 +14,7 @@
       "port": 8080
     },
     {
-      "name": "site",
+      "name": "docs",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8931", "--directory", "/Users/col/New CC v2/docs"],
       "port": 8931

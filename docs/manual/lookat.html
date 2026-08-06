@@ -26,6 +26,33 @@
     position so the shot stays locked on a subject while the camera orbits past on
     the rail. Calibrate a subject once and the rig keeps it framed for you.</p>
 
+    <figure class="shot">
+      <video src="../assets/img/lookat-geometry.mp4"
+             poster="../assets/img/lookat-geometry.jpg"
+             autoplay loop muted playsinline controls
+             aria-label="Animated diagram: as the camera travels the slider rail, pan and tilt
+                         are recalculated continuously so the subject stays framed."></video>
+      <figcaption>Pan and tilt are <em>derived</em> from slider position: as the camera
+      travels the rail, both angles are recomputed continuously so the subject holds
+      its place in frame. The readouts show the three values changing together.</figcaption>
+    </figure>
+
+    <h2>Before you can use it</h2>
+    <p>Look-at has a few one-time prerequisites. Set these up per camera in
+    <a href="config.html">Configuration</a>:</p>
+    <ol class="steps">
+      <li><strong>Has slider</strong> is enabled and the slider is
+      <strong>homed</strong> — look-at is a slider move, so it needs one.</li>
+      <li><strong>Find Limits</strong> has been run, so the mount knows the rail's
+      full millimetre range.</li>
+      <li><strong>Look-at mode</strong> is enabled on that camera's tab.</li>
+    </ol>
+
+    <h2>Calibrating a subject</h2>
+    <p>You teach the mount where a subject is in 3D by aiming at it from
+    <strong>two points on the rail</strong>. Two sight-lines cross in space, and
+    the mount solves for the subject's position by triangulation. Each mount holds
+    up to <strong>eight named subjects</strong>, stored in its memory.</p>
     <div style="border:1px solid var(--border);border-radius:10px;background:var(--bg2);padding:8px;margin:20px 0;overflow-x:auto">
       <svg viewBox="0 0 760 250" width="100%" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
         <defs>
@@ -55,23 +82,6 @@
         </g>
       </svg>
     </div>
-
-    <h2>Before you can use it</h2>
-    <p>Look-at has a few one-time prerequisites. Set these up per camera in
-    <a href="config.html">Configuration</a>:</p>
-    <ol class="steps">
-      <li><strong>Has slider</strong> is enabled and the slider is
-      <strong>homed</strong> — look-at is a slider move, so it needs one.</li>
-      <li><strong>Find Limits</strong> has been run, so the mount knows the rail's
-      full millimetre range.</li>
-      <li><strong>Look-at mode</strong> is enabled on that camera's tab.</li>
-    </ol>
-
-    <h2>Calibrating a subject</h2>
-    <p>You teach the mount where a subject is in 3D by aiming at it from
-    <strong>two points on the rail</strong>. Two sight-lines cross in space, and
-    the mount solves for the subject's position by triangulation. Each mount holds
-    up to <strong>eight named subjects</strong>, stored in its memory.</p>
     <ol class="steps">
       <li>Start <strong>Add Subject</strong> (PC app, console or web). The slider
       moves itself to the home end of the rail.</li>
