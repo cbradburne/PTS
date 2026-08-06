@@ -304,6 +304,12 @@ static uint32_t _ws_status_ms[NUM_MOUNTS] = {};
 // the cause and the answer is at the WiFi layer — see the AP station events.
 static uint32_t _ws_sent = 0, _ws_full = 0, _ws_pkts = 0;
 
+// Free-running, never zeroed.  The per-client totals below are differences
+// taken across a connection, and _ws_sent is reset at every [RATE] report — so
+// differencing it reported only as far back as the last reset.  A 35-second
+// session that really sent 234 frames was logged as 4.
+static uint32_t _ws_frames_total = 0;
+
 // Coalescing buffer, hub -> phones.
 //
 // Measured on the rig: 44-70 WebSocket messages per second at one phone, each
@@ -336,7 +342,8 @@ static void ws_flush() {
         // Skip rather than queue when full: the client is set to drop-not-close,
         // so this only decides where the frame is discarded — and makes the
         // pressure countable.
-        if (_ws.availableForWriteAll()) { _ws.binaryAll(_ws_agg, _ws_agg_len); _ws_sent++; }
+        if (_ws.availableForWriteAll()) { _ws.binaryAll(_ws_agg, _ws_agg_len);
+                                          _ws_sent++; _ws_frames_total++; }
         else _ws_full++;
     }
     _ws_agg_len = 0;
@@ -356,8 +363,8 @@ static WsCli _ws_cli[4] = {};
 
 static void ws_cli_open(uint32_t id) {
     for (auto &c : _ws_cli)
-        if (c.id == 0) { c = { id, millis(), _ws_sent }; return; }
-    _ws_cli[0] = { id, millis(), _ws_sent };      // table full — reuse
+        if (c.id == 0) { c = { id, millis(), _ws_frames_total }; return; }
+    _ws_cli[0] = { id, millis(), _ws_frames_total };   // table full — reuse
 }
 
 // Lifetime and how much we actually pushed at it, which is the number that says
@@ -368,7 +375,7 @@ static void ws_cli_close(uint32_t id) {
             Serial.printf("[WEB] client %u disconnected after %lu ms, "
                           "%lu frames sent\n", id,
                           (unsigned long)(millis() - c.at),
-                          (unsigned long)(_ws_sent - c.sent));
+                          (unsigned long)(_ws_frames_total - c.sent));
             c.id = 0; return;
         }
     Serial.printf("[WEB] client %u disconnected\n", id);
