@@ -783,6 +783,23 @@ class Bridge:
             log.info("HUB EVENT: OSC feedback → %s:%d — %d message(s) sent%s",
                      ip, port, sent,
                      "" if sent else "  (nothing sent since last report)")
+        elif kind == 9:
+            # Own layout: [1] worst loop section, [2..3] that section's worst
+            # pass (ms), [4..5] worst whole pass (ms), [6..7] loops/s,
+            # [8] serial frames dropped.  The hub had no loop timing at all
+            # until a 13.8 s stall wedged a mount and nothing could say where
+            # the time had gone.
+            names = ("top", "accept", "sat", "osc", "tcp", "usb", "ws",
+                     "disp", "relay")
+            sec  = names[pkt.payload[1]] if pkt.payload[1] < len(names) else "?"
+            sms  = int.from_bytes(pkt.payload[2:4], "big")
+            pms  = int.from_bytes(pkt.payload[4:6], "big")
+            lps  = int.from_bytes(pkt.payload[6:8], "big")
+            drop = pkt.payload[8]
+            fn = log.warning if pms >= 1000 else log.info
+            fn("HUB LOOP: %d loops/s | worst pass %d ms | worst section '%s' "
+               "%d ms%s", lps, pms, sec, sms,
+               f" | {drop} serial frame(s) dropped" if drop else "")
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "

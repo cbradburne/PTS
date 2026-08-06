@@ -983,12 +983,73 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
 
 // Sends to USB serial and TCP clients.  WebSocket is handled separately in the
 // relay loop with per-mount rate limiting to avoid overflowing the WS send queue.
+// Bounded write to USB serial: the whole frame or none of it.
+//
+// setup() sets setTxTimeoutMs(0) so a host that stops draining cannot stall
+// loop() — that part is long since handled.  What it does not handle is that
+// HWCDC::write() still returns so_far when the ring fills, so the frame is
+// TRUNCATED rather than dropped, and a truncated packet desynchronises the
+// reader until it happens on the next magic.
+//
+// All-or-nothing fixes that.  A dropped frame is harmless: the reader hunts for
+// 0xAA 0x55 and checks a CRC, so it costs one status update.  A partial frame
+// is not, so this never writes "as much as fits".
+static uint32_t _ser_writes = 0, _ser_dropped = 0;
+
+// ---------------------------------------------------------------------------
+// Loop timing
+// ---------------------------------------------------------------------------
+// A 13.8-second pass wedged mount 1 into a reconnect and the hub could not say
+// where the time went.  The satellite has had [RATE] since the day its problems
+// started, which is exactly why they were solvable and this one was not: three
+// separate theories about this stall were argued from symptoms alone and the
+// leading one — a blocking Serial.write() — turned out to have been bounded in
+// setup() all along.
+//
+// Sections are timed individually because "the loop took 13 seconds" narrows
+// nothing.  MARK() charges the time since the previous mark to a section, so
+// every microsecond of the pass lands somewhere and nothing hides in the gaps.
+// Only the worst pass per section survives each report.
+enum { SEC_TOP, SEC_ACCEPT, SEC_SAT, SEC_OSC, SEC_TCP, SEC_USB, SEC_WS,
+       SEC_DISP, SEC_RELAY, SEC_N };
+static const char *const SEC_NAME[SEC_N] = {
+    "top", "accept", "sat", "osc", "tcp", "usb", "ws", "disp", "relay" };
+static uint32_t _sec_max[SEC_N] = {};
+static uint32_t _loop_count = 0, _loop_max_us = 0, _loop_report_ms = 0;
+#define LOOP_REPORT_MS  30000UL
+
+// Sent to comms.log, not to serial — the hub's USB port carries the binary
+// packet stream and is not humanly readable.
+//   [0]=9  [1]=worst section  [2..3]=that section ms  [4..5]=worst pass ms
+//   [6..7]=loops/s  [8]=serial frames dropped (capped)
+static void send_loop_report() {
+    int worst = 0;
+    for (int i = 1; i < SEC_N; i++) if (_sec_max[i] > _sec_max[worst]) worst = i;
+    uint32_t secs = LOOP_REPORT_MS / 1000UL;
+    uint32_t lps  = _loop_count / (secs ? secs : 1);
+    uint16_t sms  = (uint16_t)((_sec_max[worst] / 1000UL) > 65535 ? 65535 : _sec_max[worst] / 1000UL);
+    uint16_t pms  = (uint16_t)((_loop_max_us   / 1000UL) > 65535 ? 65535 : _loop_max_us   / 1000UL);
+    uint8_t p[9] = { 9, (uint8_t)worst, (uint8_t)(sms >> 8), (uint8_t)sms,
+                     (uint8_t)(pms >> 8), (uint8_t)pms,
+                     (uint8_t)(lps >> 8), (uint8_t)lps,
+                     (uint8_t)(_ser_dropped > 255 ? 255 : _ser_dropped) };
+    send_hub_event_raw(p);
+    for (int i = 0; i < SEC_N; i++) _sec_max[i] = 0;
+    _loop_count = _loop_max_us = _ser_dropped = _ser_writes = 0;
+}
+
+static void serial_write_frame(const uint8_t *d, uint16_t n) {
+    _ser_writes++;
+    if (Serial.availableForWrite() >= (int)n) Serial.write(d, n);
+    else                                      _ser_dropped++;
+}
+
 // Dropped frames per client, reported below.  A slow client losing status
 // frames is not interesting; a client losing them steadily is.
 static uint32_t _bcast_dropped = 0, _bcast_sent = 0;
 
 static void broadcast_to_all(const uint8_t *data, uint16_t len) {
-    Serial.write(data, len);
+    serial_write_frame(data, len);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (_slots[i].active && _slots[i].client.connected()) {
             // Raw non-blocking send, NOT client.write().  NetworkClient::write()
@@ -1549,7 +1610,7 @@ static void dispatch_disp_msg(uint8_t type, uint8_t len, const uint8_t *d) {
         uint8_t buf[PKT_BUF_SIZE + 4];
         uint16_t n = build_packet(buf, 0xFD /*display sentinel*/, ++_usb_diag_seq,
                                   CMD_HEALTH, d, 24);
-        Serial.write(buf, n);
+        serial_write_frame(buf, n);
         return;
     }
 
@@ -1656,7 +1717,7 @@ static void send_usb_diag() {
     // received - hub firmware may predate the diagnostic", which is both
     // alarming and wrong: the firmware is current, the packet simply never
     // left by the door the client was listening at.
-    Serial.write(buf, n);
+    serial_write_frame(buf, n);
     broadcast_to_all(buf, n);
     _ws.binaryAll(buf, (size_t)n);
 }
@@ -1691,7 +1752,7 @@ static void send_own_health(bool anomaly) {
     // has just rebooted.  Sending it over USB alone meant that running the PC
     // app on TCP, which is what stops the host resetting the hub, silently
     // traded away every means of noticing that the hub restarted at all.
-    Serial.write(buf, n);
+    serial_write_frame(buf, n);
     broadcast_to_all(buf, n);
     _ws.binaryAll(buf, (size_t)n);
     _health_last_ms     = millis();
@@ -1736,7 +1797,7 @@ static void send_hub_event_raw(const uint8_t p[9]) {
     // structured notable events (mount online, pairing, wedge ladder,
     // restart imminent); losing them on TCP left the PC app blind to the
     // hub's own account of what it was doing.
-    Serial.write(buf, n);
+    serial_write_frame(buf, n);
     broadcast_to_all(buf, n);
     _ws.binaryAll(buf, (size_t)n);
 }
@@ -2163,6 +2224,7 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
     } else if (strcmp(verb, "speed") == 0 && nt >= 5) {
         // .../speed/pt|sl        <1-4>   set outright
         // .../speed/pt|sl/up|down        step by one, clamped
+        // .../speed/pt|sl/inc            cycle 1-2-3-4-1, as the other surfaces do
         //
         // Stepping needs no argument, so one button can walk the preset without
         // the surface tracking which one is current — and the clamp means a
@@ -2179,6 +2241,10 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
             int base = (*cur >= 1 && *cur <= 4) ? *cur : 1;   // unknown -> 1
             if      (strcmp(tok[5], "up")   == 0) want = base + 1;
             else if (strcmp(tok[5], "down") == 0) want = base - 1;
+            // Wraps, unlike up/down: this is the web app's and the PC app's
+            // single-button behaviour, where one control walks the presets
+            // round rather than stalling at the top.
+            else if (strcmp(tok[5], "inc")  == 0) want = (base % 4) + 1;
             if (want < 1) want = 1;
             if (want > 4) want = 4;
         } else if (argc >= 1) {
@@ -2319,6 +2385,12 @@ void setup() {
     // hub-display joystick AND the PC joystick unresponsive until the PC is
     // restarted.  With timeout=0 writes return immediately when the buffer is full
     // — STATUS packets may be dropped but loop() never stalls.
+    //
+    // "Dropped" needed qualifying: with timeout 0, HWCDC::write() still returns
+    // so_far, so a full ring yields a PARTIAL frame in the stream rather than no
+    // frame at all, and a truncated packet desynchronises the reader until it
+    // finds the next magic.  Frames therefore go through serial_write_frame(),
+    // which writes all of a packet or none of it.
     Serial.setTxTimeoutMs(0);
 
     crash_report_print();   // report the previous panic, if any
@@ -2713,6 +2785,11 @@ static void check_maintenance_restart(uint32_t now) {
 // ---------------------------------------------------------------------------
 
 void loop() {
+    // MARK(x) charges everything since the previous mark to section x, so the
+    // whole pass is accounted for and nothing hides between the sections.
+    uint32_t _pass_t0 = micros(), _mark = _pass_t0;
+    #define MARK(sec) do { uint32_t n_ = micros(); uint32_t d_ = n_ - _mark; \
+                           if (d_ > _sec_max[sec]) _sec_max[sec] = d_; _mark = n_; } while (0)
     esp_task_wdt_reset();
 
     uint32_t now = millis();
@@ -2793,6 +2870,8 @@ void loop() {
         last_hb = now;
     }
 
+    MARK(SEC_TOP);
+
     // ---- Accept new TCP connections ----
     WiFiClient incoming = _tcp_server.accept();
     if (incoming) {
@@ -2834,6 +2913,8 @@ void loop() {
             }
         }
     }
+
+    MARK(SEC_ACCEPT);
 
     // ---- Satellites ----
     {
@@ -2902,9 +2983,13 @@ void loop() {
         }
     }
 
+    MARK(SEC_SAT);
+
     // ---- OSC control (Companion / QLab) → mounts ----
     osc_poll();
     osc_feedback_poll(now);
+
+    MARK(SEC_OSC);
 
     // ---- TCP clients → mounts ----
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -2929,6 +3014,8 @@ void loop() {
             }
         }
     }
+
+    MARK(SEC_TCP);
 
     // ---- USB Serial → mounts ----
     while (Serial.available()) {
@@ -2970,6 +3057,8 @@ void loop() {
         _bcast_dropped = _bcast_sent = 0;
     }
 
+    MARK(SEC_USB);
+
     // ---- WebSocket RX → mounts (drained here, not in AsyncTCP callback) ----
     {
         WsRxMsg ws_msg;
@@ -2987,9 +3076,13 @@ void loop() {
         }
     }
 
+    MARK(SEC_WS);
+
     // ---- Display UART receive (config commands from touchscreen) ----
     while (Serial1.available())
         process_disp_byte((uint8_t)Serial1.read());
+
+    MARK(SEC_DISP);
 
     // ---- Relay ESP-NOW packets → clients + display ----
     RelayMsg msg;
@@ -3136,4 +3229,14 @@ void loop() {
     // ---- WebSocket housekeeping (every loop — required by mathieucarbou fork) ----
     _ws.cleanupClients();
 
+
+    MARK(SEC_RELAY);
+    uint32_t _pass = micros() - _pass_t0;
+    if (_pass > _loop_max_us) _loop_max_us = _pass;
+    _loop_count++;
+    if (millis() - _loop_report_ms >= LOOP_REPORT_MS) {
+        _loop_report_ms = millis();
+        send_loop_report();
+    }
+    #undef MARK
 }
