@@ -2096,6 +2096,53 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
 
     } else if (strcmp(verb, "jog") == 0) {
         if (nt >= 5 && strcmp(tok[4], "stop") == 0) { osc_stop_jog((uint8_t)mid); return; }
+
+        // Named directions, for surfaces whose controls are buttons.  /jog
+        // itself takes four signed values, which suits a stick or a fader; a
+        // Companion button sends one message and wants to say "left".
+        //
+        // Signs come from the web app's _sendJog(), the reference every other
+        // surface already follows:  pan + = right, tilt + = UP (it negates the
+        // screen's down-positive Y), slider + = right, zoom + = in.  Read from
+        // there rather than assumed, because a sign error here is a mount
+        // driving the wrong way on a live rig with nothing to catch it.
+        //
+        // Absent or non-zero argument means GO, zero means STOP — so a button
+        // binds press to 1 and release to 0.  Non-zero is always FULL
+        // deflection: buttons send 1, and treating that as a magnitude would
+        // creep the mount instead of moving it.  Use /jog for proportional.
+        //
+        // Each direction owns one axis and leaves the rest alone, so two held
+        // buttons give a diagonal and releasing one keeps the other running.
+        int axis = -1, sign = 0;
+        if (nt == 5) {
+            if      (strcmp(tok[4], "left")  == 0) { axis = 0; sign = -1; }
+            else if (strcmp(tok[4], "right") == 0) { axis = 0; sign =  1; }
+            else if (strcmp(tok[4], "up")    == 0) { axis = 1; sign =  1; }
+            else if (strcmp(tok[4], "down")  == 0) { axis = 1; sign = -1; }
+        } else if (nt == 6 && strcmp(tok[4], "slide") == 0) {
+            if      (strcmp(tok[5], "left")  == 0) { axis = 2; sign = -1; }
+            else if (strcmp(tok[5], "right") == 0) { axis = 2; sign =  1; }
+        } else if (nt == 6 && strcmp(tok[4], "zoom") == 0) {
+            if      (strcmp(tok[5], "in")    == 0) { axis = 3; sign =  1; }
+            else if (strcmp(tok[5], "out")   == 0) { axis = 3; sign = -1; }
+        }
+        if (axis >= 0) {
+            bool go = (argc < 1) || (a[0] != 0);
+            _osc_jog[idx][axis] = go ? (int16_t)(sign * 1000) : 0;
+            bool moving = false;
+            for (int k = 0; k < 4; k++) if (_osc_jog[idx][k]) moving = true;
+            if (moving) {
+                if (_osc_jog_until[idx] == 0)
+                    Serial.printf("[OSC] CAM %d jog start\n", mid);
+                _osc_jog_until[idx] = millis() + OSC_JOG_TTL_MS;
+                osc_send_jog_pkt((uint8_t)mid);
+            } else {
+                osc_stop_jog((uint8_t)mid);
+            }
+            return;
+        }
+
         bool any = false;
         for (int k = 0; k < 4; k++) {
             int32_t v = (k < argc) ? a[k] : 0;
@@ -2113,14 +2160,34 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
             osc_stop_jog((uint8_t)mid);
         }
 
-    } else if (strcmp(verb, "speed") == 0 && nt >= 5 && argc >= 1) {
-        if (a[0] >= 1 && a[0] <= 4) {
-            uint8_t grp;
-            if      (strcmp(tok[4], "pt") == 0) { grp = GROUP_PAN_TILT;    _mount_pt_preset[idx] = (uint8_t)a[0]; }
-            else if (strcmp(tok[4], "sl") == 0) { grp = GROUP_SLIDER_ZOOM; _mount_sl_preset[idx] = (uint8_t)a[0]; }
-            else return;
-            uint8_t p[2] = { grp, (uint8_t)a[0] };
-            Serial.printf("[OSC] CAM %d speed/%s %ld\n", mid, tok[4], (long)a[0]);
+    } else if (strcmp(verb, "speed") == 0 && nt >= 5) {
+        // .../speed/pt|sl        <1-4>   set outright
+        // .../speed/pt|sl/up|down        step by one, clamped
+        //
+        // Stepping needs no argument, so one button can walk the preset without
+        // the surface tracking which one is current — and the clamp means a
+        // button held at either end is simply inert rather than wrapping round
+        // to the opposite speed mid-shot.
+        uint8_t  grp;
+        uint8_t *cur;
+        if      (strcmp(tok[4], "pt") == 0) { grp = GROUP_PAN_TILT;    cur = &_mount_pt_preset[idx]; }
+        else if (strcmp(tok[4], "sl") == 0) { grp = GROUP_SLIDER_ZOOM; cur = &_mount_sl_preset[idx]; }
+        else return;
+
+        int want = -1;
+        if (nt >= 6) {
+            int base = (*cur >= 1 && *cur <= 4) ? *cur : 1;   // unknown -> 1
+            if      (strcmp(tok[5], "up")   == 0) want = base + 1;
+            else if (strcmp(tok[5], "down") == 0) want = base - 1;
+            if (want < 1) want = 1;
+            if (want > 4) want = 4;
+        } else if (argc >= 1) {
+            want = (int)a[0];
+        }
+        if (want >= 1 && want <= 4) {
+            *cur = (uint8_t)want;
+            uint8_t p[2] = { grp, (uint8_t)want };
+            Serial.printf("[OSC] CAM %d speed/%s %d\n", mid, tok[4], want);
             ui_send_to_mount((uint8_t)mid, CMD_SET_ACTIVE_PRESET, p, 2);
         }
 

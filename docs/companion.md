@@ -30,8 +30,20 @@ against either.  QLab network cues likewise.
 | `/pts/cam/N/clear`       | slot `1-10`         | Clear a stored position |
 | `/pts/cam/N/jog`         | pan tilt slider zoom (`-1000..1000`) | Start/refresh a jog — server re-streams at 20 Hz |
 | `/pts/cam/N/jog/stop`    | –                   | Stop jogging |
+| `/pts/cam/N/jog/left`    | `1` press / `0` release | Pan left |
+| `/pts/cam/N/jog/right`   | `1` / `0`           | Pan right |
+| `/pts/cam/N/jog/up`      | `1` / `0`           | Tilt up |
+| `/pts/cam/N/jog/down`    | `1` / `0`           | Tilt down |
+| `/pts/cam/N/jog/slide/left`  | `1` / `0`       | Slide left |
+| `/pts/cam/N/jog/slide/right` | `1` / `0`       | Slide right |
+| `/pts/cam/N/jog/zoom/in`     | `1` / `0`       | Zoom in |
+| `/pts/cam/N/jog/zoom/out`    | `1` / `0`       | Zoom out |
 | `/pts/cam/N/speed/pt`    | `1-4`               | Active pan/tilt speed preset |
 | `/pts/cam/N/speed/sl`    | `1-4`               | Active slider speed preset |
+| `/pts/cam/N/speed/pt/up`   | –                 | Pan/tilt speed one step faster (clamped at 4) |
+| `/pts/cam/N/speed/pt/down` | –                 | Pan/tilt speed one step slower (clamped at 1) |
+| `/pts/cam/N/speed/sl/up`   | –                 | Slider speed one step faster |
+| `/pts/cam/N/speed/sl/down` | –                 | Slider speed one step slower |
 | `/pts/cam/N/subject`     | `0-7`               | Select look-at subject (switches live mid-move) |
 | `/pts/cam/N/lookat`      | `0` (◀ min) / `1` (▶ max) | Look-at slider move with the selected subject |
 | `/pts/refresh`           | –                   | Resend all feedback for every mount |
@@ -56,6 +68,26 @@ action lists):
   (pressing Button A during the move switches the tracked subject live)
 
 **Speed page** — four buttons per camera: `/pts/cam/N/speed/pt` with `1..4`.
+
+### Direction buttons
+
+The named `jog` directions exist for button surfaces; `/pts/cam/N/jog` with its
+four signed values is still there for a stick or a fader.
+
+Bind **press → `1`** and **release → `0`** on the same address.  Any non-zero
+value is full deflection — a button sends `1`, and honouring that as a
+magnitude would creep the mount rather than move it.  Speed comes from the
+active preset, not from the argument.
+
+Each direction owns one axis and leaves the others alone, so holding *left* and
+*up* together gives a diagonal, and releasing one leaves the other running.
+
+If a release is lost, the 15 s TTL stops the jog anyway, and the mount's own
+500 ms dead-man stops it if the hub goes away entirely.
+
+Speed `up`/`down` need no argument and clamp at 1 and 4, so one button can walk
+the preset without Companion tracking which one is active, and a button held at
+either end is inert rather than wrapping round mid-shot.
 
 **Show-stopper**: a big red `/pts/estop` (no argument needed).
 
