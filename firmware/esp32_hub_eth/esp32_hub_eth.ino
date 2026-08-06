@@ -1725,19 +1725,10 @@ static void health_check(uint32_t now) {
 // send_usb_diag — never TCP/WS).  Used to capture mount connect transitions and
 // dropped ghost frames in the PC log so the phantom-camera cause can be pinned.
 //   kind: 0 = mount came online (real connect)   1 = ghost frame dropped (rssi==0)
-static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
-                           uint8_t state, uint8_t flags) {
-    uint32_t up = millis() / 1000UL;
-    uint8_t p[9];
-    p[0] = kind;
-    p[1] = mount_id;
-    p[2] = (uint8_t)rssi;
-    p[3] = state;
-    p[4] = flags;
-    p[5] = (up >> 24) & 0xFF;
-    p[6] = (up >> 16) & 0xFF;
-    p[7] = (up >>  8) & 0xFF;
-    p[8] =  up        & 0xFF;
+// Payload supplied by the caller.  Most events describe a mount and share the
+// layout below, but not all do — an IP and port have no sensible home in fields
+// named rssi/state/flags, and pretending otherwise reads worse at both ends.
+static void send_hub_event_raw(const uint8_t p[9]) {
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_packet(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq,
                               CMD_HUB_EVENT, p, 9);
@@ -1748,6 +1739,14 @@ static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
     Serial.write(buf, n);
     broadcast_to_all(buf, n);
     _ws.binaryAll(buf, (size_t)n);
+}
+static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
+                           uint8_t state, uint8_t flags) {
+    uint32_t up = millis() / 1000UL;
+    uint8_t p[9] = { kind, mount_id, (uint8_t)rssi, state, flags,
+                     (uint8_t)(up >> 24), (uint8_t)(up >> 16),
+                     (uint8_t)(up >> 8), (uint8_t)up };
+    send_hub_event_raw(p);
 }
 
 // Full ESP-NOW reinit — tears down and rebuilds the whole ESP-NOW stack and all
@@ -1862,6 +1861,24 @@ static int8_t   _osc_subject_sel[NUM_MOUNTS] = {-1, -1, -1, -1, -1};
 static IPAddress _osc_peer_ip;
 static uint16_t  _osc_peer_port = 0;
 
+// Where OSC feedback is being sent, and how much of it — reported through the
+// client channel because the hub's USB serial carries the binary packet stream
+// and is not humanly readable.  Feedback failing silently is the failure mode
+// this exists for: UDP gives no error, so without this the only symptom is
+// buttons that never light.
+//   [0]=8  [1..4]=peer IP  [5..6]=reply port  [7..8]=messages since last report
+static uint16_t _osc_fb_count = 0;
+
+static void osc_report_peer() {
+    uint16_t port = OSC_REPLY_PORT ? OSC_REPLY_PORT : _osc_peer_port;
+    uint8_t p[9] = { 8, _osc_peer_ip[0], _osc_peer_ip[1], _osc_peer_ip[2],
+                     _osc_peer_ip[3], (uint8_t)(port >> 8), (uint8_t)port,
+                     (uint8_t)(_osc_fb_count >> 8), (uint8_t)_osc_fb_count };
+    send_hub_event_raw(p);
+    _osc_fb_count = 0;
+}
+
+
 static int osc_pad4(int n) { return (n + 3) & ~3; }
 
 // One OSC message, one int argument.  Enough for every feedback below, and it
@@ -1881,6 +1898,7 @@ static void osc_send_int(const char *addr, int32_t val) {
     _osc_udp.beginPacket(_osc_peer_ip, port);
     _osc_udp.write(pkt, o);
     _osc_udp.endPacket();
+    _osc_fb_count++;
 }
 
 // Slot state as one value.  Ordered so a surface may also read it as a ramp:
@@ -1958,11 +1976,22 @@ static void osc_feedback_mount(int i, bool force) {
 
 // Called from loop().  Changes go out promptly; everything is resent slowly so
 // a surface that joins late, or misses a UDP packet, converges without asking.
+static uint32_t _osc_report_ms = 0;
+#define OSC_REPORT_MS  30000UL
+
 static void osc_feedback_poll(uint32_t now) {
     if (!_osc_peer_port) return;
     bool full = (now - _fb_last_full_ms >= OSC_FB_FULL_MS);
     if (full) _fb_last_full_ms = now;
     for (int i = 0; i < NUM_MOUNTS; i++) osc_feedback_mount(i, full);
+
+    // Periodic proof of life.  "Sent 340 messages to 169.254.22.30:41234" and
+    // "buttons still dark" together say the problem is past the hub — a route,
+    // a port, or the receiver — which is not deducible from either end alone.
+    if (now - _osc_report_ms >= OSC_REPORT_MS) {
+        _osc_report_ms = now;
+        if (_osc_fb_count) osc_report_peer();
+    }
 }
 
 
@@ -2185,6 +2214,7 @@ static void osc_poll() {
                 Serial.printf("[OSC] feedback -> %s:%d\n",
                               from_ip.toString().c_str(),
                               OSC_REPLY_PORT ? OSC_REPLY_PORT : from_port);
+                osc_report_peer();          // and to comms.log, which is readable
                 // A surface we have not seen before knows nothing; send the lot
                 // so its buttons are right immediately rather than after the
                 // next change.

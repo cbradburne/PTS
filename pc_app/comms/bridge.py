@@ -771,6 +771,18 @@ class Bridge:
                         "CAM %d but that slot is bound to another mount; claim "
                         "rejected (renumber one of them on its setup screen)",
                         state, flags, mount)
+        elif kind == 8:
+            # Own layout: [1..4] peer IP, [5..6] reply port, [7..8] messages
+            # sent since the last report.  The hub's USB serial carries the
+            # binary packet stream, so this is the only readable place to say
+            # where OSC feedback is going — and UDP reports no error, so a
+            # count climbing next to dark buttons is the distinguishing symptom.
+            ip   = ".".join(str(b) for b in pkt.payload[1:5])
+            port = int.from_bytes(pkt.payload[5:7], "big")
+            sent = int.from_bytes(pkt.payload[7:9], "big")
+            log.info("HUB EVENT: OSC feedback → %s:%d — %d message(s) sent%s",
+                     ip, port, sent,
+                     "" if sent else "  (nothing sent since last report)")
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "
