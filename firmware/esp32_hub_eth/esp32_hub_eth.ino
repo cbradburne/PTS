@@ -1048,7 +1048,13 @@ static uint32_t _loop_count = 0, _loop_max_us = 0, _loop_report_ms = 0;
 // Sent to comms.log, not to serial — the hub's USB port carries the binary
 // packet stream and is not humanly readable.
 //   [0]=9  [1]=worst section  [2..3]=that section ms  [4..5]=worst pass ms
-//   [6..7]=loops/s  [8]=serial frames dropped (capped)
+//   [6..7]=loops/s  [8]=percent of serial frames dropped
+//
+// A percentage, not a count: the count read 255 — its cap — in all 36 reports
+// of the first soak, because nothing was draining the USB port and every frame
+// was being discarded.  A saturated counter says only that it saturated.  100%
+// says "nobody is reading this port", 3% says "occasional pressure", and the
+// two need telling apart.
 static void send_loop_report() {
     int worst = 0;
     for (int i = 1; i < SEC_N; i++) if (_sec_max[i] > _sec_max[worst]) worst = i;
@@ -1059,7 +1065,7 @@ static void send_loop_report() {
     uint8_t p[9] = { 9, (uint8_t)worst, (uint8_t)(sms >> 8), (uint8_t)sms,
                      (uint8_t)(pms >> 8), (uint8_t)pms,
                      (uint8_t)(lps >> 8), (uint8_t)lps,
-                     (uint8_t)(_ser_dropped > 255 ? 255 : _ser_dropped) };
+                     (uint8_t)(_ser_writes ? (_ser_dropped * 100UL) / _ser_writes : 0) };
     send_hub_event_raw(p);
     for (int i = 0; i < SEC_N; i++) _sec_max[i] = 0;
     _loop_count = _loop_max_us = _ser_dropped = _ser_writes = 0;
@@ -2069,9 +2075,26 @@ static uint32_t _osc_report_ms = 0;
 
 static void osc_feedback_poll(uint32_t now) {
     if (!_osc_peer_port) return;
-    bool full = (now - _fb_last_full_ms >= OSC_FB_FULL_MS);
-    if (full) _fb_last_full_ms = now;
-    for (int i = 0; i < NUM_MOUNTS; i++) osc_feedback_mount(i, full);
+
+    // A full send is five mounts x ~fifteen addresses = 75 UDP packets, and
+    // doing them all in one pass measured as a 42 ms 'osc' section on the rig —
+    // 84% of the worst loop pass, and the largest single thing in the loop.
+    //
+    // So at most ONE mount is brought up to date per pass.  Everything that
+    // wants a full send — the 5-second resend, /pts/refresh, a peer we have not
+    // met — marks mounts invalid and is paced through here, which also means
+    // there is one path for it rather than three that each need remembering.
+    //
+    // Change-driven sends stay immediate on every pass: osc_feedback_mount()
+    // compares before it sends, so a rig at rest costs nothing.
+    if (now - _fb_last_full_ms >= OSC_FB_FULL_MS) {
+        _fb_last_full_ms = now;
+        for (int i = 0; i < NUM_MOUNTS; i++) _fb_valid[i] = false;
+    }
+    for (int i = 0; i < NUM_MOUNTS; i++)
+        if (_fb_valid[i]) osc_feedback_mount(i, false);
+    for (int i = 0; i < NUM_MOUNTS; i++)
+        if (!_fb_valid[i]) { osc_feedback_mount(i, true); break; }
 
     // Periodic proof of life.  "Sent 340 messages to 169.254.22.30:41234" and
     // "buttons still dark" together say the problem is past the hub — a route,
@@ -2375,9 +2398,8 @@ static void osc_poll() {
                               from_ip.toString().c_str(),
                               OSC_REPLY_PORT ? OSC_REPLY_PORT : from_port);
                 osc_report_peer();          // and to comms.log, which is readable
-                // A surface we have not seen before knows nothing; send the lot
-                // so its buttons are right immediately rather than after the
-                // next change.
+                // A surface we have not seen before knows nothing; queue the
+                // lot, paced one mount per pass by osc_feedback_poll().
                 for (int i = 0; i < NUM_MOUNTS; i++) _fb_valid[i] = false;
             }
             osc_handle_packet(rx, n);

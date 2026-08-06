@@ -795,11 +795,17 @@ class Bridge:
             sms  = int.from_bytes(pkt.payload[2:4], "big")
             pms  = int.from_bytes(pkt.payload[4:6], "big")
             lps  = int.from_bytes(pkt.payload[6:8], "big")
-            drop = pkt.payload[8]
+            drop = pkt.payload[8]          # percent of serial frames dropped
             fn = log.warning if pms >= 1000 else log.info
+            # 100% is the ordinary state when nothing is reading the USB port —
+            # the PC app talks TCP — so it is worth naming rather than alarming.
+            note = ""
+            if drop >= 100:
+                note = " | USB serial not being read (all frames dropped)"
+            elif drop:
+                note = f" | {drop}% of serial frames dropped"
             fn("HUB LOOP: %d loops/s | worst pass %d ms | worst section '%s' "
-               "%d ms%s", lps, pms, sec, sms,
-               f" | {drop} serial frame(s) dropped" if drop else "")
+               "%d ms%s", lps, pms, sec, sms, note)
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "
