@@ -119,6 +119,33 @@ static char AP_SSID[5 + HUB_NAME_MAX];      // composed at boot, see SAT_NAME
 // neighbours and its mounts lose nothing at all, so three fewer APs cannot be
 // the whole of a 1% send-failure rate.  Taken because it is the quietest of the
 // three and free, not because it is known to be the cause.
+// ---------------------------------------------------------------------------
+// Diagnostic telemetry (PTS_DIAG)
+// ---------------------------------------------------------------------------
+// Scaffolding, not instrumentation the firmware needs to run.  These lines were
+// added to answer specific questions — why phones lost their WebSocket, whether
+// a client was drowning or being dropped — and they answered them.  They print
+// unconditionally on a port someone may be watching for something else, so they
+// are compiled out unless asked for:
+//
+//     DIAG=1 ./tools/build.sh sat
+//
+// OFF by default: a shipped rig should not be narrating itself, and these lines
+// are noise to anyone watching the port for something else.  Turn them back on
+// for a debugging session with DIAG=1.
+//
+// What makes that safe is that FAULT reports are never gated — [DOWN], ESP-NOW
+// errors, link up/down all still print.  A quiet build still says when
+// something breaks; it just stops saying when nothing does.
+#ifndef PTS_DIAG
+#define PTS_DIAG 0
+#endif
+#if PTS_DIAG
+  #define DIAG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#else
+  #define DIAG_PRINTF(...)  ((void)0)
+#endif
+
 #ifndef AP_CHANNEL
 #define AP_CHANNEL      11
 #endif
@@ -223,7 +250,7 @@ static void on_ws_event(AsyncWebSocket *, AsyncWebSocketClient *client,
         // disconnected mid-show.
         client->setCloseClientOnQueueFull(false);
         ws_cli_open(client->id());
-        Serial.printf("[WEB] client %u connected from %s\n",
+        DIAG_PRINTF("[WEB] client %u connected from %s\n",
                       client->id(), client->remoteIP().toString().c_str());
     } else if (type == WS_EVT_DISCONNECT) {
         ws_cli_close(client->id());
@@ -372,13 +399,13 @@ static void ws_cli_open(uint32_t id) {
 static void ws_cli_close(uint32_t id) {
     for (auto &c : _ws_cli)
         if (c.id == id) {
-            Serial.printf("[WEB] client %u disconnected after %lu ms, "
+            DIAG_PRINTF("[WEB] client %u disconnected after %lu ms, "
                           "%lu frames sent\n", id,
                           (unsigned long)(millis() - c.at),
                           (unsigned long)(_ws_frames_total - c.sent));
             c.id = 0; return;
         }
-    Serial.printf("[WEB] client %u disconnected\n", id);
+    DIAG_PRINTF("[WEB] client %u disconnected\n", id);
 }
 
 // True if this frame should reach the phones now.
@@ -764,7 +791,7 @@ static void downlink_report(uint32_t now) {
     // because "how fast can this box actually push frames" is the question the
     // shed count cannot answer on its own.
     uint32_t secs = DN_REPORT_MS / 1000UL;
-    Serial.printf("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
+    DIAG_PRINTF("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
                   "uplink %lu writes, %lu dropped | ws %lu pkts in %lu frames, %lu queue-full\n",
                   (unsigned long)(_loop_count / (secs ? secs : 1)),
                   (unsigned long)_loop_max_us, (unsigned long)_dn_nomem,
@@ -869,7 +896,7 @@ void setup() {
     // last three are RF, not software.
     WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
         const uint8_t *m = info.wifi_ap_stadisconnected.mac;
-        Serial.printf("[AP] station %02X:%02X:%02X:%02X:%02X:%02X left "
+        DIAG_PRINTF("[AP] station %02X:%02X:%02X:%02X:%02X:%02X left "
                       "(reason %u)\n", m[0], m[1], m[2], m[3], m[4], m[5],
                       (unsigned)info.wifi_ap_stadisconnected.reason);
     }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);

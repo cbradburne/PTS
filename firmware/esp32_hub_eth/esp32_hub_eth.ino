@@ -983,6 +983,33 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
 
 // Sends to USB serial and TCP clients.  WebSocket is handled separately in the
 // relay loop with per-mount rate limiting to avoid overflowing the WS send queue.
+// ---------------------------------------------------------------------------
+// Diagnostic telemetry (PTS_DIAG)
+// ---------------------------------------------------------------------------
+// Scaffolding, not instrumentation the firmware needs to run.  These lines were
+// added to answer specific questions — why phones lost their WebSocket, whether
+// a client was drowning or being dropped — and they answered them.  They print
+// unconditionally on a port someone may be watching for something else, so they
+// are compiled out unless asked for:
+//
+//     DIAG=1 ./tools/build.sh hubeth
+//
+// OFF by default: a shipped rig should not be narrating itself, and these lines
+// are noise to anyone watching the port for something else.  Turn them back on
+// for a debugging session with DIAG=1.
+//
+// What makes that safe is that FAULT reports are never gated — [DOWN], ESP-NOW
+// errors, link up/down all still print.  A quiet build still says when
+// something breaks; it just stops saying when nothing does.
+#ifndef PTS_DIAG
+#define PTS_DIAG 0
+#endif
+#if PTS_DIAG
+  #define DIAG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#else
+  #define DIAG_PRINTF(...)  ((void)0)
+#endif
+
 // Bounded write to USB serial: the whole frame or none of it.
 //
 // setup() sets setTxTimeoutMs(0) so a host that stops draining cannot stall
@@ -3050,7 +3077,7 @@ void loop() {
     if (now - _last_bcast_report_ms >= 30000UL) {
         _last_bcast_report_ms = now;
         if (_bcast_dropped)
-            Serial.printf("[BCAST] %lu of %lu client writes dropped "
+            DIAG_PRINTF("[BCAST] %lu of %lu client writes dropped "
                           "(slow reader — frames shed, loop NOT blocked)\n",
                           (unsigned long)_bcast_dropped,
                           (unsigned long)_bcast_sent);

@@ -71,18 +71,27 @@ fqbn_for() {
 # Keeping it in the environment rather than the sketch means flashing three
 # satellites in a row leaves no diff behind, and none of them can inherit the
 # name of the one before it.
+#
+# DIAG=1 compiles IN the scaffolding telemetry — [RATE] on a satellite, [BCAST]
+# on a hub — for a debugging session:
+#
+#   DIAG=1 tools/build.sh flash sat
+#
+# Off by default: a working rig should not be narrating itself.  Fault reports
+# are never gated either way, so a quiet build still says when something breaks.
 props_for() {
+    _f=""
     case "$1" in
-        hubdemo) echo "compiler.cpp.extra_flags=-DDEMO_MODE=1" ;;
+        hubdemo) _f="$_f -DDEMO_MODE=1" ;;
         # arduino-cli hands extra_flags to the compiler verbatim — it does no
         # unquoting — so these quotes are the C string's own delimiters and must
         # NOT be escaped.  Escaping them compiles happily and bakes the quote
         # characters into the SSID: PTS-"Foyer".  Use _ for spaces; a literal
         # space here would be split into two arguments.
-        sat)     [ -n "${SAT_NAME:-}" ] &&
-                 echo "compiler.cpp.extra_flags=-DSAT_NAME=\"$SAT_NAME\"" ;;
-        *)       echo "" ;;
+        sat)     [ -n "${SAT_NAME:-}" ] && _f="$_f -DSAT_NAME=\"$SAT_NAME\"" ;;
     esac
+    [ -n "${DIAG:-}" ] && _f="$_f -DPTS_DIAG=$DIAG"
+    [ -n "$_f" ] && echo "compiler.cpp.extra_flags=${_f# }"
 }
 
 compile_one() {
