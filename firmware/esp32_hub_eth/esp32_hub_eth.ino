@@ -2019,6 +2019,18 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
         return;
     }
 
+    // Ask for the current picture.  A surface we have never heard from is sent
+    // the lot automatically, but a Companion that restarts on the same port is
+    // not "new" and would otherwise wait up to OSC_FB_FULL_MS with stale
+    // buttons.  Clearing the valid flags reuses that same path rather than
+    // sending from here, so the burst is paced by the poll and there is one
+    // way this happens, not two.
+    if (nt == 2 && strcmp(tok[1], "refresh") == 0) {
+        Serial.println("[OSC] refresh — full state requested");
+        for (int i = 0; i < NUM_MOUNTS; i++) _fb_valid[i] = false;
+        return;
+    }
+
     if (nt < 4 || strcmp(tok[1], "cam") != 0) return;
     int mid = atoi(tok[2]);
     if (mid < 1 || mid > NUM_MOUNTS) return;
@@ -2094,6 +2106,8 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
             }
         }
 
+    } else if (strcmp(verb, "refresh") == 0) {
+        _fb_valid[idx] = false;                 // this mount only
     } else if (strcmp(verb, "lookat") == 0 && argc >= 1) {
         if (a[0] == 0 || a[0] == 1) {
             uint8_t subj = (_osc_subject_sel[idx] >= 0)

@@ -34,6 +34,8 @@ against either.  QLab network cues likewise.
 | `/pts/cam/N/speed/sl`    | `1-4`               | Active slider speed preset |
 | `/pts/cam/N/subject`     | `0-7`               | Select look-at subject (switches live mid-move) |
 | `/pts/cam/N/lookat`      | `0` (◀ min) / `1` (▶ max) | Look-at slider move with the selected subject |
+| `/pts/refresh`           | –                   | Resend all feedback for every mount |
+| `/pts/cam/N/refresh`     | –                   | Resend all feedback for mount N |
 
 `N` = camera 1-5.  Slots and speed presets are 1-based, subjects 0-based —
 matching what every screen in the system shows.
@@ -100,7 +102,13 @@ arrives as one message it can never be seen half-updated.
 
 Only changes are sent, so a rig at rest is silent.  Everything is resent every
 5 s regardless, so a surface that joins late — or misses a UDP packet — catches
-up on its own without having to ask.
+up on its own without having to ask.  The first message from an address the hub
+has not heard from also triggers a full send.
+
+`/pts/refresh` asks for that full send on demand.  Bind it to a Companion
+startup trigger, or to a button, for the case the automatic paths do not cover:
+a Companion that restarts on the same port is not a new peer, so without asking
+it would show stale buttons until the next 5 s resend.
 
 ## Safety notes
 
