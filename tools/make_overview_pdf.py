@@ -230,9 +230,10 @@ def build():
     # ── OSC page ─────────────────────────────────────────────────────────
     el.append(Paragraph("OSC control reference  -  Companion / QLab", S["h1"]))
     el.append(Paragraph(
-        "Two identical OSC servers listen on <b>UDP port 9700</b> and accept "
-        "the same address space, so Companion pages work unchanged against "
-        "either target:", S["body"]))
+        "Two OSC servers listen on <b>UDP port 9700</b> and accept the same "
+        "commands, so Companion pages fire unchanged against either target. "
+        "<b>Feedback is sent by the hub only</b> - point Companion at the hub "
+        "for buttons that light up to show what the rig is doing:", S["body"]))
     el.append(Spacer(1, 5))
     el.append(styled_table([
         [P("<b>Target</b>", "th"), P("<b>Address</b>", "th"), P("<b>When to use</b>", "th")],
@@ -260,10 +261,18 @@ def build():
         ["/pts/cam/N/clear", "slot 1-10", "Clear a stored position", False],
         ["/pts/cam/N/jog", "pan tilt slider zoom", "Velocities -1000..1000; re-streamed at 20 Hz until stopped", False],
         ["/pts/cam/N/jog/stop", "-", "Stop jogging (put on the button's release action)", False],
+        ["/pts/cam/N/jog/left  /right  /up  /down", "1 press, 0 release", "Pan and tilt from plain buttons; full deflection at the active preset speed", False],
+        ["/pts/cam/N/jog/slide/left  /slide/right", "1 / 0", "Slide along the rail", False],
+        ["/pts/cam/N/jog/zoom/in  /zoom/out", "1 / 0", "Zoom", False],
         ["/pts/cam/N/speed/pt", "1-4", "Active pan/tilt speed preset", False],
         ["/pts/cam/N/speed/sl", "1-4", "Active slider speed preset", False],
+        ["/pts/cam/N/speed/pt/up  /down", "-", "Pan/tilt preset one step, clamped at 1 and 4", False],
+        ["/pts/cam/N/speed/sl/up  /down", "-", "Slider preset one step, clamped", False],
+        ["/pts/cam/N/speed/pt/inc  /sl/inc", "-", "Cycle the preset 1-2-3-4-1", False],
         ["/pts/cam/N/subject", "0-7", "Select look-at subject; switches live during a move", False],
         ["/pts/cam/N/lookat", "0 or 1", "Look-at slider move to min (0) or max (1) with the selected subject", False],
+        ["/pts/refresh", "-", "Resend all feedback for every mount", False],
+        ["/pts/cam/N/refresh", "-", "Resend all feedback for mount N", False],
     ]
     rows = [[P("<b>Address</b>", "th"), P("<b>Arguments</b>", "th"), P("<b>Action</b>", "th")]]
     for addr, args, desc, danger in cmds:
@@ -276,13 +285,54 @@ def build():
         "N = camera 1-5. Slots and speed presets are 1-based, subjects "
         "0-based - matching every screen in the system.", S["bodydim"]))
 
+    el.append(Paragraph("Feedback - buttons that show the rig", S["h2"]))
+    el.append(Paragraph(
+        "The hub sends state back to whoever last commanded it, so a Stream "
+        "Deck shows which shot a camera is on, whether a mount is online and "
+        "what speed it is set to - with nothing tracked in Companion. Enable "
+        "<b>Listen for Feedback</b> on the OSC connection, then add an "
+        "<i>OSC: Listen for OSC messages (Integer)</i> feedback matching an "
+        "address and value below.", S["body"]))
+    el.append(Spacer(1, 4))
+    fb = [
+        ["/pts/cam/N/active", "0 / 1", "Mount is online"],
+        ["/pts/cam/N/state", "int", "Mount state; 0 is idle"],
+        ["/pts/cam/N/target", "0-10", "Slot being moved to, 0 = not moving to one"],
+        ["/pts/cam/N/speed/pt", "1-4", "Active pan/tilt preset"],
+        ["/pts/cam/N/speed/sl", "1-4", "Active slider preset"],
+        ["/pts/cam/N/slot/M/state", "0-3", "0 empty, 1 occupied, 2 moving here, 3 arrived"],
+    ]
+    rows = [[P("<b>Address</b>", "th"), P("<b>Value</b>", "th"), P("<b>Meaning</b>", "th")]]
+    for addr, val, desc in fb:
+        rows.append([Paragraph(addr, S["mono"]), P(val, "monoc"), P(desc, "cell")])
+    el.append(styled_table(rows, [46 * mm, 34 * mm, 98 * mm]))
+    el.append(Paragraph(
+        "Slot state is one address per slot carrying one value, so a shot "
+        "button colours itself from a single feedback with nothing to combine "
+        "- the same stored / moving-to / arrived picture the hub display and "
+        "the web app show. Only changes are sent, so a rig at rest is silent; "
+        "everything is resent every 5 s, and in full the first time an address "
+        "speaks to the hub, so a surface that joins late catches up on its own. "
+        "<b>If nothing arrives</b>, check Companion's Source Port is the port it "
+        "also listens on, and that its machine is on the same subnet as the hub "
+        "- commands still arrive across a subnet mismatch, replies cannot get "
+        "back, and UDP reports no error either way.", S["bodydim"]))
+
     el.append(Paragraph("Button recipes", S["h2"]))
     rec = [
         [P("<b>Recall shot 3, cam 2</b>", "cellb"),
          P("Press: <font face='Courier'>/pts/cam/2/goto</font> with int 3", "cell")],
         [P("<b>Hold-to-jog pan-left, cam 1</b>", "cellb"),
-         P("Press: <font face='Courier'>/pts/cam/1/jog</font> ints -400 0 0 0 &nbsp;&nbsp;"
-           "Release: <font face='Courier'>/pts/cam/1/jog/stop</font>", "cell")],
+         P("Press: <font face='Courier'>/pts/cam/1/jog/left</font> int 1 &nbsp;&nbsp;"
+           "Release: same address, int 0", "cell")],
+        [P("<b>Shot button that shows its state</b>", "cellb"),
+         P("Press: <font face='Courier'>/pts/cam/1/goto</font> int 7. Feedback on "
+           "<font face='Courier'>/pts/cam/1/slot/7/state</font>: 1 red (stored), "
+           "2 amber (on its way), 3 green (arrived).", "cell")],
+        [P("<b>One speed button per camera</b>", "cellb"),
+         P("<font face='Courier'>/pts/cam/1/speed/pt/inc</font> cycles 1-2-3-4-1 per "
+           "press. Add a feedback on <font face='Courier'>/pts/cam/1/speed/pt</font> "
+           "to show which preset is live.", "cell")],
         [P("<b>Look-at pair, cam 3</b>", "cellb"),
          P("Button A: <font face='Courier'>/pts/cam/3/subject</font> int 2 &nbsp;&nbsp; "
            "Button B: <font face='Courier'>/pts/cam/3/lookat</font> int 1 "

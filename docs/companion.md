@@ -44,6 +44,8 @@ against either.  QLab network cues likewise.
 | `/pts/cam/N/speed/pt/down` | –                 | Pan/tilt speed one step slower (clamped at 1) |
 | `/pts/cam/N/speed/sl/up`   | –                 | Slider speed one step faster |
 | `/pts/cam/N/speed/sl/down` | –                 | Slider speed one step slower |
+| `/pts/cam/N/speed/pt/inc`  | –                 | Pan/tilt speed 1→2→3→4→1 (wraps) |
+| `/pts/cam/N/speed/sl/inc`  | –                 | Slider speed 1→2→3→4→1 (wraps) |
 | `/pts/cam/N/subject`     | `0-7`               | Select look-at subject (switches live mid-move) |
 | `/pts/cam/N/lookat`      | `0` (◀ min) / `1` (▶ max) | Look-at slider move with the selected subject |
 | `/pts/refresh`           | –                   | Resend all feedback for every mount |
@@ -88,6 +90,10 @@ If a release is lost, the 15 s TTL stops the jog anyway, and the mount's own
 Speed `up`/`down` need no argument and clamp at 1 and 4, so one button can walk
 the preset without Companion tracking which one is active, and a button held at
 either end is inert rather than wrapping round mid-shot.
+
+`inc` wraps instead — 1→2→3→4→1 — which is what the web app and the PC app do
+from a single control.  Use `inc` for one button that cycles, `up`/`down` for a
+pair that cannot overshoot.
 
 **Show-stopper**: a big red `/pts/estop` (no argument needed).
 

@@ -26,9 +26,11 @@
     or a cue, in time with light and sound.</p>
 
     <h2>Two servers, one address space</h2>
-    <p>There are two identical OSC servers; use whichever fits the rig. Both accept
-    the same addresses, so your Companion pages and QLab cues work unchanged against
-    either.</p>
+    <p>Two OSC servers accept commands; use whichever fits the rig. Both take the
+    same command addresses, so your Companion pages and QLab cues fire unchanged
+    against either. <strong>Feedback comes from the hub only</strong> — if you want
+    buttons that light up to show what the rig is doing, point Companion at the
+    hub.</p>
     <table>
       <tr><th style="width:38%">Target</th><th>When to use</th></tr>
       <tr><td><strong>The hub</strong> — <code>192.168.4.1:9700</code></td>
@@ -63,11 +65,69 @@
       <tr><td><code>/pts/cam/N/clear</code></td><td>slot 1–10</td><td>Clear a stored position</td></tr>
       <tr><td><code>/pts/cam/N/jog</code></td><td>pan tilt slider zoom</td><td>Velocities −1000…1000, re-streamed at 20 Hz until stopped</td></tr>
       <tr><td><code>/pts/cam/N/jog/stop</code></td><td>—</td><td>Stop jogging (put on the button's release action)</td></tr>
+      <tr><td><code>/pts/cam/N/jog/left</code> <code>/right</code> <code>/up</code> <code>/down</code></td><td>1 press, 0 release</td><td>Pan and tilt from plain buttons</td></tr>
+      <tr><td><code>/pts/cam/N/jog/slide/left</code> <code>/slide/right</code></td><td>1 / 0</td><td>Slide along the rail</td></tr>
+      <tr><td><code>/pts/cam/N/jog/zoom/in</code> <code>/zoom/out</code></td><td>1 / 0</td><td>Zoom</td></tr>
       <tr><td><code>/pts/cam/N/speed/pt</code></td><td>1–4</td><td>Active pan/tilt speed preset</td></tr>
       <tr><td><code>/pts/cam/N/speed/sl</code></td><td>1–4</td><td>Active slider speed preset</td></tr>
+      <tr><td><code>/pts/cam/N/speed/pt/up</code> <code>/down</code></td><td>—</td><td>Pan/tilt preset one step, clamped at 1 and 4</td></tr>
+      <tr><td><code>/pts/cam/N/speed/sl/up</code> <code>/down</code></td><td>—</td><td>Slider preset one step, clamped</td></tr>
+      <tr><td><code>/pts/cam/N/speed/pt/inc</code> <code>/sl/inc</code></td><td>—</td><td>Cycle the preset 1→2→3→4→1</td></tr>
       <tr><td><code>/pts/cam/N/subject</code></td><td>0–7</td><td>Select look-at subject — switches live during a move</td></tr>
       <tr><td><code>/pts/cam/N/lookat</code></td><td>0 | 1</td><td>Look-at slider move to min (0) or max (1) with the selected subject</td></tr>
+      <tr><td><code>/pts/refresh</code></td><td>—</td><td>Resend all feedback for every mount</td></tr>
+      <tr><td><code>/pts/cam/N/refresh</code></td><td>—</td><td>Resend all feedback for mount N</td></tr>
     </table>
+
+    <div class="note"><b>Direction buttons vs. the raw jog</b>
+    <code>/pts/cam/N/jog</code> takes four signed velocities and suits a fader or a
+    stick. The named directions suit buttons: bind <strong>press → 1</strong> and
+    <strong>release → 0</strong> on the same address. Any non-zero value is full
+    deflection — a button sends <code>1</code>, and treating that as a speed would
+    creep the mount instead of moving it. Speed comes from the active preset.
+    Each direction owns one axis, so holding <em>left</em> and <em>up</em> together
+    gives a diagonal and releasing one leaves the other running.</div>
+
+    <h2>Feedback — buttons that show the rig</h2>
+    <p>The hub sends state back, so a Stream Deck can show which shot a camera is
+    sitting on, whether a mount is online and what speed it is set to — without you
+    tracking any of it in Companion.</p>
+    <p>Turn on <strong>Listen for Feedback</strong> in the OSC connection, then add
+    an <em>OSC: Listen for OSC messages (Integer)</em> feedback to a button, matching
+    on the address and value below.</p>
+    <table>
+      <tr><th style="width:36%">Address</th><th style="width:14%">Value</th><th>Meaning</th></tr>
+      <tr><td><code>/pts/cam/N/active</code></td><td>0 / 1</td><td>Mount is online</td></tr>
+      <tr><td><code>/pts/cam/N/state</code></td><td>int</td><td>Mount state — 0 is idle</td></tr>
+      <tr><td><code>/pts/cam/N/target</code></td><td>0–10</td><td>Slot being moved to, 0 = not moving to one</td></tr>
+      <tr><td><code>/pts/cam/N/speed/pt</code></td><td>1–4</td><td>Active pan/tilt preset</td></tr>
+      <tr><td><code>/pts/cam/N/speed/sl</code></td><td>1–4</td><td>Active slider preset</td></tr>
+      <tr><td><code>/pts/cam/N/slot/M/state</code></td><td>0–3</td><td>Slot M — see below</td></tr>
+    </table>
+    <p>Slot state is one address per slot carrying one value, so a shot button can
+    colour itself from a single feedback with nothing to combine:</p>
+    <table>
+      <tr><th style="width:14%">Value</th><th>Meaning</th><th>Typical colour</th></tr>
+      <tr><td>0</td><td>Empty — nothing stored here</td><td>dark</td></tr>
+      <tr><td>1</td><td>Occupied — stored, mount elsewhere</td><td>red</td></tr>
+      <tr><td>2</td><td>Moving — mount is on its way here</td><td>amber</td></tr>
+      <tr><td>3</td><td>At — mount is here</td><td>green</td></tr>
+    </table>
+    <p>It is the same stored / moving-to / arrived picture the hub display and the
+    web app show, and because it arrives as one message a button can never be caught
+    half-updated.</p>
+    <p>Only changes are sent, so a rig at rest is silent. Everything is resent every
+    5 seconds regardless, and in full the first time an address speaks to the hub, so
+    a surface that joins late or drops a UDP packet catches up on its own.</p>
+
+    <div class="warn"><b>If no feedback arrives</b> The hub replies to whoever last
+    commanded it — the sender's IP and source port — so there is nothing to configure,
+    but two things can silently swallow the replies. Check that Companion's
+    <strong>Source Port</strong> is the port it also listens on, and that the
+    Companion machine is on the <strong>same subnet</strong> as the hub. Commands
+    still arrive across a subnet mismatch; replies cannot get back, and UDP reports
+    no error either way. <code>/pts/refresh</code> is the quickest test: bind it to a
+    button and watch whether anything lights.</div>
 
     <h2>Button recipes</h2>
     <p><strong>Recall shot 3 on camera 2</strong> — the bread-and-butter Stream
@@ -78,9 +138,22 @@
     <p><strong>Hold-to-jog pan-left on camera 1</strong> — uses Companion's press
     <em>and</em> release action lists:</p>
     <ul>
-      <li>Press: <code>/pts/cam/1/jog</code>, ints <code>-400 0 0 0</code></li>
-      <li>Release: <code>/pts/cam/1/jog/stop</code></li>
+      <li>Press: <code>/pts/cam/1/jog/left</code>, int <code>1</code></li>
+      <li>Release: <code>/pts/cam/1/jog/left</code>, int <code>0</code></li>
     </ul>
+    <p><strong>A shot button that shows its own state</strong> — press recalls slot 7
+    on camera 1, and the button colours itself from the feedback:</p>
+    <ul>
+      <li>Press action: <code>/pts/cam/1/goto</code>, int <code>7</code></li>
+      <li>Feedback on <code>/pts/cam/1/slot/7/state</code> = <code>1</code> → red
+      (stored)</li>
+      <li>Same address = <code>2</code> → amber (on its way)</li>
+      <li>Same address = <code>3</code> → green (arrived)</li>
+    </ul>
+    <p><strong>One speed button per camera</strong> — <code>/pts/cam/1/speed/pt/inc</code>
+    cycles 1→2→3→4→1 on each press, the same as tapping the speed control on any
+    screen. Add a feedback on <code>/pts/cam/1/speed/pt</code> to show which preset is
+    live.</p>
     <p><strong>Look-at: track subject 2, slider right, camera 3</strong>:</p>
     <ul>
       <li>Button A press: <code>/pts/cam/3/subject</code>, int <code>2</code></li>
