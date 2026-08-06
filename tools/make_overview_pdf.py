@@ -299,7 +299,7 @@ def build():
         ["/pts/cam/N/state", "int", "Mount state; 0 is idle"],
         ["/pts/cam/N/target", "0-10", "Slot being moved to, 0 = not moving to one"],
         ["/pts/cam/N/speed/pt", "1-4", "Active pan/tilt preset"],
-        ["/pts/cam/N/speed/sl", "1-4", "Active slider preset"],
+        ["/pts/cam/N/speed/sl", "0-4", "Active slider preset; 0 = this mount has no rail"],
         ["/pts/cam/N/slot/M/state", "0-3", "0 empty, 1 occupied, 2 moving here, 3 arrived"],
     ]
     rows = [[P("<b>Address</b>", "th"), P("<b>Value</b>", "th"), P("<b>Meaning</b>", "th")]]

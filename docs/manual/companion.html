@@ -101,7 +101,7 @@
       <tr><td><code>/pts/cam/N/state</code></td><td>int</td><td>Mount state — 0 is idle</td></tr>
       <tr><td><code>/pts/cam/N/target</code></td><td>0–10</td><td>Slot being moved to, 0 = not moving to one</td></tr>
       <tr><td><code>/pts/cam/N/speed/pt</code></td><td>1–4</td><td>Active pan/tilt preset</td></tr>
-      <tr><td><code>/pts/cam/N/speed/sl</code></td><td>1–4</td><td>Active slider preset</td></tr>
+      <tr><td><code>/pts/cam/N/speed/sl</code></td><td>0–4</td><td>Active slider preset — <strong>0 means this mount has no rail</strong></td></tr>
       <tr><td><code>/pts/cam/N/slot/M/state</code></td><td>0–3</td><td>Slot M — see below</td></tr>
     </table>
     <p>Slot state is one address per slot carrying one value, so a shot button can
@@ -116,6 +116,12 @@
     <p>It is the same stored / moving-to / arrived picture the hub display and the
     web app show, and because it arrives as one message a button can never be caught
     half-updated.</p>
+    <p>A mount with no slider reports <code>speed/sl</code> as <strong>0</strong> —
+    no preset ever uses 0 — so a button can hide or grey itself rather than showing
+    a speed for an axis that cannot move. The hub also ignores
+    <code>speed/sl/…</code> and <code>jog/slide/…</code> for those mounts, so a
+    button pressed against a rail-less mount does nothing instead of walking a
+    number that controls nothing.</p>
     <p>Only changes are sent, so a rig at rest is silent. Everything is resent every
     5 seconds regardless, and in full the first time an address speaks to the hub, so
     a surface that joins late or drops a UDP packet catches up on its own.</p>

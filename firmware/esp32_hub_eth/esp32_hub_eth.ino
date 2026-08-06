@@ -581,6 +581,14 @@ static uint32_t _last_wifi_reinit_ms  = 0;   // stamped by hub_wifi_full_reinit(
 static uint32_t _last_wedge_ms        = 0;   // last time any wedge clock was active
 static uint32_t _last_client_cmd_ms   = 0;   // last command from any client (TCP/WS/serial/display)
 static uint8_t  _mount_last_state[NUM_MOUNTS];  // last STATUS state byte (0xFF = unknown)
+// Last STATUS flags byte, kept for FLAG_HAS_SLIDER.  A rig mixes mounts with a
+// rail and mounts without, and a surface should not be offered a control that
+// does nothing: the web app has always zeroed the slider axis for a mount that
+// has none, and OSC now matches it.
+static uint8_t  _mount_flags[NUM_MOUNTS] = {};
+static inline bool mount_has_slider(int i) {
+    return (i >= 0 && i < NUM_MOUNTS) && (_mount_flags[i] & FLAG_HAS_SLIDER);
+}
 static bool     _restart_block_logged = false;  // rate-limits the streak-exceeded log line
 
 // Per-mount live context cached from STATUS — consumed by the OSC server.
@@ -1562,6 +1570,7 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
     uint8_t flags = pkt.payload[1];
 
     _mount_last_state[msg.src_idx] = state;   // read by the maintenance-restart idle check
+    _mount_flags[msg.src_idx]      = flags;   // FLAG_HAS_SLIDER, for the OSC surface
 
     // Cache per-mount presets + look-at subject — the OSC control server
     // builds preset-aware GOTO_SLOT / JOG / START_LOOK_AT_MOVE from these.
@@ -2041,6 +2050,10 @@ static void osc_feedback_mount(int i, bool force) {
     if (all || pt != _fb_pt[i]) {
         snprintf(a, sizeof(a), "/pts/cam/%d/speed/pt", i + 1); osc_send_int(a, pt);
     }
+    // 0 for a mount with no rail.  Presets are 1-4, so 0 is unambiguous, and a
+    // Companion button can hide or grey itself on it rather than displaying a
+    // speed for an axis that cannot move.
+    if (!mount_has_slider(i)) sl = 0;
     if (all || sl != _fb_sl[i]) {
         snprintf(a, sizeof(a), "/pts/cam/%d/speed/sl", i + 1); osc_send_int(a, sl);
     }
@@ -2231,7 +2244,7 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
             else if (strcmp(tok[4], "right") == 0) { axis = 0; sign =  1; }
             else if (strcmp(tok[4], "up")    == 0) { axis = 1; sign =  1; }
             else if (strcmp(tok[4], "down")  == 0) { axis = 1; sign = -1; }
-        } else if (nt == 6 && strcmp(tok[4], "slide") == 0) {
+        } else if (nt == 6 && strcmp(tok[4], "slide") == 0 && mount_has_slider(idx)) {
             if      (strcmp(tok[5], "left")  == 0) { axis = 2; sign = -1; }
             else if (strcmp(tok[5], "right") == 0) { axis = 2; sign =  1; }
         } else if (nt == 6 && strcmp(tok[4], "zoom") == 0) {
@@ -2257,6 +2270,9 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
         bool any = false;
         for (int k = 0; k < 4; k++) {
             int32_t v = (k < argc) ? a[k] : 0;
+            // Same rule the web app applies before it sends: a mount with no
+            // rail gets no slider velocity, whatever the surface asked for.
+            if (k == 2 && !mount_has_slider(idx)) v = 0;
             if (v >  1000) v =  1000;
             if (v < -1000) v = -1000;
             _osc_jog[idx][k] = (int16_t)v;
@@ -2283,7 +2299,13 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
         uint8_t  grp;
         uint8_t *cur;
         if      (strcmp(tok[4], "pt") == 0) { grp = GROUP_PAN_TILT;    cur = &_mount_pt_preset[idx]; }
-        else if (strcmp(tok[4], "sl") == 0) { grp = GROUP_SLIDER_ZOOM; cur = &_mount_sl_preset[idx]; }
+        else if (strcmp(tok[4], "sl") == 0) {
+            // Nothing to set the speed of.  Ignored rather than clamped, so a
+            // button held on a rail-less mount leaves the reported speed at 0
+            // instead of walking a number that controls nothing.
+            if (!mount_has_slider(idx)) return;
+            grp = GROUP_SLIDER_ZOOM; cur = &_mount_sl_preset[idx];
+        }
         else return;
 
         int want = -1;

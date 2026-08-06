@@ -121,7 +121,7 @@ All arguments are a single int.
 | `/pts/cam/N/state`               | int   | Mount state — 0 IDLE, others per `MountState` |
 | `/pts/cam/N/target`              | 0-10  | Slot being moved to, 0 = not moving to one |
 | `/pts/cam/N/speed/pt`            | 1-4   | Active pan/tilt speed preset |
-| `/pts/cam/N/speed/sl`            | 1-4   | Active slider speed preset |
+| `/pts/cam/N/speed/sl`            | 0-4   | Active slider speed preset — **0 = this mount has no rail** |
 | `/pts/cam/N/slot/M/state`        | 0-3   | Slot M — see below |
 
 Slot state is one address per slot carrying one value:
@@ -142,6 +142,13 @@ Only changes are sent, so a rig at rest is silent.  Everything is resent every
 5 s regardless, so a surface that joins late — or misses a UDP packet — catches
 up on its own without having to ask.  The first message from an address the hub
 has not heard from also triggers a full send.
+
+A mount with no slider reports `speed/sl` as **0**, which no preset ever uses,
+so a button can hide or grey itself instead of showing a speed for an axis that
+cannot move.  The hub also ignores `speed/sl/...` and `jog/slide/...` for those
+mounts, so a button pressed against a rail-less mount does nothing rather than
+walking a number that controls nothing.  This matches the web app, which has
+always zeroed the slider axis for a mount without one.
 
 `/pts/refresh` asks for that full send on demand.  Bind it to a Companion
 startup trigger, or to a button, for the case the automatic paths do not cover:
