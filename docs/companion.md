@@ -82,13 +82,21 @@ All arguments are a single int.
 | `/pts/cam/N/target`              | 0-10  | Slot being moved to, 0 = not moving to one |
 | `/pts/cam/N/speed/pt`            | 1-4   | Active pan/tilt speed preset |
 | `/pts/cam/N/speed/sl`            | 1-4   | Active slider speed preset |
-| `/pts/cam/N/slot/M/occupied`     | 0/1   | Slot M has a stored position |
-| `/pts/cam/N/slot/M/at`           | 0/1   | Mount is physically at slot M |
+| `/pts/cam/N/slot/M/state`        | 0-3   | Slot M — see below |
 
-`occupied` and `at` are per slot rather than a bitmask so a button can bind
-straight to one address and colour itself, with no bitwise expression to get
-wrong.  Between them they give the same three-colour picture the display and
-the web app show: stored, moving-to, arrived.
+Slot state is one address per slot carrying one value:
+
+| Value | Meaning |
+|-------|---------|
+| 0 | empty — nothing stored here |
+| 1 | occupied — stored, mount elsewhere |
+| 2 | moving — mount is on its way here |
+| 3 | at — mount is here |
+
+A button binds to that single address and picks its colour from the value, with
+no bitwise expression and nothing to combine.  It is the same picture the
+display and the web app show — stored, moving-to, arrived — and because it
+arrives as one message it can never be seen half-updated.
 
 Only changes are sent, so a rig at rest is silent.  Everything is resent every
 5 s regardless, so a surface that joins late — or misses a UDP packet — catches

@@ -1883,13 +1883,19 @@ static void osc_send_int(const char *addr, int32_t val) {
     _osc_udp.endPacket();
 }
 
+// Slot state as one value.  Ordered so a surface may also read it as a ramp:
+// nothing stored, stored, on its way, arrived.
+#define OSC_SLOT_EMPTY     0
+#define OSC_SLOT_OCCUPIED  1
+#define OSC_SLOT_MOVING    2
+#define OSC_SLOT_AT        3
+
 // Last values sent, so only changes go out.  A surface with fifty buttons does
 // not want fifty packets a second, and Companion redraws on receipt.
 static uint8_t  _fb_state[NUM_MOUNTS]    = {};
 static uint8_t  _fb_active[NUM_MOUNTS]   = {};
 static uint8_t  _fb_target[NUM_MOUNTS]   = {};
-static uint16_t _fb_occupied[NUM_MOUNTS] = {};
-static uint16_t _fb_at[NUM_MOUNTS]       = {};
+static uint8_t  _fb_slot[NUM_MOUNTS][NUM_POSITIONS] = {};
 static uint8_t  _fb_pt[NUM_MOUNTS]       = {};
 static uint8_t  _fb_sl[NUM_MOUNTS]       = {};
 static bool     _fb_valid[NUM_MOUNTS]    = {};
@@ -1926,22 +1932,27 @@ static void osc_feedback_mount(int i, bool force) {
     if (all || sl != _fb_sl[i]) {
         snprintf(a, sizeof(a), "/pts/cam/%d/speed/sl", i + 1); osc_send_int(a, sl);
     }
-    // Per-slot rather than a bitmask: a Companion button binds straight to one
-    // address and colours itself, with no bitwise expression to get wrong.
-    // Fifty addresses instead of five, but they only move when a slot does.
+    // One value per slot, not two booleans.  The states are not independent and
+    // "moving to" is not in either mask: it is target == this slot, so a surface
+    // pairing occupied+at still had to evaluate that comparison itself — the
+    // very expression the per-address form exists to avoid.  Collapsing them
+    // also halves the traffic and makes the change atomic; the two-boolean form
+    // had a window where "occupied" had landed and "at" had not, which showed
+    // on a button as the wrong colour.
     for (int sN = 0; sN < NUM_POSITIONS; sN++) {
         uint16_t bit = (uint16_t)(1u << sN);
-        if (all || ((occ ^ _fb_occupied[i]) & bit)) {
-            snprintf(a, sizeof(a), "/pts/cam/%d/slot/%d/occupied", i + 1, sN + 1);
-            osc_send_int(a, (occ & bit) ? 1 : 0);
-        }
-        if (all || ((at ^ _fb_at[i]) & bit)) {
-            snprintf(a, sizeof(a), "/pts/cam/%d/slot/%d/at", i + 1, sN + 1);
-            osc_send_int(a, (at & bit) ? 1 : 0);
+        uint8_t  ss  = (at & bit)       ? OSC_SLOT_AT
+                     : (tgt == sN + 1)  ? OSC_SLOT_MOVING
+                     : (occ & bit)      ? OSC_SLOT_OCCUPIED
+                                        : OSC_SLOT_EMPTY;
+        if (all || ss != _fb_slot[i][sN]) {
+            snprintf(a, sizeof(a), "/pts/cam/%d/slot/%d/state", i + 1, sN + 1);
+            osc_send_int(a, ss);
+            _fb_slot[i][sN] = ss;
         }
     }
     _fb_state[i] = st; _fb_active[i] = act; _fb_target[i] = tgt;
-    _fb_occupied[i] = occ; _fb_at[i] = at; _fb_pt[i] = pt; _fb_sl[i] = sl;
+    _fb_pt[i] = pt; _fb_sl[i] = sl;
     _fb_valid[i] = true;
 }
 
