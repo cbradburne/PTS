@@ -123,6 +123,13 @@ static volatile uint32_t     _bc_notifies  = 0;
 static uint32_t              _bc_report_ms = 0;
 static uint32_t              _bc_retry_ms  = 0;
 static uint32_t              _bc_since_ms  = 0;
+static int                   _bc_best_rssi = -999;
+// A camera on this mount should be strong.  Weaker than this is worth SAYING
+// on a rig where several mounts each carry one — connecting to a neighbour's
+// camera would look like success — but it is only a warning, not a veto: a
+// metal-bodied camera at arm's length can read -66, and refusing to try would
+// have blocked the only camera in the room on a bench with one.
+#define BLECAM_WEAK_RSSI  (-65)
 
 class BcScanCb : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice dev) override {
@@ -142,9 +149,19 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
                       dev.getRSSI(), (unsigned)dev.getAddressType(),
                       (unsigned)dev.getAdvType(), (int)dev.isConnectable(),
                       (unsigned)dev.getPayloadLength());
-        if (_bc_found) delete _bc_found;
-        _bc_found = new BLEAdvertisedDevice(dev);
-        BLEDevice::getScan()->stop();
+        // Keep the STRONGEST, do not stop at the first.
+        //
+        // A rig has a Blackmagic camera on several mounts, and they all
+        // advertise this service.  Stopping at the first match meant a mount
+        // trying to connect to a camera across the building — seen at -81 dBm,
+        // when the one bolted to this mount is centimetres away and should be
+        // -30 to -50.  Signal strength is the only thing that distinguishes
+        // "mine" from "someone else's" here, and it distinguishes it easily.
+        if (!_bc_found || dev.getRSSI() > _bc_best_rssi) {
+            if (_bc_found) delete _bc_found;
+            _bc_found = new BLEAdvertisedDevice(dev);
+            _bc_best_rssi = dev.getRSSI();
+        }
     }
 };
 
@@ -208,8 +225,12 @@ static void ble_cam_spike_poll() {
             BLEDevice::getScan()->start(3, false);
             return;
         }
-        Serial.printf("[BLECAM] connecting to %s\n",
-                      _bc_found->getAddress().toString().c_str());
+        if (_bc_best_rssi < BLECAM_WEAK_RSSI)
+            Serial.printf("[BLECAM] NOTE %d dBm is weak for a camera on this mount — "
+                          "check %s is the right one if others are in range\n",
+                          _bc_best_rssi, _bc_found->getAddress().toString().c_str());
+        Serial.printf("[BLECAM] connecting to %s (%d dBm, strongest of the scan)\n",
+                      _bc_found->getAddress().toString().c_str(), _bc_best_rssi);
         if (!_bc_client) {
             _bc_client = BLEDevice::createClient();
             _bc_client->setClientCallbacks(new BcClientCb());
@@ -235,7 +256,7 @@ static void ble_cam_spike_poll() {
                                "refusing us: another central still bonded/connected "
                                "(close the Blackmagic app, BT off on that device, "
                                "power-cycle the camera) is much the most likely.");
-            delete _bc_found; _bc_found = nullptr;   // rescan, the address may be rotating
+            delete _bc_found; _bc_found = nullptr; _bc_best_rssi = -999;
             return;
         }
         BLERemoteService *svc = _bc_client->getService(BLEUUID(BLECAM_SERVICE));
