@@ -91,6 +91,11 @@ props_for() {
         sat)     [ -n "${SAT_NAME:-}" ] && _f="$_f -DSAT_NAME=\"$SAT_NAME\"" ;;
     esac
     [ -n "${DIAG:-}" ] && _f="$_f -DPTS_DIAG=$DIAG"
+    # BLE camera-control SPIKE (amoled only) — measures what a BLE link to the
+    # camera costs the ESP-NOW link.  Not a feature; see ble_cam_spike.h.
+    #   BLE_CAM=1 BLE_CAM_PIN=123456 tools/build.sh flash amoled
+    [ -n "${BLE_CAM:-}" ]     && _f="$_f -DBLE_CAM_SPIKE=$BLE_CAM"
+    [ -n "${BLE_CAM_PIN:-}" ] && _f="$_f -DBLE_CAM_PIN=$BLE_CAM_PIN"
     [ -n "$_f" ] && echo "compiler.cpp.extra_flags=${_f# }"
 }
 

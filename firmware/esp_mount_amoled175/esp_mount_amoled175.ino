@@ -42,6 +42,7 @@
 #include <Wire.h>
 #include "../shared/protocol.h"
 #include "../shared/crash_report.h"
+#include "ble_cam_spike.h"   // no-op unless BLE_CAM=1
 #include "ui_types.h"   // ArcStrip struct — must be included before Arduino auto-prototypes
 
 // ---------------------------------------------------------------------------
@@ -1948,6 +1949,11 @@ void setup() {
     // Unpaired unit: nothing useful to do on the main screen — open SETUP
     // (which immediately starts a hub scan).
     if (!_cfg_valid) setup_enter();
+
+    // Last, deliberately: ESP-NOW is up and settled before the BLE radio is
+    // brought in, so anything the spike costs is visible as a change to a
+    // working link rather than confused with a bad start.
+    ble_cam_spike_setup();
 }
 
 // ---------------------------------------------------------------------------
@@ -1967,6 +1973,7 @@ static inline void drain_teensy_serial() {
 
 void loop() {
     esp_task_wdt_reset();
+    ble_cam_spike_poll();     // compiles away entirely in a normal build
 
     // Health telemetry: worst gap between loop iterations ≈ worst iteration.
     {
