@@ -99,6 +99,9 @@ props_for() {
     [ -n "${BLE_CAM:-}" ] && _f="$_f -DBLE_CAM_SPIKE=$BLE_CAM"
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${BLE_CAM_NAME:-}" ] && _f="$_f -DBLECAM_NAME=\"$BLE_CAM_NAME\""
+    # BLE_VERBOSE=1 turns up the BLE stack's own logging so connect() failures
+    # report the GAP error instead of just returning false.
+    [ -n "${BLE_VERBOSE:-}" ] && _f="$_f -DBLECAM_VERBOSE=1 -DCORE_DEBUG_LEVEL=4"
     [ -n "$_f" ] && echo "compiler.cpp.extra_flags=${_f# }"
 }
 

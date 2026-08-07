@@ -115,6 +115,13 @@ static uint32_t bc_prompt_passkey() {
     return 0;
 }
 
+// BLE_VERBOSE=1 turns the BLE stack's own logging up.  Four rounds of guessing
+// at why connect() returns false have cost more than reading the error would
+// have: the stack knows exactly why and simply is not asked.
+#ifndef BLECAM_VERBOSE
+#define BLECAM_VERBOSE 0
+#endif
+
 #define BLECAM_REPORT_MS   30000UL
 #define BLECAM_RETRY_MS    10000UL
 
@@ -427,11 +434,23 @@ static void ble_cam_spike_poll() {
         // which surfaced as a connect failure and looked like the camera
         // refusing us.  It was this end crashing before the camera ever
         // answered.  Leave the watchdog for the duration and rejoin after.
+        // NimBLE refuses a connection while discovery is active (BLE_HS_EBUSY).
+        // The blocking scan should have ended by itself, but "should have" is
+        // not worth a round trip to the rig — BlueMagic32 stops it explicitly
+        // in its scan callback, and this is one line.
+        BLEDevice::getScan()->stop();
+        delay(50);
+
         esp_task_wdt_delete(NULL);
         bool ok = _bc_client->connect(_bc_pick_addr);
         esp_task_wdt_add(NULL);
         if (!ok) {
             Serial.println("[BLECAM] connect failed — picking again from a fresh scan.");
+#if !BLECAM_VERBOSE
+            Serial.println("[BLECAM]   no reason available at this log level. Rebuild with");
+            Serial.println("[BLECAM]   BLE_CAM=2 BLE_VERBOSE=1 to make the BLE stack print");
+            Serial.println("[BLECAM]   the GAP error it is actually returning.");
+#endif
             _bc_chosen = false;
             return;
         }
