@@ -23,15 +23,19 @@
 //
 //   1. With a NORMAL build on that mount, in the position it will stay in, take
 //      ~30 minutes of NODE HEALTH from comms.log.  That is the BLE-off baseline.
-//   2. Reflash the SAME mount, in the SAME position, with:
+//   2. PAIR FIRST, once per mount, on the bench:
+//        BLE_CAM=2 tools/build.sh flash amoled
+//      Open a serial monitor.  It lists what is in range, picks the Blackmagic
+//      camera if there is exactly one, then asks for the passkey — the camera
+//      shows six digits at that moment.  Type them, press Enter, and look for
+//      "encryption ESTABLISHED — PAIRED".  BLE_CAM=2 stops WiFi, so this build
+//      cannot talk to a hub and must not be left on a rig.
+//   3. Then reflash the SAME mount, in the SAME position, with:
 //        BLE_CAM=1 tools/build.sh flash amoled
-//      Then open a serial monitor.  When the mount finds the camera it will ask
-//      for the passkey; the camera shows six digits at that moment — type them
-//      in and press Enter.  Pairing is remembered, so this is once per mount.
-//   3. Confirm from the mount's serial that it reaches CONNECTED and that
-//      [BLECAM] keeps reporting a rising notification count.  A link that
-//      silently failed to connect shows no impact and looks like good news.
-//   4. Take another ~30 minutes and compare txfail/min.
+//      The bond is in NVS, so it reconnects without asking again.
+//   4. Confirm the serial says PAIRED and keeps saying it.  A link that
+//      silently dropped shows no ESP-NOW impact and looks like good news.
+//   5. Take another ~30 minutes and compare txfail/min.
 //
 //   The baseline must be FRESH.  txfail depends on where the mount is and
 //   whether it reaches the hub directly or through a satellite, so a figure
@@ -43,7 +47,7 @@
 //   Same mount, same position, same path, same rig activity.  Equal window
 //   lengths matter less than equal conditions, since txfail is per-minute.
 //
-//   WHY IT DOES NOT CONNECT — FOUND, AND NOT FIXABLE FROM HERE
+//   WHY IT WOULD NOT CONNECT — FOUND, AND WORKED AROUND
 //
 //   With CORE_DEBUG_LEVEL up, the rig finally said it:
 //
@@ -65,10 +69,12 @@
 //   happens before the security block a few lines below, pairing never starts
 //   and the camera never shows a passkey.  Every symptom follows from that.
 //
-//   None of it is reachable from a sketch: the call is inside the core's
-//   BLEClient event handler.  The fix is to vendor NimBLE-Arduino into
-//   libraries/ (as lvgl, GFX_Library_for_Arduino and SensorLib already are)
-//   and drive it directly, which also gets a smaller stack than this wrapper.
+//   The wrapper cannot be changed from a sketch — but it does not have to be.
+//   <host/ble_gap.h> comes in with the library's own headers, so the NimBLE C
+//   API underneath is available directly.  bc_gap_event() below runs the same
+//   sequence in the same order, minus the one line that throws the connection
+//   away, and calls ble_gap_security_initiate() itself so pairing actually
+//   starts.  Vendoring a whole BLE library turned out to be unnecessary.
 //
 //   Five theories were spent on this before the log was simply turned up:
 //   security config, address types, WiFi coexistence, the wrong device, a
@@ -163,16 +169,111 @@ static uint32_t bc_prompt_passkey() {
 #define BLECAM_REPORT_MS   30000UL
 #define BLECAM_RETRY_MS    10000UL
 
-static BLEClient            *_bc_client = nullptr;
 static BLEAdvertisedDevice  *_bc_found  = nullptr;
 static volatile bool         _bc_connected = false;
 static volatile uint32_t     _bc_notifies  = 0;
 static uint32_t              _bc_report_ms = 0;
 static uint32_t              _bc_retry_ms  = 0;
 static uint32_t              _bc_since_ms  = 0;
+
+// ---------------------------------------------------------------------------
+// Connect via NimBLE directly, not through BLEClient
+// ---------------------------------------------------------------------------
+// BLEClient's own BLE_GAP_EVENT_CONNECT handler does this:
+//
+//     rc = ble_gattc_exchange_mtu(...);
+//     if (rc != 0) { log_e(...); break; }     // tears the connection down
+//
+// and this camera returns BLE_HS_EALREADY (2) because it initiates the MTU
+// exchange itself the instant a central connects.  A peer being quick is not a
+// failure, but the wrapper treats every non-zero return as fatal, drops a
+// working link, and never reaches the security block a few lines below — so
+// pairing never starts and the camera never shows a passkey.
+//
+// None of that is reachable from a sketch.  But the NimBLE C API underneath it
+// is: <host/ble_gap.h> comes in with the library's own headers.  So this drives
+// GAP itself, with the same steps in the same order, minus the one line that
+// throws the connection away.
+static uint16_t _bc_conn = BLE_HS_CONN_HANDLE_NONE;
+
+static int bc_gap_event(struct ble_gap_event *ev, void *) {
+    switch (ev->type) {
+
+    case BLE_GAP_EVENT_CONNECT:
+        if (ev->connect.status != 0) {
+            Serial.printf("[BLECAM] connect failed, status=%d\n", ev->connect.status);
+            _bc_conn = BLE_HS_CONN_HANDLE_NONE;
+            return 0;
+        }
+        _bc_conn = ev->connect.conn_handle;
+        Serial.printf("[BLECAM] CONNECTED (handle %u)\n", _bc_conn);
+        {
+            // Ask, but do not care.  EALREADY means the camera got there first,
+            // which is fine — this is the line the wrapper dies on.
+            int rc = ble_gattc_exchange_mtu(_bc_conn, nullptr, nullptr);
+            if (rc) Serial.printf("[BLECAM] (MTU exchange rc=%d — ignored)\n", rc);
+        }
+        // Pairing has to be asked for; the camera will not volunteer it.
+        if (int rc = ble_gap_security_initiate(_bc_conn))
+            Serial.printf("[BLECAM] security_initiate rc=%d\n", rc);
+        return 0;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        if (ev->passkey.params.action == BLE_SM_IOACT_INPUT) {
+            struct ble_sm_io io = {};
+            io.action  = BLE_SM_IOACT_INPUT;
+            io.passkey = bc_prompt_passkey();
+            int rc = ble_sm_inject_io(ev->passkey.conn_handle, &io);
+            Serial.printf("[BLECAM] passkey injected, rc=%d\n", rc);
+        } else {
+            Serial.printf("[BLECAM] unexpected passkey action %d\n",
+                          ev->passkey.params.action);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        Serial.printf("[BLECAM] encryption %s (status=%d)\n",
+                      ev->enc_change.status ? "FAILED" : "ESTABLISHED — PAIRED",
+                      ev->enc_change.status);
+        if (ev->enc_change.status == 0) {
+            _bc_connected = true;
+            _bc_since_ms  = millis();
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        Serial.printf("[BLECAM] disconnected (reason %d)\n", ev->disconnect.reason);
+        _bc_conn      = BLE_HS_CONN_HANDLE_NONE;
+        _bc_connected = false;
+        return 0;
+
+    case BLE_GAP_EVENT_NOTIFY_RX:
+        _bc_notifies++;
+        return 0;
+
+    default:
+        return 0;
+    }
+}
+
+// Returns false if the attempt could not even be started.
+static bool bc_connect(const char *addr_text) {
+    ble_addr_t a = {};
+    a.type = BLE_ADDR_PUBLIC;
+    unsigned v[6];
+    if (sscanf(addr_text, "%x:%x:%x:%x:%x:%x",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
+    // ble_addr_t.val is little-endian — the reverse of the printed form.
+    for (int i = 0; i < 6; i++) a.val[i] = (uint8_t)v[5 - i];
+    int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &a, 15000, nullptr,
+                             bc_gap_event, nullptr);
+    if (rc) Serial.printf("[BLECAM] ble_gap_connect rc=%d\n", rc);
+    return rc == 0;
+}
+
 static int                   _bc_best_rssi = -999;
 static bool                  _bc_by_name   = false;
-static BLEAddress            _bc_pick_addr;
+static char                  _bc_pick_text[20] = {};
 
 // Every device the scan turned up, so a human can pick one.
 //
@@ -298,17 +399,6 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
     }
 };
 
-class BcClientCb : public BLEClientCallbacks {
-    void onConnect(BLEClient *) override {
-        _bc_connected = true; _bc_since_ms = millis();
-        Serial.println("[BLECAM] CONNECTED");
-    }
-    void onDisconnect(BLEClient *) override {
-        _bc_connected = false;
-        Serial.println("[BLECAM] disconnected");
-    }
-};
-
 class BcSecCb : public BLESecurityCallbacks {
     uint32_t onPassKeyRequest() override { return bc_prompt_passkey(); }
     void onPassKeyNotify(uint32_t pass) override {
@@ -324,12 +414,6 @@ class BcSecCb : public BLESecurityCallbacks {
     // actually resolves below rather than by a callback that never fires.
     bool onAuthorizationRequest(uint16_t, uint16_t, bool) override { return true; }
 };
-
-// Counted, not decoded.  A rising count is proof the link is carrying traffic
-// during the measurement window, which is all this spike needs to establish.
-static void bc_notify(BLERemoteCharacteristic *, uint8_t *, size_t, bool) {
-    _bc_notifies++;
-}
 
 // BLE_CAM=2 — PAIR-ONLY mode.  WiFi is stopped before BLE starts.
 //
@@ -358,16 +442,14 @@ static void ble_cam_spike_setup() {
 #endif
     // The task watchdog is switched OFF for the whole spike build.
     //
-    // Releasing loopTask from it was not enough: connect() then starved the
-    // IDLE1 task instead and the watchdog fired on that —
-    //   task 'IDLE1' faulted ... Task watchdog got triggered
-    // which is the same crash wearing a different name.  Whatever the BLE
-    // connect does to this core, it does not leave the idle task enough room.
+    // The blocking connect() that first tripped it is gone — ble_gap_connect()
+    // is asynchronous — but the passkey prompt still blocks the NimBLE host
+    // task for as long as it takes someone to type six digits, and a watchdog
+    // that fires while a human is reading a camera screen is no use to anyone.
     //
-    // A spike build is a bench diagnostic — BLE_CAM=2 already refuses to talk
-    // to a hub at all — so the watchdog is protecting nothing here, and it is
-    // the only thing standing between us and reading the connect's actual
-    // error.  It stays exactly as it was in every normal build.
+    // A spike build is a bench diagnostic and BLE_CAM=2 refuses to talk to a
+    // hub at all, so nothing here is protecting a rig.  Normal builds keep it
+    // exactly as it was.
     esp_task_wdt_deinit();
     Serial.println("[BLECAM] SPIKE BUILD — task watchdog OFF for this build");
     BLEDevice::init("PTS-Mount");
@@ -446,87 +528,38 @@ static bool bc_choose() {
     }
 
     if (_bc_found) { delete _bc_found; _bc_found = nullptr; }
-    _bc_pick_addr  = BLEAddress(String(_bc_cand[pick].addr));
+    snprintf(_bc_pick_text, sizeof(_bc_pick_text), "%s", _bc_cand[pick].addr);
     _bc_best_rssi  = _bc_cand[pick].rssi;
     _bc_chosen     = true;
-    Serial.printf("[BLECAM] chose %s (%d dBm)\n",
-                  _bc_pick_addr.toString().c_str(), _bc_best_rssi);
+    Serial.printf("[BLECAM] chose %s (%d dBm)\n", _bc_pick_text, _bc_best_rssi);
     return true;
 }
 
 static void ble_cam_spike_poll() {
     uint32_t now = millis();
 
-    if (!_bc_connected && (now - _bc_retry_ms) > BLECAM_RETRY_MS) {
+    // ble_gap_connect() is asynchronous: this only starts an attempt, and
+    // bc_gap_event() carries it through connect -> passkey -> encrypted.  So
+    // there is no long blocking call in loop() any more, and nothing for the
+    // task watchdog to trip over — the reason it had to be disabled was the
+    // wrapper's blocking connect(), which is gone.
+    bool busy = _bc_connected || _bc_conn != BLE_HS_CONN_HANDLE_NONE;
+    if (!busy && (now - _bc_retry_ms) > BLECAM_RETRY_MS) {
         _bc_retry_ms = now;
         if (!_bc_chosen) {
-            // Blocking, but only in a spike build, and only while disconnected.
-            // A normal build never reaches here.
             _bc_ncand = 0;
-            BLEDevice::getScan()->start(5, false);
+            BLEDevice::getScan()->start(5, false);      // blocking, spike only
             if (!bc_choose()) return;
         }
-        Serial.printf("[BLECAM] connecting to %s (%d dBm)\n",
-                      _bc_pick_addr.toString().c_str(), _bc_best_rssi);
-        // A fresh client per attempt, as BlueMagic32 does.  Reusing one across a
-        // failed connect can leave it in a state that never succeeds again,
-        // which would turn a first failure into a permanent one.
-        if (!_bc_client) {
-            _bc_client = BLEDevice::createClient();
-            _bc_client->setClientCallbacks(new BcClientCb());
-        }
-        // Plain address, as BlueMagic32 does.  The address-type retry added
-        // earlier was chasing the wrong fault — the addresses here are public
-        // (addrtype 0) and the failure was the security negotiation, not
-        // addressing.
-        // connect() blocks for longer than the task watchdog allows, and this runs
-        // on loopTask, which is subscribed to it.  Every attempt was ending in
-        //   "Task watchdog got triggered ... loopTask (CPU 1)" -> reboot
-        // which surfaced as a connect failure and looked like the camera
-        // refusing us.  It was this end crashing before the camera ever
-        // answered.  Leave the watchdog for the duration and rejoin after.
-        // NimBLE refuses a connection while discovery is active (BLE_HS_EBUSY).
-        // The blocking scan should have ended by itself, but "should have" is
-        // not worth a round trip to the rig — BlueMagic32 stops it explicitly
-        // in its scan callback, and this is one line.
+        // NimBLE will not start a connection while discovery is running.
         BLEDevice::getScan()->stop();
         delay(50);
-
-        esp_task_wdt_delete(NULL);
-        bool ok = _bc_client->connect(_bc_pick_addr);
-        esp_task_wdt_add(NULL);
-        if (!ok) {
-            // Tear down whatever got part-way.  After a failed attempt the
-            // camera disappeared from every following scan, which is what a
-            // peripheral does when it believes it is connected — so the attempt
-            // is reaching it and half-succeeding, and leaving that hanging
-            // would explain why retrying never finds it again.
-            _bc_client->disconnect();
-            delay(200);
-            Serial.println("[BLECAM] connect failed — picking again from a fresh scan.");
-#if !BLECAM_VERBOSE
-            Serial.println("[BLECAM]   no reason available at this log level. Rebuild with");
-            Serial.println("[BLECAM]   BLE_CAM=2 BLE_VERBOSE=1 to make the BLE stack print");
-            Serial.println("[BLECAM]   the GAP error it is actually returning.");
-#endif
+        Serial.printf("[BLECAM] connecting to %s (%d dBm)\n",
+                      _bc_pick_text, _bc_best_rssi);
+        if (!bc_connect(_bc_pick_text)) {
+            Serial.println("[BLECAM] could not start the attempt — rescanning");
             _bc_chosen = false;
-            return;
         }
-        BLERemoteService *svc = _bc_client->getService(BLEUUID(BLECAM_SERVICE));
-        if (!svc) {
-            _bc_chosen = false;    // wrong device — offer the list again
-            Serial.println("[BLECAM] connected, but no Blackmagic service — wrong device");
-            _bc_client->disconnect();
-            return;
-        }
-        // Subscribing is what makes this a realistic load: an idle connected
-        // link is cheap, a link actually carrying notifications is the thing
-        // camera control would really do.
-        for (const char *u : { BLECAM_OUTGOING, BLECAM_STATUS }) {
-            BLERemoteCharacteristic *ch = svc->getCharacteristic(BLEUUID(u));
-            if (ch && ch->canNotify()) ch->registerForNotify(bc_notify);
-        }
-        Serial.println("[BLECAM] subscribed — leave it running and take the numbers");
     }
 
     if ((now - _bc_report_ms) >= BLECAM_REPORT_MS) {
@@ -534,7 +567,7 @@ static void ble_cam_spike_poll() {
         // Printed even when disconnected, on purpose: "no ESP-NOW impact"
         // means nothing if the link was down for the window.
         Serial.printf("[BLECAM] %s | up %lus | %lu notifications\n",
-                      _bc_connected ? "CONNECTED" : "not connected",
+                      _bc_connected ? "PAIRED" : "not connected",
                       (unsigned long)(_bc_connected ? (now - _bc_since_ms) / 1000UL : 0),
                       (unsigned long)_bc_notifies);
     }
