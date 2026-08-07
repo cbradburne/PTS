@@ -43,6 +43,38 @@
 //   Same mount, same position, same path, same rig activity.  Equal window
 //   lengths matter less than equal conditions, since txfail is per-minute.
 //
+//   WHY IT DOES NOT CONNECT — FOUND, AND NOT FIXABLE FROM HERE
+//
+//   With CORE_DEBUG_LEVEL up, the rig finally said it:
+//
+//     BLEClient.cpp:1167  BLEClient: Connected event. Handle: 1
+//     BLEClient.cpp:1173  MTU exchange error
+//     BLEClient.cpp:1015  Connection failed; status=2
+//                         "Operation already in progress or completed."
+//
+//   The connection SUCCEEDS.  What fails is the next line of the core's own
+//   BLE_GAP_EVENT_CONNECT handler:
+//
+//     rc = ble_gattc_exchange_mtu(client->m_conn_id, nullptr, nullptr);
+//     if (rc != 0) { log_e(...); break; }        // <- tears the link down
+//
+//   status=2 is BLE_HS_EALREADY: the MTU exchange has ALREADY happened,
+//   because this camera initiates it itself the instant a central connects.
+//   A peer being quick is not an error, but the library treats any non-zero
+//   return as fatal and drops the connection — and because the teardown
+//   happens before the security block a few lines below, pairing never starts
+//   and the camera never shows a passkey.  Every symptom follows from that.
+//
+//   None of it is reachable from a sketch: the call is inside the core's
+//   BLEClient event handler.  The fix is to vendor NimBLE-Arduino into
+//   libraries/ (as lvgl, GFX_Library_for_Arduino and SensorLib already are)
+//   and drive it directly, which also gets a smaller stack than this wrapper.
+//
+//   Five theories were spent on this before the log was simply turned up:
+//   security config, address types, WiFi coexistence, the wrong device, a
+//   half-open connection.  All wrong.  The two things that found real faults
+//   were reading a crash dump and reading the library's source.
+//
 // Default OFF, and a no-op when off — nothing here links into a normal build.
 // ---------------------------------------------------------------------------
 #ifndef BLE_CAM_SPIKE
