@@ -1278,14 +1278,101 @@ static void setup_exit() {
 // paired with.  Deliberately shorter than ESPNOW_RESTART_MS, so adoption gets
 // a chance BEFORE the isolation restart throws away the attempt.
 #define REACQ_ADOPT_MS   60000UL
+// How much stronger an unknown hub must be to be adopted while a known one is
+// still audible.  Larger than REACQ_UPGRADE_MARGIN_DB on purpose: switching
+// between two hubs we already trust is cheap, taking a stranger is not.
+#define REACQ_ADOPT_MARGIN_DB  20
+
+// ---------------------------------------------------------------------------
+// Provisional adoption
+// ---------------------------------------------------------------------------
+// A prefix match is NOT proof of a hub.  The only test a candidate passes is
+// that its SSID starts with "PTS-", and a WiFi repeater rebroadcasting the hub's
+// own SSID passes it too — with a different BSSID, so it is never in the known
+// list and is therefore always a candidate.  Adopting one is silent death:
+// there is no ESP-NOW peer behind it, and the far-end guard this design leans on
+// (the hub refusing a device that claims a slot bound to another MAC) never
+// engages, because there is no far end.
+//
+// That is not hypothetical.  A repeater named "PTS-Hub..." was installed near
+// mount 5 while the satellite was being commissioned, and mount 5 spent the
+// morning off the air.
+//
+// So adoption is provisional.  If the newly adopted hub has said nothing within
+// ADOPT_TRIAL_MS, the mount puts back the hub it left, drops the impostor from
+// the known list, and remembers it for ADOPT_DUD_HOLD_MS so the next scan does
+// not walk straight back into it.  Cost of a wrong guess: one trial window.
+#define ADOPT_TRIAL_MS      20000UL
+#define ADOPT_DUD_HOLD_MS   (10UL * 60UL * 1000UL)
+#define ADOPT_DUD_MAX       4
+
+static KnownHub _adopt_prev;                    // hub we left, to go back to
+static bool     _adopt_prev_ok   = false;
+static uint32_t _adopt_start_ms  = 0;           // 0 = no trial running
+static uint8_t  _dud_mac[ADOPT_DUD_MAX][6] = {};
+static uint32_t _dud_at[ADOPT_DUD_MAX]     = {};
+static uint8_t  _dud_next = 0;
+
+static bool dud_known(const uint8_t *mac, uint32_t nowm) {
+    for (int i = 0; i < ADOPT_DUD_MAX; i++)
+        if (_dud_at[i] && (nowm - _dud_at[i]) < ADOPT_DUD_HOLD_MS &&
+            memcmp(_dud_mac[i], mac, 6) == 0) return true;
+    return false;
+}
+
+static void dud_record(const uint8_t *mac, uint32_t nowm) {
+    memcpy(_dud_mac[_dud_next], mac, 6);
+    _dud_at[_dud_next] = nowm ? nowm : 1;
+    _dud_next = (uint8_t)((_dud_next + 1) % ADOPT_DUD_MAX);
+}
+
+// Drop a hub from the known list.  Needed on revert: hub_remember() has already
+// stored the impostor, and leaving it there would let the ordinary "follow the
+// strongest known hub" path walk into it on the very next scan.
+static void hub_forget(const uint8_t *mac) {
+    for (uint8_t i = 0; i < _cfg.n_hubs; i++) {
+        if (memcmp(_cfg.hubs[i].mac, mac, 6) != 0) continue;
+        for (uint8_t k = i; k + 1 < _cfg.n_hubs; k++) _cfg.hubs[k] = _cfg.hubs[k + 1];
+        _cfg.n_hubs--;
+        if (_cfg.last_hub >= _cfg.n_hubs) _cfg.last_hub = 0;
+        return;
+    }
+}
 
 static uint32_t _reacq_last_ms = 0;
 static bool     _reacq_was_silent = false;   // why this scan was started
+
+// Confirm or undo a provisional adoption.  Runs on every poll, not only around
+// a scan: the verdict is about whether traffic arrived, which has nothing to do
+// with scanning.
+static void adopt_trial_poll(uint32_t nowm) {
+    if (!_adopt_start_ms) return;
+    if ((int32_t)(_last_hub_rx_ms - _adopt_start_ms) > 0) {
+        Serial.printf("[REACQ] Adoption confirmed — \"%s\" is talking to us\n",
+                      _cfg.hubs[_cfg.last_hub].ssid);
+        _adopt_start_ms = 0;
+        cfg_save();                       // only now is it worth persisting
+        return;
+    }
+    if ((uint32_t)(nowm - _adopt_start_ms) < ADOPT_TRIAL_MS) return;
+
+    uint8_t bad[6];
+    memcpy(bad, _cfg.hubs[_cfg.last_hub].mac, 6);
+    Serial.printf("[REACQ] Adopted \"%s\" %02X:%02X said nothing in %lus — not a hub, "
+                  "reverting\n", _cfg.hubs[_cfg.last_hub].ssid, bad[4], bad[5],
+                  (unsigned long)(ADOPT_TRIAL_MS / 1000UL));
+    dud_record(bad, nowm);
+    hub_forget(bad);
+    if (_adopt_prev_ok) hub_remember(_adopt_prev);
+    cfg_apply_active_hub();
+    _adopt_start_ms = 0;
+}
 
 static void hub_reacquire_poll() {
     if (!_cfg_valid || _setup_active || _scan_running) { _reacq_scanning = false; return; }
 
     uint32_t nowm = millis();
+    adopt_trial_poll(nowm);
     if (!_reacq_scanning) {
         bool silent = (nowm - _last_hub_rx_ms) > REACQ_SILENT_MS;
         // A scan takes the radio off-channel for a second or two.  When the hub
@@ -1340,33 +1427,66 @@ static void hub_reacquire_poll() {
     // guard; the second is at the far end, where the hub's pairing rules
     // reject a device claiming a slot bound to a different MAC — so wandering
     // onto a neighbouring rig's hub is refused there rather than trusted here.
+    // Strongest prefixed AP we do NOT already know, and have not already tried
+    // and found silent.  Known ones are the `best` path's business.
     KnownHub adopt = {};
-    bool     adopt_ok = false;
-    if (best < 0 && (nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS) {
-        int16_t adopt_db = -32768;
-        for (int i = 0; i < n; i++) {
-            String ssid = WiFi.SSID(i);
-            if (!ssid.startsWith(HUB_SSID_PREFIX) &&
-                !ssid.startsWith(HUB_SSID_PREFIX_OLD)) continue;
-            if ((int16_t)WiFi.RSSI(i) <= adopt_db) continue;
-            adopt_db = (int16_t)WiFi.RSSI(i);
-            memcpy(adopt.mac, WiFi.BSSID(i), 6);
-            adopt.channel = (uint8_t)WiFi.channel(i);
-            snprintf(adopt.ssid, sizeof(adopt.ssid), "%s", ssid.c_str());
-            adopt_ok = true;
-        }
-        if (adopt_ok)
-            Serial.printf("[REACQ] Isolated %lus — adopting \"%s\" %02X:%02X on ch %d (%d dB)\n",
-                          (unsigned long)((nowm - _last_hub_rx_ms) / 1000UL),
-                          adopt.ssid, adopt.mac[4], adopt.mac[5],
-                          (int)adopt.channel, (int)adopt_db);
+    bool     adopt_seen = false;
+    int16_t  adopt_db   = -32768;
+    for (int i = 0; i < n; i++) {
+        String ssid = WiFi.SSID(i);
+        if (!ssid.startsWith(HUB_SSID_PREFIX) &&
+            !ssid.startsWith(HUB_SSID_PREFIX_OLD)) continue;
+        const uint8_t *bssid = WiFi.BSSID(i);
+        bool known = false;
+        for (uint8_t k = 0; k < _cfg.n_hubs; k++)
+            if (memcmp(bssid, _cfg.hubs[k].mac, 6) == 0) { known = true; break; }
+        if (known || dud_known(bssid, nowm)) continue;
+        if ((int16_t)WiFi.RSSI(i) <= adopt_db) continue;
+        adopt_db = (int16_t)WiFi.RSSI(i);
+        memcpy(adopt.mac, bssid, 6);
+        adopt.channel = (uint8_t)WiFi.channel(i);
+        snprintf(adopt.ssid, sizeof(adopt.ssid), "%s", ssid.c_str());
+        adopt_seen = true;
     }
+
+    // Two ways in.
+    //
+    // ISOLATED    nothing known in range, nothing heard for REACQ_ADOPT_MS.
+    // OUTCLASSED  a known hub IS audible, but a stranger beats every known
+    //             option by REACQ_ADOPT_MARGIN_DB.  Without this a mount that
+    //             could still hear its old hub at -63 dB clung to it and never
+    //             looked at a satellite in the same room 20 dB stronger — and
+    //             the known-hub upgrade path could not rescue it either, because
+    //             a satellite is by definition not in the known list.
+    //
+    // Compared against the BEST known reading, not merely the current one, so a
+    // stranger cannot win a contest a known hub would have won.  Either way the
+    // adoption is provisional — see adopt_trial_poll().
+    int16_t known_db = (bestdb > curdb) ? bestdb : curdb;
+    bool isolated    = (best < 0) && ((nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS);
+    bool outclassed  = (known_db > -32768) && (adopt_db > known_db + REACQ_ADOPT_MARGIN_DB);
+    bool adopt_ok    = adopt_seen && !_adopt_start_ms && (isolated || outclassed);
+
+    if (adopt_ok && isolated)
+        Serial.printf("[REACQ] Isolated %lus — trying \"%s\" %02X:%02X on ch %d (%d dB)\n",
+                      (unsigned long)((nowm - _last_hub_rx_ms) / 1000UL),
+                      adopt.ssid, adopt.mac[4], adopt.mac[5],
+                      (int)adopt.channel, (int)adopt_db);
+    else if (adopt_ok)
+        Serial.printf("[REACQ] Best known hub %d dB, \"%s\" %d dB (+%d) — trying "
+                      "%02X:%02X on ch %d\n", (int)known_db, adopt.ssid,
+                      (int)adopt_db, (int)(adopt_db - known_db),
+                      adopt.mac[4], adopt.mac[5], (int)adopt.channel);
 
     WiFi.scanDelete();
 
     if (adopt_ok) {
+        // Provisional: remember where to go back to, and do NOT persist yet —
+        // an impostor must not survive a power cycle in the stored config.
+        _adopt_prev    = _cfg.hubs[_cfg.last_hub];
+        _adopt_prev_ok = true;
+        _adopt_start_ms = nowm ? nowm : 1;
         hub_remember(adopt);
-        cfg_save();
         cfg_apply_active_hub();
     } else if (best >= 0) {
         // Switching hub is free when the current one has gone quiet — we have
