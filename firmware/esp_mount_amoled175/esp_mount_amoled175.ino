@@ -1278,6 +1278,11 @@ static void setup_exit() {
 // paired with.  Deliberately shorter than ESPNOW_RESTART_MS, so adoption gets
 // a chance BEFORE the isolation restart throws away the attempt.
 #define REACQ_ADOPT_MS   60000UL
+// ...and how much stronger an unknown hub must be to be adopted while a known
+// one is still audible.  Larger than REACQ_UPGRADE_MARGIN_DB on purpose:
+// switching between two hubs we already trust is cheap, taking a stranger
+// should need a clearer case than that.
+#define REACQ_ADOPT_MARGIN_DB  20
 
 static uint32_t _reacq_last_ms = 0;
 static bool     _reacq_was_silent = false;   // why this scan was started
@@ -1328,39 +1333,69 @@ static void hub_reacquire_poll() {
             }
         }
     }
-    // Nothing known is in range.  A mount in that state cannot rescue itself
-    // today: the loop above only matches hubs it has already been paired with,
-    // so a satellite deployed specifically to reach it is invisible until
-    // somebody walks up to the mount and pairs it by hand.  On a rig where
-    // mounts tour the building that is the difference between a satellite
-    // fixing a mount and needing a ladder.
+    // Adoption — taking a hub this mount has never been paired with.  The loops
+    // above only match hubs already in the known list, so a satellite deployed
+    // specifically to reach this mount is invisible to them.  Without adoption
+    // it stays invisible until somebody walks up to the mount and pairs it by
+    // hand, which on a rig where mounts tour the building is the difference
+    // between a satellite fixing a mount and needing a ladder.
     //
-    // So: if we have heard nothing at all for REACQ_ADOPT_MS, adopt the
-    // strongest AP whose SSID carries our prefix.  The prefix is the first
-    // guard; the second is at the far end, where the hub's pairing rules
-    // reject a device claiming a slot bound to a different MAC — so wandering
-    // onto a neighbouring rig's hub is refused there rather than trusted here.
+    // Strongest AP carrying our prefix that we do NOT already know.  Known ones
+    // are the `best` path's business; this is only ever about strangers.
     KnownHub adopt = {};
-    bool     adopt_ok = false;
-    if (best < 0 && (nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS) {
-        int16_t adopt_db = -32768;
-        for (int i = 0; i < n; i++) {
-            String ssid = WiFi.SSID(i);
-            if (!ssid.startsWith(HUB_SSID_PREFIX) &&
-                !ssid.startsWith(HUB_SSID_PREFIX_OLD)) continue;
-            if ((int16_t)WiFi.RSSI(i) <= adopt_db) continue;
-            adopt_db = (int16_t)WiFi.RSSI(i);
-            memcpy(adopt.mac, WiFi.BSSID(i), 6);
-            adopt.channel = (uint8_t)WiFi.channel(i);
-            snprintf(adopt.ssid, sizeof(adopt.ssid), "%s", ssid.c_str());
-            adopt_ok = true;
-        }
-        if (adopt_ok)
-            Serial.printf("[REACQ] Isolated %lus — adopting \"%s\" %02X:%02X on ch %d (%d dB)\n",
-                          (unsigned long)((nowm - _last_hub_rx_ms) / 1000UL),
-                          adopt.ssid, adopt.mac[4], adopt.mac[5],
-                          (int)adopt.channel, (int)adopt_db);
+    bool     adopt_seen = false;
+    int16_t  adopt_db   = -32768;
+    for (int i = 0; i < n; i++) {
+        String ssid = WiFi.SSID(i);
+        if (!ssid.startsWith(HUB_SSID_PREFIX) &&
+            !ssid.startsWith(HUB_SSID_PREFIX_OLD)) continue;
+        const uint8_t *bssid = WiFi.BSSID(i);
+        bool known = false;
+        for (uint8_t k = 0; k < _cfg.n_hubs; k++)
+            if (memcmp(bssid, _cfg.hubs[k].mac, 6) == 0) { known = true; break; }
+        if (known) continue;
+        if ((int16_t)WiFi.RSSI(i) <= adopt_db) continue;
+        adopt_db = (int16_t)WiFi.RSSI(i);
+        memcpy(adopt.mac, bssid, 6);
+        adopt.channel = (uint8_t)WiFi.channel(i);
+        snprintf(adopt.ssid, sizeof(adopt.ssid), "%s", ssid.c_str());
+        adopt_seen = true;
     }
+
+    // Two ways in.
+    //
+    // ISOLATED — nothing known is in range and nothing has been heard for
+    // REACQ_ADOPT_MS.  There is nothing to lose by trying a stranger.
+    //
+    // OUTCLASSED — a known hub IS audible, but a stranger beats every known
+    // option by REACQ_ADOPT_MARGIN_DB.  Adoption used to require isolation, so
+    // a mount that could still hear its old hub at -63 dB clung to it and never
+    // looked at a satellite in the same room that was 20+ dB stronger.  That is
+    // exactly what happened moving mount 5 to the foyer: audible enough to block
+    // adoption, too weak to stay connected, and the known-hub upgrade path could
+    // not rescue it either because a satellite is by definition not in the known
+    // list.  Compared against the BEST known reading, not merely the current
+    // one, so a stranger cannot win a contest a known hub would have won.
+    //
+    // The guards are unchanged: the SSID prefix here, and at the far end the hub
+    // refuses a device claiming a slot bound to a different MAC — so a mount
+    // cannot wander onto a neighbouring rig merely by being near it.
+    int16_t known_db = (bestdb > curdb) ? bestdb : curdb;
+    bool isolated    = (best < 0) && ((nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS);
+    bool outclassed  = (known_db > -32768) && (adopt_db > known_db + REACQ_ADOPT_MARGIN_DB);
+    bool adopt_ok    = adopt_seen && (isolated || outclassed);
+
+    if (adopt_ok && isolated)
+        Serial.printf("[REACQ] Isolated %lus — adopting \"%s\" %02X:%02X on ch %d (%d dB)\n",
+                      (unsigned long)((nowm - _last_hub_rx_ms) / 1000UL),
+                      adopt.ssid, adopt.mac[4], adopt.mac[5],
+                      (int)adopt.channel, (int)adopt_db);
+    else if (adopt_ok)
+        Serial.printf("[REACQ] Best known hub %d dB, \"%s\" %d dB (+%d) — adopting "
+                      "%02X:%02X on ch %d\n",
+                      (int)known_db, adopt.ssid, (int)adopt_db,
+                      (int)(adopt_db - known_db), adopt.mac[4], adopt.mac[5],
+                      (int)adopt.channel);
 
     WiFi.scanDelete();
 
