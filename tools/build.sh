@@ -130,6 +130,15 @@ compile_one() {
     if [ -z "$sk" ]; then echo "unknown target: $t"; return 2; fi
     printf '── %-8s %s\n' "$t" "$(fqbn_for "$t")"
     props="$(props_for "$t")"
+    # Say what is actually being compiled in.  A build whose flags were dropped
+    # produces a binary that looks normal and behaves normally — the BLE spike
+    # simply is not there, and the only symptom is an absence of output, which
+    # is a miserable thing to debug from.  One line removes the whole class.
+    if [ -n "$props" ]; then
+        printf '   flags  %s\n' "${props#compiler.cpp.extra_flags=}"
+    else
+        printf '   flags  (none — plain build)\n'
+    fi
     if [ -n "$props" ]; then
         arduino-cli compile \
             --fqbn "$(fqbn_for "$t")" \
