@@ -137,7 +137,11 @@ static BLEAddress            _bc_pick_addr;
 // name match still auto-selects, so once it is known to work this stops
 // needing a human.
 #define BC_MAX_CAND 12
-struct BcCand { uint8_t mac[6]; char name[26]; int16_t rssi; bool svc; bool named; };
+// Address kept as TEXT.  getNative() is little-endian, so printing those bytes
+// in order reverses the address: the scan line said 90:fd:9f:b4:50:df and the
+// menu said DF:50:B4:9F:FD:90 for the same device.  toString() is the form
+// everything else in the system uses, and BLEAddress can be rebuilt from it.
+struct BcCand { char addr[20]; char name[26]; int16_t rssi; bool svc; bool named; };
 static BcCand  _bc_cand[BC_MAX_CAND];
 static uint8_t _bc_ncand = 0;
 // The name from the camera's Bluetooth menu.  Substring, so "BMPCC" matches
@@ -169,14 +173,13 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
                       dev.getRSSI(), svc ? " [svc]" : "", named ? " [NAME MATCH]" : "");
         // Remembered whether or not it looks like a camera: the whole point is
         // that our idea of "looks like a camera" has been wrong twice.
+        String as = dev.getAddress().toString();
         bool dup = false;
         for (uint8_t i = 0; i < _bc_ncand; i++)
-            if (memcmp(_bc_cand[i].mac, dev.getAddress().getNative(), 6) == 0) {
-                _bc_cand[i].rssi = dev.getRSSI(); dup = true; break;
-            }
+            if (as == _bc_cand[i].addr) { _bc_cand[i].rssi = dev.getRSSI(); dup = true; break; }
         if (!dup && _bc_ncand < BC_MAX_CAND) {
             BcCand &c = _bc_cand[_bc_ncand++];
-            memcpy(c.mac, dev.getAddress().getNative(), 6);
+            snprintf(c.addr, sizeof(c.addr), "%s", as.c_str());
             snprintf(c.name, sizeof(c.name), "%s", nm.c_str());
             c.rssi = dev.getRSSI(); c.svc = svc; c.named = named;
         }
@@ -324,24 +327,26 @@ static bool _bc_chosen = false;
 static bool bc_choose() {
     if (!_bc_ncand) { Serial.println("[BLECAM] scan found nothing at all"); return false; }
 
+    // Match on the SERVICE, not the name.  The camera does not advertise its
+    // name at all — "Colin BMPCC" lives in a GATT characteristic that can only
+    // be read after connecting, which is how BlueMagic32 gets it.  Chasing the
+    // advertised name was chasing something that was never going to be there.
     int only_named = -1, n_named = 0;
     for (uint8_t i = 0; i < _bc_ncand; i++)
-        if (_bc_cand[i].named) { only_named = i; n_named++; }
+        if (_bc_cand[i].svc) { only_named = i; n_named++; }
 
     Serial.println("\n[BLECAM] ---- devices in range ----");
     for (uint8_t i = 0; i < _bc_ncand; i++) {
         BcCand &c = _bc_cand[i];
-        Serial.printf("[BLECAM]  %u) %-24s %02X:%02X:%02X:%02X:%02X:%02X  %4d dBm%s%s\n",
-                      i + 1, c.name[0] ? c.name : "(no name)",
-                      c.mac[0], c.mac[1], c.mac[2], c.mac[3], c.mac[4], c.mac[5],
-                      c.rssi, c.svc ? "  [bmd-service]" : "",
-                      c.named ? "  [NAME MATCH]" : "");
+        Serial.printf("[BLECAM]  %2u) %-26s %-18s %4d dBm%s\n",
+                      i + 1, c.name[0] ? c.name : "(no name)", c.addr, c.rssi,
+                      c.svc ? "  <-- BLACKMAGIC CAMERA" : "");
     }
 
     int pick = -1;
     if (n_named == 1) {
         pick = only_named;
-        Serial.printf("[BLECAM] one name match — using %u\n", pick + 1);
+        Serial.printf("[BLECAM] one Blackmagic camera in range — using %u\n", pick + 1);
     } else {
         Serial.printf("[BLECAM] type 1-%u and Enter (15 s, else rescan): ", _bc_ncand);
         uint32_t deadline = millis() + 15000UL;
@@ -361,7 +366,7 @@ static bool bc_choose() {
     }
 
     if (_bc_found) { delete _bc_found; _bc_found = nullptr; }
-    _bc_pick_addr  = BLEAddress(_bc_cand[pick].mac);
+    _bc_pick_addr  = BLEAddress(String(_bc_cand[pick].addr));
     _bc_best_rssi  = _bc_cand[pick].rssi;
     _bc_chosen     = true;
     Serial.printf("[BLECAM] chose %s (%d dBm)\n",
