@@ -56,6 +56,7 @@ static inline void ble_cam_spike_poll()  {}
 
 #else
 
+#include <esp_wifi.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
@@ -198,7 +199,31 @@ static void bc_notify(BLERemoteCharacteristic *, uint8_t *, size_t, bool) {
     _bc_notifies++;
 }
 
+// BLE_CAM=2 — PAIR-ONLY mode.  WiFi is stopped before BLE starts.
+//
+// With WiFi running, the camera was found every time and the connection never
+// completed.  BlueMagic32, which works against this camera, runs on boards
+// doing nothing else; a mount runs WiFi STA and ESP-NOW on the same radio, and
+// on the S3 WiFi wins coexistence arbitration by default.  Establishing a BLE
+// connection needs sustained radio time that it may simply never get.
+//
+// Pairing is the expensive part; reconnecting to a BONDED peer is far cheaper.
+// So pair once with WiFi stopped, then reflash with BLE_CAM=1 and see whether
+// the bonded reconnect survives alongside ESP-NOW.  That splits one unanswerable
+// question into two answerable ones:
+//
+//   pair-only connects   -> coexistence blocks CONNECTION SETUP specifically
+//   pair-only also fails -> the fault is not coexistence, look elsewhere
+//                           (power, camera state, bond)
+//
+// This mode cannot relay anything and must never be flashed to a working rig.
 static void ble_cam_spike_setup() {
+#if BLE_CAM_SPIKE == 2
+    Serial.println("[BLECAM] PAIR-ONLY BUILD — stopping WiFi so BLE has the radio.");
+    Serial.println("[BLECAM] This mount will NOT talk to the hub. Pair, then reflash BLE_CAM=1.");
+    esp_wifi_stop();
+    delay(200);
+#endif
     Serial.println("[BLECAM] SPIKE BUILD — measuring BLE/ESP-NOW coexistence");
     BLEDevice::init("PTS-Mount");
     BLEDevice::setPower(ESP_PWR_LVL_P9);          // as BlueMagic32 does
