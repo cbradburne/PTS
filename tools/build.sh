@@ -192,7 +192,7 @@ if [ "${1:-}" = "flash" ]; then
         echo "auto-detected port: $port"
     fi
     exec arduino-cli upload --fqbn "$(fqbn_for "$t")" \
-        --input-dir "$OUT/$t" -p "$port" "$(sketch_for "$t")"
+        --input-dir "$(out_for "$t")" -p "$port" "$(sketch_for "$t")"
 fi
 
 targets="${*:-hub hubeth display amoled sat teensy}"
