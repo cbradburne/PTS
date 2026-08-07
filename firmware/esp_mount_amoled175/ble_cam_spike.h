@@ -445,6 +445,13 @@ static void ble_cam_spike_poll() {
         bool ok = _bc_client->connect(_bc_pick_addr);
         esp_task_wdt_add(NULL);
         if (!ok) {
+            // Tear down whatever got part-way.  After a failed attempt the
+            // camera disappeared from every following scan, which is what a
+            // peripheral does when it believes it is connected — so the attempt
+            // is reaching it and half-succeeding, and leaving that hanging
+            // would explain why retrying never finds it again.
+            _bc_client->disconnect();
+            delay(200);
             Serial.println("[BLECAM] connect failed — picking again from a fresh scan.");
 #if !BLECAM_VERBOSE
             Serial.println("[BLECAM]   no reason available at this log level. Rebuild with");
