@@ -618,6 +618,22 @@ static uint32_t _dn_last_ok_ms     = 0;   // last accepted send
 
 #define DN_NOMEM_DROP_MS      250UL      // stop holding a stale frame
 #define DN_NOMEM_RECOVER_MS  5000UL      // stack is wedged, rebuild it
+// Recovery attempts are timed SEPARATELY from the last good send.  Stamping
+// _dn_last_ok_ms when a rebuild was merely attempted made the rebuild reset its
+// own trigger — and the drop timer above it, which shares that variable — so
+// the queue could never drain and the interval restarted from zero every time.
+// The rig showed the result: "ESP-NOW stalled - reinitialising" every five
+// seconds without pause, "sent" frozen at the same value across four
+// consecutive reports, and nomem running to 2,254 per 30 s.
+static uint32_t _dn_last_recover_ms = 0;
+// ...and a rebuild that has not helped after this many tries is not going to.
+// Tearing the stack down destroys whatever is in flight, so repeating it
+// forever makes a bad radio state worse rather than better.  Past the cap the
+// satellite sheds frames and says so, which is honest and lets the mounts age
+// out and go looking for another hub instead of waiting on a link that is never
+// coming back.  Mirrors ESPNOW_RESTART_MAX on the mount, for the same reason.
+#define DN_RECOVER_MAX  5
+static uint8_t  _dn_recover_run = 0;
 #define DN_REPORT_MS  30000UL
 
 // ---------------------------------------------------------------------------
@@ -743,9 +759,18 @@ static void dn_pump(uint32_t now) {
                 _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
                 _dn_send_err++;
             }
-            if (now - _dn_last_ok_ms > DN_NOMEM_RECOVER_MS) {
-                _dn_last_ok_ms = now;      // one attempt per interval
-                espnow_recover();
+            if (now - _dn_last_recover_ms > DN_NOMEM_RECOVER_MS) {
+                _dn_last_recover_ms = now;          // paces the attempts only
+                if (_dn_recover_run < DN_RECOVER_MAX) {
+                    _dn_recover_run++;
+                    espnow_recover();
+                } else if (_dn_recover_run == DN_RECOVER_MAX) {
+                    _dn_recover_run++;              // say this once
+                    Serial.printf("[DOWN] %d rebuilds did not clear the stall — "
+                                  "shedding downlink instead of thrashing the "
+                                  "radio.  Mounts on this satellite will age out "
+                                  "and look elsewhere.\n", DN_RECOVER_MAX);
+                }
             }
             return;
         }
@@ -753,6 +778,7 @@ static void dn_pump(uint32_t now) {
         if (e == ESP_OK) {
             _dn_sent++;
             _dn_last_ok_ms = now;
+            _dn_recover_run = 0;        // a real send proves the stack is back
         } else {
             _dn_send_err++;
             Serial.printf("[DOWN] send failed: %s\n", esp_err_to_name(e));
