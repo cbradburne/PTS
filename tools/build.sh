@@ -33,6 +33,15 @@ FQBN_SAT="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=defaul
 FQBN_HUBETH="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=disabled"
 FQBN_TEENSY="teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
 
+# Build directory for a target.  Verbose builds get their own, because they
+# compile a different core and arduino-cli cannot reuse the cached one.
+out_for() {
+    if [ -n "${BLE_VERBOSE:-}" ] && [ "$1" = "amoled" ]; then
+        echo "$OUT/$1-dbg"; return
+    fi
+    echo "$OUT/$1"
+}
+
 sketch_for() {
     case "$1" in
         hub)     echo "$REPO/firmware/esp32_hub" ;;
@@ -46,7 +55,14 @@ sketch_for() {
     esac
 }
 
+# BLE_VERBOSE=1 rebuilds the core at debug level.  That is a different core, so
+# it also gets a different --build-path (see out_for) — reusing one build
+# directory across two core configurations is what produced
+#   ar: unable to copy file '.build/amoled/core/core.a'
 fqbn_for() {
+    if [ -n "${BLE_VERBOSE:-}" ] && [ "$1" = "amoled" ]; then
+        echo "$FQBN_AMOLED,DebugLevel=debug"; return
+    fi
     case "$1" in
         hub)     echo "$FQBN_HUB" ;;
         hubdemo) echo "$FQBN_HUB" ;;
@@ -99,9 +115,12 @@ props_for() {
     [ -n "${BLE_CAM:-}" ] && _f="$_f -DBLE_CAM_SPIKE=$BLE_CAM"
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${BLE_CAM_NAME:-}" ] && _f="$_f -DBLECAM_NAME=\"$BLE_CAM_NAME\""
-    # BLE_VERBOSE=1 turns up the BLE stack's own logging so connect() failures
-    # report the GAP error instead of just returning false.
-    [ -n "${BLE_VERBOSE:-}" ] && _f="$_f -DBLECAM_VERBOSE=1 -DCORE_DEBUG_LEVEL=4"
+    # BLE_VERBOSE=1 turns up the BLE stack's own logging.  Only BLECAM_VERBOSE
+    # here — the log level itself is a BOARD option (DebugLevel in the FQBN),
+    # and passing -DCORE_DEBUG_LEVEL as a compiler flag instead fights the
+    # core's own definition: dozens of "redefined" warnings, and a build that
+    # then failed outright because the cached core.a no longer matched.
+    [ -n "${BLE_VERBOSE:-}" ] && _f="$_f -DBLECAM_VERBOSE=1"
     [ -n "$_f" ] && echo "compiler.cpp.extra_flags=${_f# }"
 }
 
@@ -115,7 +134,7 @@ compile_one() {
         arduino-cli compile \
             --fqbn "$(fqbn_for "$t")" \
             --libraries "$LIBS" \
-            --build-path "$OUT/$t" \
+            --build-path "$(out_for "$t")" \
             --build-property "$props" \
             --warnings default \
             "$sk"
@@ -123,7 +142,7 @@ compile_one() {
         arduino-cli compile \
             --fqbn "$(fqbn_for "$t")" \
             --libraries "$LIBS" \
-            --build-path "$OUT/$t" \
+            --build-path "$(out_for "$t")" \
             --warnings default \
             "$sk"
     fi
