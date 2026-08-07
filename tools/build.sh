@@ -97,6 +97,8 @@ props_for() {
     # The pairing code is typed into the serial monitor when the camera shows
     # it — it cannot be a build flag, see ble_cam_spike.h.
     [ -n "${BLE_CAM:-}" ] && _f="$_f -DBLE_CAM_SPIKE=$BLE_CAM"
+    # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
+    [ -n "${BLE_CAM_NAME:-}" ] && _f="$_f -DBLECAM_NAME=\"$BLE_CAM_NAME\"
     [ -n "$_f" ] && echo "compiler.cpp.extra_flags=${_f# }"
 }
 

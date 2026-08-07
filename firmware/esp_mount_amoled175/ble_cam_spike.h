@@ -125,6 +125,12 @@ static uint32_t              _bc_report_ms = 0;
 static uint32_t              _bc_retry_ms  = 0;
 static uint32_t              _bc_since_ms  = 0;
 static int                   _bc_best_rssi = -999;
+static bool                  _bc_by_name   = false;
+// The name from the camera's Bluetooth menu.  Substring, so "BMPCC" matches
+// "Colin BMPCC".  Override at build time if yours is named otherwise.
+#ifndef BLECAM_NAME
+#define BLECAM_NAME  "BMPCC"
+#endif
 // A camera on this mount should be strong.  Weaker than this is worth SAYING
 // on a rig where several mounts each carry one — connecting to a neighbour's
 // camera would look like success — but it is only a warning, not a veto: a
@@ -134,8 +140,23 @@ static int                   _bc_best_rssi = -999;
 
 class BcScanCb : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice dev) override {
-        if (!dev.haveServiceUUID()) return;
-        if (!dev.isAdvertisingService(BLEUUID(BLECAM_SERVICE))) return;
+        // EVERY device, named or not.  The service-UUID filter alone was
+        // matching a nameless device that is not the camera at all — the camera
+        // advertises the name set in its Bluetooth menu ("Colin BMPCC"), and
+        // that name is the only thing here that identifies it beyond doubt.
+        // Chasing the wrong device is why the camera never showed a pairing
+        // code: nothing was ever talking to it.
+        String nm = dev.getName();
+        bool svc = dev.haveServiceUUID() &&
+                   dev.isAdvertisingService(BLEUUID(BLECAM_SERVICE));
+        bool named = nm.length() && (nm.indexOf(BLECAM_NAME) >= 0);
+        Serial.printf("[BLECAM]  seen \"%s\" %s %d dBm%s%s\n",
+                      nm.c_str(), dev.getAddress().toString().c_str(),
+                      dev.getRSSI(), svc ? " [svc]" : "", named ? " [NAME MATCH]" : "");
+        if (!named && !svc) return;
+        // A name match outranks a service match — see above.
+        if (_bc_found && _bc_by_name && !named) return;
+        if (named && !_bc_by_name) { _bc_best_rssi = -999; _bc_by_name = true; }
         // "connect failed" on its own is useless — it was, on the rig.  These
         // four fields separate the causes that look identical from outside:
         //   connectable=0  the camera is broadcasting, not accepting.  Nothing
@@ -158,6 +179,21 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
         // when the one bolted to this mount is centimetres away and should be
         // -30 to -50.  Signal strength is the only thing that distinguishes
         // "mine" from "someone else's" here, and it distinguishes it easily.
+        // Dump the raw advertisement once per device.  The name is empty, which a
+        // BMPCC4K should not be, so the filter matching is worth confirming
+        // rather than trusting: this prints what actually came off the air.
+        static uint8_t seen[6] = {};
+        if (memcmp(seen, dev.getAddress().getNative(), 6) != 0) {
+            memcpy(seen, dev.getAddress().getNative(), 6);
+            uint8_t *pl = dev.getPayload();
+            size_t   n  = dev.getPayloadLength();
+            Serial.print("[BLECAM] raw adv: ");
+            for (size_t i = 0; i < n && i < 62; i++) Serial.printf("%02X", pl[i]);
+            Serial.println();
+            Serial.printf("[BLECAM] svc uuid: %s | count %d\n",
+                          dev.getServiceUUID().toString().c_str(),
+                          (int)dev.getServiceDataCount());
+        }
         if (!_bc_found || dev.getRSSI() > _bc_best_rssi) {
             if (_bc_found) delete _bc_found;
             _bc_found = new BLEAdvertisedDevice(dev);
@@ -271,6 +307,9 @@ static void ble_cam_spike_poll() {
                           _bc_best_rssi, _bc_found->getAddress().toString().c_str());
         Serial.printf("[BLECAM] connecting to %s (%d dBm, strongest of the scan)\n",
                       _bc_found->getAddress().toString().c_str(), _bc_best_rssi);
+        // A fresh client per attempt, as BlueMagic32 does.  Reusing one across a
+        // failed connect can leave it in a state that never succeeds again,
+        // which would turn a first failure into a permanent one.
         if (!_bc_client) {
             _bc_client = BLEDevice::createClient();
             _bc_client->setClientCallbacks(new BcClientCb());
@@ -281,7 +320,7 @@ static void ble_cam_spike_poll() {
         // addressing.
         bool ok = _bc_client->connect(_bc_found->getAddress());
         if (!ok) {
-            Serial.println("[BLECAM] connect failed both address types.");
+            Serial.println("[BLECAM] connect failed.");
             if (!_bc_found->isConnectable())
                 Serial.println("[BLECAM]   advertisement is NOT connectable — the camera "
                                "is broadcasting, not accepting. Nothing this end can fix.");
