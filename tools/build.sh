@@ -93,9 +93,10 @@ props_for() {
     [ -n "${DIAG:-}" ] && _f="$_f -DPTS_DIAG=$DIAG"
     # BLE camera-control SPIKE (amoled only) — measures what a BLE link to the
     # camera costs the ESP-NOW link.  Not a feature; see ble_cam_spike.h.
-    #   BLE_CAM=1 BLE_CAM_PIN=123456 tools/build.sh flash amoled
-    [ -n "${BLE_CAM:-}" ]     && _f="$_f -DBLE_CAM_SPIKE=$BLE_CAM"
-    [ -n "${BLE_CAM_PIN:-}" ] && _f="$_f -DBLE_CAM_PIN=$BLE_CAM_PIN"
+    #   BLE_CAM=1 tools/build.sh flash amoled
+    # The pairing code is typed into the serial monitor when the camera shows
+    # it — it cannot be a build flag, see ble_cam_spike.h.
+    [ -n "${BLE_CAM:-}" ] && _f="$_f -DBLE_CAM_SPIKE=$BLE_CAM"
     [ -n "$_f" ] && echo "compiler.cpp.extra_flags=${_f# }"
 }
 

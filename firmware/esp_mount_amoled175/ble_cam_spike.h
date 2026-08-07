@@ -24,7 +24,10 @@
 //   1. With a NORMAL build on that mount, in the position it will stay in, take
 //      ~30 minutes of NODE HEALTH from comms.log.  That is the BLE-off baseline.
 //   2. Reflash the SAME mount, in the SAME position, with:
-//        BLE_CAM=1 BLE_CAM_PIN=<6 digits from the camera> tools/build.sh flash amoled
+//        BLE_CAM=1 tools/build.sh flash amoled
+//      Then open a serial monitor.  When the mount finds the camera it will ask
+//      for the passkey; the camera shows six digits at that moment — type them
+//      in and press Enter.  Pairing is remembered, so this is once per mount.
 //   3. Confirm from the mount's serial that it reaches CONNECTED and that
 //      [BLECAM] keeps reporting a rising notification count.  A link that
 //      silently failed to connect shows no impact and looks like good news.
@@ -67,11 +70,48 @@ static inline void ble_cam_spike_poll()  {}
 #define BLECAM_INCOMING  "b864e140-76a0-416a-bf30-5876504537d9"  // us -> camera
 #define BLECAM_STATUS    "7fe8691d-95dc-4fc5-8abd-ca74339b51b9"
 
-// The camera shows a six-digit code on its screen when pairing.  Passed in at
-// build time because the spike has no UI and does not deserve one.
-#ifndef BLE_CAM_PIN
-#define BLE_CAM_PIN 000000
-#endif
+// The passkey is typed into the SERIAL MONITOR while pairing is in progress.
+//
+// It cannot be a build flag, which is what this first tried.  The camera only
+// displays a code once something attempts to pair with it, so the code does not
+// exist until after the flash — and BLE passkey pairing generates fresh random
+// digits every attempt, so there is nothing to carry forward between flashes
+// either.  Compile-time was circular twice over.
+//
+// So onPassKeyRequest() waits for the number, which is also what a real
+// implementation would do — from the mount's own touchscreen rather than a
+// serial monitor.
+#define BLE_CAM_PIN_WAIT_MS  90000UL
+
+// Blocking, deliberately.  It runs on the BLE host task during pairing, which
+// is exactly the moment there is nothing else for that task to do, and the
+// alternative — failing the pairing and retrying — cannot work when the camera
+// picks new digits each time.
+static uint32_t bc_prompt_passkey() {
+    Serial.println();
+    Serial.println("[BLECAM] ============================================");
+    Serial.println("[BLECAM] The camera is now showing a 6-digit code.");
+    Serial.println("[BLECAM] Type it here and press Enter.");
+    Serial.println("[BLECAM] ============================================");
+    char buf[8]; uint8_t n = 0;
+    uint32_t deadline = millis() + BLE_CAM_PIN_WAIT_MS;
+    while ((int32_t)(millis() - deadline) < 0) {
+        while (Serial.available()) {
+            int c = Serial.read();
+            if (c == '\r' || c == '\n') {
+                if (n == 0) continue;                 // ignore a bare newline
+                buf[n] = 0;
+                uint32_t k = (uint32_t)strtoul(buf, nullptr, 10);
+                Serial.printf("[BLECAM] using %06lu\n", (unsigned long)k);
+                return k;
+            }
+            if (c >= '0' && c <= '9' && n < 6) buf[n++] = (char)c;
+        }
+        delay(10);
+    }
+    Serial.println("[BLECAM] no code entered — pairing will fail, it will retry");
+    return 0;
+}
 
 #define BLECAM_REPORT_MS   30000UL
 #define BLECAM_RETRY_MS    10000UL
@@ -109,11 +149,7 @@ class BcClientCb : public BLEClientCallbacks {
 };
 
 class BcSecCb : public BLESecurityCallbacks {
-    uint32_t onPassKeyRequest() override {
-        Serial.printf("[BLECAM] passkey requested — sending %06lu\n",
-                      (unsigned long)BLE_CAM_PIN);
-        return BLE_CAM_PIN;
-    }
+    uint32_t onPassKeyRequest() override { return bc_prompt_passkey(); }
     void onPassKeyNotify(uint32_t pass) override {
         Serial.printf("[BLECAM] camera shows %06lu\n", (unsigned long)pass);
     }
