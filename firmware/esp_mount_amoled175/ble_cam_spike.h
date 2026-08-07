@@ -201,13 +201,28 @@ static void bc_notify(BLERemoteCharacteristic *, uint8_t *, size_t, bool) {
 static void ble_cam_spike_setup() {
     Serial.println("[BLECAM] SPIKE BUILD — measuring BLE/ESP-NOW coexistence");
     BLEDevice::init("PTS-Mount");
+    BLEDevice::setPower(ESP_PWR_LVL_P9);          // as BlueMagic32 does
     BLEDevice::setSecurityCallbacks(new BcSecCb());
-    // bonding + MITM + secure connections: the camera shows a passkey and
-    // expects it entered, which is MITM protection with keyboard capability.
-    BLESecurity::setAuthenticationMode(true, true, true);
-    BLESecurity::setCapability(ESP_IO_CAP_KBDISP);
+
+    // Taken from schoolpost/BlueMagic32, which is proven against the BMPCC4K,
+    // after my own guess at this failed to connect at all.
+    //
+    // IO capability decides the pairing association model, and it is the whole
+    // difference.  KEYBOARD_ONLY means "the peer displays, I type" — Passkey
+    // Entry, which is this camera's flow.  KEYBOARD_DISPLAY, which I had,
+    // claims both and negotiates Numeric Comparison instead; the camera will
+    // not do that, and because encryption is required at connect time the link
+    // is dropped before pairing ever appears on the camera's screen.  That is
+    // exactly what the rig showed: "connect failed", camera showing nothing.
+    //
+    // MITM is NOT requested for the same reason BlueMagic32 does not request
+    // it — SC + bonding with keyboard-only already yields passkey entry.
+    BLESecurity::setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
+    BLESecurity::setCapability(ESP_IO_CAP_IN);
+    BLESecurity::setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
     BLEScan *scan = BLEDevice::getScan();
+    scan->clearResults();
     scan->setAdvertisedDeviceCallbacks(new BcScanCb());
     scan->setActiveScan(true);
     scan->setInterval(100);
@@ -235,17 +250,11 @@ static void ble_cam_spike_poll() {
             _bc_client = BLEDevice::createClient();
             _bc_client->setClientCallbacks(new BcClientCb());
         }
-        // Two attempts, because a wrong address type fails silently at this end
-        // and never reaches the camera.  The advertised type first, then the
-        // other one — cheap, and it removes a whole class of cause.
-        uint8_t at = _bc_found->getAddressType();
-        bool ok = _bc_client->connect(_bc_found->getAddress(), at, 8000);
-        if (!ok) {
-            uint8_t alt = at ? 0 : 1;
-            Serial.printf("[BLECAM] connect failed as addrtype %u — retrying as %u\n",
-                          (unsigned)at, (unsigned)alt);
-            ok = _bc_client->connect(_bc_found->getAddress(), alt, 8000);
-        }
+        // Plain address, as BlueMagic32 does.  The address-type retry added
+        // earlier was chasing the wrong fault — the addresses here are public
+        // (addrtype 0) and the failure was the security negotiation, not
+        // addressing.
+        bool ok = _bc_client->connect(_bc_found->getAddress());
         if (!ok) {
             Serial.println("[BLECAM] connect failed both address types.");
             if (!_bc_found->isConnectable())
