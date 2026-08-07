@@ -128,9 +128,20 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice dev) override {
         if (!dev.haveServiceUUID()) return;
         if (!dev.isAdvertisingService(BLEUUID(BLECAM_SERVICE))) return;
-        Serial.printf("[BLECAM] found \"%s\" %s (%d dBm)\n",
+        // "connect failed" on its own is useless — it was, on the rig.  These
+        // four fields separate the causes that look identical from outside:
+        //   connectable=0  the camera is broadcasting, not accepting.  Nothing
+        //                  we do on this side will help; it needs putting into
+        //                  a state where it accepts a central.
+        //   addrtype 1     a random address.  connect() must be told, or it
+        //                  tries the wrong type and fails without reaching the
+        //                  camera — which matches "no sign of it at the camera".
+        Serial.printf("[BLECAM] found \"%s\" %s | rssi %d | addrtype %u | "
+                      "advtype %u | connectable %d | payload %u B\n",
                       dev.getName().c_str(), dev.getAddress().toString().c_str(),
-                      dev.getRSSI());
+                      dev.getRSSI(), (unsigned)dev.getAddressType(),
+                      (unsigned)dev.getAdvType(), (int)dev.isConnectable(),
+                      (unsigned)dev.getPayloadLength());
         if (_bc_found) delete _bc_found;
         _bc_found = new BLEAdvertisedDevice(dev);
         BLEDevice::getScan()->stop();
@@ -203,8 +214,28 @@ static void ble_cam_spike_poll() {
             _bc_client = BLEDevice::createClient();
             _bc_client->setClientCallbacks(new BcClientCb());
         }
-        if (!_bc_client->connect(_bc_found)) {
-            Serial.println("[BLECAM] connect failed");
+        // Two attempts, because a wrong address type fails silently at this end
+        // and never reaches the camera.  The advertised type first, then the
+        // other one — cheap, and it removes a whole class of cause.
+        uint8_t at = _bc_found->getAddressType();
+        bool ok = _bc_client->connect(_bc_found->getAddress(), at, 8000);
+        if (!ok) {
+            uint8_t alt = at ? 0 : 1;
+            Serial.printf("[BLECAM] connect failed as addrtype %u — retrying as %u\n",
+                          (unsigned)at, (unsigned)alt);
+            ok = _bc_client->connect(_bc_found->getAddress(), alt, 8000);
+        }
+        if (!ok) {
+            Serial.println("[BLECAM] connect failed both address types.");
+            if (!_bc_found->isConnectable())
+                Serial.println("[BLECAM]   advertisement is NOT connectable — the camera "
+                               "is broadcasting, not accepting. Nothing this end can fix.");
+            else
+                Serial.println("[BLECAM]   it says it is connectable, so something is "
+                               "refusing us: another central still bonded/connected "
+                               "(close the Blackmagic app, BT off on that device, "
+                               "power-cycle the camera) is much the most likely.");
+            delete _bc_found; _bc_found = nullptr;   // rescan, the address may be rotating
             return;
         }
         BLERemoteService *svc = _bc_client->getService(BLEUUID(BLECAM_SERVICE));
