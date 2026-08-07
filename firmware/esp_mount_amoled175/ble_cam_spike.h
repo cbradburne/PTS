@@ -18,19 +18,27 @@
 // settled.
 //
 //   HOW TO RUN THE MEASUREMENT
-//   1. Flash one mount normally.  Let it settle, then take 30 minutes of
-//      NODE HEALTH from comms.log — that is the BLE-off baseline.  Mount 1 is
-//      the best subject: direct to the hub, and its numbers are clean.
-//   2. Reflash the same mount with:
+//   Use whichever mount actually carries a camera — that constraint wins over
+//   any preference about which link is cleanest.
+//
+//   1. With a NORMAL build on that mount, in the position it will stay in, take
+//      ~30 minutes of NODE HEALTH from comms.log.  That is the BLE-off baseline.
+//   2. Reflash the SAME mount, in the SAME position, with:
 //        BLE_CAM=1 BLE_CAM_PIN=<6 digits from the camera> tools/build.sh flash amoled
 //   3. Confirm from the mount's serial that it reaches CONNECTED and that
-//      [BLECAM] keeps reporting notifications.  A link that silently failed to
-//      connect would show no impact and would look like good news.
-//   4. Take another 30 minutes of NODE HEALTH and compare txfail/min.
+//      [BLECAM] keeps reporting a rising notification count.  A link that
+//      silently failed to connect shows no impact and looks like good news.
+//   4. Take another ~30 minutes and compare txfail/min.
 //
-//   Compare like with like: same mount, same position, same rig activity.
-//   txfail is per-minute, so equal window lengths matter less than equal
-//   conditions.
+//   The baseline must be FRESH.  txfail depends on where the mount is and
+//   whether it reaches the hub directly or through a satellite, so a figure
+//   from before a move — or from when it was on a different path — is not a
+//   baseline, it is a different experiment.  A mount on a satellite is a
+//   perfectly good subject; its txfail simply describes the mount-to-satellite
+//   hop rather than mount-to-hub.
+//
+//   Same mount, same position, same path, same rig activity.  Equal window
+//   lengths matter less than equal conditions, since txfail is per-minute.
 //
 // Default OFF, and a no-op when off — nothing here links into a normal build.
 // ---------------------------------------------------------------------------
