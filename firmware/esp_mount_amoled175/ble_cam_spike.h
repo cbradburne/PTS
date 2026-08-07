@@ -51,7 +51,13 @@
 
 #if !BLE_CAM_SPIKE
 
-static inline void ble_cam_spike_setup() {}
+// One line, on purpose.  A build without the flag is silent and behaves
+// perfectly normally, so "no [BLECAM] output" and "the spike is not in this
+// binary" look identical from a serial monitor — that ambiguity has now cost
+// two flash-and-test rounds.  Cheaper to say so than to work it out again.
+static inline void ble_cam_spike_setup() {
+    Serial.println("[BLECAM] spike NOT compiled in (build with BLE_CAM=1 or 2)");
+}
 static inline void ble_cam_spike_poll()  {}
 
 #else
@@ -318,7 +324,20 @@ static void ble_cam_spike_setup() {
     esp_wifi_stop();
     delay(200);
 #endif
-    Serial.println("[BLECAM] SPIKE BUILD — measuring BLE/ESP-NOW coexistence");
+    // The task watchdog is switched OFF for the whole spike build.
+    //
+    // Releasing loopTask from it was not enough: connect() then starved the
+    // IDLE1 task instead and the watchdog fired on that —
+    //   task 'IDLE1' faulted ... Task watchdog got triggered
+    // which is the same crash wearing a different name.  Whatever the BLE
+    // connect does to this core, it does not leave the idle task enough room.
+    //
+    // A spike build is a bench diagnostic — BLE_CAM=2 already refuses to talk
+    // to a hub at all — so the watchdog is protecting nothing here, and it is
+    // the only thing standing between us and reading the connect's actual
+    // error.  It stays exactly as it was in every normal build.
+    esp_task_wdt_deinit();
+    Serial.println("[BLECAM] SPIKE BUILD — task watchdog OFF for this build");
     BLEDevice::init("PTS-Mount");
     BLEDevice::setPower(ESP_PWR_LVL_P9);          // as BlueMagic32 does
     BLEDevice::setSecurityCallbacks(new BcSecCb());
