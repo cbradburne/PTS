@@ -57,6 +57,7 @@ static inline void ble_cam_spike_poll()  {}
 #else
 
 #include <esp_wifi.h>
+#include <esp_task_wdt.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
@@ -164,7 +165,28 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
         // that name is the only thing here that identifies it beyond doubt.
         // Chasing the wrong device is why the camera never showed a pairing
         // code: nothing was ever talking to it.
+        // getName() returns only the COMPLETE local name (AD type 0x09).  This
+        // camera advertises a SHORTENED one (0x08), so getName() was empty and
+        // the name looked absent — it was there the whole time:
+        //   1E 08 436F6C696E20424D504343  ->  "Colin BMPCC"
         String nm = dev.getName();
+        if (!nm.length()) {
+            uint8_t *pl = dev.getPayload();
+            size_t   pn = dev.getPayloadLength();
+            for (size_t i = 0; i + 1 < pn; ) {
+                uint8_t fl = pl[i];
+                if (!fl || i + fl >= pn + 1) break;
+                uint8_t ty = pl[i + 1];
+                if ((ty == 0x08 || ty == 0x09) && fl > 1) {
+                    char t[27]; uint8_t n = fl - 1;
+                    if (n > sizeof(t) - 1) n = sizeof(t) - 1;
+                    memcpy(t, pl + i + 2, n); t[n] = 0;
+                    nm = String(t);
+                    break;
+                }
+                i += fl + 1;
+            }
+        }
         bool svc = dev.haveServiceUUID() &&
                    dev.isAdvertisingService(BLEUUID(BLECAM_SERVICE));
         bool named = nm.length() && (nm.indexOf(BLECAM_NAME) >= 0);
@@ -327,10 +349,10 @@ static bool _bc_chosen = false;
 static bool bc_choose() {
     if (!_bc_ncand) { Serial.println("[BLECAM] scan found nothing at all"); return false; }
 
-    // Match on the SERVICE, not the name.  The camera does not advertise its
-    // name at all — "Colin BMPCC" lives in a GATT characteristic that can only
-    // be read after connecting, which is how BlueMagic32 gets it.  Chasing the
-    // advertised name was chasing something that was never going to be there.
+    // Match on the SERVICE.  The name is now recovered from the raw payload as
+    // well and shown in the list, but the service UUID is the reliable
+    // identifier: a camera could be renamed to anything, and 0x1800 is what
+    // getServiceUUID() returns for this one anyway.
     int only_named = -1, n_named = 0;
     for (uint8_t i = 0; i < _bc_ncand; i++)
         if (_bc_cand[i].svc) { only_named = i; n_named++; }
@@ -399,7 +421,15 @@ static void ble_cam_spike_poll() {
         // earlier was chasing the wrong fault — the addresses here are public
         // (addrtype 0) and the failure was the security negotiation, not
         // addressing.
+        // connect() blocks for longer than the task watchdog allows, and this runs
+        // on loopTask, which is subscribed to it.  Every attempt was ending in
+        //   "Task watchdog got triggered ... loopTask (CPU 1)" -> reboot
+        // which surfaced as a connect failure and looked like the camera
+        // refusing us.  It was this end crashing before the camera ever
+        // answered.  Leave the watchdog for the duration and rejoin after.
+        esp_task_wdt_delete(NULL);
         bool ok = _bc_client->connect(_bc_pick_addr);
+        esp_task_wdt_add(NULL);
         if (!ok) {
             Serial.println("[BLECAM] connect failed — picking again from a fresh scan.");
             _bc_chosen = false;
