@@ -126,6 +126,20 @@ static uint32_t              _bc_retry_ms  = 0;
 static uint32_t              _bc_since_ms  = 0;
 static int                   _bc_best_rssi = -999;
 static bool                  _bc_by_name   = false;
+static BLEAddress            _bc_pick_addr;
+
+// Every device the scan turned up, so a human can pick one.
+//
+// Auto-matching was guessing — first by service UUID, which found a nameless
+// device that was not the camera at all, then by name, which only works if the
+// name is what I assumed.  A numbered list needs no assumption: the operator
+// reads the camera's Bluetooth screen and picks the matching line.  An exact
+// name match still auto-selects, so once it is known to work this stops
+// needing a human.
+#define BC_MAX_CAND 12
+struct BcCand { uint8_t mac[6]; char name[26]; int16_t rssi; bool svc; bool named; };
+static BcCand  _bc_cand[BC_MAX_CAND];
+static uint8_t _bc_ncand = 0;
 // The name from the camera's Bluetooth menu.  Substring, so "BMPCC" matches
 // "Colin BMPCC".  Override at build time if yours is named otherwise.
 #ifndef BLECAM_NAME
@@ -153,8 +167,20 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
         Serial.printf("[BLECAM]  seen \"%s\" %s %d dBm%s%s\n",
                       nm.c_str(), dev.getAddress().toString().c_str(),
                       dev.getRSSI(), svc ? " [svc]" : "", named ? " [NAME MATCH]" : "");
+        // Remembered whether or not it looks like a camera: the whole point is
+        // that our idea of "looks like a camera" has been wrong twice.
+        bool dup = false;
+        for (uint8_t i = 0; i < _bc_ncand; i++)
+            if (memcmp(_bc_cand[i].mac, dev.getAddress().getNative(), 6) == 0) {
+                _bc_cand[i].rssi = dev.getRSSI(); dup = true; break;
+            }
+        if (!dup && _bc_ncand < BC_MAX_CAND) {
+            BcCand &c = _bc_cand[_bc_ncand++];
+            memcpy(c.mac, dev.getAddress().getNative(), 6);
+            snprintf(c.name, sizeof(c.name), "%s", nm.c_str());
+            c.rssi = dev.getRSSI(); c.svc = svc; c.named = named;
+        }
         if (!named && !svc) return;
-        // A name match outranks a service match — see above.
         if (_bc_found && _bc_by_name && !named) return;
         if (named && !_bc_by_name) { _bc_best_rssi = -999; _bc_by_name = true; }
         // "connect failed" on its own is useless — it was, on the rig.  These
@@ -290,23 +316,73 @@ static void ble_cam_spike_setup() {
     scan->setWindow(80);
 }
 
+// Print what was found and let the operator pick.  Returns true once _bc_found
+// holds a choice.  Auto-selects a single name match without asking, so this
+// stops needing a human as soon as the name is known to be right.
+static bool _bc_chosen = false;
+
+static bool bc_choose() {
+    if (!_bc_ncand) { Serial.println("[BLECAM] scan found nothing at all"); return false; }
+
+    int only_named = -1, n_named = 0;
+    for (uint8_t i = 0; i < _bc_ncand; i++)
+        if (_bc_cand[i].named) { only_named = i; n_named++; }
+
+    Serial.println("\n[BLECAM] ---- devices in range ----");
+    for (uint8_t i = 0; i < _bc_ncand; i++) {
+        BcCand &c = _bc_cand[i];
+        Serial.printf("[BLECAM]  %u) %-24s %02X:%02X:%02X:%02X:%02X:%02X  %4d dBm%s%s\n",
+                      i + 1, c.name[0] ? c.name : "(no name)",
+                      c.mac[0], c.mac[1], c.mac[2], c.mac[3], c.mac[4], c.mac[5],
+                      c.rssi, c.svc ? "  [bmd-service]" : "",
+                      c.named ? "  [NAME MATCH]" : "");
+    }
+
+    int pick = -1;
+    if (n_named == 1) {
+        pick = only_named;
+        Serial.printf("[BLECAM] one name match — using %u\n", pick + 1);
+    } else {
+        Serial.printf("[BLECAM] type 1-%u and Enter (15 s, else rescan): ", _bc_ncand);
+        uint32_t deadline = millis() + 15000UL;
+        int v = 0; bool any = false;
+        while ((int32_t)(millis() - deadline) < 0) {
+            while (Serial.available()) {
+                int ch = Serial.read();
+                if (ch == '\r' || ch == '\n') { if (any) { deadline = 0; break; } continue; }
+                if (ch >= '0' && ch <= '9') { v = v * 10 + (ch - '0'); any = true; Serial.write(ch); }
+            }
+            if (!deadline) break;
+            delay(10);
+        }
+        Serial.println();
+        if (!any || v < 1 || v > _bc_ncand) { Serial.println("[BLECAM] no valid choice — rescanning"); return false; }
+        pick = v - 1;
+    }
+
+    if (_bc_found) { delete _bc_found; _bc_found = nullptr; }
+    _bc_pick_addr  = BLEAddress(_bc_cand[pick].mac);
+    _bc_best_rssi  = _bc_cand[pick].rssi;
+    _bc_chosen     = true;
+    Serial.printf("[BLECAM] chose %s (%d dBm)\n",
+                  _bc_pick_addr.toString().c_str(), _bc_best_rssi);
+    return true;
+}
+
 static void ble_cam_spike_poll() {
     uint32_t now = millis();
 
     if (!_bc_connected && (now - _bc_retry_ms) > BLECAM_RETRY_MS) {
         _bc_retry_ms = now;
-        if (!_bc_found) {
+        if (!_bc_chosen) {
             // Blocking, but only in a spike build, and only while disconnected.
             // A normal build never reaches here.
-            BLEDevice::getScan()->start(3, false);
-            return;
+            _bc_ncand = 0;
+            BLEDevice::getScan()->start(5, false);
+            if (!bc_choose()) return;
         }
-        if (_bc_best_rssi < BLECAM_WEAK_RSSI)
-            Serial.printf("[BLECAM] NOTE %d dBm is weak for a camera on this mount — "
-                          "check %s is the right one if others are in range\n",
-                          _bc_best_rssi, _bc_found->getAddress().toString().c_str());
-        Serial.printf("[BLECAM] connecting to %s (%d dBm, strongest of the scan)\n",
-                      _bc_found->getAddress().toString().c_str(), _bc_best_rssi);
+        Serial.printf("[BLECAM] connecting to %s (%d dBm)\n",
+                      _bc_pick_addr.toString().c_str(), _bc_best_rssi);
         // A fresh client per attempt, as BlueMagic32 does.  Reusing one across a
         // failed connect can leave it in a state that never succeeds again,
         // which would turn a first failure into a permanent one.
@@ -318,23 +394,16 @@ static void ble_cam_spike_poll() {
         // earlier was chasing the wrong fault — the addresses here are public
         // (addrtype 0) and the failure was the security negotiation, not
         // addressing.
-        bool ok = _bc_client->connect(_bc_found->getAddress());
+        bool ok = _bc_client->connect(_bc_pick_addr);
         if (!ok) {
-            Serial.println("[BLECAM] connect failed.");
-            if (!_bc_found->isConnectable())
-                Serial.println("[BLECAM]   advertisement is NOT connectable — the camera "
-                               "is broadcasting, not accepting. Nothing this end can fix.");
-            else
-                Serial.println("[BLECAM]   it says it is connectable, so something is "
-                               "refusing us: another central still bonded/connected "
-                               "(close the Blackmagic app, BT off on that device, "
-                               "power-cycle the camera) is much the most likely.");
-            delete _bc_found; _bc_found = nullptr; _bc_best_rssi = -999;
+            Serial.println("[BLECAM] connect failed — picking again from a fresh scan.");
+            _bc_chosen = false;
             return;
         }
         BLERemoteService *svc = _bc_client->getService(BLEUUID(BLECAM_SERVICE));
         if (!svc) {
-            Serial.println("[BLECAM] camera service missing — wrong device?");
+            _bc_chosen = false;    // wrong device — offer the list again
+            Serial.println("[BLECAM] connected, but no Blackmagic service — wrong device");
             _bc_client->disconnect();
             return;
         }
