@@ -709,20 +709,31 @@ static bool bc_choose() {
         pick = only_named;
         Serial.printf("[BLECAM] one Blackmagic camera in range — using %u\n", pick + 1);
     } else {
-        Serial.printf("[BLECAM] type 1-%u and Enter (15 s, else rescan): ", _bc_ncand);
-        uint32_t deadline = millis() + 15000UL;
+        // NON-BLOCKING.  An earlier version waited fifteen seconds here for a
+        // keystroke, on the main loop — and on a rig there is no serial monitor
+        // attached to type into, so every ambiguous scan cost fifteen seconds
+        // of dead motion control.  The rig showed it: loopmax 15002ms.
+        //
+        // Only wait if somebody is actually typing.  Nothing buffered means
+        // nobody is there, so say what was found and rescan instead of
+        // stopping the mount to wait for an operator who does not exist.
+        if (!Serial.available()) {
+            Serial.printf("[BLECAM] no single Blackmagic camera in range — "
+                          "type 1-%u while a scan result is fresh to force one, "
+                          "otherwise rescanning\n", _bc_ncand);
+            return false;
+        }
         int v = 0; bool any = false;
-        while ((int32_t)(millis() - deadline) < 0) {
-            while (Serial.available()) {
-                int ch = Serial.read();
-                if (ch == '\r' || ch == '\n') { if (any) { deadline = 0; break; } continue; }
-                if (ch >= '0' && ch <= '9') { v = v * 10 + (ch - '0'); any = true; Serial.write(ch); }
-            }
-            if (!deadline) break;
-            delay(10);
+        while (Serial.available()) {
+            int ch = Serial.read();
+            if (ch == '\r' || ch == '\n') break;
+            if (ch >= '0' && ch <= '9') { v = v * 10 + (ch - '0'); any = true; Serial.write(ch); }
         }
         Serial.println();
-        if (!any || v < 1 || v > _bc_ncand) { Serial.println("[BLECAM] no valid choice — rescanning"); return false; }
+        if (!any || v < 1 || v > _bc_ncand) {
+            Serial.println("[BLECAM] no valid choice — rescanning");
+            return false;
+        }
         pick = v - 1;
     }
 
