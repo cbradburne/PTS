@@ -428,6 +428,7 @@ class MainWindow(QMainWindow):
 
         for label, handler in [
             ("⚙  Config",   self._open_config),
+            ("◎  CC",       self._open_camera_control),
             ("◉  CV Track", self._open_cv),
         ]:
             btn = QPushButton(label)
@@ -1184,6 +1185,24 @@ class MainWindow(QMainWindow):
             self._grid.set_look_at_mode(mid, self._config.mount(mid).look_at_mode)
             # Reset cached look-at selection so stale subjects don't persist.
             self._active_la_subject[mid] = -1
+
+    def _open_camera_control(self) -> None:
+        """Blackmagic camera control over each mount's BLE link.
+
+        Modeless and remembered, like the CV window: pressing autofocus while
+        watching the shot is the whole point, and a modal dialog would sit on
+        top of the thing being focused.
+        """
+        from .dialogs.camera_control_dialog import CameraControlDialog
+        if not getattr(self, "_cc_dialog", None):
+            ids    = [m.mount_id for m in self._mm.all_states()]
+            labels = {i: self._config.mount_label(i) for i in ids}
+            self._cc_dialog = CameraControlDialog(ids, labels, self._mm,
+                                                  self._bridge, self)
+            self._cc_dialog.finished.connect(
+                lambda _: setattr(self, "_cc_dialog", None))
+        self._cc_dialog.show()
+        self._cc_dialog.raise_()
 
     def _open_cv(self) -> None:
         from .cv_window import CVWindow

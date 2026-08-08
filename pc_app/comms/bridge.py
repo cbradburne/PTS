@@ -299,6 +299,8 @@ class Bridge:
         self._last_hub_restart_t: float = 0.0   # paces CMD_HUB_RESTART escalation
         # last uptime seen per node name — a decrease means it restarted
         self._node_uptime: dict[str, int] = {}
+        # mount_id -> BLE camera link state, from CMD_HEALTH; absent = no camera build
+        self._cam_ble: dict[int, bool] = {}
         # Same thing across restarts of THIS app: {node: {uptime_s, reset, at}}.
         self._node_state_prev: dict = self._node_state_load()
         self._node_state_cur:  dict = {}
@@ -681,7 +683,14 @@ class Bridge:
         # be compared against.
         ble = ""
         if h.flags & HEALTH_FLAG_BLE_BUILD:
-            ble = " | BLE PAIRED" if (h.flags & HEALTH_FLAG_BLE_LINK) else " | BLE down"
+            linked = bool(h.flags & HEALTH_FLAG_BLE_LINK)
+            ble = " | BLE PAIRED" if linked else " | BLE down"
+            # Kept so the camera-control dialog can grey a button rather than
+            # firing into a link that is not there.  A plain dict read by the
+            # UI on a timer: health arrives every 10 s, so a signal would add
+            # plumbing for an update rate nothing can perceive.
+            if 1 <= pkt.mount_id <= 5:
+                self._cam_ble[pkt.mount_id] = linked
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "
                 "loopmax %4dms | txfail %d | rssi %d | n32 %d | reset %d%s") % (
             who, h.uptime_s / 3600.0,
@@ -969,6 +978,13 @@ class Bridge:
                     oldest_mount = mt
             pending = len(self._pending_acks)
         return oldest, oldest_mount, pending
+
+    def cam_ble_link(self, mount_id: int):
+        """True/False if that mount reports a BLE camera link, None if its
+        firmware has no camera support at all — three states the UI needs to
+        tell apart, because 'no camera' and 'camera off' want different words.
+        """
+        return self._cam_ble.get(mount_id)
 
     def _hub_tx_proven_ok(self, now: float, exclude_mount: int) -> int:
         """Return a mount_id (other than exclude_mount) that has ACKed inside
