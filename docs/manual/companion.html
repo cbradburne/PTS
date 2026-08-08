@@ -75,6 +75,7 @@
       <tr><td><code>/pts/cam/N/speed/pt/inc</code> <code>/sl/inc</code></td><td>—</td><td>Cycle the preset 1→2→3→4→1</td></tr>
       <tr><td><code>/pts/cam/N/subject</code></td><td>0–7</td><td>Select look-at subject — switches live during a move</td></tr>
       <tr><td><code>/pts/cam/N/lookat</code></td><td>0 | 1</td><td>Look-at slider move to min (0) or max (1) with the selected subject</td></tr>
+      <tr><td><code>/pts/cam/N/autofocus</code></td><td>—</td><td>Instantaneous autofocus on that mount's Blackmagic camera</td></tr>
       <tr><td><code>/pts/refresh</code></td><td>—</td><td>Resend all feedback for every mount</td></tr>
       <tr><td><code>/pts/cam/N/refresh</code></td><td>—</td><td>Resend all feedback for mount N</td></tr>
     </table>
@@ -87,6 +88,15 @@
     creep the mount instead of moving it. Speed comes from the active preset.
     Each direction owns one axis, so holding <em>left</em> and <em>up</em> together
     gives a diagonal and releasing one leaves the other running.</div>
+
+    <div class="note"><b>Camera control</b>
+    <code>/pts/cam/N/autofocus</code> fires instantaneous autofocus on the
+    Blackmagic camera attached to that mount, over the mount's own Bluetooth
+    link — no SDI cable and no converter. Fire-and-forget: the Blackmagic
+    protocol has no acknowledgement, so nothing comes back to say the lens
+    moved, and a camera that is off or unpaired simply has the command dropped
+    at the mount. The PC app's <strong>CC</strong> panel shows which cameras are
+    reachable.</div>
 
     <h2>Feedback — buttons that show the rig</h2>
     <p>The hub sends state back, so a Stream Deck can show which shot a camera is

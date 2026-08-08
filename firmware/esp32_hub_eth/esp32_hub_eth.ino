@@ -2340,6 +2340,24 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
             }
         }
 
+    } else if (strcmp(verb, "autofocus") == 0) {
+        // Instantaneous autofocus on that mount's Blackmagic camera.
+        //
+        // The bytes are the Blackmagic command itself and the hub does not
+        // build them from parts — CMD_CAM_CONTROL is a verbatim pipe all the
+        // way to the camera, so the one thing the hub must not do is
+        // reinterpret them.  Same sequence the PC app sends, and the same one
+        // schoolpost/BlueMagic32 is known to work with on a Pocket 4K:
+        //   FF 04 00 00  00 01 01 00  00 00 00 00
+        //    |  |         |  | lens category / instantaneous autofocus
+        //    |  payload length
+        //    destination 255 = the camera on this mount
+        static const uint8_t AF[12] = { 0xFF, 0x04, 0x00, 0x00,
+                                        0x00, 0x01, 0x01, 0x00,
+                                        0x00, 0x00, 0x00, 0x00 };
+        Serial.printf("[OSC] CAM %d autofocus\n", mid);
+        ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, AF, sizeof(AF));
+
     } else if (strcmp(verb, "refresh") == 0) {
         _fb_valid[idx] = false;                 // this mount only
     } else if (strcmp(verb, "lookat") == 0 && argc >= 1) {

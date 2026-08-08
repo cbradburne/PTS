@@ -48,6 +48,7 @@ against either.  QLab network cues likewise.
 | `/pts/cam/N/speed/sl/inc`  | –                 | Slider speed 1→2→3→4→1 (wraps) |
 | `/pts/cam/N/subject`     | `0-7`               | Select look-at subject (switches live mid-move) |
 | `/pts/cam/N/lookat`      | `0` (◀ min) / `1` (▶ max) | Look-at slider move with the selected subject |
+| `/pts/cam/N/autofocus`   | –                   | Instantaneous autofocus on that mount's Blackmagic camera |
 | `/pts/refresh`           | –                   | Resend all feedback for every mount |
 | `/pts/cam/N/refresh`     | –                   | Resend all feedback for mount N |
 
@@ -149,6 +150,18 @@ cannot move.  The hub also ignores `speed/sl/...` and `jog/slide/...` for those
 mounts, so a button pressed against a rail-less mount does nothing rather than
 walking a number that controls nothing.  This matches the web app, which has
 always zeroed the slider axis for a mount without one.
+
+### Camera control
+
+`/pts/cam/N/autofocus` triggers instantaneous autofocus on the Blackmagic camera
+attached to that mount, over the mount's own Bluetooth link — no SDI cable and
+no converter.
+
+It is fire-and-forget: the Blackmagic protocol has no acknowledgement, so
+nothing comes back to say the lens moved.  If a camera is off, asleep or not
+paired, the command is simply dropped at the mount.  Whether a mount's camera
+link is up shows in the PC app's **CC** panel and in `comms.log` as
+`BLE PAIRED`.
 
 `/pts/refresh` asks for that full send on demand.  Bind it to a Companion
 startup trigger, or to a button, for the case the automatic paths do not cover:

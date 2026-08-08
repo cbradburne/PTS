@@ -271,6 +271,7 @@ def build():
         ["/pts/cam/N/speed/pt/inc  /sl/inc", "-", "Cycle the preset 1-2-3-4-1", False],
         ["/pts/cam/N/subject", "0-7", "Select look-at subject; switches live during a move", False],
         ["/pts/cam/N/lookat", "0 or 1", "Look-at slider move to min (0) or max (1) with the selected subject", False],
+        ["/pts/cam/N/autofocus", "-", "Instantaneous autofocus on that mount's Blackmagic camera (Bluetooth)", False],
         ["/pts/refresh", "-", "Resend all feedback for every mount", False],
         ["/pts/cam/N/refresh", "-", "Resend all feedback for mount N", False],
     ]
