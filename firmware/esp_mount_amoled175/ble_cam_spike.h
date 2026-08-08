@@ -112,6 +112,7 @@ static inline void ble_cam_spike_setup() {
     Serial.println("[BLECAM] spike NOT compiled in (build with BLE_CAM=1 or 2)");
 }
 static inline void ble_cam_spike_poll()  {}
+static inline uint8_t ble_cam_health_flags() { return 0; }
 
 #else
 
@@ -548,6 +549,14 @@ static bool bc_choose() {
     _bc_chosen     = true;
     Serial.printf("[BLECAM] chose %s (%d dBm)\n", _bc_pick_text, _bc_best_rssi);
     return true;
+}
+
+// Reported in every CMD_HEALTH, because a mount on a rig has no readable
+// serial port — the enclosure is shut and the Teensy owns the USB cable — so
+// [BLECAM] says nothing where the measurement actually happens.  These two bits
+// land in comms.log beside txfail, which is what they have to be compared with.
+static uint8_t ble_cam_health_flags() {
+    return HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0);
 }
 
 static void ble_cam_spike_poll() {

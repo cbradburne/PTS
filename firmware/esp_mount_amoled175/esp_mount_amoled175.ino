@@ -632,7 +632,7 @@ static void send_health(bool anomaly) {
     h.loop_max_ms   = _health_loop_max_ms;
     h.tx_fail       = (uint16_t)_espnow_fail_total;
     h.rssi          = _last_rssi;
-    h.flags         = anomaly ? 0x01 : 0x00;
+    h.flags         = (anomaly ? HEALTH_FLAG_ANOMALY : 0) | ble_cam_health_flags();
     h.node_u32      = _reinit_count;
     uint8_t p[24];
     encode_health_payload(p, &h);

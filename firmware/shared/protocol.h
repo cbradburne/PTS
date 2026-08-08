@@ -219,6 +219,17 @@ typedef enum : uint8_t {
 #define HEALTH_LOOP_STALL_MS        500     // worst loop iteration above this → anomaly
 #define HEALTH_TXFAIL_JUMP            8     // tx-fail delta since last send → anomaly
 
+// PayloadHealth.flags bits.  Spare bits in a byte that already ships every 10 s
+// from every node — no payload growth, no protocol version to think about.
+#define HEALTH_FLAG_ANOMALY    0x01   // this send was triggered by a threshold
+// bit1/bit2: BLE camera link on a mount bridge.  A mount on a rig cannot have
+// its serial read — the USB port is inside the enclosure and the Teensy owns
+// the cable — so [BLECAM] output is invisible exactly where the measurement has
+// to happen.  These two bits put the state in comms.log with the rest of the
+// telemetry, which is where it can be correlated with txfail anyway.
+#define HEALTH_FLAG_BLE_BUILD  0x02   // this firmware has the BLE spike compiled in
+#define HEALTH_FLAG_BLE_LINK   0x04   // ...and the camera is currently paired
+
 // ---------------------------------------------------------------------------
 // Axis / group identifiers
 // ---------------------------------------------------------------------------
@@ -360,7 +371,7 @@ typedef struct __attribute__((packed)) {
     uint16_t loop_max_ms;     // worst loop/task iteration since the last report
     uint16_t tx_fail;         // cumulative link send failures (wraps; deltas matter)
     int8_t   rssi;            // last link RSSI where meaningful, else 0
-    uint8_t  flags;           // bit0 = anomaly-triggered send
+    uint8_t  flags;           // HEALTH_FLAG_* — bit0 anomaly, bit1/2 BLE camera
     uint32_t node_u32;        // node-specific: hub=ghost_rx_drops, bridge=reinit count
 } PayloadHealth;              // wire: 24 bytes, all multi-byte fields big-endian
                               // (build_health() is with the other builders below)

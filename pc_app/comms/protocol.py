@@ -138,6 +138,12 @@ class Cmd(IntEnum):
 # CMD_HEALTH node_type values (payload byte [0])
 HEALTH_NODE_NAMES = {0: "hub", 1: "bridge", 2: "teensy", 3: "display"}
 
+# PayloadHealth.flags bits — spare bits in a byte every node already sends
+# every 10 s, so no payload growth and no protocol version to think about.
+HEALTH_FLAG_ANOMALY   = 0x01
+HEALTH_FLAG_BLE_BUILD = 0x02   # mount firmware has the BLE camera spike in it
+HEALTH_FLAG_BLE_LINK  = 0x04   # ...and the camera is currently paired
+
 
 class Axis(IntEnum):
     PAN    = 0
@@ -731,7 +737,7 @@ class HealthPayload:
     loop_max_ms:   int    # worst loop/task iteration since last report
     tx_fail:       int    # cumulative link send failures (wraps)
     rssi:          int
-    flags:         int    # bit0 = anomaly-triggered send
+    flags:         int    # HEALTH_FLAG_* bits
     node_u32:      int    # node-specific counter (hub=ghost drops, bridge=reinits)
 
     @property

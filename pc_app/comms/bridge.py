@@ -30,7 +30,8 @@ from typing import Callable, Optional
 import serial
 import serial.tools.list_ports
 
-from .protocol import PacketReader, Packet, Cmd, decode_health, ParseError, build_packet
+from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
+                       build_packet, HEALTH_FLAG_BLE_BUILD, HEALTH_FLAG_BLE_LINK)
 
 log = logging.getLogger(__name__)
 
@@ -674,11 +675,18 @@ class Bridge:
             who = "display"
         else:
             who = f"cam{pkt.mount_id}/{h.node_name}"
+        # BLE camera state, on builds that have it.  A mount on a rig has no
+        # readable serial port, so this is the only place its BLE link is
+        # visible — and it sits next to txfail, which is exactly what it has to
+        # be compared against.
+        ble = ""
+        if h.flags & HEALTH_FLAG_BLE_BUILD:
+            ble = " | BLE PAIRED" if (h.flags & HEALTH_FLAG_BLE_LINK) else " | BLE down"
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "
-                "loopmax %4dms | txfail %d | rssi %d | n32 %d | reset %d") % (
+                "loopmax %4dms | txfail %d | rssi %d | n32 %d | reset %d%s") % (
             who, h.uptime_s / 3600.0,
             h.free_heap // 1024, h.min_free_heap // 1024,
-            h.loop_max_ms, h.tx_fail, h.rssi, h.node_u32, h.reset_reason)
+            h.loop_max_ms, h.tx_fail, h.rssi, h.node_u32, h.reset_reason, ble)
         # Any node whose uptime goes BACKWARDS has restarted.  Derived from
         # CMD_HEALTH rather than the hub's USB byte counter, so it works on
         # every transport and for every node — the counter-based HUB REBOOTED
