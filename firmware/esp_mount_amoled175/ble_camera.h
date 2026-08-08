@@ -84,6 +84,7 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <BLESecurity.h>
+#include <host/ble_store.h>
 
 // Published by Blackmagic in the camera's "Developer Information" manual
 // section.  Same Camera Control Protocol the SDI path carries, so a command
@@ -153,6 +154,28 @@ static uint32_t bc_prompt_passkey() {
 
 #define CAM_REPORT_MS   30000UL
 #define CAM_RETRY_MS    10000UL
+
+// A paired mount has exactly ONE camera it should ever talk to, and NimBLE
+// already knows which: the bond is in NVS, keyed by the camera's address.
+// Preferring it outranks both name and signal strength, and it is what makes a
+// five-camera rig work at all — see bc_choose().
+static int bc_bonded_count() {
+    ble_addr_t peers[8]; int n = 0;
+    if (ble_store_util_bonded_peers(peers, &n, 8) != 0) return 0;
+    return n;
+}
+// nat is the 6-byte little-endian address, the same order ble_addr_t.val uses.
+static bool bc_is_bonded(const uint8_t *nat) {
+    ble_addr_t peers[8]; int n = 0;
+    if (ble_store_util_bonded_peers(peers, &n, 8) != 0) return false;
+    for (int i = 0; i < n; i++)
+        if (memcmp(peers[i].val, nat, 6) == 0) return true;
+    return false;
+}
+
+// Declared here because bc_gap_event() clears it when it lands on the wrong
+// camera, and the scan code that owns it is defined further down.
+static bool _bc_chosen = false;
 
 static BLEAdvertisedDevice  *_bc_found  = nullptr;
 static volatile bool         _bc_connected = false;
@@ -366,9 +389,20 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
             // for as long as the rig is powered.  Latch it, say it once, and let
             // the health flag carry the instruction to the PC app.
             (void)io;
-            _bc_unpaired = true;
-            Serial.println("[CAM] camera is NOT PAIRED with this mount — no more "
-                           "attempts. Reflash with CAM_PAIR=1 on a bench, once.");
+            if (bc_bonded_count() == 0) {
+                // Never paired to anything: no reconnect can create a bond, so
+                // stop rather than reprompt the camera every 10 s for ever.
+                _bc_unpaired = true;
+                Serial.println("[CAM] camera is NOT PAIRED with this mount — no more "
+                               "attempts. Reflash with CAM_PAIR=1 on a bench, once.");
+            } else {
+                // We ARE paired, just not to this camera — a neighbour's, picked
+                // while ours was out of range.  Recoverable, so drop the choice
+                // and rescan instead of latching a working mount out of service.
+                Serial.println("[CAM] that is not our camera (no bond with it) — "
+                               "dropping it and rescanning");
+                _bc_chosen = false;
+            }
             ble_gap_terminate(ev->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
 #endif
         } else {
@@ -453,7 +487,8 @@ static char                  _bc_pick_text[20] = {};
 // in order reverses the address: the scan line said 90:fd:9f:b4:50:df and the
 // menu said DF:50:B4:9F:FD:90 for the same device.  toString() is the form
 // everything else in the system uses, and BLEAddress can be rebuilt from it.
-struct BcCand { char addr[20]; char name[26]; int16_t rssi; bool svc; bool named; };
+struct BcCand { char addr[20]; char name[26]; uint8_t nat[6];
+                int16_t rssi; bool svc; bool named; };
 static BcCand  _bc_cand[BC_MAX_CAND];
 static uint8_t _bc_ncand = 0;
 // The name from the camera's Bluetooth menu.  Substring, so "BMPCC" matches
@@ -514,6 +549,7 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
             BcCand &c = _bc_cand[_bc_ncand++];
             snprintf(c.addr, sizeof(c.addr), "%s", as.c_str());
             snprintf(c.name, sizeof(c.name), "%s", nm.c_str());
+            memcpy(c.nat, dev.getAddress().getNative(), 6);
             c.rssi = dev.getRSSI(); c.svc = svc; c.named = named;
         }
         if (!named && !svc) return;
@@ -639,10 +675,7 @@ static void ble_cam_setup() {
     scan->setWindow(80);
 }
 
-// Print what was found and let the operator pick.  Returns true once _bc_found
-// holds a choice.  Auto-selects a single name match without asking, so this
-// stops needing a human as soon as the name is known to be right.
-static bool _bc_chosen = false;
+// Print what was found and pick.  Returns true once a choice is held.
 
 static volatile bool _bc_scanning   = false;
 static volatile bool _bc_scan_ready = false;
@@ -666,16 +699,40 @@ static bool bc_choose() {
     for (uint8_t i = 0; i < _bc_ncand; i++)
         if (_bc_cand[i].svc) { only_named = i; n_named++; }
 
+    // The bonded camera wins outright, however many are in range.
+    //
+    // Without this, a rig is unusable: the auto-pick below only fires when
+    // exactly ONE Blackmagic camera is visible, so with five mounts each
+    // carrying one, every mount would fall through to the keystroke prompt —
+    // and there is no serial monitor on a rig to type into, so every mount
+    // would rescan for ever and none would ever connect.  It worked on the
+    // bench only because there was a single camera in the room.
+    //
+    // Strongest-of-the-bonded rather than first: a mount re-paired to a
+    // replacement camera keeps the old bond in NVS, and the one actually
+    // bolted to it is the near one.
+    int bonded_i = -1, n_bonded = 0;
+    for (uint8_t i = 0; i < _bc_ncand; i++)
+        if (bc_is_bonded(_bc_cand[i].nat)) {
+            n_bonded++;
+            if (bonded_i < 0 || _bc_cand[i].rssi > _bc_cand[bonded_i].rssi) bonded_i = i;
+        }
+
     Serial.println("\n[CAM] ---- devices in range ----");
     for (uint8_t i = 0; i < _bc_ncand; i++) {
         BcCand &c = _bc_cand[i];
         Serial.printf("[CAM]  %2u) %-26s %-18s %4d dBm%s\n",
                       i + 1, c.name[0] ? c.name : "(no name)", c.addr, c.rssi,
-                      c.svc ? "  <-- BLACKMAGIC CAMERA" : "");
+                      bc_is_bonded(c.nat) ? "  <-- PAIRED WITH THIS MOUNT"
+                                          : (c.svc ? "  <-- BLACKMAGIC CAMERA" : ""));
     }
 
     int pick = -1;
-    if (n_named == 1) {
+    if (n_bonded) {
+        pick = bonded_i;
+        Serial.printf("[CAM] paired camera in range — using %u%s\n", pick + 1,
+                      n_bonded > 1 ? " (strongest of several bonded)" : "");
+    } else if (n_named == 1) {
         pick = only_named;
         Serial.printf("[CAM] one Blackmagic camera in range — using %u\n", pick + 1);
     } else {

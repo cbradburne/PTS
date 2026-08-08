@@ -167,7 +167,13 @@ link is up shows in the PC app's **CC** panel and in `comms.log` as
 ships with camera control built in, but Bluetooth pairing needs the six-digit
 code the camera puts on screen, typed in while someone is watching — so it
 cannot happen out on a rig.  The bond is then stored on the mount and survives
-power cycles and reflashes.  A mount that has never been paired says so
+power cycles and reflashes.
+
+The bond is also how a mount knows which camera is *its own*.  With several
+cameras on a rig they all advertise the same way, so an unpaired mount has
+nothing but signal strength to go on and can reach for a neighbour's camera;
+a paired one goes straight to the camera it was paired with and ignores the
+rest.  A mount that has never been paired says so
 specifically, in the **CC** panel as *not paired* and in `comms.log` as
 `BLE NOT PAIRED` — distinct from *camera off*, because the fix is different.
 Pairing is a firmware job: see `ble_camera.h`.
