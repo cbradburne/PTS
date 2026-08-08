@@ -133,6 +133,7 @@ class Cmd(IntEnum):
     PAIR_DECIDE       = 0x9E   # client→hub, 8B: cam(1)+decision(1: 1=replace, 0=ignore)+new_mac(6)
     PAIR_FORGET       = 0x9F   # client→hub, 1B: cam — clear (unbind) that slot
     MOUNT_ROUTE       = 0xA0   # hub→clients, 5B: per-cam 0 = direct, N = via satellite N
+    CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
 
 
 # CMD_HEALTH node_type values (payload byte [0])
@@ -944,6 +945,41 @@ def pkt_get_config(mount_id: int) -> bytes:
     return build_packet(mount_id, Cmd.GET_CONFIG)
 
 
+# ── Blackmagic camera control, relayed by the mount over BLE ────────────────
+# Commands are built HERE, not on the mount.  The mount writes whatever arrives
+# straight to the camera's control characteristic without parsing it, so adding
+# a camera function is a change to this file alone — no firmware, nothing to
+# keep in sync across three codebases.
+#
+# Wire format is Blackmagic's own, from the camera manual's developer section:
+#
+#   [0] destination   255 = broadcast, i.e. the camera on that mount
+#   [1] length        bytes of command data after this 4-byte header
+#   [2] command id    0 = change configuration
+#   [3] reserved
+#   [4] category      0 = lens
+#   [5] parameter
+#   [6] data type
+#   [7] operation     0 = assign
+#   [8+] data, padded to a 4-byte boundary
+def bmd_command(category: int, parameter: int, data_type: int = 0,
+                operation: int = 0, data: bytes = b"") -> bytes:
+    body = bytes([category, parameter, data_type, operation]) + data
+    while len(body) % 4:
+        body += b"\x00"
+    return bytes([0xFF, len(body), 0x00, 0x00]) + body
+
+
+def pkt_cam_autofocus(mount_id: int) -> bytes:
+    """Instantaneous autofocus — lens category, parameter 1.
+
+    Byte-for-byte what schoolpost/BlueMagic32 sends and is known to work on a
+    Pocket Cinema Camera 4K:  FF 04 00 00 00 01 01 00 00 00 00 00
+    """
+    cmd = bmd_command(category=0, parameter=1, data_type=1) + b"\x00\x00\x00\x00"
+    return build_packet(mount_id, Cmd.CAM_CONTROL, cmd)
+
+
 def pkt_save_speeds(mount_id: int,
                     pt_presets: list[tuple[int, int]],
                     sl_presets: list[tuple[int, int]],
@@ -1156,6 +1192,7 @@ HUB_SENTINEL              = 0xFE
 MOUNT_TABLE_PAYLOAD_LEN   = 30   # 5 × MAC(6)
 PAIR_CONFLICT_PAYLOAD_LEN = 13   # cam(1) + new_mac(6) + old_mac(6)
 MOUNT_ROUTE_PAYLOAD_LEN   = 5    # one byte per cam
+CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
 
 
 def pkt_get_mount_table() -> bytes:

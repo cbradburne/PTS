@@ -113,6 +113,7 @@ static inline void ble_cam_spike_setup() {
 }
 static inline void ble_cam_spike_poll()  {}
 static inline uint8_t ble_cam_health_flags() { return 0; }
+static inline bool ble_cam_send(const uint8_t *, uint16_t) { return false; }
 
 #else
 
@@ -211,6 +212,49 @@ static uint32_t              _bc_since_ms  = 0;
 // GAP itself, with the same steps in the same order, minus the one line that
 // throws the connection away.
 static uint16_t _bc_conn = BLE_HS_CONN_HANDLE_NONE;
+// Value handle of the camera's incoming-control characteristic, found once per
+// connection.  0 = not discovered yet, and a write before then is dropped
+// rather than guessed at.
+static uint16_t _bc_ctrl_handle = 0;
+
+// GATT discovery, run after encryption because this characteristic is not
+// readable before it.  Two async steps: find the service, then the
+// characteristic inside it.
+static int bc_on_chr(uint16_t conn, const struct ble_gatt_error *err,
+                     const struct ble_gatt_chr *chr, void *) {
+    if (err->status == 0 && chr) {
+        _bc_ctrl_handle = chr->val_handle;
+        Serial.printf("[BLECAM] control characteristic ready (handle %u)\n",
+                      _bc_ctrl_handle);
+    } else if (err->status != BLE_HS_EDONE) {
+        Serial.printf("[BLECAM] characteristic discovery failed, status=%d\n",
+                      err->status);
+    }
+    return 0;
+}
+
+static int bc_on_svc(uint16_t conn, const struct ble_gatt_error *err,
+                     const struct ble_gatt_svc *svc, void *) {
+    if (err->status == 0 && svc) {
+        ble_uuid_any_t u;
+        ble_uuid_from_str(&u, BLECAM_INCOMING);
+        ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
+                                    &u.u, bc_on_chr, nullptr);
+    } else if (err->status != BLE_HS_EDONE) {
+        Serial.printf("[BLECAM] service discovery failed, status=%d\n", err->status);
+    }
+    return 0;
+}
+
+// Relay a Blackmagic command to the camera, byte for byte.  The mount never
+// interprets it — see CMD_CAM_CONTROL in protocol.h for why.
+bool ble_cam_send(const uint8_t *cmd, uint16_t len) {
+    if (!_bc_connected || !_bc_ctrl_handle) return false;
+    if (!len || len > CAM_CONTROL_MAX_LEN) return false;
+    int rc = ble_gattc_write_flat(_bc_conn, _bc_ctrl_handle, cmd, len, nullptr, nullptr);
+    if (rc) Serial.printf("[BLECAM] write rc=%d\n", rc);
+    return rc == 0;
+}
 
 static int bc_gap_event(struct ble_gap_event *ev, void *) {
     switch (ev->type) {
@@ -254,13 +298,19 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         if (ev->enc_change.status == 0) {
             _bc_connected = true;
             _bc_since_ms  = millis();
+            // Only now: the control characteristic is not reachable before the
+            // link is encrypted.
+            ble_uuid_any_t u;
+            ble_uuid_from_str(&u, BLECAM_SERVICE);
+            ble_gattc_disc_svc_by_uuid(_bc_conn, &u.u, bc_on_svc, nullptr);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         Serial.printf("[BLECAM] disconnected (reason %d)\n", ev->disconnect.reason);
-        _bc_conn      = BLE_HS_CONN_HANDLE_NONE;
-        _bc_connected = false;
+        _bc_conn        = BLE_HS_CONN_HANDLE_NONE;
+        _bc_connected   = false;
+        _bc_ctrl_handle = 0;      // handles do not survive a connection
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:

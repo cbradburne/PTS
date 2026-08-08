@@ -29,7 +29,7 @@ from .protocol import (
     pkt_e_stop, pkt_get_status, pkt_ping,
     pkt_get_state, pkt_store_pos, pkt_clear_pos,
     pkt_set_active_preset, pkt_save_speeds, pkt_goto_slot, pkt_move_rel,
-    pkt_get_config, pkt_set_stall_threshold,
+    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
     decode_subject_list, decode_look_at_status, decode_ref_confirmed,
@@ -286,6 +286,16 @@ class MountManager(QObject):
     def send_get_config(self, mount_id: int) -> None:
         """Request speed presets and orientation from a mount."""
         self._send(pkt_get_config(mount_id))
+
+    def send_cam_autofocus(self, mount_id: int) -> None:
+        """Instantaneous autofocus on that mount's Blackmagic camera.
+
+        Fire-and-forget: the mount ACKs receiving the command, but there is no
+        acknowledgement from the CAMERA — the Blackmagic control protocol has
+        none.  Whether the camera link is up at all is in CMD_HEALTH, logged as
+        "BLE PAIRED", so a camera that is off does not look like a dead mount.
+        """
+        self._send(pkt_cam_autofocus(mount_id))
 
     def send_set_stall_threshold(self, mount_id: int, axis: Axis,
                                   threshold: int) -> None:

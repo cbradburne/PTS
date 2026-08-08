@@ -774,6 +774,18 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
     if (pkt.cmd == CMD_JOG) _last_jog_fwd_ms = _last_hub_rx_ms;  // health-send deferral
     uint8_t ack[PKT_BUF_SIZE + 4];
     esp_now_send(_hub_mac, ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
+
+    // Camera control stops here — it goes out over BLE, not down to the Teensy,
+    // which has no idea what a Blackmagic command is and would log it as a bad
+    // packet.  ACKed above either way: the ACK says the mount received the
+    // command, and whether the camera link is up is reported separately in
+    // CMD_HEALTH, so a missing camera does not look like a dead mount.
+    if (pkt.cmd == CMD_CAM_CONTROL) {
+        if (!ble_cam_send(pkt.payload, pkt.payload_len))
+            Serial.println("[BLECAM] camera command dropped — no link");
+        return;
+    }
+
     uint8_t fwd[PKT_BUF_SIZE + 4];
     Serial1.write(fwd, build_packet(fwd, pkt.mount_id, pkt.seq,
                                     pkt.cmd, pkt.payload, pkt.payload_len));

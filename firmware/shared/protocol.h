@@ -70,6 +70,10 @@
 #define MOUNT_TABLE_PAYLOAD_LEN    30   // 5 × MAC(6); an all-zero slot = unbound
 #define PAIR_CONFLICT_PAYLOAD_LEN  13   // cam(1) + new_mac(6) + old_mac(6)
 #define MOUNT_ROUTE_PAYLOAD_LEN     5   // one byte per cam: 0 = direct, N = via satellite N
+// Longest BMD camera-control command we will relay.  Theirs are a 4-byte header
+// plus payload padded to a 4-byte boundary; 40 covers everything in the
+// published protocol with room to spare, and bounds the mount's buffer.
+#define CAM_CONTROL_MAX_LEN        40
 #define PAIR_DECIDE_PAYLOAD_LEN     8   // cam(1) + decision(1) + new_mac(6)
 
 // v2 look-at subject constants
@@ -194,6 +198,33 @@ typedef enum : uint8_t {
     CMD_PAIR_DECIDE       = 0x9E,  // client→hub, 8B: cam(1)+decision(1: 1=replace/set, 0=ignore)+new_mac(6)
     CMD_PAIR_FORGET       = 0x9F,  // client→hub, 1B: cam — clear (unbind) that slot (live mount re-pairs in ~5 s)
     CMD_MOUNT_ROUTE       = 0xA0,  // hub→clients, 5B: one byte per cam — how the hub reaches it.
+
+    // ── Camera control over the mount's BLE link ────────────────────────────
+    // PC app / web app → hub → mount → Blackmagic camera.
+    //
+    // The payload is the Blackmagic Camera Control command VERBATIM — the same
+    // bytes the SDI path carries, documented in the camera's own manual.  The
+    // mount does not parse it; it writes it to the camera's incoming-control
+    // characteristic and nothing else.
+    //
+    // Deliberate.  Every future camera function — iris, zoom, white balance,
+    // record — is then a new payload composed by the PC app, with no mount
+    // firmware change and nothing to keep in sync across three codebases.  The
+    // mount is a pipe, and the one thing it must get right is delivering the
+    // bytes unaltered.
+    //
+    // Instantaneous autofocus, for reference:
+    //   FF 04 00 00  00 01 01 00  00 00 00 00
+    //   |  |  |  |   |  |  |  operation 0 = assign
+    //   |  |  |  |   |  |  data type
+    //   |  |  |  |   |  parameter 1 = instantaneous autofocus
+    //   |  |  |  |   category 0 = lens
+    //   |  |  |  reserved
+    //   |  |  command id 0 = change configuration
+    //   |  payload length
+    //   destination 255 = broadcast (the camera on this mount)
+    CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
+
                                    //   0        = direct, on the hub's own ESP-NOW radio
                                    //   1..6     = relayed by that satellite (slot number)
                                    // Kept separate from CMD_MOUNT_TABLE because a route changes
