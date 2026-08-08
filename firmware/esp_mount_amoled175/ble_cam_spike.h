@@ -269,13 +269,32 @@ static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
         return 0;
     }
     if (err->status == BLE_HS_EDONE && _bc_cccd_handle) {
+        // 0x02 = INDICATIONS, not 0x01 notifications.
+        //
+        // This characteristic indicates; it never notifies.  Writing 0x01
+        // enables a thing the camera does not send, and the write SUCCEEDS —
+        // so the mount reported "subscribed" and then sat in silence, even
+        // while ISO and white balance were being changed on the camera body.
+        //
+        // BlueMagic32 says so in one argument that is easy to read past:
+        //     _incomingCameraControl->registerForNotify(controlNotify, false);
+        // and in the library that flag is exactly this byte:
+        //     uint8_t val[] = {0x01, 0x00};
+        //     if (!notifications) val[0] = 0x02;
+        // Its other two subscriptions (timecode, camera status) leave the flag
+        // at its default and do use notifications, which is why the difference
+        // is deliberate rather than incidental.
+        //
+        // Indications arrive through the same BLE_GAP_EVENT_NOTIFY_RX; NimBLE
+        // sends the ATT confirmation itself, so nothing else changes.
+        //
         // Now, and not before: writing from inside the discovery would be a
         // second procedure while the first is still running.
-        static const uint8_t on[2] = { 0x01, 0x00 };
+        static const uint8_t on[2] = { 0x02, 0x00 };
         int rc = ble_gattc_write_flat(conn, _bc_cccd_handle, on, sizeof(on),
                                       nullptr, nullptr);
         _bc_subscribed = (rc == 0);
-        Serial.printf("[BLECAM] status notifications %s\n", rc ? "FAILED" : "enabled");
+        Serial.printf("[BLECAM] status indications %s\n", rc ? "FAILED" : "enabled");
     } else if (err->status == BLE_HS_EDONE) {
         Serial.println("[BLECAM] no CCCD found — camera will not notify");
     }
