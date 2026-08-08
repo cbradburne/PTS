@@ -37,6 +37,32 @@ from comms.mount_manager import MountManager
 _POLL_MS = 2000          # health arrives every 10 s; this is just the redraw
 _FLASH_MS = 400          # how long a button shows it fired
 
+# ISO steps the camera actually has.  Stepping through its own values rather
+# than adding a fixed amount means every press lands on a setting the camera
+# will accept, and the number that comes back matches the one that was asked
+# for — which is how you can tell a command was applied at all.
+_ISO_STEPS = [100, 200, 400, 800, 1250, 3200, 6400, 12800, 25600]
+
+# Kelvin.  Blackmagic's own presets, for the same reason.
+_WB_STEPS = [2500, 2800, 3000, 3200, 3400, 3600, 4000, 4500, 4800, 5000,
+             5200, 5400, 5600, 6000, 6500, 7000, 7500, 8000, 9000, 10000]
+
+
+def _step(table, current, direction):
+    """Next value along, clamped at both ends.
+
+    A reported value that is not in the table — the camera was set by hand, or
+    to something between presets — steps to the nearest one in that direction
+    rather than jumping to the start of the list.
+    """
+    if current is None:
+        return None
+    if direction > 0:
+        nxt = [v for v in table if v > current]
+        return nxt[0] if nxt else table[-1]
+    prv = [v for v in table if v < current]
+    return prv[-1] if prv else table[0]
+
 _STATE_STYLE = {
     "ready":   ("camera ready",       "#2E7D32"),
     "off":     ("camera off",         "#B71C1C"),
@@ -77,11 +103,35 @@ class _CamRow(QWidget):
 
         self._af = QPushButton("Auto Focus")
         self._af.setFixedHeight(44)
-        self._af.setMinimumWidth(130)
+        self._af.setMinimumWidth(120)
         self._af.clicked.connect(self._on_autofocus)
         hl.addWidget(self._af)
 
+        # Gain and white balance: the number between the buttons is what the
+        # CAMERA last reported, never what we last sent.  It stays "—" until
+        # the camera says something, and the buttons stay disabled until then,
+        # because stepping from a value we invented would fight the camera.
+        self._iso_lbl = self._add_stepper(hl, "Gain", self._iso_down, self._iso_up)
+        self._wb_lbl  = self._add_stepper(hl, "WB",   self._wb_down,  self._wb_up)
+
         self.refresh()
+
+    def _add_stepper(self, hl, caption, on_down, on_up) -> QLabel:
+        cap = QLabel(caption)
+        cap.setStyleSheet("color:#8A97A8;")
+        hl.addWidget(cap)
+        minus = QPushButton("−")
+        val   = QLabel("—")
+        plus  = QPushButton("+")
+        val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        val.setMinimumWidth(64)
+        val.setStyleSheet("color:#CFD8DC; font-weight:bold;")
+        for b, cb in ((minus, on_down), (plus, on_up)):
+            b.setFixedSize(38, 44)
+            b.clicked.connect(cb)
+        hl.addWidget(minus); hl.addWidget(val); hl.addWidget(plus)
+        val._minus, val._plus = minus, plus          # refresh() enables these
+        return val
 
     # ------------------------------------------------------------------
 
@@ -97,8 +147,19 @@ class _CamRow(QWidget):
         key = self._link_state()
         text, colour = _STATE_STYLE[key]
         self._state_lbl.setText(f"<span style='color:{colour}'>{text}</span>")
-        self._af.setEnabled(key == "ready")
+        ready = (key == "ready")
+        self._af.setEnabled(ready)
         self._set_btn_style()
+
+        st  = self._mm.state(self._mount_id)
+        for lbl, value, suffix in ((self._iso_lbl, st.cam_iso, ""),
+                                   (self._wb_lbl,  st.cam_wb,  "K")):
+            known = value is not None
+            lbl.setText(f"{value}{suffix}" if known else "—")
+            # Disabled until the camera has told us where it is: a stepper with
+            # no starting point would have to guess one.
+            lbl._minus.setEnabled(ready and known)
+            lbl._plus.setEnabled(ready and known)
 
     def _set_btn_style(self, fired: bool = False) -> None:
         bg = "#1565C0" if not fired else "#43A047"
@@ -110,6 +171,24 @@ class _CamRow(QWidget):
             QPushButton:disabled {{ background: #2A3038; color: #6B7683; }}
             QPushButton:pressed  {{ background: #0D47A1; }}
         """)
+
+    # Steps send a command and stop.  The number on screen does NOT move until
+    # the camera reports the change — if it never does, the display is right and
+    # the command was not applied, which is the useful thing to see.
+    def _iso_up(self):   self._step_iso(+1)
+    def _iso_down(self): self._step_iso(-1)
+    def _wb_up(self):    self._step_wb(+1)
+    def _wb_down(self):  self._step_wb(-1)
+
+    def _step_iso(self, d: int) -> None:
+        nxt = _step(_ISO_STEPS, self._mm.state(self._mount_id).cam_iso, d)
+        if nxt is not None:
+            self._mm.send_cam_iso(self._mount_id, nxt)
+
+    def _step_wb(self, d: int) -> None:
+        nxt = _step(_WB_STEPS, self._mm.state(self._mount_id).cam_wb, d)
+        if nxt is not None:
+            self._mm.send_cam_white_balance(self._mount_id, nxt)
 
     def _on_autofocus(self) -> None:
         self._mm.send_cam_autofocus(self._mount_id)
@@ -143,8 +222,11 @@ class CameraControlDialog(QDialog):
             vl.addWidget(_h_rule())
 
         note = QLabel(
-            "Auto Focus is instantaneous — the camera has no way to report back, "
-            "so the button confirms the command was sent, not that the lens moved."
+            "Gain and WB show what the CAMERA reports, not what was last sent — a "
+            "value only changes when the camera confirms it, including changes made "
+            "on the camera itself.  Auto Focus is instantaneous and the camera has "
+            "no way to report back, so that button confirms the command was sent, "
+            "not that the lens moved."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #5A6472; font-size: 11px;")
@@ -159,9 +241,20 @@ class CameraControlDialog(QDialog):
         btns.addWidget(close)
         vl.addLayout(btns)
 
+        # Camera reports redraw immediately; the timer only covers link state,
+        # which comes from 10-second health.  Without this a value would take up
+        # to two seconds to appear after a change made on the camera body, which
+        # looks like the button not working.
+        mount_manager.cam_status_received.connect(self._on_cam_status)
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_all)
         self._timer.start(_POLL_MS)
+
+    def _on_cam_status(self, mount_id: int) -> None:
+        for r in self._rows:
+            if r._mount_id == mount_id:
+                r.refresh()
 
     def _refresh_all(self) -> None:
         for r in self._rows:

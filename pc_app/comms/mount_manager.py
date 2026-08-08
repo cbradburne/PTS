@@ -30,6 +30,7 @@ from .protocol import (
     pkt_get_state, pkt_store_pos, pkt_clear_pos,
     pkt_set_active_preset, pkt_save_speeds, pkt_goto_slot, pkt_move_rel,
     pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus,
+    pkt_cam_iso, pkt_cam_white_balance, decode_cam_status,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
     decode_subject_list, decode_look_at_status, decode_ref_confirmed,
@@ -84,6 +85,13 @@ class MountState_:
     zoom_max:    Optional[int] = None
 
     # Active speed presets (from STATUS extended fields / STATE_REPORT)
+    # Blackmagic camera, as REPORTED by the camera — never what we last sent.
+    # None until the camera says so, which is what lets the UI grey a control
+    # rather than invent a starting value and drift from the real one.
+    cam_iso:  Optional[int] = None
+    cam_wb:   Optional[int] = None
+    cam_tint: Optional[int] = None
+
     active_pt_preset: int = 2
     active_sl_preset: int = 2
 
@@ -125,6 +133,7 @@ class MountManager(QObject):
 
     # v2 — look-at tracking
     subject_list_received  = pyqtSignal(int)           # mount_id — subjects updated
+    cam_status_received    = pyqtSignal(int)           # mount_id — camera settings updated
     look_at_status_updated = pyqtSignal(int)           # mount_id — LookAtStatusPayload updated
     calib_prompt_received  = pyqtSignal(int, int)      # mount_id, CalibPrompt value
     ref_confirmed          = pyqtSignal(int, float, float)  # mount_id, pan_deg, tilt_deg
@@ -297,6 +306,16 @@ class MountManager(QObject):
         """
         self._send(pkt_cam_autofocus(mount_id))
 
+    def send_cam_iso(self, mount_id: int, iso: int) -> None:
+        self._send(pkt_cam_iso(mount_id, iso))
+
+    def send_cam_white_balance(self, mount_id: int, kelvin: int) -> None:
+        """Temperature only — tint is carried in the same command, so the
+        camera's last reported tint is resent unchanged rather than zeroed."""
+        st = self._states.get(mount_id)
+        tint = st.cam_tint if st and st.cam_tint is not None else 0
+        self._send(pkt_cam_white_balance(mount_id, kelvin, tint))
+
     def send_set_stall_threshold(self, mount_id: int, axis: Axis,
                                   threshold: int) -> None:
         """Set and persist a StallGuard threshold on the mount."""
@@ -440,6 +459,31 @@ class MountManager(QObject):
             except Exception as e:
                 print(f"!!! CRITICAL ERROR: Failed to decode STATUS from {mid}: {e}")
                 log.warning(f"Bad STATUS from mount {mid}: {e}")
+
+        elif pkt.cmd == Cmd.CAM_STATUS:
+
+            # The camera reports whatever it likes, whenever it likes — including
+
+            # changes made on the camera body.  That is the point: the UI shows the
+
+            # camera's truth, not an echo of our own commands.
+
+            upd = decode_cam_status(bytes(pkt.payload))
+
+            if upd:
+
+                st = self._states.get(pkt.mount_id)
+
+                if st:
+
+                    if "iso" in upd:           st.cam_iso  = upd["iso"]
+
+                    if "white_balance" in upd: st.cam_wb   = upd["white_balance"]
+
+                    if "tint" in upd:          st.cam_tint = upd["tint"]
+
+                    self.cam_status_received.emit(pkt.mount_id)
+
 
         elif pkt.cmd == Cmd.LIMITS_FOUND:
             try:

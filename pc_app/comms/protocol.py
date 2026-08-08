@@ -134,6 +134,7 @@ class Cmd(IntEnum):
     PAIR_FORGET       = 0x9F   # client→hub, 1B: cam — clear (unbind) that slot
     MOUNT_ROUTE       = 0xA0   # hub→clients, 5B: per-cam 0 = direct, N = via satellite N
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
+    CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
 
 
 # CMD_HEALTH node_type values (payload byte [0])
@@ -979,6 +980,52 @@ def pkt_cam_autofocus(mount_id: int) -> bytes:
     """
     cmd = bmd_command(category=0, parameter=1, data_type=1) + b"\x00\x00\x00\x00"
     return build_packet(mount_id, Cmd.CAM_CONTROL, cmd)
+
+
+def pkt_cam_iso(mount_id: int, iso: int) -> bytes:
+    """Sensor ISO — video category, parameter 14, int32.
+
+    Blackmagic calls this ISO and the camera displays it as ISO; the operator
+    calls it gain.  The wire value is the ISO number itself (400, 1250, ...).
+    """
+    data = int(iso).to_bytes(4, "little", signed=True)
+    return build_packet(mount_id, Cmd.CAM_CONTROL,
+                        bmd_command(category=1, parameter=14, data_type=3, data=data))
+
+
+def pkt_cam_white_balance(mount_id: int, kelvin: int, tint: int = 0) -> bytes:
+    """Manual white balance — video category, parameter 2, two int16s.
+
+    Tint travels with the temperature in the same command, so it has to be sent
+    even when only the temperature is changing; passing the camera's last
+    reported tint keeps it where the operator left it.
+    """
+    data = (int(kelvin).to_bytes(2, "little", signed=True)
+            + int(tint).to_bytes(2, "little", signed=True))
+    return build_packet(mount_id, Cmd.CAM_CONTROL,
+                        bmd_command(category=1, parameter=2, data_type=2, data=data))
+
+
+# ── Decoding what the camera reports ────────────────────────────────────────
+# CMD_CAM_STATUS carries a Blackmagic status message verbatim, in the same
+# framing as a command:
+#
+#   [4] category  [5] parameter  [6] type  [7] operation  [8+] data
+#
+# Returns {"iso": n} / {"white_balance": k, "tint": t} / {} for anything not
+# understood — an unknown parameter is normal traffic, not an error, because
+# the camera reports everything it feels like reporting.
+def decode_cam_status(payload: bytes) -> dict:
+    if len(payload) < 8:
+        return {}
+    category, parameter = payload[4], payload[5]
+    data = payload[8:]
+    if category == 1 and parameter == 14 and len(data) >= 2:      # ISO
+        return {"iso": int.from_bytes(data[:4].ljust(4, b"\x00"), "little", signed=True)}
+    if category == 1 and parameter == 2 and len(data) >= 4:       # white balance
+        return {"white_balance": int.from_bytes(data[0:2], "little", signed=True),
+                "tint":          int.from_bytes(data[2:4], "little", signed=True)}
+    return {}
 
 
 def pkt_save_speeds(mount_id: int,

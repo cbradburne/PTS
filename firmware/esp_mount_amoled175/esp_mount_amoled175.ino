@@ -1965,6 +1965,16 @@ void setup() {
     // Last, deliberately: ESP-NOW is up and settled before the BLE radio is
     // brought in, so anything the spike costs is visible as a change to a
     // working link rather than confused with a bad start.
+    // Camera status goes straight back to the hub as CMD_CAM_STATUS, unread.
+    // The mount is a pipe in both directions; only the PC app knows what a
+    // Blackmagic parameter means, and keeping it that way means a new camera
+    // feature never needs a mount reflash.
+    ble_cam_on_status([](const uint8_t *d, uint16_t n) {
+        if (!n || n > CAM_CONTROL_MAX_LEN) return;
+        uint8_t buf[PKT_BUF_SIZE + 4];
+        esp_now_send(_hub_mac, buf,
+                     build_packet(buf, _mount_id, ++_tx_seq, CMD_CAM_STATUS, d, n));
+    });
     ble_cam_spike_setup();
 }
 

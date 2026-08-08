@@ -224,6 +224,16 @@ typedef enum : uint8_t {
     //   |  payload length
     //   destination 255 = broadcast (the camera on this mount)
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
+    // Camera → mount → hub → clients: the camera's own status notifications,
+    // relayed verbatim in the same framing as CMD_CAM_CONTROL.  Same reasoning
+    // in reverse — the mount does not decode them, so a client can learn about
+    // a new camera parameter without any firmware changing.
+    //
+    // This is what makes a UI able to show the camera's REAL settings rather
+    // than what it last asked for.  A control that echoes its own commands
+    // lies whenever the camera is also being operated by hand.
+    CMD_CAM_STATUS        = 0xA2,  // mount→hub→clients, 1-40B: BMD status, as-is
+
 
                                    //   0        = direct, on the hub's own ESP-NOW radio
                                    //   1..6     = relayed by that satellite (slot number)

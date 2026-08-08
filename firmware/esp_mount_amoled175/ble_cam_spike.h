@@ -114,6 +114,7 @@ static inline void ble_cam_spike_setup() {
 static inline void ble_cam_spike_poll()  {}
 static inline uint8_t ble_cam_health_flags() { return 0; }
 static inline bool ble_cam_send(const uint8_t *, uint16_t) { return false; }
+static inline void ble_cam_on_status(void (*)(const uint8_t *, uint16_t)) {}
 
 #else
 
@@ -224,16 +225,50 @@ static uint16_t _bc_ctrl_handle = 0;
 // Sticky until reported: a write that fails between two health sends must not
 // be lost just because the next one succeeded.
 static bool     _bc_write_err   = false;
+// Notify handle for the camera's status characteristic, and its CCCD.  A
+// characteristic is not enough: notifications only start once 0x0001 is written
+// to the Client Characteristic Configuration Descriptor, which has to be
+// discovered separately.
+static uint16_t _bc_notify_handle = 0;
+
+// The sketch supplies this; the spike does not know what a hub is.  Keeps the
+// relay decision (what to do with camera bytes) out of the BLE layer.
+static void (*_bc_status_cb)(const uint8_t *, uint16_t) = nullptr;
+void ble_cam_on_status(void (*cb)(const uint8_t *, uint16_t)) { _bc_status_cb = cb; }
 
 // GATT discovery, run after encryption because this characteristic is not
 // readable before it.  Two async steps: find the service, then the
 // characteristic inside it.
+// Enable notifications by writing 0x0001 to the CCCD, once we have found it.
+static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
+                     uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc,
+                     void *) {
+    if (err->status == 0 && dsc && ble_uuid_u16(&dsc->uuid.u) == 0x2902) {
+        static const uint8_t on[2] = { 0x01, 0x00 };
+        int rc = ble_gattc_write_flat(conn, dsc->handle, on, sizeof(on), nullptr, nullptr);
+        Serial.printf("[BLECAM] status notifications %s\n", rc ? "FAILED" : "enabled");
+    }
+    return 0;
+}
+
 static int bc_on_chr(uint16_t conn, const struct ble_gatt_error *err,
-                     const struct ble_gatt_chr *chr, void *) {
+                     const struct ble_gatt_chr *chr, void *arg) {
+    bool is_notify = (arg != nullptr);
     if (err->status == 0 && chr) {
-        _bc_ctrl_handle = chr->val_handle;
-        Serial.printf("[BLECAM] control characteristic ready (handle %u)\n",
-                      _bc_ctrl_handle);
+        if (is_notify) {
+            _bc_notify_handle = chr->val_handle;
+            Serial.printf("[BLECAM] status characteristic (handle %u)\n",
+                          _bc_notify_handle);
+            // Its CCCD sits between this characteristic's value handle and the
+            // next one; discovering to +3 is enough and avoids walking the
+            // whole service.
+            ble_gattc_disc_all_dscs(conn, chr->val_handle,
+                                    chr->val_handle + 3, bc_on_dsc, nullptr);
+        } else {
+            _bc_ctrl_handle = chr->val_handle;
+            Serial.printf("[BLECAM] control characteristic ready (handle %u)\n",
+                          _bc_ctrl_handle);
+        }
     } else if (err->status != BLE_HS_EDONE) {
         Serial.printf("[BLECAM] characteristic discovery failed, status=%d\n",
                       err->status);
@@ -244,10 +279,13 @@ static int bc_on_chr(uint16_t conn, const struct ble_gatt_error *err,
 static int bc_on_svc(uint16_t conn, const struct ble_gatt_error *err,
                      const struct ble_gatt_svc *svc, void *) {
     if (err->status == 0 && svc) {
-        ble_uuid_any_t u;
-        ble_uuid_from_str(&u, BLECAM_OUTGOING);   // the one we WRITE to
+        static ble_uuid_any_t uo, ui;
+        ble_uuid_from_str(&uo, BLECAM_OUTGOING);  // we WRITE here
         ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
-                                    &u.u, bc_on_chr, nullptr);
+                                    &uo.u, bc_on_chr, nullptr);
+        ble_uuid_from_str(&ui, BLECAM_INCOMING);  // the camera NOTIFIES here
+        ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
+                                    &ui.u, bc_on_chr, (void *)1);
     } else if (err->status != BLE_HS_EDONE) {
         Serial.printf("[BLECAM] service discovery failed, status=%d\n", err->status);
     }
@@ -318,12 +356,23 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         Serial.printf("[BLECAM] disconnected (reason %d)\n", ev->disconnect.reason);
         _bc_conn        = BLE_HS_CONN_HANDLE_NONE;
         _bc_connected   = false;
-        _bc_ctrl_handle = 0;      // handles do not survive a connection
+        _bc_ctrl_handle   = 0;    // handles do not survive a connection
+        _bc_notify_handle = 0;
         return 0;
 
-    case BLE_GAP_EVENT_NOTIFY_RX:
+    case BLE_GAP_EVENT_NOTIFY_RX: {
         _bc_notifies++;
+        // Hand the bytes up untouched — the mount does not decode camera
+        // status any more than it decodes camera commands.
+        if (_bc_status_cb && ev->notify_rx.om) {
+            uint8_t buf[CAM_CONTROL_MAX_LEN];
+            uint16_t n = OS_MBUF_PKTLEN(ev->notify_rx.om);
+            if (n && n <= sizeof(buf) &&
+                ble_hs_mbuf_to_flat(ev->notify_rx.om, buf, sizeof(buf), &n) == 0)
+                _bc_status_cb(buf, n);
+        }
         return 0;
+    }
 
     default:
         return 0;
