@@ -12,10 +12,15 @@
 // 5% or 50% of that budget decides whether camera control belongs on this chip
 // at all — and it is not answerable by reasoning, only by measuring.
 //
-// So this connects to a camera, subscribes to its status, and otherwise does
-// NOTHING.  No camera commands, no protocol work, no UI.  Those are the easy
-// parts and there is no point building them before the radio question is
-// settled.
+// So this pairs with a camera, holds the link, and otherwise does NOTHING.  No
+// camera commands, no protocol work, no UI.  Those are the easy parts and there
+// is no point building them before the radio question is settled.
+//
+// Note it does NOT subscribe to notifications yet, so what it measures is the
+// cost of a bonded, connected, IDLE link — the connection interval alone.  That
+// is a lower bound and the right first number: if merely holding the link is
+// expensive, nothing built on top of it will be cheap.  Add traffic afterwards
+// if the idle cost turns out to be acceptable.
 //
 //   HOW TO RUN THE MEASUREMENT
 //   Use whichever mount actually carries a camera — that constraint wins over
@@ -75,6 +80,16 @@
 //   sequence in the same order, minus the one line that throws the connection
 //   away, and calls ble_gap_security_initiate() itself so pairing actually
 //   starts.  Vendoring a whole BLE library turned out to be unnecessary.
+//
+//   CONFIRMED on hardware, 2026-08-07:
+//
+//     [BLECAM] CONNECTED (handle 1)
+//     [BLECAM] (MTU exchange rc=2 — ignored)
+//     [BLECAM] passkey injected, rc=0
+//     [BLECAM] encryption ESTABLISHED — PAIRED (status=0)
+//
+//   rc=2 is the EALREADY that the wrapper treated as fatal.  Asked for,
+//   ignored, and every step after it worked first time.
 //
 //   Five theories were spent on this before the log was simply turned up:
 //   security config, address types, WiFi coexistence, the wrong device, a
