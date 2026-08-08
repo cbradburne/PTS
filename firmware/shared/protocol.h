@@ -260,6 +260,12 @@ typedef enum : uint8_t {
 // telemetry, which is where it can be correlated with txfail anyway.
 #define HEALTH_FLAG_BLE_BUILD  0x02   // this firmware has the BLE spike compiled in
 #define HEALTH_FLAG_BLE_LINK   0x04   // ...and the camera is currently paired
+// Set when a camera write has failed since the last report, and cleared by
+// sending it.  A mount on a rig has no readable serial, so without this a write
+// that the camera rejects is indistinguishable from one it ignored — which is
+// exactly the ambiguity that made a wrong characteristic look like a working
+// link doing nothing.
+#define HEALTH_FLAG_CAM_WR_ERR 0x08
 
 // ---------------------------------------------------------------------------
 // Axis / group identifiers

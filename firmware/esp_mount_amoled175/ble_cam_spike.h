@@ -129,8 +129,13 @@ static inline bool ble_cam_send(const uint8_t *, uint16_t) { return false; }
 // section.  Same Camera Control Protocol the SDI path carries, so if this
 // spike passes, the command work is mostly mapping rather than inventing.
 #define BLECAM_SERVICE   "291d567a-6d75-11e6-8b77-86f30ca893d3"
-#define BLECAM_OUTGOING  "5dd3465f-1aee-4299-8493-d2eca2f8e1bb"  // camera -> us
-#define BLECAM_INCOMING  "b864e140-76a0-416a-bf30-5876504537d9"  // us -> camera
+// Named from the CONTROLLER's point of view, not the camera's — which is the
+// opposite of what the words suggest and cost a round trip on the rig:
+// commands were being written to the notify characteristic, so the link was up,
+// the write returned success, and the camera did nothing.  Checked against
+// schoolpost/BlueMagic32, which writes to Outgoing and subscribes to Incoming.
+#define BLECAM_OUTGOING  "5dd3465f-1aee-4299-8493-d2eca2f8e1bb"  // us -> camera (WRITE)
+#define BLECAM_INCOMING  "b864e140-76a0-416a-bf30-5876504537d9"  // camera -> us (notify)
 #define BLECAM_STATUS    "7fe8691d-95dc-4fc5-8abd-ca74339b51b9"
 
 // The passkey is typed into the SERIAL MONITOR while pairing is in progress.
@@ -216,6 +221,9 @@ static uint16_t _bc_conn = BLE_HS_CONN_HANDLE_NONE;
 // connection.  0 = not discovered yet, and a write before then is dropped
 // rather than guessed at.
 static uint16_t _bc_ctrl_handle = 0;
+// Sticky until reported: a write that fails between two health sends must not
+// be lost just because the next one succeeded.
+static bool     _bc_write_err   = false;
 
 // GATT discovery, run after encryption because this characteristic is not
 // readable before it.  Two async steps: find the service, then the
@@ -237,7 +245,7 @@ static int bc_on_svc(uint16_t conn, const struct ble_gatt_error *err,
                      const struct ble_gatt_svc *svc, void *) {
     if (err->status == 0 && svc) {
         ble_uuid_any_t u;
-        ble_uuid_from_str(&u, BLECAM_INCOMING);
+        ble_uuid_from_str(&u, BLECAM_OUTGOING);   // the one we WRITE to
         ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
                                     &u.u, bc_on_chr, nullptr);
     } else if (err->status != BLE_HS_EDONE) {
@@ -252,7 +260,7 @@ bool ble_cam_send(const uint8_t *cmd, uint16_t len) {
     if (!_bc_connected || !_bc_ctrl_handle) return false;
     if (!len || len > CAM_CONTROL_MAX_LEN) return false;
     int rc = ble_gattc_write_flat(_bc_conn, _bc_ctrl_handle, cmd, len, nullptr, nullptr);
-    if (rc) Serial.printf("[BLECAM] write rc=%d\n", rc);
+    if (rc) { Serial.printf("[BLECAM] write rc=%d\n", rc); _bc_write_err = true; }
     return rc == 0;
 }
 
@@ -606,7 +614,9 @@ static bool bc_choose() {
 // [BLECAM] says nothing where the measurement actually happens.  These two bits
 // land in comms.log beside txfail, which is what they have to be compared with.
 static uint8_t ble_cam_health_flags() {
-    return HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0);
+    uint8_t f = HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0);
+    if (_bc_write_err) { f |= HEALTH_FLAG_CAM_WR_ERR; _bc_write_err = false; }
+    return f;
 }
 
 static void ble_cam_spike_poll() {

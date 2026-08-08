@@ -31,7 +31,8 @@ import serial
 import serial.tools.list_ports
 
 from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
-                       build_packet, HEALTH_FLAG_BLE_BUILD, HEALTH_FLAG_BLE_LINK)
+                       build_packet, HEALTH_FLAG_BLE_BUILD, HEALTH_FLAG_BLE_LINK,
+                       HEALTH_FLAG_CAM_WR_ERR)
 
 log = logging.getLogger(__name__)
 
@@ -685,6 +686,8 @@ class Bridge:
         if h.flags & HEALTH_FLAG_BLE_BUILD:
             linked = bool(h.flags & HEALTH_FLAG_BLE_LINK)
             ble = " | BLE PAIRED" if linked else " | BLE down"
+            if h.flags & HEALTH_FLAG_CAM_WR_ERR:
+                ble += " | CAMERA WRITE FAILED"
             # Kept so the camera-control dialog can grey a button rather than
             # firing into a link that is not there.  A plain dict read by the
             # UI on a timer: health arrives every 10 s, so a signal would add
