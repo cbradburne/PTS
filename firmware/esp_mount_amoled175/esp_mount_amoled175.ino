@@ -42,7 +42,7 @@
 #include <Wire.h>
 #include "../shared/protocol.h"
 #include "../shared/crash_report.h"
-#include "ble_cam_spike.h"   // no-op unless BLE_CAM=1
+#include "ble_camera.h"   // Blackmagic camera control over BLE
 #include "ui_types.h"   // ArcStrip struct — must be included before Arduino auto-prototypes
 
 // ---------------------------------------------------------------------------
@@ -1975,7 +1975,7 @@ void setup() {
         esp_now_send(_hub_mac, buf,
                      build_packet(buf, _mount_id, ++_tx_seq, CMD_CAM_STATUS, d, n));
     });
-    ble_cam_spike_setup();
+    ble_cam_setup();
 }
 
 // ---------------------------------------------------------------------------
@@ -1995,7 +1995,7 @@ static inline void drain_teensy_serial() {
 
 void loop() {
     esp_task_wdt_reset();
-    ble_cam_spike_poll();     // compiles away entirely in a normal build
+    ble_cam_poll();
 
     // Health telemetry: worst gap between loop iterations ≈ worst iteration.
     {

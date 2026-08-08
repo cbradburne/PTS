@@ -1,58 +1,33 @@
 #pragma once
 // ---------------------------------------------------------------------------
-// BLE camera control — SPIKE, not a feature
+// Blackmagic camera control over BLE
 // ---------------------------------------------------------------------------
-// This exists to answer ONE question and then be deleted or grown up:
+// Each mount holds a Bluetooth link to the camera riding on it and relays the
+// Blackmagic Camera Control Protocol both ways: commands down from the PC app
+// (CMD_CAM_CONTROL), camera-reported state back up (CMD_CAM_STATUS).
 //
-//     What does holding a BLE link to the camera cost the ESP-NOW link?
+// This started as a spike to answer one question — what does holding a BLE link
+// cost the ESP-NOW link, on a chip with one radio time-slicing between them?
+// Measured on hardware 2026-08-07 with a paired, subscribed, actively-used link:
+// txfail 0, loop max 9 ms.  Indistinguishable from the BLE-off baseline.  That
+// result is why camera control lives on this chip instead of a second ESP32 per
+// mount, so it is worth re-measuring if the radio picture ever changes.
 //
-// The ESP32-S3 has a single radio shared between WiFi and Bluetooth.  ESP-NOW
-// and BLE coexist by time-slicing, and these mounts already sit at 5-7
-// txfail/min with the occasional 11-second dropout.  Whether adding BLE costs
-// 5% or 50% of that budget decides whether camera control belongs on this chip
-// at all — and it is not answerable by reasoning, only by measuring.
+//   PAIRING — once per mount, on a bench
 //
-// So this pairs with a camera, holds the link, and otherwise does NOTHING.  No
-// camera commands, no protocol work, no UI.  Those are the easy parts and there
-// is no point building them before the radio question is settled.
+//     CAM_PAIR=1 tools/build.sh flash amoled
 //
-// Note it does NOT subscribe to notifications yet, so what it measures is the
-// cost of a bonded, connected, IDLE link — the connection interval alone.  That
-// is a lower bound and the right first number: if merely holding the link is
-// expensive, nothing built on top of it will be cheap.  Add traffic afterwards
-// if the idle cost turns out to be acceptable.
+//   That build stops WiFi so BLE has the radio, and disables the task watchdog
+//   because the passkey prompt blocks.  Open a serial monitor: it lists what is
+//   in range, picks the Blackmagic camera if there is exactly one, and asks for
+//   the passkey — the camera shows six digits at that moment.  Type them and
+//   look for "encryption ESTABLISHED — PAIRED".
 //
-//   HOW TO RUN THE MEASUREMENT
-//   Use whichever mount actually carries a camera — that constraint wins over
-//   any preference about which link is cleanest.
+//   Then reflash normally.  The bond is in NVS, so it reconnects on its own and
+//   never asks again.  A pairing build cannot reach a hub and must not be left
+//   on a rig.
 //
-//   1. With a NORMAL build on that mount, in the position it will stay in, take
-//      ~30 minutes of NODE HEALTH from comms.log.  That is the BLE-off baseline.
-//   2. PAIR FIRST, once per mount, on the bench:
-//        BLE_CAM=2 tools/build.sh flash amoled
-//      Open a serial monitor.  It lists what is in range, picks the Blackmagic
-//      camera if there is exactly one, then asks for the passkey — the camera
-//      shows six digits at that moment.  Type them, press Enter, and look for
-//      "encryption ESTABLISHED — PAIRED".  BLE_CAM=2 stops WiFi, so this build
-//      cannot talk to a hub and must not be left on a rig.
-//   3. Then reflash the SAME mount, in the SAME position, with:
-//        BLE_CAM=1 tools/build.sh flash amoled
-//      The bond is in NVS, so it reconnects without asking again.
-//   4. Confirm the serial says PAIRED and keeps saying it.  A link that
-//      silently dropped shows no ESP-NOW impact and looks like good news.
-//   5. Take another ~30 minutes and compare txfail/min.
-//
-//   The baseline must be FRESH.  txfail depends on where the mount is and
-//   whether it reaches the hub directly or through a satellite, so a figure
-//   from before a move — or from when it was on a different path — is not a
-//   baseline, it is a different experiment.  A mount on a satellite is a
-//   perfectly good subject; its txfail simply describes the mount-to-satellite
-//   hop rather than mount-to-hub.
-//
-//   Same mount, same position, same path, same rig activity.  Equal window
-//   lengths matter less than equal conditions, since txfail is per-minute.
-//
-//   WHY IT WOULD NOT CONNECT — FOUND, AND WORKED AROUND
+//   THE MTU WORKAROUND — why this bypasses BLEClient
 //
 //   With CORE_DEBUG_LEVEL up, the rig finally said it:
 //
@@ -67,12 +42,12 @@
 //     rc = ble_gattc_exchange_mtu(client->m_conn_id, nullptr, nullptr);
 //     if (rc != 0) { log_e(...); break; }        // <- tears the link down
 //
-//   status=2 is BLE_HS_EALREADY: the MTU exchange has ALREADY happened,
-//   because this camera initiates it itself the instant a central connects.
-//   A peer being quick is not an error, but the library treats any non-zero
-//   return as fatal and drops the connection — and because the teardown
-//   happens before the security block a few lines below, pairing never starts
-//   and the camera never shows a passkey.  Every symptom follows from that.
+//   status=2 is BLE_HS_EALREADY: the MTU exchange has ALREADY happened, because
+//   this camera initiates it itself the instant a central connects.  A peer
+//   being quick is not an error, but the library treats any non-zero return as
+//   fatal and drops the connection — and because the teardown happens before
+//   the security block a few lines below, pairing never starts and the camera
+//   never shows a passkey.  Every symptom followed from that.
 //
 //   The wrapper cannot be changed from a sketch — but it does not have to be.
 //   <host/ble_gap.h> comes in with the library's own headers, so the NimBLE C
@@ -81,42 +56,26 @@
 //   away, and calls ble_gap_security_initiate() itself so pairing actually
 //   starts.  Vendoring a whole BLE library turned out to be unnecessary.
 //
-//   CONFIRMED on hardware, 2026-08-07:
+//   TWO THINGS THAT WILL WASTE A DAY IF FORGOTTEN
 //
-//     [BLECAM] CONNECTED (handle 1)
-//     [BLECAM] (MTU exchange rc=2 — ignored)
-//     [BLECAM] passkey injected, rc=0
-//     [BLECAM] encryption ESTABLISHED — PAIRED (status=0)
+//   * The camera's characteristics are named from the CONTROLLER's point of
+//     view.  "Outgoing" is the one we WRITE to; "Incoming" is the one the camera
+//     notifies on.  Writing to the obvious-sounding one silently does nothing.
+//   * The CCCD wants 0x02 — INDICATIONS, not notifications.  Subscribing with
+//     0x01 succeeds, reports success, and delivers nothing.
 //
-//   rc=2 is the EALREADY that the wrapper treated as fatal.  Asked for,
-//   ignored, and every step after it worked first time.
-//
-//   Five theories were spent on this before the log was simply turned up:
-//   security config, address types, WiFi coexistence, the wrong device, a
-//   half-open connection.  All wrong.  The two things that found real faults
-//   were reading a crash dump and reading the library's source.
-//
-// Default OFF, and a no-op when off — nothing here links into a normal build.
+//   Both were found by adding a diagnostic, not by reasoning.  So was every
+//   other real fault here; five theories were spent before the log was simply
+//   turned up.
 // ---------------------------------------------------------------------------
-#ifndef BLE_CAM_SPIKE
-#define BLE_CAM_SPIKE 0
+
+// CAM_PAIR=1 builds the one-time PAIRING mode described above.  Pairing is the
+// only thing here that has to block — someone reads six digits off a camera and
+// types them — and blocking is exactly what a rig cannot afford, so it stays
+// where a person already is.  A normal build never prompts.
+#ifndef CAM_PAIR
+#define CAM_PAIR 0
 #endif
-
-#if !BLE_CAM_SPIKE
-
-// One line, on purpose.  A build without the flag is silent and behaves
-// perfectly normally, so "no [BLECAM] output" and "the spike is not in this
-// binary" look identical from a serial monitor — that ambiguity has now cost
-// two flash-and-test rounds.  Cheaper to say so than to work it out again.
-static inline void ble_cam_spike_setup() {
-    Serial.println("[BLECAM] spike NOT compiled in (build with BLE_CAM=1 or 2)");
-}
-static inline void ble_cam_spike_poll()  {}
-static inline uint8_t ble_cam_health_flags() { return 0; }
-static inline bool ble_cam_send(const uint8_t *, uint16_t) { return false; }
-static inline void ble_cam_on_status(void (*)(const uint8_t *, uint16_t)) {}
-
-#else
 
 #include <esp_wifi.h>
 #include <esp_task_wdt.h>
@@ -127,17 +86,17 @@ static inline void ble_cam_on_status(void (*)(const uint8_t *, uint16_t)) {}
 #include <BLESecurity.h>
 
 // Published by Blackmagic in the camera's "Developer Information" manual
-// section.  Same Camera Control Protocol the SDI path carries, so if this
-// spike passes, the command work is mostly mapping rather than inventing.
-#define BLECAM_SERVICE   "291d567a-6d75-11e6-8b77-86f30ca893d3"
+// section.  Same Camera Control Protocol the SDI path carries, so a command
+// built here is the one an SDI controller would send, byte for byte.
+#define CAM_SERVICE   "291d567a-6d75-11e6-8b77-86f30ca893d3"
 // Named from the CONTROLLER's point of view, not the camera's — which is the
 // opposite of what the words suggest and cost a round trip on the rig:
 // commands were being written to the notify characteristic, so the link was up,
 // the write returned success, and the camera did nothing.  Checked against
 // schoolpost/BlueMagic32, which writes to Outgoing and subscribes to Incoming.
-#define BLECAM_OUTGOING  "5dd3465f-1aee-4299-8493-d2eca2f8e1bb"  // us -> camera (WRITE)
-#define BLECAM_INCOMING  "b864e140-76a0-416a-bf30-5876504537d9"  // camera -> us (notify)
-#define BLECAM_STATUS    "7fe8691d-95dc-4fc5-8abd-ca74339b51b9"
+#define CAM_OUTGOING  "5dd3465f-1aee-4299-8493-d2eca2f8e1bb"  // us -> camera (WRITE)
+#define CAM_INCOMING  "b864e140-76a0-416a-bf30-5876504537d9"  // camera -> us (notify)
+#define CAM_STATUS    "7fe8691d-95dc-4fc5-8abd-ca74339b51b9"
 
 // The passkey is typed into the SERIAL MONITOR while pairing is in progress.
 //
@@ -150,20 +109,22 @@ static inline void ble_cam_on_status(void (*)(const uint8_t *, uint16_t)) {}
 // So onPassKeyRequest() waits for the number, which is also what a real
 // implementation would do — from the mount's own touchscreen rather than a
 // serial monitor.
-#define BLE_CAM_PIN_WAIT_MS  90000UL
+#define CAM_PIN_WAIT_MS  90000UL
 
+#if CAM_PAIR
 // Blocking, deliberately.  It runs on the BLE host task during pairing, which
 // is exactly the moment there is nothing else for that task to do, and the
 // alternative — failing the pairing and retrying — cannot work when the camera
-// picks new digits each time.
+// picks new digits each time.  Compiled only into a pairing build for that
+// reason: nothing on a rig may block like this.
 static uint32_t bc_prompt_passkey() {
     Serial.println();
-    Serial.println("[BLECAM] ============================================");
-    Serial.println("[BLECAM] The camera is now showing a 6-digit code.");
-    Serial.println("[BLECAM] Type it here and press Enter.");
-    Serial.println("[BLECAM] ============================================");
+    Serial.println("[CAM] ============================================");
+    Serial.println("[CAM] The camera is now showing a 6-digit code.");
+    Serial.println("[CAM] Type it here and press Enter.");
+    Serial.println("[CAM] ============================================");
     char buf[8]; uint8_t n = 0;
-    uint32_t deadline = millis() + BLE_CAM_PIN_WAIT_MS;
+    uint32_t deadline = millis() + CAM_PIN_WAIT_MS;
     while ((int32_t)(millis() - deadline) < 0) {
         while (Serial.available()) {
             int c = Serial.read();
@@ -171,26 +132,27 @@ static uint32_t bc_prompt_passkey() {
                 if (n == 0) continue;                 // ignore a bare newline
                 buf[n] = 0;
                 uint32_t k = (uint32_t)strtoul(buf, nullptr, 10);
-                Serial.printf("[BLECAM] using %06lu\n", (unsigned long)k);
+                Serial.printf("[CAM] using %06lu\n", (unsigned long)k);
                 return k;
             }
             if (c >= '0' && c <= '9' && n < 6) buf[n++] = (char)c;
         }
         delay(10);
     }
-    Serial.println("[BLECAM] no code entered — pairing will fail, it will retry");
+    Serial.println("[CAM] no code entered — pairing will fail, it will retry");
     return 0;
 }
+#endif  // CAM_PAIR
 
 // BLE_VERBOSE=1 turns the BLE stack's own logging up.  Four rounds of guessing
 // at why connect() returns false have cost more than reading the error would
 // have: the stack knows exactly why and simply is not asked.
-#ifndef BLECAM_VERBOSE
-#define BLECAM_VERBOSE 0
+#ifndef CAM_VERBOSE
+#define CAM_VERBOSE 0
 #endif
 
-#define BLECAM_REPORT_MS   30000UL
-#define BLECAM_RETRY_MS    10000UL
+#define CAM_REPORT_MS   30000UL
+#define CAM_RETRY_MS    10000UL
 
 static BLEAdvertisedDevice  *_bc_found  = nullptr;
 static volatile bool         _bc_connected = false;
@@ -232,6 +194,8 @@ static bool     _bc_write_err   = false;
 static uint16_t _bc_notify_handle = 0;
 static uint16_t _bc_cccd_handle   = 0;
 static uint16_t _bc_svc_start = 0, _bc_svc_end = 0;
+// volatile: written by the NimBLE host task, read by loop() to gate retries.
+static volatile bool _bc_unpaired = false;  // asked for a passkey we cannot supply
 static bool     _bc_subscribed = false;
 
 // NimBLE runs ONE GATT procedure per connection at a time.  The first version
@@ -247,7 +211,7 @@ static bool     _bc_subscribed = false;
 //
 //   service -> control chr -> notify chr -> its CCCD -> write 0x0001
 
-// The sketch supplies this; the spike does not know what a hub is.  Keeps the
+// The sketch supplies this; this layer does not know what a hub is.  Keeps the
 // relay decision (what to do with camera bytes) out of the BLE layer.
 static void (*_bc_status_cb)(const uint8_t *, uint16_t) = nullptr;
 void ble_cam_on_status(void (*cb)(const uint8_t *, uint16_t)) { _bc_status_cb = cb; }
@@ -294,9 +258,9 @@ static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
         int rc = ble_gattc_write_flat(conn, _bc_cccd_handle, on, sizeof(on),
                                       nullptr, nullptr);
         _bc_subscribed = (rc == 0);
-        Serial.printf("[BLECAM] status indications %s\n", rc ? "FAILED" : "enabled");
+        Serial.printf("[CAM] status indications %s\n", rc ? "FAILED" : "enabled");
     } else if (err->status == BLE_HS_EDONE) {
-        Serial.println("[BLECAM] no CCCD found — camera will not notify");
+        Serial.println("[CAM] no CCCD found — camera will not notify");
     }
     return 0;
 }
@@ -307,11 +271,11 @@ static int bc_on_chr(uint16_t conn, const struct ble_gatt_error *err,
     if (err->status == 0 && chr) {
         if (is_notify) {
             _bc_notify_handle = chr->val_handle;
-            Serial.printf("[BLECAM] status characteristic (handle %u)\n",
+            Serial.printf("[CAM] status characteristic (handle %u)\n",
                           _bc_notify_handle);
         } else {
             _bc_ctrl_handle = chr->val_handle;
-            Serial.printf("[BLECAM] control characteristic ready (handle %u)\n",
+            Serial.printf("[CAM] control characteristic ready (handle %u)\n",
                           _bc_ctrl_handle);
         }
         return 0;
@@ -320,7 +284,7 @@ static int bc_on_chr(uint16_t conn, const struct ble_gatt_error *err,
         if (!is_notify) {
             // Control characteristic done — now the notify one.
             static ble_uuid_any_t ui;
-            ble_uuid_from_str(&ui, BLECAM_INCOMING);
+            ble_uuid_from_str(&ui, CAM_INCOMING);
             ble_gattc_disc_chrs_by_uuid(conn, _bc_svc_start, _bc_svc_end,
                                         &ui.u, bc_on_chr, (void *)1);
         } else if (_bc_notify_handle) {
@@ -330,11 +294,11 @@ static int bc_on_chr(uint16_t conn, const struct ble_gatt_error *err,
             ble_gattc_disc_all_dscs(conn, _bc_notify_handle,
                                     _bc_notify_handle + 3, bc_on_dsc, nullptr);
         } else {
-            Serial.println("[BLECAM] status characteristic not found");
+            Serial.println("[CAM] status characteristic not found");
         }
         return 0;
     }
-    Serial.printf("[BLECAM] characteristic discovery failed, status=%d\n",
+    Serial.printf("[CAM] characteristic discovery failed, status=%d\n",
                   err->status);
     return 0;
 }
@@ -346,11 +310,11 @@ static int bc_on_svc(uint16_t conn, const struct ble_gatt_error *err,
         _bc_svc_start = svc->start_handle;
         _bc_svc_end   = svc->end_handle;
         static ble_uuid_any_t uo;
-        ble_uuid_from_str(&uo, BLECAM_OUTGOING);  // we WRITE here; notify next
+        ble_uuid_from_str(&uo, CAM_OUTGOING);  // we WRITE here; notify next
         ble_gattc_disc_chrs_by_uuid(conn, _bc_svc_start, _bc_svc_end,
                                     &uo.u, bc_on_chr, nullptr);
     } else if (err->status != BLE_HS_EDONE) {
-        Serial.printf("[BLECAM] service discovery failed, status=%d\n", err->status);
+        Serial.printf("[CAM] service discovery failed, status=%d\n", err->status);
     }
     return 0;
 }
@@ -361,7 +325,7 @@ bool ble_cam_send(const uint8_t *cmd, uint16_t len) {
     if (!_bc_connected || !_bc_ctrl_handle) return false;
     if (!len || len > CAM_CONTROL_MAX_LEN) return false;
     int rc = ble_gattc_write_flat(_bc_conn, _bc_ctrl_handle, cmd, len, nullptr, nullptr);
-    if (rc) { Serial.printf("[BLECAM] write rc=%d\n", rc); _bc_write_err = true; }
+    if (rc) { Serial.printf("[CAM] write rc=%d\n", rc); _bc_write_err = true; }
     return rc == 0;
 }
 
@@ -370,38 +334,51 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
 
     case BLE_GAP_EVENT_CONNECT:
         if (ev->connect.status != 0) {
-            Serial.printf("[BLECAM] connect failed, status=%d\n", ev->connect.status);
+            Serial.printf("[CAM] connect failed, status=%d\n", ev->connect.status);
             _bc_conn = BLE_HS_CONN_HANDLE_NONE;
             return 0;
         }
         _bc_conn = ev->connect.conn_handle;
-        Serial.printf("[BLECAM] CONNECTED (handle %u)\n", _bc_conn);
+        Serial.printf("[CAM] CONNECTED (handle %u)\n", _bc_conn);
         {
             // Ask, but do not care.  EALREADY means the camera got there first,
             // which is fine — this is the line the wrapper dies on.
             int rc = ble_gattc_exchange_mtu(_bc_conn, nullptr, nullptr);
-            if (rc) Serial.printf("[BLECAM] (MTU exchange rc=%d — ignored)\n", rc);
+            if (rc) Serial.printf("[CAM] (MTU exchange rc=%d — ignored)\n", rc);
         }
         // Pairing has to be asked for; the camera will not volunteer it.
         if (int rc = ble_gap_security_initiate(_bc_conn))
-            Serial.printf("[BLECAM] security_initiate rc=%d\n", rc);
+            Serial.printf("[CAM] security_initiate rc=%d\n", rc);
         return 0;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         if (ev->passkey.params.action == BLE_SM_IOACT_INPUT) {
             struct ble_sm_io io = {};
             io.action  = BLE_SM_IOACT_INPUT;
+#if CAM_PAIR
             io.passkey = bc_prompt_passkey();
             int rc = ble_sm_inject_io(ev->passkey.conn_handle, &io);
-            Serial.printf("[BLECAM] passkey injected, rc=%d\n", rc);
+            Serial.printf("[CAM] passkey injected, rc=%d\n", rc);
+#else
+            // No bond, and nobody here to type six digits.  Give up rather than
+            // retry: reconnecting cannot create a bond, so the 10 s retry would
+            // just put a failed-pairing prompt on the camera every 10 seconds,
+            // for as long as the rig is powered.  Latch it, say it once, and let
+            // the health flag carry the instruction to the PC app.
+            (void)io;
+            _bc_unpaired = true;
+            Serial.println("[CAM] camera is NOT PAIRED with this mount — no more "
+                           "attempts. Reflash with CAM_PAIR=1 on a bench, once.");
+            ble_gap_terminate(ev->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+#endif
         } else {
-            Serial.printf("[BLECAM] unexpected passkey action %d\n",
+            Serial.printf("[CAM] unexpected passkey action %d\n",
                           ev->passkey.params.action);
         }
         return 0;
 
     case BLE_GAP_EVENT_ENC_CHANGE:
-        Serial.printf("[BLECAM] encryption %s (status=%d)\n",
+        Serial.printf("[CAM] encryption %s (status=%d)\n",
                       ev->enc_change.status ? "FAILED" : "ESTABLISHED — PAIRED",
                       ev->enc_change.status);
         if (ev->enc_change.status == 0) {
@@ -410,13 +387,13 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
             // Only now: the control characteristic is not reachable before the
             // link is encrypted.
             ble_uuid_any_t u;
-            ble_uuid_from_str(&u, BLECAM_SERVICE);
+            ble_uuid_from_str(&u, CAM_SERVICE);
             ble_gattc_disc_svc_by_uuid(_bc_conn, &u.u, bc_on_svc, nullptr);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        Serial.printf("[BLECAM] disconnected (reason %d)\n", ev->disconnect.reason);
+        Serial.printf("[CAM] disconnected (reason %d)\n", ev->disconnect.reason);
         _bc_conn        = BLE_HS_CONN_HANDLE_NONE;
         _bc_connected   = false;
         _bc_ctrl_handle   = 0;    // handles do not survive a connection
@@ -455,7 +432,7 @@ static bool bc_connect(const char *addr_text) {
     for (int i = 0; i < 6; i++) a.val[i] = (uint8_t)v[5 - i];
     int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &a, 15000, nullptr,
                              bc_gap_event, nullptr);
-    if (rc) Serial.printf("[BLECAM] ble_gap_connect rc=%d\n", rc);
+    if (rc) Serial.printf("[CAM] ble_gap_connect rc=%d\n", rc);
     return rc == 0;
 }
 
@@ -481,15 +458,15 @@ static BcCand  _bc_cand[BC_MAX_CAND];
 static uint8_t _bc_ncand = 0;
 // The name from the camera's Bluetooth menu.  Substring, so "BMPCC" matches
 // "Colin BMPCC".  Override at build time if yours is named otherwise.
-#ifndef BLECAM_NAME
-#define BLECAM_NAME  "BMPCC"
+#ifndef CAM_NAME
+#define CAM_NAME  "BMPCC"
 #endif
 // A camera on this mount should be strong.  Weaker than this is worth SAYING
 // on a rig where several mounts each carry one — connecting to a neighbour's
 // camera would look like success — but it is only a warning, not a veto: a
 // metal-bodied camera at arm's length can read -66, and refusing to try would
 // have blocked the only camera in the room on a bench with one.
-#define BLECAM_WEAK_RSSI  (-65)
+#define CAM_WEAK_RSSI  (-65)
 
 class BcScanCb : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice dev) override {
@@ -522,9 +499,9 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
             }
         }
         bool svc = dev.haveServiceUUID() &&
-                   dev.isAdvertisingService(BLEUUID(BLECAM_SERVICE));
-        bool named = nm.length() && (nm.indexOf(BLECAM_NAME) >= 0);
-        Serial.printf("[BLECAM]  seen \"%s\" %s %d dBm%s%s\n",
+                   dev.isAdvertisingService(BLEUUID(CAM_SERVICE));
+        bool named = nm.length() && (nm.indexOf(CAM_NAME) >= 0);
+        Serial.printf("[CAM]  seen \"%s\" %s %d dBm%s%s\n",
                       nm.c_str(), dev.getAddress().toString().c_str(),
                       dev.getRSSI(), svc ? " [svc]" : "", named ? " [NAME MATCH]" : "");
         // Remembered whether or not it looks like a camera: the whole point is
@@ -550,7 +527,7 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
         //   addrtype 1     a random address.  connect() must be told, or it
         //                  tries the wrong type and fails without reaching the
         //                  camera — which matches "no sign of it at the camera".
-        Serial.printf("[BLECAM] found \"%s\" %s | rssi %d | addrtype %u | "
+        Serial.printf("[CAM] found \"%s\" %s | rssi %d | addrtype %u | "
                       "advtype %u | connectable %d | payload %u B\n",
                       dev.getName().c_str(), dev.getAddress().toString().c_str(),
                       dev.getRSSI(), (unsigned)dev.getAddressType(),
@@ -572,10 +549,10 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
             memcpy(seen, dev.getAddress().getNative(), 6);
             uint8_t *pl = dev.getPayload();
             size_t   n  = dev.getPayloadLength();
-            Serial.print("[BLECAM] raw adv: ");
+            Serial.print("[CAM] raw adv: ");
             for (size_t i = 0; i < n && i < 62; i++) Serial.printf("%02X", pl[i]);
             Serial.println();
-            Serial.printf("[BLECAM] svc uuid: %s | count %d\n",
+            Serial.printf("[CAM] svc uuid: %s | count %d\n",
                           dev.getServiceUUID().toString().c_str(),
                           (int)dev.getServiceDataCount());
         }
@@ -588,13 +565,17 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
 };
 
 class BcSecCb : public BLESecurityCallbacks {
+#if CAM_PAIR
     uint32_t onPassKeyRequest() override { return bc_prompt_passkey(); }
+#else
+    uint32_t onPassKeyRequest() override { return 0; }
+#endif
     void onPassKeyNotify(uint32_t pass) override {
-        Serial.printf("[BLECAM] camera shows %06lu\n", (unsigned long)pass);
+        Serial.printf("[CAM] camera shows %06lu\n", (unsigned long)pass);
     }
     bool onSecurityRequest() override { return true; }
     bool onConfirmPIN(uint32_t pin) override {
-        Serial.printf("[BLECAM] confirm %06lu\n", (unsigned long)pin);
+        Serial.printf("[CAM] confirm %06lu\n", (unsigned long)pin);
         return true;
     }
     // onAuthenticationComplete() is Bluedroid-only and this core builds the BLE
@@ -603,43 +584,32 @@ class BcSecCb : public BLESecurityCallbacks {
     bool onAuthorizationRequest(uint16_t, uint16_t, bool) override { return true; }
 };
 
-// BLE_CAM=2 — PAIR-ONLY mode.  WiFi is stopped before BLE starts.
+// Camera support is unconditional in a normal build; only PAIRING is opt-in.
 //
+// WiFi is stopped for pairing because the two jobs want the same radio at once.
 // With WiFi running, the camera was found every time and the connection never
-// completed.  BlueMagic32, which works against this camera, runs on boards
-// doing nothing else; a mount runs WiFi STA and ESP-NOW on the same radio, and
-// on the S3 WiFi wins coexistence arbitration by default.  Establishing a BLE
-// connection needs sustained radio time that it may simply never get.
-//
-// Pairing is the expensive part; reconnecting to a BONDED peer is far cheaper.
-// So pair once with WiFi stopped, then reflash with BLE_CAM=1 and see whether
-// the bonded reconnect survives alongside ESP-NOW.  That splits one unanswerable
-// question into two answerable ones:
-//
-//   pair-only connects   -> coexistence blocks CONNECTION SETUP specifically
-//   pair-only also fails -> the fault is not coexistence, look elsewhere
-//                           (power, camera state, bond)
-//
-// This mode cannot relay anything and must never be flashed to a working rig.
-static void ble_cam_spike_setup() {
-#if BLE_CAM_SPIKE == 2
-    Serial.println("[BLECAM] PAIR-ONLY BUILD — stopping WiFi so BLE has the radio.");
-    Serial.println("[BLECAM] This mount will NOT talk to the hub. Pair, then reflash BLE_CAM=1.");
+// completed: on the S3, WiFi wins coexistence arbitration by default, and
+// establishing a BLE connection needs sustained radio time it may never get.
+// Pairing is the expensive part — reconnecting to a BONDED peer is far cheaper,
+// and measurably free alongside ESP-NOW.  So pairing gets the radio to itself,
+// once, and everything after it shares.
+static void ble_cam_setup() {
+#if CAM_PAIR
+    Serial.println("[CAM] PAIRING BUILD — WiFi stopped so BLE has the radio.");
+    Serial.println("[CAM] This mount will NOT talk to a hub. Pair, then reflash normally.");
     esp_wifi_stop();
     delay(200);
-#endif
-    // The task watchdog is switched OFF for the whole spike build.
-    //
-    // The blocking connect() that first tripped it is gone — ble_gap_connect()
-    // is asynchronous — but the passkey prompt still blocks the NimBLE host
-    // task for as long as it takes someone to type six digits, and a watchdog
-    // that fires while a human is reading a camera screen is no use to anyone.
-    //
-    // A spike build is a bench diagnostic and BLE_CAM=2 refuses to talk to a
-    // hub at all, so nothing here is protecting a rig.  Normal builds keep it
-    // exactly as it was.
+
+    // Watchdog off for PAIRING ONLY.  The blocking connect() that first tripped
+    // it is long gone — ble_gap_connect() is asynchronous — but the passkey
+    // prompt still blocks the NimBLE host task for as long as it takes someone
+    // to type six digits, and a watchdog that fires while a human is reading a
+    // camera screen is no use to anyone.  This build cannot reach a hub, so
+    // nothing here is protecting a rig.  A normal build never prompts and keeps
+    // the watchdog exactly as every other build has it.
     esp_task_wdt_deinit();
-    Serial.println("[BLECAM] SPIKE BUILD — task watchdog OFF for this build");
+    Serial.println("[CAM] pairing build — task watchdog OFF");
+#endif
     BLEDevice::init("PTS-Mount");
     BLEDevice::setPower(ESP_PWR_LVL_P9);          // as BlueMagic32 does
     BLEDevice::setSecurityCallbacks(new BcSecCb());
@@ -686,7 +656,7 @@ static void bc_scan_done(BLEScanResults) {
 }
 
 static bool bc_choose() {
-    if (!_bc_ncand) { Serial.println("[BLECAM] scan found nothing at all"); return false; }
+    if (!_bc_ncand) { Serial.println("[CAM] scan found nothing at all"); return false; }
 
     // Match on the SERVICE.  The name is now recovered from the raw payload as
     // well and shown in the list, but the service UUID is the reliable
@@ -696,10 +666,10 @@ static bool bc_choose() {
     for (uint8_t i = 0; i < _bc_ncand; i++)
         if (_bc_cand[i].svc) { only_named = i; n_named++; }
 
-    Serial.println("\n[BLECAM] ---- devices in range ----");
+    Serial.println("\n[CAM] ---- devices in range ----");
     for (uint8_t i = 0; i < _bc_ncand; i++) {
         BcCand &c = _bc_cand[i];
-        Serial.printf("[BLECAM]  %2u) %-26s %-18s %4d dBm%s\n",
+        Serial.printf("[CAM]  %2u) %-26s %-18s %4d dBm%s\n",
                       i + 1, c.name[0] ? c.name : "(no name)", c.addr, c.rssi,
                       c.svc ? "  <-- BLACKMAGIC CAMERA" : "");
     }
@@ -707,7 +677,7 @@ static bool bc_choose() {
     int pick = -1;
     if (n_named == 1) {
         pick = only_named;
-        Serial.printf("[BLECAM] one Blackmagic camera in range — using %u\n", pick + 1);
+        Serial.printf("[CAM] one Blackmagic camera in range — using %u\n", pick + 1);
     } else {
         // NON-BLOCKING.  An earlier version waited fifteen seconds here for a
         // keystroke, on the main loop — and on a rig there is no serial monitor
@@ -718,7 +688,7 @@ static bool bc_choose() {
         // nobody is there, so say what was found and rescan instead of
         // stopping the mount to wait for an operator who does not exist.
         if (!Serial.available()) {
-            Serial.printf("[BLECAM] no single Blackmagic camera in range — "
+            Serial.printf("[CAM] no single Blackmagic camera in range — "
                           "type 1-%u while a scan result is fresh to force one, "
                           "otherwise rescanning\n", _bc_ncand);
             return false;
@@ -731,7 +701,7 @@ static bool bc_choose() {
         }
         Serial.println();
         if (!any || v < 1 || v > _bc_ncand) {
-            Serial.println("[BLECAM] no valid choice — rescanning");
+            Serial.println("[CAM] no valid choice — rescanning");
             return false;
         }
         pick = v - 1;
@@ -741,23 +711,26 @@ static bool bc_choose() {
     snprintf(_bc_pick_text, sizeof(_bc_pick_text), "%s", _bc_cand[pick].addr);
     _bc_best_rssi  = _bc_cand[pick].rssi;
     _bc_chosen     = true;
-    Serial.printf("[BLECAM] chose %s (%d dBm)\n", _bc_pick_text, _bc_best_rssi);
+    Serial.printf("[CAM] chose %s (%d dBm)\n", _bc_pick_text, _bc_best_rssi);
     return true;
 }
 
-// Reported in every CMD_HEALTH, because a mount on a rig has no readable
-// serial port — the enclosure is shut and the Teensy owns the USB cable — so
-// [BLECAM] says nothing where the measurement actually happens.  These two bits
-// land in comms.log beside txfail, which is what they have to be compared with.
+// Reported in every CMD_HEALTH, because a mount on a rig has no readable serial
+// port — the enclosure is shut and the Teensy owns the USB cable — so [CAM]
+// output is invisible exactly where the camera actually is.  These bits land in
+// comms.log instead, beside txfail, which is what they get compared with.
+// BLE_BUILD is unconditional: the PC app uses its absence to tell "old firmware"
+// apart from "camera switched off", which look the same from a dark button.
 static uint8_t ble_cam_health_flags() {
     uint8_t f = HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0)
+              | (_bc_unpaired  ? HEALTH_FLAG_CAM_UNPAIRED : 0)
               | (_bc_subscribed ? HEALTH_FLAG_CAM_SUBSCR : 0)
               | (_bc_notifies   ? HEALTH_FLAG_CAM_RX     : 0);
     if (_bc_write_err) { f |= HEALTH_FLAG_CAM_WR_ERR; _bc_write_err = false; }
     return f;
 }
 
-static void ble_cam_spike_poll() {
+static void ble_cam_poll() {
     uint32_t now = millis();
 
     // ble_gap_connect() is asynchronous: this only starts an attempt, and
@@ -766,7 +739,7 @@ static void ble_cam_spike_poll() {
     // task watchdog to trip over — the reason it had to be disabled was the
     // wrapper's blocking connect(), which is gone.
     bool busy = _bc_connected || _bc_conn != BLE_HS_CONN_HANDLE_NONE || _bc_scanning;
-    if (!busy && (now - _bc_retry_ms) > BLECAM_RETRY_MS) {
+    if (!busy && !_bc_unpaired && (now - _bc_retry_ms) > CAM_RETRY_MS) {
         _bc_retry_ms = now;
         if (!_bc_chosen) {
             if (!_bc_scan_ready) {
@@ -787,23 +760,22 @@ static void ble_cam_spike_poll() {
         // NimBLE will not start a connection while discovery is running.
         BLEDevice::getScan()->stop();
         delay(50);
-        Serial.printf("[BLECAM] connecting to %s (%d dBm)\n",
+        Serial.printf("[CAM] connecting to %s (%d dBm)\n",
                       _bc_pick_text, _bc_best_rssi);
         if (!bc_connect(_bc_pick_text)) {
-            Serial.println("[BLECAM] could not start the attempt — rescanning");
+            Serial.println("[CAM] could not start the attempt — rescanning");
             _bc_chosen = false;
         }
     }
 
-    if ((now - _bc_report_ms) >= BLECAM_REPORT_MS) {
+    if ((now - _bc_report_ms) >= CAM_REPORT_MS) {
         _bc_report_ms = now;
         // Printed even when disconnected, on purpose: "no ESP-NOW impact"
         // means nothing if the link was down for the window.
-        Serial.printf("[BLECAM] %s | up %lus | %lu notifications\n",
+        Serial.printf("[CAM] %s | up %lus | %lu notifications\n",
                       _bc_connected ? "PAIRED" : "not connected",
                       (unsigned long)(_bc_connected ? (now - _bc_since_ms) / 1000UL : 0),
                       (unsigned long)_bc_notifies);
     }
 }
 
-#endif  // BLE_CAM_SPIKE

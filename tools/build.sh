@@ -20,6 +20,18 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 LIBS="$REPO/libraries"
 OUT="$REPO/.build"
 
+# A value with a space cannot survive compiler.cpp.extra_flags, which arduino-cli
+# splits on whitespace: the build then fails deep in the linker with
+# "BMPCC": linker input file not found, naming neither this variable nor the
+# file it came from.  The match is a SUBSTRING, so one word is always enough —
+# CAM_NAME=BMPCC matches a camera called "Colin BMPCC".
+case "${CAM_NAME:-}" in
+    *\ *) echo "CAM_NAME must not contain spaces."
+          echo "  It is a substring match, so use one word:"
+          echo "  CAM_NAME=BMPCC   matches a camera named \"${CAM_NAME}\""
+          exit 1 ;;
+esac
+
 FQBN_HUB="esp32:esp32:XIAO_ESP32S3:USBMode=default,CDCOnBoot=default,PartitionScheme=default_8MB,FlashSize=8M"
 FQBN_DISPLAY="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
 FQBN_AMOLED="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
@@ -107,20 +119,21 @@ props_for() {
         sat)     [ -n "${SAT_NAME:-}" ] && _f="$_f -DSAT_NAME=\"$SAT_NAME\"" ;;
     esac
     [ -n "${DIAG:-}" ] && _f="$_f -DPTS_DIAG=$DIAG"
-    # BLE camera-control SPIKE (amoled only) — measures what a BLE link to the
-    # camera costs the ESP-NOW link.  Not a feature; see ble_cam_spike.h.
-    #   BLE_CAM=1 tools/build.sh flash amoled
+    # Blackmagic camera control is built into every amoled binary.  Only the
+    # one-time PAIRING mode is opt-in, because it stops WiFi and blocks for a
+    # passkey — see ble_camera.h:
+    #   CAM_PAIR=1 tools/build.sh flash amoled     # bench only, once per mount
     # The pairing code is typed into the serial monitor when the camera shows
-    # it — it cannot be a build flag, see ble_cam_spike.h.
-    [ -n "${BLE_CAM:-}" ] && _f="$_f -DBLE_CAM_SPIKE=$BLE_CAM"
+    # it, so it cannot be a build flag.
+    [ -n "${CAM_PAIR:-}" ] && _f="$_f -DCAM_PAIR=$CAM_PAIR"
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
-    [ -n "${BLE_CAM_NAME:-}" ] && _f="$_f -DBLECAM_NAME=\"$BLE_CAM_NAME\""
-    # BLE_VERBOSE=1 turns up the BLE stack's own logging.  Only BLECAM_VERBOSE
+    [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""
+    # BLE_VERBOSE=1 turns up the BLE stack's own logging.  Only CAM_VERBOSE
     # here — the log level itself is a BOARD option (DebugLevel in the FQBN),
     # and passing -DCORE_DEBUG_LEVEL as a compiler flag instead fights the
     # core's own definition: dozens of "redefined" warnings, and a build that
     # then failed outright because the cached core.a no longer matched.
-    [ -n "${BLE_VERBOSE:-}" ] && _f="$_f -DBLECAM_VERBOSE=1"
+    [ -n "${BLE_VERBOSE:-}" ] && _f="$_f -DCAM_VERBOSE=1"
     [ -n "$_f" ] && echo "compiler.cpp.extra_flags=${_f# }"
 }
 

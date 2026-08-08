@@ -163,6 +163,15 @@ paired, the command is simply dropped at the mount.  Whether a mount's camera
 link is up shows in the PC app's **CC** panel and in `comms.log` as
 `BLE PAIRED`.
 
+**Each mount must be paired with its camera once, on a bench.**  Every mount
+ships with camera control built in, but Bluetooth pairing needs the six-digit
+code the camera puts on screen, typed in while someone is watching — so it
+cannot happen out on a rig.  The bond is then stored on the mount and survives
+power cycles and reflashes.  A mount that has never been paired says so
+specifically, in the **CC** panel as *not paired* and in `comms.log` as
+`BLE NOT PAIRED` — distinct from *camera off*, because the fix is different.
+Pairing is a firmware job: see `ble_camera.h`.
+
 `/pts/refresh` asks for that full send on demand.  Bind it to a Companion
 startup trigger, or to a button, for the case the automatic paths do not cover:
 a Companion that restarts on the same port is not a new peer, so without asking

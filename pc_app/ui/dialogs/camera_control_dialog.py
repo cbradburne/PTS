@@ -6,14 +6,18 @@ first would add a step to every use.
 
 What a row can tell you, and why all three states matter:
 
-    "no camera support"   that mount's firmware has no BLE camera build, so
-                          nothing here will ever work until it is reflashed
-    "camera off"          BLE build, but no link — the camera is off, asleep,
-                          or out of range
+    "no camera support"   that mount is running firmware from before camera
+                          support — nothing here works until it is reflashed
+    "camera off"          firmware is current, but no link — the camera is
+                          off, asleep, or out of range
+    "not paired"          the mount and camera have no bond, and the mount has
+                          stopped trying because reconnecting cannot create one
+                          — a one-time CAM_PAIR=1 bench flash fixes it
     "camera ready"        paired; the button will do something
 
-Those first two look identical from a greyed-out button, and they need
-completely different actions, so they are spelled out rather than implied.
+All three look identical from a greyed-out button and need completely
+different actions — reflash the mount, go and check the camera, or pair it — so
+they are spelled out rather than implied.
 
 Commands are fire-and-forget.  The Blackmagic control protocol has no
 acknowledgement of any kind — the mount ACKs receiving the relay packet, but
@@ -66,6 +70,7 @@ def _step(table, current, direction):
 _STATE_STYLE = {
     "ready":   ("camera ready",       "#2E7D32"),
     "off":     ("camera off",         "#B71C1C"),
+    "unpaired":("not paired",         "#E65100"),
     "nobuild": ("no camera support",  "#5A6472"),
     "nomount": ("mount offline",      "#5A6472"),
 }
@@ -141,6 +146,8 @@ class _CamRow(QWidget):
         link = self._bridge.cam_ble_link(self._mount_id)
         if link is None:
             return "nobuild"
+        if link == "unpaired":
+            return "unpaired"
         return "ready" if link else "off"
 
     def refresh(self) -> None:

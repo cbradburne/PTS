@@ -268,7 +268,11 @@ typedef enum : uint8_t {
 // the cable — so [BLECAM] output is invisible exactly where the measurement has
 // to happen.  These two bits put the state in comms.log with the rest of the
 // telemetry, which is where it can be correlated with txfail anyway.
-#define HEALTH_FLAG_BLE_BUILD  0x02   // this firmware has the BLE spike compiled in
+// Set by every current amoled build, so its ABSENCE is the useful signal: that
+// mount is running firmware from before camera support and needs reflashing.
+// Without it, old firmware and a camera that is merely switched off look
+// identical from the PC app, and they need completely different actions.
+#define HEALTH_FLAG_BLE_BUILD  0x02   // firmware has camera support at all
 #define HEALTH_FLAG_BLE_LINK   0x04   // ...and the camera is currently paired
 // Set when a camera write has failed since the last report, and cleared by
 // sending it.  A mount on a rig has no readable serial, so without this a write
@@ -287,6 +291,14 @@ typedef enum : uint8_t {
 // descriptor reports success and then silence, which looks exactly like a
 // relay that is dropping the packets afterwards.
 #define HEALTH_FLAG_CAM_RX     0x20
+
+// Latched when a camera asks for a passkey on a build that cannot answer one.
+// That mount has no bond, and no amount of reconnecting will create one — it
+// needs a CAM_PAIR=1 bench flash.  Worth its own bit because it is the one
+// camera fault the PC app can give a precise instruction for, and because it
+// otherwise hides behind "camera off", which tells someone to go check a camera
+// that is working perfectly well.
+#define HEALTH_FLAG_CAM_UNPAIRED 0x40
 
 // ---------------------------------------------------------------------------
 // Axis / group identifiers

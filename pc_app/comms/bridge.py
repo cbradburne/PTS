@@ -34,7 +34,8 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        build_packet, HEALTH_FLAG_BLE_BUILD, HEALTH_FLAG_BLE_LINK,
                        HEALTH_FLAG_CAM_WR_ERR,
                        HEALTH_FLAG_CAM_SUBSCR,
-                       HEALTH_FLAG_CAM_RX)
+                       HEALTH_FLAG_CAM_RX,
+                       HEALTH_FLAG_CAM_UNPAIRED)
 
 log = logging.getLogger(__name__)
 
@@ -687,10 +688,15 @@ class Bridge:
         ble = ""
         if h.flags & HEALTH_FLAG_BLE_BUILD:
             linked = bool(h.flags & HEALTH_FLAG_BLE_LINK)
-            ble = " | BLE PAIRED" if linked else " | BLE down"
+            unpaired = bool(h.flags & HEALTH_FLAG_CAM_UNPAIRED)
+            if unpaired:
+                # Terminal until someone reflashes: the mount has no bond and
+                # has stopped trying, so this will not clear on its own.
+                ble = " | BLE NOT PAIRED (needs CAM_PAIR=1 bench flash)"
+            else:
+                ble = " | BLE PAIRED" if linked else " | BLE down"
             if linked:
-                if not (h.flags & HEALTH_FLAG_CAM_SUBSCR,
-                       HEALTH_FLAG_CAM_RX):
+                if not h.flags & HEALTH_FLAG_CAM_SUBSCR:
                     ble += " (NOT subscribed — no gain/WB)"
                 elif h.flags & HEALTH_FLAG_CAM_RX:
                     ble += " (subscribed, camera reporting)"
@@ -707,7 +713,7 @@ class Bridge:
             # UI on a timer: health arrives every 10 s, so a signal would add
             # plumbing for an update rate nothing can perceive.
             if 1 <= pkt.mount_id <= 5:
-                self._cam_ble[pkt.mount_id] = linked
+                self._cam_ble[pkt.mount_id] = "unpaired" if unpaired else linked
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "
                 "loopmax %4dms | txfail %d | rssi %d | n32 %d | reset %d%s") % (
             who, h.uptime_s / 3600.0,
@@ -997,9 +1003,14 @@ class Bridge:
         return oldest, oldest_mount, pending
 
     def cam_ble_link(self, mount_id: int):
-        """True/False if that mount reports a BLE camera link, None if its
-        firmware has no camera support at all — three states the UI needs to
-        tell apart, because 'no camera' and 'camera off' want different words.
+        """One of True, False, "unpaired", or None.
+
+        Four states because each wants a different sentence from the UI:
+        True = usable; False = camera off or out of range, try the camera;
+        "unpaired" = the mount has no bond and has given up, reflash it;
+        None = firmware predates camera support, reflash it with anything
+        current.  Collapsing any pair of these sends someone to check the
+        wrong thing.
         """
         return self._cam_ble.get(mount_id)
 
