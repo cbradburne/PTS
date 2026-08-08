@@ -650,6 +650,17 @@ static void ble_cam_spike_setup() {
 // stops needing a human as soon as the name is known to be right.
 static bool _bc_chosen = false;
 
+static volatile bool _bc_scanning   = false;
+static volatile bool _bc_scan_ready = false;
+
+// Runs on the BLE task, so it does no work beyond saying the scan is over.
+// Choosing can wait fifteen seconds for a keystroke, which has no business
+// happening on that task.
+static void bc_scan_done(BLEScanResults) {
+    _bc_scanning   = false;
+    _bc_scan_ready = true;
+}
+
 static bool bc_choose() {
     if (!_bc_ncand) { Serial.println("[BLECAM] scan found nothing at all"); return false; }
 
@@ -718,13 +729,24 @@ static void ble_cam_spike_poll() {
     // there is no long blocking call in loop() any more, and nothing for the
     // task watchdog to trip over — the reason it had to be disabled was the
     // wrapper's blocking connect(), which is gone.
-    bool busy = _bc_connected || _bc_conn != BLE_HS_CONN_HANDLE_NONE;
+    bool busy = _bc_connected || _bc_conn != BLE_HS_CONN_HANDLE_NONE || _bc_scanning;
     if (!busy && (now - _bc_retry_ms) > BLECAM_RETRY_MS) {
         _bc_retry_ms = now;
         if (!_bc_chosen) {
-            _bc_ncand = 0;
-            BLEDevice::getScan()->start(5, false);      // blocking, spike only
-            if (!bc_choose()) return;
+            if (!_bc_scan_ready) {
+                // Asynchronous.  The blocking form stopped loop() dead for its
+                // whole duration, and the rig showed it plainly:
+                //   loopmax 5054ms ... loopmax 20003ms
+                // Harmless on a bench; on a rig a camera that is switched off
+                // would mean five seconds of no motion control every ten, which
+                // is worse than having no camera control at all.
+                _bc_ncand    = 0;
+                _bc_scanning = true;
+                BLEDevice::getScan()->start(5, bc_scan_done, false);
+                return;
+            }
+            _bc_scan_ready = false;
+            if (!bc_choose()) return;      // nothing picked — rescan next time
         }
         // NimBLE will not start a connection while discovery is running.
         BLEDevice::getScan()->stop();
