@@ -230,6 +230,22 @@ static bool     _bc_write_err   = false;
 // to the Client Characteristic Configuration Descriptor, which has to be
 // discovered separately.
 static uint16_t _bc_notify_handle = 0;
+static uint16_t _bc_cccd_handle   = 0;
+static uint16_t _bc_svc_start = 0, _bc_svc_end = 0;
+static bool     _bc_subscribed = false;
+
+// NimBLE runs ONE GATT procedure per connection at a time.  The first version
+// started the control and notify discoveries back to back and then wrote the
+// CCCD from inside a discovery callback — three overlapping procedures, of
+// which only the first could run.  Autofocus still worked, because that only
+// needs the control handle the first discovery found, so everything looked
+// fine while notifications had never been subscribed at all.
+//
+// Each step therefore starts the next one from its BLE_HS_EDONE, which is
+// NimBLE's "that procedure is finished" and the only safe moment to begin
+// another:
+//
+//   service -> control chr -> notify chr -> its CCCD -> write 0x0001
 
 // The sketch supplies this; the spike does not know what a hub is.  Keeps the
 // relay decision (what to do with camera bytes) out of the BLE layer.
@@ -244,9 +260,19 @@ static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
                      uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc,
                      void *) {
     if (err->status == 0 && dsc && ble_uuid_u16(&dsc->uuid.u) == 0x2902) {
+        _bc_cccd_handle = dsc->handle;      // remembered, written below
+        return 0;
+    }
+    if (err->status == BLE_HS_EDONE && _bc_cccd_handle) {
+        // Now, and not before: writing from inside the discovery would be a
+        // second procedure while the first is still running.
         static const uint8_t on[2] = { 0x01, 0x00 };
-        int rc = ble_gattc_write_flat(conn, dsc->handle, on, sizeof(on), nullptr, nullptr);
+        int rc = ble_gattc_write_flat(conn, _bc_cccd_handle, on, sizeof(on),
+                                      nullptr, nullptr);
+        _bc_subscribed = (rc == 0);
         Serial.printf("[BLECAM] status notifications %s\n", rc ? "FAILED" : "enabled");
+    } else if (err->status == BLE_HS_EDONE) {
+        Serial.println("[BLECAM] no CCCD found — camera will not notify");
     }
     return 0;
 }
@@ -259,33 +285,46 @@ static int bc_on_chr(uint16_t conn, const struct ble_gatt_error *err,
             _bc_notify_handle = chr->val_handle;
             Serial.printf("[BLECAM] status characteristic (handle %u)\n",
                           _bc_notify_handle);
-            // Its CCCD sits between this characteristic's value handle and the
-            // next one; discovering to +3 is enough and avoids walking the
-            // whole service.
-            ble_gattc_disc_all_dscs(conn, chr->val_handle,
-                                    chr->val_handle + 3, bc_on_dsc, nullptr);
         } else {
             _bc_ctrl_handle = chr->val_handle;
             Serial.printf("[BLECAM] control characteristic ready (handle %u)\n",
                           _bc_ctrl_handle);
         }
-    } else if (err->status != BLE_HS_EDONE) {
-        Serial.printf("[BLECAM] characteristic discovery failed, status=%d\n",
-                      err->status);
+        return 0;
     }
+    if (err->status == BLE_HS_EDONE) {
+        if (!is_notify) {
+            // Control characteristic done — now the notify one.
+            static ble_uuid_any_t ui;
+            ble_uuid_from_str(&ui, BLECAM_INCOMING);
+            ble_gattc_disc_chrs_by_uuid(conn, _bc_svc_start, _bc_svc_end,
+                                        &ui.u, bc_on_chr, (void *)1);
+        } else if (_bc_notify_handle) {
+            // ...and now its CCCD.  It sits just after the characteristic's
+            // value handle, so a range of +3 finds it without walking the
+            // whole service.
+            ble_gattc_disc_all_dscs(conn, _bc_notify_handle,
+                                    _bc_notify_handle + 3, bc_on_dsc, nullptr);
+        } else {
+            Serial.println("[BLECAM] status characteristic not found");
+        }
+        return 0;
+    }
+    Serial.printf("[BLECAM] characteristic discovery failed, status=%d\n",
+                  err->status);
     return 0;
 }
 
 static int bc_on_svc(uint16_t conn, const struct ble_gatt_error *err,
                      const struct ble_gatt_svc *svc, void *) {
     if (err->status == 0 && svc) {
-        static ble_uuid_any_t uo, ui;
-        ble_uuid_from_str(&uo, BLECAM_OUTGOING);  // we WRITE here
-        ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
+        // Remembered so the chained discoveries below know where to look.
+        _bc_svc_start = svc->start_handle;
+        _bc_svc_end   = svc->end_handle;
+        static ble_uuid_any_t uo;
+        ble_uuid_from_str(&uo, BLECAM_OUTGOING);  // we WRITE here; notify next
+        ble_gattc_disc_chrs_by_uuid(conn, _bc_svc_start, _bc_svc_end,
                                     &uo.u, bc_on_chr, nullptr);
-        ble_uuid_from_str(&ui, BLECAM_INCOMING);  // the camera NOTIFIES here
-        ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle,
-                                    &ui.u, bc_on_chr, (void *)1);
     } else if (err->status != BLE_HS_EDONE) {
         Serial.printf("[BLECAM] service discovery failed, status=%d\n", err->status);
     }
@@ -358,6 +397,8 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         _bc_connected   = false;
         _bc_ctrl_handle   = 0;    // handles do not survive a connection
         _bc_notify_handle = 0;
+        _bc_cccd_handle   = 0;
+        _bc_subscribed    = false;
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
@@ -663,7 +704,8 @@ static bool bc_choose() {
 // [BLECAM] says nothing where the measurement actually happens.  These two bits
 // land in comms.log beside txfail, which is what they have to be compared with.
 static uint8_t ble_cam_health_flags() {
-    uint8_t f = HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0);
+    uint8_t f = HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0)
+              | (_bc_subscribed ? HEALTH_FLAG_CAM_SUBSCR : 0);
     if (_bc_write_err) { f |= HEALTH_FLAG_CAM_WR_ERR; _bc_write_err = false; }
     return f;
 }

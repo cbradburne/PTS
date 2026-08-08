@@ -276,6 +276,11 @@ typedef enum : uint8_t {
 // exactly the ambiguity that made a wrong characteristic look like a working
 // link doing nothing.
 #define HEALTH_FLAG_CAM_WR_ERR 0x08
+// Set once the camera's status notifications are actually subscribed.  A link
+// can be paired, discovered and writable — autofocus working proves all three —
+// while notifications were never enabled, and nothing else distinguishes that
+// from a camera that simply has not reported yet.
+#define HEALTH_FLAG_CAM_SUBSCR 0x10
 
 // ---------------------------------------------------------------------------
 // Axis / group identifiers

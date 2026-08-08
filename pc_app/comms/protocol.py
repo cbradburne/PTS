@@ -146,6 +146,7 @@ HEALTH_FLAG_ANOMALY   = 0x01
 HEALTH_FLAG_BLE_BUILD = 0x02   # mount firmware has the BLE camera spike in it
 HEALTH_FLAG_BLE_LINK  = 0x04   # ...and the camera is currently paired
 HEALTH_FLAG_CAM_WR_ERR = 0x08  # a camera write failed since the last report
+HEALTH_FLAG_CAM_SUBSCR = 0x10  # camera status notifications are subscribed
 
 
 class Axis(IntEnum):

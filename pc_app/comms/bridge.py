@@ -32,7 +32,8 @@ import serial.tools.list_ports
 
 from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        build_packet, HEALTH_FLAG_BLE_BUILD, HEALTH_FLAG_BLE_LINK,
-                       HEALTH_FLAG_CAM_WR_ERR)
+                       HEALTH_FLAG_CAM_WR_ERR,
+                       HEALTH_FLAG_CAM_SUBSCR)
 
 log = logging.getLogger(__name__)
 
@@ -686,6 +687,10 @@ class Bridge:
         if h.flags & HEALTH_FLAG_BLE_BUILD:
             linked = bool(h.flags & HEALTH_FLAG_BLE_LINK)
             ble = " | BLE PAIRED" if linked else " | BLE down"
+            if linked:
+                ble += (" (status subscribed)"
+                        if h.flags & HEALTH_FLAG_CAM_SUBSCR
+                        else " (NOT subscribed — no gain/WB)")
             if h.flags & HEALTH_FLAG_CAM_WR_ERR:
                 ble += " | CAMERA WRITE FAILED"
             # Kept so the camera-control dialog can grey a button rather than
