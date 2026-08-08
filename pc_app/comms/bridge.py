@@ -33,7 +33,8 @@ import serial.tools.list_ports
 from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        build_packet, HEALTH_FLAG_BLE_BUILD, HEALTH_FLAG_BLE_LINK,
                        HEALTH_FLAG_CAM_WR_ERR,
-                       HEALTH_FLAG_CAM_SUBSCR)
+                       HEALTH_FLAG_CAM_SUBSCR,
+                       HEALTH_FLAG_CAM_RX)
 
 log = logging.getLogger(__name__)
 
@@ -688,9 +689,17 @@ class Bridge:
             linked = bool(h.flags & HEALTH_FLAG_BLE_LINK)
             ble = " | BLE PAIRED" if linked else " | BLE down"
             if linked:
-                ble += (" (status subscribed)"
-                        if h.flags & HEALTH_FLAG_CAM_SUBSCR
-                        else " (NOT subscribed — no gain/WB)")
+                if not (h.flags & HEALTH_FLAG_CAM_SUBSCR,
+                       HEALTH_FLAG_CAM_RX):
+                    ble += " (NOT subscribed — no gain/WB)"
+                elif h.flags & HEALTH_FLAG_CAM_RX:
+                    ble += " (subscribed, camera reporting)"
+                else:
+                    # Subscribed but silent: the CCCD write succeeded and
+                    # nothing has ever arrived.  Different fault from a relay
+                    # that drops what it receives, and they look the same
+                    # without this.
+                    ble += " (subscribed but camera has never reported)"
             if h.flags & HEALTH_FLAG_CAM_WR_ERR:
                 ble += " | CAMERA WRITE FAILED"
             # Kept so the camera-control dialog can grey a button rather than

@@ -259,7 +259,12 @@ void ble_cam_on_status(void (*cb)(const uint8_t *, uint16_t)) { _bc_status_cb = 
 static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
                      uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc,
                      void *) {
-    if (err->status == 0 && dsc && ble_uuid_u16(&dsc->uuid.u) == 0x2902) {
+    // chr_val_handle is checked, not just the UUID.  The discovery window is a
+    // handle range, and a range that overruns into the NEXT characteristic
+    // would find ITS 0x2902 — writing that reports success and subscribes us to
+    // something we never read.  Silence afterwards would look identical.
+    if (err->status == 0 && dsc && chr_val_handle == _bc_notify_handle
+                                && ble_uuid_u16(&dsc->uuid.u) == 0x2902) {
         _bc_cccd_handle = dsc->handle;      // remembered, written below
         return 0;
     }
@@ -716,7 +721,8 @@ static bool bc_choose() {
 // land in comms.log beside txfail, which is what they have to be compared with.
 static uint8_t ble_cam_health_flags() {
     uint8_t f = HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0)
-              | (_bc_subscribed ? HEALTH_FLAG_CAM_SUBSCR : 0);
+              | (_bc_subscribed ? HEALTH_FLAG_CAM_SUBSCR : 0)
+              | (_bc_notifies   ? HEALTH_FLAG_CAM_RX     : 0);
     if (_bc_write_err) { f |= HEALTH_FLAG_CAM_WR_ERR; _bc_write_err = false; }
     return f;
 }

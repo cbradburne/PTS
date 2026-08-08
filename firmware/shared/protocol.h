@@ -281,6 +281,12 @@ typedef enum : uint8_t {
 // while notifications were never enabled, and nothing else distinguishes that
 // from a camera that simply has not reported yet.
 #define HEALTH_FLAG_CAM_SUBSCR 0x10
+// Set once at least one camera notification has actually been RECEIVED.
+// Subscribing successfully and receiving anything are different things, and
+// without this they are indistinguishable: a CCCD written to the wrong
+// descriptor reports success and then silence, which looks exactly like a
+// relay that is dropping the packets afterwards.
+#define HEALTH_FLAG_CAM_RX     0x20
 
 // ---------------------------------------------------------------------------
 // Axis / group identifiers
