@@ -47,6 +47,7 @@
 #include <esp_wifi.h>
 #include <Preferences.h>
 #include <lwip/sockets.h>   // raw non-blocking send() for both TCP links
+#include <errno.h>          // why a non-blocking send refused, not just that it did
 #include <ESPAsyncWebServer.h>
 
 #include "../shared/protocol.h"
@@ -527,9 +528,15 @@ static void peer_learn(uint8_t mount_id, const uint8_t *mac, uint32_t now) {
 // while a mount streams STATUS at ~10 Hz.
 static uint32_t _loop_count   = 0;   // passes since the last report
 static uint32_t _loop_max_us  = 0;   // slowest single pass
+// Set when a pass is dominated by a known blocking call that has already
+// reported its own cost, so it is not double-counted as a stall.
+static bool     _skip_pass_max = false;
 static uint32_t _dn_nomem     = 0;   // esp_now_send() refusals
 static uint32_t _up_writes    = 0;   // TCP writes made for uplink frames
 static uint32_t _up_dropped   = 0;   // uplink frames the hub would not take
+static uint32_t _up_drop_full = 0;   // ...refused outright (send() < 0)
+static uint32_t _up_drop_part = 0;   // ...taken in part, truncated on the wire
+static int      _up_errno     = 0;   // last refusal reason; EAGAIN(11) = buffer full
 
 // ---------------------------------------------------------------------------
 // ESP-NOW  ->  uplink
@@ -588,7 +595,18 @@ static void drain_espnow_to_uplink(uint32_t now) {
                 // A partial send leaves a truncated envelope on the wire; the
                 // hub's parser hunts for the 0xA5/0x5A sync and picks up at the
                 // next frame, so it costs one frame rather than the stream.
-                if (w != (int)n) _up_dropped++;
+                if (w != (int)n) {
+                    _up_dropped++;
+                    // WHY it would not go, because the two causes want opposite
+                    // fixes.  send() refusing outright (EAGAIN) is the socket
+                    // buffer full — the far end is not draining fast enough, or
+                    // this box is offering more than the link can carry.  A
+                    // PARTIAL write means the buffer took some and filled
+                    // mid-frame, which additionally leaves a truncated envelope
+                    // on the wire for the hub's parser to resync past.
+                    if (w < 0) { _up_drop_full++; _up_errno = errno; }
+                    else         _up_drop_part++;
+                }
             }
         }
         // Not connected: drop.  Buffering telemetry to replay later would
@@ -818,13 +836,17 @@ static void downlink_report(uint32_t now) {
     // shed count cannot answer on its own.
     uint32_t secs = DN_REPORT_MS / 1000UL;
     DIAG_PRINTF("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
-                  "uplink %lu writes, %lu dropped | ws %lu pkts in %lu frames, %lu queue-full\n",
+                  "uplink %lu writes, %lu dropped (%lu full errno %d, %lu partial) | "
+                  "ws %lu pkts in %lu frames, %lu queue-full\n",
                   (unsigned long)(_loop_count / (secs ? secs : 1)),
                   (unsigned long)_loop_max_us, (unsigned long)_dn_nomem,
                   (unsigned long)_up_writes, (unsigned long)_up_dropped,
+                  (unsigned long)_up_drop_full, _up_errno,
+                  (unsigned long)_up_drop_part,
                   (unsigned long)_ws_pkts, (unsigned long)_ws_sent,
                   (unsigned long)_ws_full);
     _loop_count = _loop_max_us = _dn_nomem = _up_writes = _up_dropped = 0;
+    _up_drop_full = _up_drop_part = 0;
     _ws_sent = _ws_full = _ws_pkts = 0;
 
     if (!_dn_no_peer && !_dn_send_err && !_dn_overflow && !_dn_unacked) return;
@@ -901,21 +923,51 @@ static void uplink_service(uint32_t now) {
     if (_tcp_len) _tcp_len = 0;                 // stale half-frame from the drop
     if (!eth_is_up() || now < _uplink_next_try_ms) return;
 
-    if (hub_connect(_uplink, HUB_PORT)) {
+    // hub_connect() BLOCKS — up to the 2 s connect timeout, and far longer the
+    // first time, when the mDNS name still has to be resolved.  It is measured
+    // and reported here for two reasons.
+    //
+    // It was showing up as the slowest loop pass instead: the first [RATE] line
+    // after a restart routinely read seconds, once 9.1 s, and the working
+    // knowledge became "ignore the first one".  That is a metric being quietly
+    // discounted, which is the same as not having it — a genuine multi-second
+    // stall in that window would have been waved through by the same habit.
+    //
+    // So the connect reports its own cost and then clears the stall figure it
+    // caused.  Nothing is hidden: a connect that starts taking 30 s says so on
+    // its own line, and the [RATE] slowest-pass goes back to meaning what it
+    // says — the worst pass the satellite managed while actually working.
+    uint32_t t0 = millis();
+    bool ok = hub_connect(_uplink, HUB_PORT);
+    uint32_t took = millis() - t0;
+
+    if (ok) {
         _uplink.setNoDelay(true);               // jog latency matters more than packing
         // NOTE: setting SO_SNDTIMEO here would do nothing.  NetworkClient's
         // send() passes MSG_DONTWAIT, so the option is never consulted — the
         // uplink is bounded by sending on the raw fd instead, in
         // drain_espnow_to_uplink().
         _uplink_backoff_ms = 1000;
-        Serial.printf("[UPLINK] connected to %s:%d\n", _hub_host, HUB_PORT);
+        Serial.printf("[UPLINK] connected to %s:%d (connect blocked %lu ms)\n",
+                      _hub_host, HUB_PORT, (unsigned long)took);
         uplink_send_hello();
     } else {
         _uplink_next_try_ms = now + _uplink_backoff_ms;
         if (_uplink_backoff_ms < UPLINK_BACKOFF_MAX_MS) _uplink_backoff_ms *= 2;
-        Serial.printf("[UPLINK] %s:%d unreachable — retry in %lu ms\n",
-                      _hub_host, HUB_PORT, (unsigned long)_uplink_backoff_ms);
+        Serial.printf("[UPLINK] %s:%d unreachable after %lu ms — retry in %lu ms\n",
+                      _hub_host, HUB_PORT, (unsigned long)took,
+                      (unsigned long)_uplink_backoff_ms);
     }
+    // Either way the blocking call is accounted for above, so it must not also
+    // be reported as a stall.  Failed attempts block too — the 9.1 s pass was
+    // one failed resolve plus the retry that succeeded.
+    //
+    // A FLAG, not a reset of _loop_max_us: this pass has not been measured yet.
+    // _loop_max_us is updated at the bottom of loop(), after this returns, so
+    // clearing it here would discard earlier honest measurements from the same
+    // window and then record the connect anyway — the exact opposite of the
+    // intent.
+    if (took > 20) _skip_pass_max = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,5 +1117,6 @@ void loop() {
 
     _loop_count++;
     uint32_t _dt = micros() - _t0;
-    if (_dt > _loop_max_us) _loop_max_us = _dt;
+    if (_skip_pass_max)            _skip_pass_max = false;
+    else if (_dt > _loop_max_us)   _loop_max_us   = _dt;
 }
