@@ -159,6 +159,7 @@ class MountManager(QObject):
         # 0 = the hub reaches that cam directly, N = relayed by satellite N.
         self._mount_route: list[int] = [0] * NUM_MOUNTS
         self._sat_names: dict[int, str] = {}
+        self._cam_params_seen: set[tuple[int, int, int]] = set()
 
         bridge.on_packet(self._on_packet)
         self.destroyed.connect(lambda: bridge.off_packet(self._on_packet))
@@ -318,6 +319,29 @@ class MountManager(QObject):
         "BLE PAIRED", so a camera that is off does not look like a dead mount.
         """
         self._send(pkt_cam_autofocus(mount_id))
+
+    def _log_cam_param(self, mount_id: int, raw: bytes, upd: dict) -> None:
+        """Name every distinct camera parameter this mount reports, once each.
+
+        Gain and white balance have now gone missing twice, and both times the
+        question "is the camera even reporting them?" was answered by reasoning
+        rather than by looking — wrongly, both times.  The frames are already
+        arriving here, so the answer costs one dict and one log line per
+        parameter, and lands in comms.log where it can actually be read: the
+        mount's serial port is inside the enclosure on a rig.
+
+        Once per (mount, category, parameter) so a camera reporting on a 5 s
+        replay does not flood the log.
+        """
+        if len(raw) < 6:
+            return
+        key = (mount_id, raw[4], raw[5])
+        if key in self._cam_params_seen:
+            return
+        self._cam_params_seen.add(key)
+        known = ", ".join(f"{k}={v}" for k, v in upd.items()) if upd else "not decoded"
+        log.info("CAM PARAM cam%d category=%d parameter=%d len=%d — %s",
+                 mount_id, raw[4], raw[5], len(raw), known)
 
     def send_cam_iso(self, mount_id: int, iso: int) -> None:
         self._send(pkt_cam_iso(mount_id, iso))
@@ -490,7 +514,11 @@ class MountManager(QObject):
 
             # camera's truth, not an echo of our own commands.
 
-            upd = decode_cam_status(bytes(pkt.payload))
+            raw = bytes(pkt.payload)
+
+            upd = decode_cam_status(raw)
+
+            self._log_cam_param(pkt.mount_id, raw, upd)
 
             if upd:
 

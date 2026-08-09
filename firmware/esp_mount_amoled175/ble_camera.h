@@ -251,13 +251,28 @@ static bool     _bc_subscribed = false;
 // downstream needs to know the difference — and nothing here has to understand
 // what the bytes mean, which is the property that let gain and white balance be
 // added without touching the mount at all.
-#define CAM_CACHE_MAX   8
-#define CAM_REPLAY_MS   5000UL
+// 8 was a guess and it was wrong: a bench log measured the replay adding
+// ~1.8 packets/s at one sweep per 5 s, i.e. ~9 frames a sweep — the cache was
+// PEGGED at its cap, so this camera reports more than eight distinct parameters
+// and everything past the eighth was being thrown away.  Gain or white balance
+// landing in that tail would look exactly like the bug this was meant to fix.
+// 32 × 41 bytes is 1.3 KB against 8 MB of free heap, so the cap may as well be
+// past anything a camera plausibly sends.
+#define CAM_CACHE_MAX   32
+// One frame per tick, cycling, rather than the whole cache at once.
+//
+// A full sweep of 32 frames back-to-back every few seconds is precisely the
+// shape of traffic this rig has spent a long time removing: a burst the hub
+// reads as a run of send failures, which it calls a TX wedge.  A steady trickle
+// costs the same bytes and never bursts — ~3 packets/s against a ~32 packets/s
+// baseline, constant no matter how much the camera has to say.
+#define CAM_REPLAY_MS   300UL
 
 struct BcCachedStatus { uint8_t len; uint8_t data[CAM_CONTROL_MAX_LEN]; };
 static BcCachedStatus _bc_cache[CAM_CACHE_MAX];
 static uint8_t        _bc_ncache   = 0;
 static uint32_t       _bc_replay_ms = 0;
+static uint8_t        _bc_replay_i  = 0;   // next cache entry to re-offer
 
 // BMD framing: [4]=category [5]=parameter identify the value being reported.
 static void bc_cache_store(const uint8_t *d, uint16_t n) {
@@ -269,11 +284,21 @@ static void bc_cache_store(const uint8_t *d, uint16_t n) {
         _bc_cache[i].len = (uint8_t)n;
         return;
     }
-    // Full: drop it rather than evict. The parameters a camera reports settle
-    // within seconds of connecting, so anything arriving after eight distinct
-    // ones is a camera with more to say than this is for — and silently
-    // recycling entries would make the replay flap between two parameters.
-    if (_bc_ncache >= CAM_CACHE_MAX) return;
+    // Full: drop rather than evict, so the replay cannot flap between two
+    // parameters fighting for the last slot.  With the cap at 32 this should be
+    // unreachable; it is a backstop, not a policy.
+    if (_bc_ncache >= CAM_CACHE_MAX) {
+        // Should not happen at 32.  If it ever does, the tail is being dropped
+        // again and the symptom is a value that never appears — so say it once
+        // rather than let it look like a dead camera.
+        static bool moaned = false;
+        if (!moaned) {
+            moaned = true;
+            Serial.printf("[CAM] status cache full at %d — parameter %u/%u dropped\n",
+                          CAM_CACHE_MAX, d[4], d[5]);
+        }
+        return;
+    }
     memcpy(_bc_cache[_bc_ncache].data, d, n);
     _bc_cache[_bc_ncache].len = (uint8_t)n;
     _bc_ncache++;
@@ -879,9 +904,10 @@ static void ble_cam_poll() {
     // information being a one-shot that a client had to be present to catch.
     if (_bc_connected && _bc_ncache && (now - _bc_replay_ms) >= CAM_REPLAY_MS) {
         _bc_replay_ms = now;
+        if (_bc_replay_i >= _bc_ncache) _bc_replay_i = 0;
         if (_bc_status_cb)
-            for (uint8_t i = 0; i < _bc_ncache; i++)
-                _bc_status_cb(_bc_cache[i].data, _bc_cache[i].len);
+            _bc_status_cb(_bc_cache[_bc_replay_i].data, _bc_cache[_bc_replay_i].len);
+        _bc_replay_i++;
     }
 
     if ((now - _bc_report_ms) >= CAM_REPORT_MS) {
