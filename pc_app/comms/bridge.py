@@ -35,7 +35,7 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_WR_ERR,
                        HEALTH_FLAG_CAM_SUBSCR,
                        HEALTH_FLAG_CAM_RX,
-                       HEALTH_FLAG_CAM_UNPAIRED)
+                       HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL)
 
 log = logging.getLogger(__name__)
 
@@ -708,6 +708,11 @@ class Bridge:
                     ble += " (subscribed but camera has never reported)"
             if h.flags & HEALTH_FLAG_CAM_WR_ERR:
                 ble += " | CAMERA WRITE FAILED"
+            if h.flags & HEALTH_FLAG_CAM_CACHE_FULL:
+                # Silent data loss otherwise: some camera value simply never
+                # arrives, and the only symptom is a dash where a number
+                # belongs — which has already been misdiagnosed twice.
+                ble += " | CAM CACHE FULL — a parameter is being dropped"
             # Kept so the camera-control dialog can grey a button rather than
             # firing into a link that is not there.  A plain dict read by the
             # UI on a timer: health arrives every 10 s, so a signal would add

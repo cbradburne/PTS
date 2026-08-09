@@ -151,6 +151,7 @@ HEALTH_FLAG_CAM_WR_ERR = 0x08  # a camera write failed since the last report
 HEALTH_FLAG_CAM_SUBSCR = 0x10  # camera status notifications are subscribed
 HEALTH_FLAG_CAM_RX     = 0x20  # at least one notification actually received
 HEALTH_FLAG_CAM_UNPAIRED = 0x40  # no bond — needs a CAM_PAIR=1 bench flash
+HEALTH_FLAG_CAM_CACHE_FULL = 0x80  # a camera parameter is being dropped, silently
 
 
 class Axis(IntEnum):

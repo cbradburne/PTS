@@ -251,14 +251,19 @@ static bool     _bc_subscribed = false;
 // downstream needs to know the difference — and nothing here has to understand
 // what the bytes mean, which is the property that let gain and white balance be
 // added without touching the mount at all.
-// 8 was a guess and it was wrong: a bench log measured the replay adding
-// ~1.8 packets/s at one sweep per 5 s, i.e. ~9 frames a sweep — the cache was
-// PEGGED at its cap, so this camera reports more than eight distinct parameters
-// and everything past the eighth was being thrown away.  Gain or white balance
-// landing in that tail would look exactly like the bug this was meant to fix.
-// 32 × 41 bytes is 1.3 KB against 8 MB of free heap, so the cap may as well be
-// past anything a camera plausibly sends.
-#define CAM_CACHE_MAX   32
+// Sized from a measurement, after guessing twice and being wrong twice.
+//
+// A Pocket Cinema Camera 4K reports 33 distinct (category, parameter) pairs.
+// The cap was 8, then 32 — the first threw away 25 of them, the second exactly
+// one, and both did it in silence.  Whichever parameter fell off the end simply
+// never appeared in a client, which is precisely how gain and white balance
+// went missing.
+//
+// 64 is double what this camera needs.  At 65 bytes an entry that is ~4 KB
+// against 8 MB of free heap, so there is no reason to sit close to the line —
+// and HEALTH_FLAG_CAM_CACHE_FULL now reports it in comms.log if a camera ever
+// does exceed it, rather than leaving it to be inferred from a missing number.
+#define CAM_CACHE_MAX   64
 // One frame per tick, cycling, rather than the whole cache at once.
 //
 // A full sweep of 32 frames back-to-back every few seconds is precisely the
@@ -273,6 +278,7 @@ static BcCachedStatus _bc_cache[CAM_CACHE_MAX];
 static uint8_t        _bc_ncache   = 0;
 static uint32_t       _bc_replay_ms = 0;
 static uint8_t        _bc_replay_i  = 0;   // next cache entry to re-offer
+static bool           _bc_cache_full = false;  // dropped at least one parameter
 
 // BMD framing: [4]=category [5]=parameter identify the value being reported.
 static void bc_cache_store(const uint8_t *d, uint16_t n) {
@@ -291,11 +297,14 @@ static void bc_cache_store(const uint8_t *d, uint16_t n) {
         // Should not happen at 32.  If it ever does, the tail is being dropped
         // again and the symptom is a value that never appears — so say it once
         // rather than let it look like a dead camera.
+        // Latched, and reported in health: on a rig this serial line is inside
+        // the enclosure, so saying it only here would be saying it nowhere.
+        _bc_cache_full = true;
         static bool moaned = false;
         if (!moaned) {
             moaned = true;
-            Serial.printf("[CAM] status cache full at %d — parameter %u/%u dropped\n",
-                          CAM_CACHE_MAX, d[4], d[5]);
+            Serial.printf("[CAM] status cache FULL at %d — parameter %u/%u dropped "
+                          "and will never be reported\n", CAM_CACHE_MAX, d[4], d[5]);
         }
         return;
     }
@@ -506,6 +515,8 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         // last gain on screen indefinitely, which is worse than showing nothing:
         // the dash is honest about not knowing, a stale number is not.
         _bc_ncache        = 0;
+        _bc_cache_full    = false;
+        _bc_replay_i      = 0;
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
@@ -855,6 +866,7 @@ static bool bc_choose() {
 static uint8_t ble_cam_health_flags() {
     uint8_t f = HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0)
               | (_bc_unpaired  ? HEALTH_FLAG_CAM_UNPAIRED : 0)
+              | (_bc_cache_full ? HEALTH_FLAG_CAM_CACHE_FULL : 0)
               | (_bc_subscribed ? HEALTH_FLAG_CAM_SUBSCR : 0)
               | (_bc_notifies   ? HEALTH_FLAG_CAM_RX     : 0);
     if (_bc_write_err) { f |= HEALTH_FLAG_CAM_WR_ERR; _bc_write_err = false; }

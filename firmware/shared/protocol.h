@@ -324,6 +324,18 @@ typedef enum : uint8_t {
 // that is working perfectly well.
 #define HEALTH_FLAG_CAM_UNPAIRED 0x40
 
+// The mount's camera-status cache is full, so at least one parameter is being
+// dropped and whatever it is will never appear in a client.  Measured on a
+// Pocket Cinema Camera 4K: it reports 33 distinct parameters, against a cache
+// that was 8 and then 32 — both too small, and both failed SILENTLY, which is
+// how gain and white balance went missing twice.
+//
+// This is the last spare bit in the byte, spent on a silent-data-loss condition
+// that has already cost three rounds of guessing.  The mount does say it on
+// serial, but a mount on a rig has its USB port inside the enclosure — so
+// serial is exactly where this cannot be read.
+#define HEALTH_FLAG_CAM_CACHE_FULL 0x80
+
 // ---------------------------------------------------------------------------
 // Axis / group identifiers
 // ---------------------------------------------------------------------------
