@@ -524,15 +524,17 @@ static void peer_learn(uint8_t mount_id, const uint8_t *mac, uint32_t now) {
 // Two candidates, and these separate them.  Either the radio accepts almost
 // nothing per pass (nomem climbing, pumped-per-pass ~1), or the loop itself is
 // too slow to pump often enough (loop rate low, nomem near zero) - most likely
-// starved by drain_espnow_to_uplink(), which does a TCP write per uplink frame
-// while a mount streams STATUS at ~10 Hz.
+// starved by drain_espnow_to_uplink().  That used to do a TCP write per uplink
+// frame while a mount streams STATUS at ~10 Hz; it now batches them, so this
+// candidate is far weaker than when the note was written.
 static uint32_t _loop_count   = 0;   // passes since the last report
 static uint32_t _loop_max_us  = 0;   // slowest single pass
 // Set when a pass is dominated by a known blocking call that has already
 // reported its own cost, so it is not double-counted as a stall.
 static bool     _skip_pass_max = false;
 static uint32_t _dn_nomem     = 0;   // esp_now_send() refusals
-static uint32_t _up_writes    = 0;   // TCP writes made for uplink frames
+static uint32_t _up_writes    = 0;   // actual send() calls (batches, not frames)
+static uint32_t _up_frames    = 0;   // envelopes queued — comparable to the old count
 static uint32_t _up_dropped   = 0;   // uplink frames the hub would not take
 static uint32_t _up_drop_full = 0;   // ...refused outright (send() < 0)
 static uint32_t _up_drop_part = 0;   // ...taken in part, truncated on the wire
@@ -568,6 +570,57 @@ static inline uint8_t frame_mount_id(const uint8_t *d, uint8_t len) {
     return (len >= 4 && d[0] == PKT_START_1 && d[1] == PKT_START_2) ? d[3] : 0;
 }
 
+// Coalesce uplink envelopes into one write instead of one write per frame.
+//
+// The measurement that forced this: ~1900 envelopes per 30 s (63/s) at ~50
+// bytes each is about 3 KB/s — nothing for a W5500 — yet a quarter to a third
+// of them came back EAGAIN, every single one refused OUTRIGHT with not one
+// partial write in ten windows.  A link refusing whole frames while carrying
+// 3 KB/s is not short of bandwidth; it is short of QUEUE.
+//
+// setNoDelay(true) makes every one of those tiny frames its own TCP segment,
+// and lwIP bounds its send queue by segment COUNT, not bytes.  With the hub's
+// delayed ACK running to ~200 ms, a dozen or more unacked segments pile up
+// against a limit around 8-16, the queue overflows, and it recovers the moment
+// an ACK lands — which is exactly the bursty 16-34% pattern that was logged.
+//
+// Batching attacks the count directly: same bytes, a third of the segments.
+// It also mirrors what the WebSocket side already does for the same reason,
+// WS_COALESCE_MS.
+//
+// The cost is up to UPLINK_COALESCE_MS of latency on mount telemetry, which is
+// invisible against STATUS being superseded every 100 ms.  The DOWNLINK is
+// untouched — those are the hub's sends, and [DOWN] was already clean.
+#define UPLINK_COALESCE_MS  20
+// One MSS-ish.  Going over just makes lwIP split it again, which is the thing
+// being avoided.
+#define UPLINK_AGG_MAX      1200
+
+static uint8_t  _up_agg[UPLINK_AGG_MAX + SAT_ENV_MAX];
+static uint16_t _up_agg_len    = 0;
+static uint16_t _up_agg_frames = 0;   // envelopes in the batch, for the drop count
+static uint32_t _up_agg_since  = 0;
+
+static void uplink_flush(uint32_t now) {
+    if (!_up_agg_len) return;
+    if (!_uplink.connected()) {          // nowhere to send it; do not hoard stale telemetry
+        _up_agg_len = _up_agg_frames = 0;
+        return;
+    }
+    int sfd = _uplink.fd();
+    int  w  = (sfd >= 0) ? ::send(sfd, _up_agg, _up_agg_len, MSG_DONTWAIT) : -1;
+    _up_writes++;
+    if (w != (int)_up_agg_len) {
+        // Frames, not batches, so this number stays comparable with the
+        // per-frame counts from before coalescing.
+        _up_dropped += _up_agg_frames;
+        if (w < 0) { _up_drop_full++; _up_errno = errno; }
+        else         _up_drop_part++;
+    }
+    _up_agg_len = _up_agg_frames = 0;
+    _up_agg_since = now;
+}
+
 static void drain_espnow_to_uplink(uint32_t now) {
     RxItem it;
     while (xQueueReceive(_rx_q, &it, 0) == pdTRUE) {
@@ -576,43 +629,22 @@ static void drain_espnow_to_uplink(uint32_t now) {
             uint8_t env[SAT_ENV_MAX];
             uint16_t n = sat_env_build(env, it.mac, it.rssi, it.data, it.len);
             if (n) {
-                // A single non-blocking send on the raw socket, NOT
-                // NetworkClient::write().  That function cannot be bounded from
-                // outside: its send() uses MSG_DONTWAIT, so SO_SNDTIMEO is never
-                // consulted (setting it, as this code did, achieves nothing) and
-                // the waiting happens in a select() of 1 s, up to 10 retries —
-                // with a PARTIAL write resetting the retry count.  A socket that
-                // drains slowly therefore loops indefinitely: seven rounds of
-                // partial progress is where the measured 70-second loop pass
-                // came from.
-                //
-                // One send, no loop.  If it will not all go now it does not go:
-                // this is telemetry, superseded every 100 ms, and the box
-                // staying responsive is worth more than any single frame.
-                int sfd = _uplink.fd();
-                int  w  = (sfd >= 0) ? ::send(sfd, env, n, MSG_DONTWAIT) : -1;
-                _up_writes++;
-                // A partial send leaves a truncated envelope on the wire; the
-                // hub's parser hunts for the 0xA5/0x5A sync and picks up at the
-                // next frame, so it costs one frame rather than the stream.
-                if (w != (int)n) {
-                    _up_dropped++;
-                    // WHY it would not go, because the two causes want opposite
-                    // fixes.  send() refusing outright (EAGAIN) is the socket
-                    // buffer full — the far end is not draining fast enough, or
-                    // this box is offering more than the link can carry.  A
-                    // PARTIAL write means the buffer took some and filled
-                    // mid-frame, which additionally leaves a truncated envelope
-                    // on the wire for the hub's parser to resync past.
-                    if (w < 0) { _up_drop_full++; _up_errno = errno; }
-                    else         _up_drop_part++;
-                }
+                if (_up_agg_len + n > UPLINK_AGG_MAX) uplink_flush(now);
+                memcpy(_up_agg + _up_agg_len, env, n);
+                _up_agg_len += n;
+                _up_agg_frames++;
+                _up_frames++;
+                if (!_up_agg_since) _up_agg_since = now;
             }
         }
         // Not connected: drop.  Buffering telemetry to replay later would
         // deliver a burst of stale STATUS the moment the hub reappears, and
         // STATUS is superseded every 100 ms anyway.
     }
+    // Age the batch out even while nothing new arrives, or the last frames
+    // before a lull would sit here until the next one — indefinitely, on an
+    // idle rig.  The same trap ws_flush() exists to avoid.
+    if (_up_agg_len && (now - _up_agg_since) >= UPLINK_COALESCE_MS) uplink_flush(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -836,16 +868,18 @@ static void downlink_report(uint32_t now) {
     // shed count cannot answer on its own.
     uint32_t secs = DN_REPORT_MS / 1000UL;
     DIAG_PRINTF("[RATE] %lu loops/s (slowest pass %lu us) | %lu nomem | "
-                  "uplink %lu writes, %lu dropped (%lu full errno %d, %lu partial) | "
+                  "uplink %lu frames in %lu sends, %lu dropped (%lu refused errno %d, %lu partial) | "
                   "ws %lu pkts in %lu frames, %lu queue-full\n",
                   (unsigned long)(_loop_count / (secs ? secs : 1)),
                   (unsigned long)_loop_max_us, (unsigned long)_dn_nomem,
-                  (unsigned long)_up_writes, (unsigned long)_up_dropped,
+                  (unsigned long)_up_frames, (unsigned long)_up_writes,
+                  (unsigned long)_up_dropped,
                   (unsigned long)_up_drop_full, _up_errno,
                   (unsigned long)_up_drop_part,
                   (unsigned long)_ws_pkts, (unsigned long)_ws_sent,
                   (unsigned long)_ws_full);
     _loop_count = _loop_max_us = _dn_nomem = _up_writes = _up_dropped = 0;
+    _up_frames = 0;
     _up_drop_full = _up_drop_part = 0;
     _ws_sent = _ws_full = _ws_pkts = 0;
 
@@ -948,6 +982,7 @@ static void uplink_service(uint32_t now) {
         // uplink is bounded by sending on the raw fd instead, in
         // drain_espnow_to_uplink().
         _uplink_backoff_ms = 1000;
+        _up_agg_len = _up_agg_frames = 0;   // no half-batch from the dead socket
         Serial.printf("[UPLINK] connected to %s:%d (connect blocked %lu ms)\n",
                       _hub_host, HUB_PORT, (unsigned long)took);
         uplink_send_hello();
