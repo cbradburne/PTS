@@ -707,19 +707,42 @@ class BcSecCb : public BLESecurityCallbacks {
 
 // Camera support is unconditional in a normal build; only PAIRING is opt-in.
 //
-// WiFi is stopped for pairing because the two jobs want the same radio at once.
-// With WiFi running, the camera was found every time and the connection never
-// completed: on the S3, WiFi wins coexistence arbitration by default, and
-// establishing a BLE connection needs sustained radio time it may never get.
-// Pairing is the expensive part — reconnecting to a BONDED peer is far cheaper,
-// and measurably free alongside ESP-NOW.  So pairing gets the radio to itself,
-// once, and everything after it shares.
+// CAM_PAIR=1 stops WiFi for pairing; CAM_PAIR=2 leaves it up.
+//
+// The stop exists because with WiFi running the camera was found every time and
+// the connection never completed — read at the time as the S3 giving WiFi the
+// radio and starving BLE of the sustained time a pairing needs.  That reading
+// predates the discovery that the core's BLEClient was tearing down every
+// connection over the MTU exchange, which explains the same symptom without
+// invoking coexistence at all.  CAM_PAIR=2 is there to settle it: if pairing
+// completes with WiFi up, the stop is unnecessary and the passkey no longer has
+// to be typed at the mount.
 static void ble_cam_setup() {
 #if CAM_PAIR
+#if CAM_PAIR == 2
+    // CAM_PAIR=2 — pair with WiFi LEFT RUNNING, to retest the assumption below.
+    //
+    // "WiFi must be off to pair" was concluded in e66217e, BEFORE 636902d found
+    // that the core's BLEClient tears down every connection when the camera
+    // wins the MTU exchange.  That bug explained the failure on its own: the
+    // connection succeeded and the library dropped it.  Coexistence was blamed
+    // for a fault that had a different cause entirely, and the conclusion has
+    // never been retested since the cause was fixed.
+    //
+    // It matters well beyond a build flag.  If pairing works with WiFi up, the
+    // mount stays reachable throughout, the passkey can be typed into the PC
+    // app and sent over ESP-NOW, and all five mounts pair from the desk — no
+    // keypad on a 466 px circle, no ladder.  If it genuinely does not, the
+    // passkey has to be entered on the mount itself, because nothing can reach
+    // it while its radio is off.
+    Serial.println("[CAM] PAIRING BUILD — WiFi LEFT UP (CAM_PAIR=2, coexistence retest).");
+    Serial.println("[CAM] If this pairs, pairing does not need the radio to itself.");
+#else
     Serial.println("[CAM] PAIRING BUILD — WiFi stopped so BLE has the radio.");
     Serial.println("[CAM] This mount will NOT talk to a hub. Pair, then reflash normally.");
     esp_wifi_stop();
     delay(200);
+#endif
 
     // Watchdog off for PAIRING ONLY.  The blocking connect() that first tripped
     // it is long gone — ble_gap_connect() is asynchronous — but the passkey

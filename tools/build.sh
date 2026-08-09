@@ -122,7 +122,8 @@ props_for() {
     # Blackmagic camera control is built into every amoled binary.  Only the
     # one-time PAIRING mode is opt-in, because it stops WiFi and blocks for a
     # passkey — see ble_camera.h:
-    #   CAM_PAIR=1 tools/build.sh flash amoled     # bench only, once per mount
+    #   CAM_PAIR=1 tools/build.sh flash amoled  # bench only, once per mount
+    #   CAM_PAIR=2 tools/build.sh flash amoled  # same, WiFi left up (coexistence retest)
     # The pairing code is typed into the serial monitor when the camera shows
     # it, so it cannot be a build flag.
     [ -n "${CAM_PAIR:-}" ] && _f="$_f -DCAM_PAIR=$CAM_PAIR"
