@@ -1287,6 +1287,34 @@ static void setup_exit() {
 // margin large enough that two comparable hubs cannot make it oscillate.
 #define REACQ_HEALTHY_PERIOD_MS  (5UL * 60UL * 1000UL)
 #define REACQ_UPGRADE_MARGIN_DB  15
+// ...but not when the hub we are on is already strong.
+//
+// The healthy scan is not free: WiFi.scanNetworks() takes the radio off-channel
+// for one to three seconds, and for that whole time ESP-NOW fails in BOTH
+// directions.  The hub reads a run of send failures as a TX wedge, refreshes
+// the peer, and the mount blinks OFFLINE and back in the PC app.  An overnight
+// bench log showed it exactly: 174 wedges, one every 300 s to the second, phase
+// locked to the mount's boot, ~100-150 txfail in a single burst each time while
+// 97% of all other samples logged zero.  That mount sat at -15 dBm.
+//
+// At that strength the scan cannot achieve anything.  Switching needs a hub
+// REACQ_UPGRADE_MARGIN_DB stronger than the current one, so at -15 dBm it would
+// have to find 0 dBm, which does not exist.  The cost is real and the benefit
+// is arithmetically zero.
+//
+// -60 dBm is deliberately conservative rather than tuned to that bench.  Both
+// faults this feature was built for involve a WEAK current hub — a mount that
+// dropped back to a distant hub "which answers, weakly", and a mount that never
+// noticed the satellite beside it — so both stay well inside the scanning band
+// and keep the 5-minute check they need.  A link at -60 still has ~20 dB of
+// margin before ESP-NOW cares, and a mount that healthy has no reachability
+// problem for a scan to solve.
+//
+// This only gates the HEALTHY scan.  Once the hub actually goes quiet,
+// REACQ_SILENT_MS takes over and scans regardless of how strong it used to be,
+// so the recovery path is untouched.
+#define REACQ_HEALTHY_SKIP_DBM   (-60)
+#define REACQ_HEALTHY_SKIP_HYST_DB  5
 // How long fully isolated before the mount may adopt a hub it has never been
 // paired with.  Deliberately shorter than ESPNOW_RESTART_MS, so adoption gets
 // a chance BEFORE the isolation restart throws away the attempt.
@@ -1354,6 +1382,7 @@ static void hub_forget(const uint8_t *mac) {
 
 static uint32_t _reacq_last_ms = 0;
 static bool     _reacq_was_silent = false;   // why this scan was started
+static bool     _reacq_skipping   = false;   // healthy scan suppressed: hub is strong
 
 // Confirm or undo a provisional adoption.  Runs on every poll, not only around
 // a scan: the verdict is about whether traffic arrived, which has nothing to do
@@ -1395,6 +1424,32 @@ static void hub_reacquire_poll() {
         // deafness is not something to schedule into a live shot.  Waiting for
         // idle only delays the upgrade to the next tick.
         bool safe_to_scan = silent || (_ms.state == STATE_IDLE);
+        // A strong hub makes the healthy scan pointless — see the note on
+        // REACQ_HEALTHY_SKIP_DBM.  rssi 0 means nothing has been received yet,
+        // which is emphatically not "strong", so it must not count as one.
+        //
+        // Hysteresis, because this runs every loop pass and RSSI wanders a few
+        // dB at rest: a mount sitting near the threshold would otherwise flip
+        // state thousands of times a second and log every one of them.  Stop
+        // scanning above -60, resume only once it has genuinely fallen to -65.
+        int8_t thresh = REACQ_HEALTHY_SKIP_DBM
+                      - (_reacq_skipping ? REACQ_HEALTHY_SKIP_HYST_DB : 0);
+        bool strong = !silent && _last_rssi != 0 && _last_rssi > thresh;
+        if (strong != _reacq_skipping) {
+            // Logged on the EDGE only.  Saying it every five minutes for ever
+            // would bury the interesting lines; saying it never would make a
+            // mount that has quietly stopped scanning impossible to tell from
+            // one whose timer has broken.
+            _reacq_skipping = strong;
+            Serial.printf("[REACQ] hub at %d dBm — periodic scan %s\n",
+                          (int)_last_rssi, strong ? "OFF (already strong)" : "back ON");
+        }
+        // Returning without stamping _reacq_last_ms is deliberate: a link that
+        // has just degraded then scans on the very next pass instead of waiting
+        // out the rest of a five-minute window it was never running.  Losing
+        // signal is precisely when looking for something better is worth two
+        // seconds of deafness.
+        if (strong) return;
         uint32_t period = silent ? REACQ_PERIOD_MS : REACQ_HEALTHY_PERIOD_MS;
         if (safe_to_scan && (nowm - _reacq_last_ms) > period) {
             _reacq_last_ms   = nowm;
