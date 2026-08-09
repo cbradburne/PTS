@@ -18,7 +18,9 @@ from config.mount_config import AppConfig
 from comms.bridge import Bridge
 from comms.mount_manager import MountManager
 from comms.protocol import (Cmd, build_packet, decode_mount_route, parse_packet,
-                            MOUNT_ROUTE_PAYLOAD_LEN, NUM_MOUNTS, ParseError)
+                            decode_sat_names, MOUNT_ROUTE_PAYLOAD_LEN,
+                            SAT_NAMES_PAYLOAD_LEN, SAT_NAME_LEN, SAT_SLOTS,
+                            NUM_MOUNTS, ParseError)
 from ui.dialogs.config_dialog import ConfigDialog
 
 app = QApplication(sys.argv)
@@ -75,8 +77,42 @@ feed([0, 0, 0, 0, 0])
 chk("cam 2 cleared on return", dlg._pair_via_lbls[2].text(), "")
 chk("cam 4 cleared on return", dlg._pair_via_lbls[4].text(), "")
 
-print("\n5. Payload length agrees with the firmware constant")
+print("\n5. Satellite names replace the slot number")
+# The slot is TCP accept order and means nothing to anyone in the building.
+def feed_names(names: dict):
+    """names: {slot (1-based): text} -> push a CMD_SAT_NAMES frame."""
+    buf = bytearray(SAT_NAMES_PAYLOAD_LEN)
+    for slot, txt in names.items():
+        raw = txt.encode()[:SAT_NAME_LEN - 1]
+        buf[(slot - 1) * SAT_NAME_LEN:(slot - 1) * SAT_NAME_LEN + len(raw)] = raw
+    mm._on_packet(parse_packet(build_packet(0xFE, Cmd.SAT_NAMES, bytes(buf))))
+    app.processEvents()
+
+chk("decode skips unnamed slots", decode_sat_names(bytes(SAT_NAMES_PAYLOAD_LEN)), {})
+feed_names({2: "Foyer", 3: "Balcony"})
+chk("slot 2 named",   mm.sat_label(2), "Foyer")
+chk("slot 3 named",   mm.sat_label(3), "Balcony")
+# The fallback is not cosmetic: a satellite on firmware from before names
+# existed never introduces itself, and a blank label would read as a broken
+# route rather than an out-of-date box.
+chk("unnamed slot falls back", mm.sat_label(5), "SAT 5")
+
+feed([0, 3, 0, 2, 0])
+chk("cam 2 -> via Balcony", dlg._pair_via_lbls[2].text(), "via Balcony")
+chk("cam 4 -> via Foyer",   dlg._pair_via_lbls[4].text(), "via Foyer")
+
+# Names can arrive AFTER the route, so a late CMD_SAT_NAMES must relabel rows
+# already on screen rather than wait for the next roam.
+feed_names({2: "Foyer", 3: "Circle"})
+chk("late rename redraws", dlg._pair_via_lbls[2].text(), "via Circle")
+# ...and a satellite that drops clears its name, so the row must not keep
+# showing a room that is no longer relaying anything.
+feed_names({})
+chk("name cleared -> number", dlg._pair_via_lbls[2].text(), "via SAT 3")
+
+print("\n6. Payload lengths agree with the firmware constants")
 chk("MOUNT_ROUTE_PAYLOAD_LEN", MOUNT_ROUTE_PAYLOAD_LEN, NUM_MOUNTS)
+chk("SAT_NAMES_PAYLOAD_LEN",   SAT_NAMES_PAYLOAD_LEN, SAT_SLOTS * SAT_NAME_LEN)
 
 print("\nRESULT: " + ("ALL PASS" if not fails else "FAILED: " + ", ".join(fails)))
 sys.exit(1 if fails else 0)

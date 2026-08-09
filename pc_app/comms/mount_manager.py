@@ -43,7 +43,8 @@ from .protocol import (
     MAX_SUBJECTS,
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
-    decode_mount_table, decode_mount_route, decode_pair_conflict, PairConflictPayload,
+    decode_mount_table, decode_mount_route, decode_sat_names,
+    decode_pair_conflict, PairConflictPayload,
 )
 
 
@@ -143,6 +144,7 @@ class MountManager(QObject):
     # Pairing management (hub-owned mount table; nothing stored locally)
     mount_table_updated    = pyqtSignal(list)          # [5 × 6-byte MAC]; all-zero = unbound
     mount_route_updated    = pyqtSignal(list)          # [5 × int]; 0 = direct, N = via satellite N
+    sat_names_updated      = pyqtSignal(dict)          # {slot: name} for slots that gave one
     pair_conflict          = pyqtSignal(object)        # PairConflictPayload; cam 0 = dismiss
 
     def __init__(self, bridge: Bridge, parent=None):
@@ -156,6 +158,7 @@ class MountManager(QObject):
         self._mount_table: list[bytes] = [b"\x00" * 6 for _ in range(NUM_MOUNTS)]
         # 0 = the hub reaches that cam directly, N = relayed by satellite N.
         self._mount_route: list[int] = [0] * NUM_MOUNTS
+        self._sat_names: dict[int, str] = {}
 
         bridge.on_packet(self._on_packet)
         self.destroyed.connect(lambda: bridge.off_packet(self._on_packet))
@@ -247,6 +250,16 @@ class MountManager(QObject):
         measured wherever the frame arrived, so it says nothing about distance
         from the hub once satellites are in play."""
         return list(self._mount_route)
+
+    def sat_label(self, slot: int) -> str:
+        """How to refer to satellite `slot` (1-based, as mount_route reports).
+
+        The name if the satellite gave one, otherwise "SAT N".  The fallback is
+        not cosmetic: a satellite running firmware from before names existed
+        never introduces itself, and a blank label would read as a bug in the
+        route rather than an out-of-date box.
+        """
+        return self._sat_names.get(slot) or f"SAT {slot}"
 
     def send_set_limits(self, mount_id: int, axis: Axis,
                         min_steps: int, max_steps: int) -> None:
@@ -407,6 +420,15 @@ class MountManager(QObject):
                     self.mount_route_updated.emit(list(route))
             except Exception as e:
                 log.error(f"MOUNT_ROUTE decode failed: {e}")
+            return
+        if pkt.cmd == Cmd.SAT_NAMES:
+            try:
+                names = decode_sat_names(pkt.payload)
+                if names != self._sat_names:
+                    self._sat_names = names
+                    self.sat_names_updated.emit(dict(names))
+            except Exception as e:
+                log.error(f"SAT_NAMES decode failed: {e}")
             return
         if pkt.cmd == Cmd.PAIR_CONFLICT:
             try:

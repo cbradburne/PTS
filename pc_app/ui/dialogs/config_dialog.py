@@ -104,6 +104,9 @@ class ConfigDialog(QWidget):
         # Pairing table (hub-owned): live-refresh + request an initial push
         self._mm.mount_table_updated.connect(self._refresh_mount_table)
         self._mm.mount_route_updated.connect(self._refresh_mount_route)
+        # Names arrive on their own message and can land either side of the
+        # route, so redraw on both rather than assuming an order.
+        self._mm.sat_names_updated.connect(self._refresh_sat_names)
         self._refresh_mount_table(self._mm.mount_table())
         self._refresh_mount_route(self._mm.mount_route)
         self._mm.request_mount_table()   # hub answers with the table AND the routes
@@ -605,11 +608,20 @@ class ConfigDialog(QWidget):
         the frame arrived, so a mount reads -40 with a satellite beside it and
         -85 when that satellite drops and it falls back to the hub — the same
         mount, unmoved, with nothing else on screen to explain the change."""
+        self._route = list(route)
         for mid in range(1, 6):
             via = route[mid - 1] if len(route) >= mid else 0
             lbl = self._pair_via_lbls.get(mid)
             if lbl is not None:
-                lbl.setText(f"via SAT {via}" if via else "")
+                # "via Foyer" beats "via SAT 2": the slot number is TCP accept
+                # order and tells nobody which box in the building to go and
+                # look at.  mount_manager falls back to the number for a
+                # satellite that has not given a name.
+                lbl.setText(f"via {self._mm.sat_label(via)}" if via else "")
+
+    def _refresh_sat_names(self, _names: dict) -> None:
+        """A satellite named itself — relabel the rows already on screen."""
+        self._refresh_mount_route(getattr(self, "_route", []))
 
     def _refresh_mount_table(self, table: list) -> None:
         """Update the Paired Mounts rows from the hub's table (5 × 6-byte MAC)."""

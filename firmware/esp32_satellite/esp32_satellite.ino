@@ -869,6 +869,33 @@ static void drain_uplink_to_espnow() {
     }
 }
 
+// Tell the hub what this satellite is called, so a client can say "via Foyer"
+// rather than "via SAT 2" — the slot number is TCP accept order and means
+// nothing to someone standing in the building.
+//
+// Sent on every connect rather than once at boot: the slot is assigned at
+// accept time and a reconnect can land in a different one, so the name has to
+// arrive with the connection it describes.  If it is ever lost the hub simply
+// shows the slot number, which is what it did before.
+//
+// The envelope's MAC field is this satellite's own.  It has to be something,
+// and its own address is the honest answer — the hub recognises the frame by
+// its command and never looks the MAC up.
+static void uplink_send_hello() {
+    uint8_t name[SAT_HELLO_PAYLOAD_LEN] = {};
+    snprintf((char *)name, sizeof(name), "%s", _hub_name);
+
+    uint8_t  frame[PKT_BUF_SIZE + 4];
+    uint16_t fn = build_packet(frame, 0, 0, CMD_SAT_HELLO, name, sizeof(name));
+
+    uint8_t  mac[6];
+    WiFi.softAPmacAddress(mac);
+    uint8_t  env[SAT_ENV_MAX];
+    uint16_t en = sat_env_build(env, mac, 0, frame, fn);
+    if (en) _uplink.write(env, en);
+    Serial.printf("[UPLINK] introduced myself as \"%s\"\n", _hub_name);
+}
+
 static void uplink_service(uint32_t now) {
     if (_uplink.connected()) return;
     if (_tcp_len) _tcp_len = 0;                 // stale half-frame from the drop
@@ -882,6 +909,7 @@ static void uplink_service(uint32_t now) {
         // drain_espnow_to_uplink().
         _uplink_backoff_ms = 1000;
         Serial.printf("[UPLINK] connected to %s:%d\n", _hub_host, HUB_PORT);
+        uplink_send_hello();
     } else {
         _uplink_next_try_ms = now + _uplink_backoff_ms;
         if (_uplink_backoff_ms < UPLINK_BACKOFF_MAX_MS) _uplink_backoff_ms *= 2;

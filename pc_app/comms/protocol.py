@@ -133,6 +133,8 @@ class Cmd(IntEnum):
     PAIR_DECIDE       = 0x9E   # client→hub, 8B: cam(1)+decision(1: 1=replace, 0=ignore)+new_mac(6)
     PAIR_FORGET       = 0x9F   # client→hub, 1B: cam — clear (unbind) that slot
     MOUNT_ROUTE       = 0xA0   # hub→clients, 5B: per-cam 0 = direct, N = via satellite N
+    SAT_HELLO         = 0xA3   # satellite→hub, 13B: its location name
+    SAT_NAMES         = 0xA4   # hub→clients, 6×13B: slot → location name
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
     CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
 
@@ -1243,6 +1245,9 @@ HUB_SENTINEL              = 0xFE
 MOUNT_TABLE_PAYLOAD_LEN   = 30   # 5 × MAC(6)
 PAIR_CONFLICT_PAYLOAD_LEN = 13   # cam(1) + new_mac(6) + old_mac(6)
 MOUNT_ROUTE_PAYLOAD_LEN   = 5    # one byte per cam
+SAT_NAME_LEN              = 13   # 12 characters + NUL, as in the AP SSID
+SAT_SLOTS                 = 6
+SAT_NAMES_PAYLOAD_LEN     = SAT_SLOTS * SAT_NAME_LEN
 CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
 
 
@@ -1281,6 +1286,24 @@ def decode_mount_route(payload: bytes) -> list[int]:
     if len(payload) < MOUNT_ROUTE_PAYLOAD_LEN:
         raise ParseError(f"MOUNT_ROUTE payload too short: {len(payload)}")
     return [int(payload[i]) for i in range(NUM_MOUNTS)]
+
+
+def decode_sat_names(payload: bytes) -> dict[int, str]:
+    """CMD_SAT_NAMES → {slot number (1-based, as CMD_MOUNT_ROUTE reports): name}.
+
+    Only slots that actually gave a name appear.  An empty string means the slot
+    is unoccupied, or holds a satellite too old to introduce itself; both want
+    the caller to fall back to the bare slot number rather than invent a label.
+    """
+    if len(payload) < SAT_NAMES_PAYLOAD_LEN:
+        raise ParseError(f"SAT_NAMES payload too short: {len(payload)}")
+    out: dict[int, str] = {}
+    for i in range(SAT_SLOTS):
+        raw = bytes(payload[i * SAT_NAME_LEN:(i + 1) * SAT_NAME_LEN])
+        name = raw.split(b"\x00", 1)[0].decode("utf-8", "replace").strip()
+        if name:
+            out[i + 1] = name
+    return out
 
 
 @dataclass

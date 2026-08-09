@@ -70,6 +70,19 @@
 #define MOUNT_TABLE_PAYLOAD_LEN    30   // 5 × MAC(6); an all-zero slot = unbound
 #define PAIR_CONFLICT_PAYLOAD_LEN  13   // cam(1) + new_mac(6) + old_mac(6)
 #define MOUNT_ROUTE_PAYLOAD_LEN     5   // one byte per cam: 0 = direct, N = via satellite N
+// Satellite location names, so a client can say "via Foyer" instead of "via
+// SAT 2".  The slot number is an artefact of TCP accept order and means nothing
+// to anyone standing in the building; the name is the thing an operator can act
+// on.  Kept the same 12 characters + NUL the hub and satellite already agree on
+// for the AP SSID (HUB_NAME_MAX), so one name works everywhere it is shown.
+#define SAT_NAME_MAX               12
+#define SAT_NAME_LEN               13   // SAT_NAME_MAX + NUL
+// Mirrors MAX_SATELLITES in the hub sketch, which static_asserts against this.
+// It lives here because it sizes a wire payload, and a payload length that only
+// one end knows is how a parser starts reading the next packet's header.
+#define SAT_SLOTS                   6
+#define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
+#define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients
 // Longest BMD camera-control command we will relay.  Theirs are a 4-byte header
 // plus payload padded to a 4-byte boundary; 40 covers everything in the
 // published protocol with room to spare, and bounds the mount's buffer.
@@ -223,6 +236,17 @@ typedef enum : uint8_t {
     //   |  |  command id 0 = change configuration
     //   |  payload length
     //   destination 255 = broadcast (the camera on this mount)
+    // Satellite → hub, SAT_HELLO_PAYLOAD_LEN: the satellite's location name,
+    // sent once per uplink connection.  It travels inside a normal relay
+    // envelope, so the hub must check for it BEFORE looking the envelope's MAC
+    // up in the mount table — a satellite's own MAC is not a mount's, and an
+    // unrecognised MAC otherwise walks straight into the pairing rules.
+    CMD_SAT_HELLO         = 0xA3,
+    // Hub → clients, SAT_NAMES_PAYLOAD_LEN: SAT_SLOTS × SAT_NAME_LEN, indexed
+    // by the same slot number CMD_MOUNT_ROUTE reports.  An empty string means
+    // that slot is unoccupied, or is a satellite too old to introduce itself —
+    // in both cases a client should fall back to showing the slot number.
+    CMD_SAT_NAMES         = 0xA4,
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
     // Camera → mount → hub → clients: the camera's own status notifications,
     // relayed verbatim in the same framing as CMD_CAM_CONTROL.  Same reasoning

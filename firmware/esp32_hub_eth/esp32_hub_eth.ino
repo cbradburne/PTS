@@ -812,10 +812,18 @@ static ClientSlot _slots[MAX_CLIENTS];
 // by hand, and a mount that roams moves its own route with it.
 #define MAX_SATELLITES  6
 
+static_assert(MAX_SATELLITES == SAT_SLOTS,
+              "MAX_SATELLITES and SAT_SLOTS size the same wire payload "
+              "(CMD_SAT_NAMES) and must not drift apart");
+
 struct SatSlot {
     WiFiClient   client;
     SatEnvParser parser;
     bool         active;
+    // Empty until the satellite introduces itself, and empty for one too old to
+    // do so — clients fall back to the slot number, which is what they showed
+    // before names existed.
+    char         name[SAT_NAME_LEN];
 };
 static SatSlot   _sat[MAX_SATELLITES];
 static WiFiServer _sat_server(SAT_LINK_PORT);
@@ -1142,6 +1150,21 @@ static void bcast_mount_table() {
 // N = relayed by satellite N.  Sent on every change and whenever a client asks
 // for the mount table, so a client that connects after a roam does not show the
 // route as it was the last time it looked.
+// Slot -> location name, for clients that would otherwise show accept order.
+// Sent whenever the set changes (a satellite arriving, leaving, or naming
+// itself) and alongside the mount table, so a client connecting after the fact
+// is not left with numbers until the next change.
+static void send_sat_names() {
+    uint8_t buf[SAT_NAMES_PAYLOAD_LEN] = {};
+    for (int i = 0; i < MAX_SATELLITES; i++)
+        if (_sat[i].active)
+            memcpy(buf + i * SAT_NAME_LEN, _sat[i].name, SAT_NAME_LEN);
+    uint8_t raw[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_SAT_NAMES, buf, sizeof(buf));
+    broadcast_to_all(raw, n);
+    _ws.binaryAll(raw, (size_t)n);
+}
+
 static void send_mount_route() {
     uint8_t buf[MOUNT_ROUTE_PAYLOAD_LEN];
     for (int i = 0; i < NUM_MOUNTS; i++)
@@ -1172,6 +1195,7 @@ static bool handle_pairing_cmd(const ParsedPacket &pkt) {
     case CMD_GET_MOUNT_TABLE:
         bcast_mount_table();                       // refresh every client's view
         send_mount_route();                        // ...and how each is reached
+        send_sat_names();                          // ...and what to call it
         return true;
     case CMD_PAIR_DECIDE:                           // set: replace (1) / ignore (0)
         if (pkt.payload_len >= PAIR_DECIDE_PAYLOAD_LEN)
@@ -3019,6 +3043,7 @@ void loop() {
                 // send is bounded in send_to_mount_routed() instead, by using
                 // the raw fd.
                 sat_env_init(&_sat[i].parser);
+                _sat[i].name[0] = '\0';   // until it introduces itself
                 _sat[i].active = true;
                 placed = true;
                 Serial.printf("[SAT] satellite %d connected from %s\n",
@@ -3032,8 +3057,10 @@ void loop() {
             if (!_sat[i].client.connected()) {
                 _sat[i].client.stop();
                 _sat[i].active = false;
+                _sat[i].name[0] = '\0';
                 sat_release_mounts(i);
                 Serial.printf("[SAT] satellite %d disconnected\n", i + 1);
+                send_sat_names();
                 continue;
             }
             // Bounded per pass so one busy satellite cannot starve the loop —
@@ -3059,6 +3086,30 @@ void loop() {
                 // satellite-attached mount is indistinguishable downstream —
                 // pairing, conflicts, display, WS rate-limiting and all.
                 if (env.frame_len > sizeof(RelayMsg::data)) continue;
+
+                // A satellite introducing itself, not mount traffic.  Checked
+                // BEFORE mount_table_find(): the envelope carries the
+                // satellite's own MAC, which is not a mount's, so letting it
+                // through would hand an unknown address to the pairing rules.
+                {
+                    PacketParser hp; pkt_parser_init(&hp); ParsedPacket hpk;
+                    bool hello = false;
+                    for (uint8_t k = 0; k < env.frame_len; k++) {
+                        if (!pkt_feed(&hp, env.frame[k], &hpk)) continue;
+                        if (hpk.cmd == CMD_SAT_HELLO &&
+                            hpk.payload_len == SAT_HELLO_PAYLOAD_LEN) {
+                            memcpy(_sat[i].name, hpk.payload, SAT_NAME_LEN);
+                            _sat[i].name[SAT_NAME_LEN - 1] = '\0';
+                            Serial.printf("[SAT] satellite %d is \"%s\"\n",
+                                          i + 1, _sat[i].name);
+                            send_sat_names();
+                            hello = true;
+                        }
+                        break;
+                    }
+                    if (hello) continue;
+                }
+
                 RelayMsg msg;
                 int8_t idx  = mount_table_find(env.mac);
                 msg.len     = env.frame_len;
