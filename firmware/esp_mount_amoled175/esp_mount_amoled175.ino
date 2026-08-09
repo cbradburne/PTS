@@ -1778,6 +1778,14 @@ static void campair_build() {
     // 3x4 keypad inside the circle's inscribed square.  466 across the panel
     // leaves ~330 usable at these rows; 110x50 keys clear a fingertip at this
     // pixel density with room between them.
+    //
+    // TO REVISIT: these are small in the hand.  The keypad is squared off inside
+    // a round panel, so the widest part of the circle goes unused — at mid-height
+    // the full 466 is available and only 330 is taken, leaving ~68 px lobes down
+    // each side.  Enough for icon-only OK and BACKSPACE buttons, which would free
+    // two grid cells AND the bottom row, and let the digits grow into both.
+    // Deferred deliberately: functionality first, and the layout is cosmetic
+    // until the pairing handshake itself is proven on hardware.
     static const char *KEYS[12] = { "1","2","3", "4","5","6", "7","8","9", "<","0","#" };
     for (int i = 0; i < 12; i++) {
         lv_obj_t *b = lv_obj_create(_pair_scr);
