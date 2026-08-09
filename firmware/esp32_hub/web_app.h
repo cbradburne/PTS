@@ -25,7 +25,7 @@ static const char WEB_APP_HTML[] PROGMEM = R"rawhtml(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>CamMount</title>
@@ -53,7 +53,22 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
   font-family:system-ui,sans-serif;touch-action:none;user-select:none;}
 
 /* ---- views ---- */
-.view{display:none;width:100%;height:100%;flex-direction:column;}
+/* viewport-fit=cover (see the meta tag) makes the page cover the WHOLE screen
+   rather than letting iOS inset it to the safe area.  Added because a mount
+   operator running this from the Home Screen — a standalone web app, no browser
+   chrome — lost a band across the bottom of the landscape screen to an inset
+   the page never got to use.  Without viewport-fit=cover that band is not
+   unused page, it is outside the page entirely, so no amount of layout work
+   inside could reclaim it.
+   The insets then have to be honoured by hand, and NOT symmetrically:
+     left/right  the notch physically covers content, so pad it away
+     bottom      the home indicator is a translucent bar over the top of the
+                 app.  Background and layout may run underneath it; only
+                 touch targets need to stay clear, which #gc-bottom does
+                 below.  Padding it away here would give back exactly the
+                 band this change exists to recover. */
+.view{display:none;width:100%;height:100%;flex-direction:column;
+  padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
 .view.show{display:flex;}
 
 /* ---- cam bar ---- */
@@ -151,7 +166,13 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 #btn-estop-p:active,#btn-estop-l:active{background:var(--red-lit);}
 
 /* ---- status bar ---- */
-.stat-bar{padding:4px 8px;background:var(--surf);border-top:1px solid var(--border);
+/* The bottom bars carry the safe-area inset themselves rather than the .view
+   doing it, so the BAR's background runs to the physical bottom edge while its
+   contents stay above the home indicator.  Padding the view instead would leave
+   the same dead band this change exists to remove — just tinted --bg rather
+   than black.  max() so a device with no inset keeps the original padding. */
+.stat-bar{padding:4px 8px max(4px,env(safe-area-inset-bottom)) 8px;
+  background:var(--surf);border-top:1px solid var(--border);
   font-size:11px;color:var(--dim);text-align:center;flex-shrink:0;}
 .ws-dot{display:inline-block;width:7px;height:7px;border-radius:50%;
   background:var(--red-lit);margin-right:5px;vertical-align:middle;}
@@ -204,13 +225,27 @@ canvas.hsl-c{display:block;touch-action:none;}
 .dial-lbl{font-size:10px;color:var(--dim);letter-spacing:.05em;text-transform:uppercase;}
 
 /* ---- game-controller view ---- */
+/* Cam buttons scale with the screen instead of being a fixed 34 px.
+   On a phone held in landscape these are the most-hit targets on the page and
+   they were the smallest thing on it, while the slot grid quietly absorbed
+   every spare pixel — it is the only flex:1 child, so all slack went there.
+   Sizing the padding in vh spends that height on the buttons instead, and
+   keeps doing so on a bigger screen without another breakpoint.
+   clamp() bounds both ends: never smaller than the old 8 px on a very short
+   viewport, never so tall on a tablet that it crowds the grid. */
+#gc-cam-bar .cam-btn{padding:clamp(8px,4.2vh,30px) 2px;}
 .gc-pos-grid{grid-template-columns:repeat(10,minmax(0,84px));justify-content:center;
   flex:1 1 auto;align-content:center;}
 #gc-ctrl-row{display:flex;flex-direction:row;justify-content:center;align-items:center;
   gap:22px;padding:6px 8px;background:var(--surf);border-top:1px solid var(--border);flex-shrink:0;}
 #gc-ctrl-row .ctrl-btn{flex:0 0 auto;padding:14px 30px;font-size:14px;}
+/* E-STOP lives in this bar, so the inset here is not cosmetic: without it the
+   button would sit under the home indicator, where a press that misses becomes
+   a swipe-up out of the app — on a live rig, at the exact moment somebody is
+   reaching for the stop. */
 #gc-bottom{display:flex;align-items:center;justify-content:space-between;gap:8px;
-  padding:6px 10px;background:var(--surf);border-top:1px solid var(--border);flex-shrink:0;
+  padding:6px 10px max(6px,env(safe-area-inset-bottom)) 10px;
+  background:var(--surf);border-top:1px solid var(--border);flex-shrink:0;
   font-size:11px;color:var(--dim);}
 #gc-bottom .gc-stat{flex:1;text-align:center;}
 #gc-estop{background:var(--red);border-color:var(--red);color:#fff;flex:0 0 auto;padding:10px 22px;}
