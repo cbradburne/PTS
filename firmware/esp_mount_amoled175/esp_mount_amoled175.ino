@@ -1333,6 +1333,12 @@ static void setup_exit() {
 // reversible, taking a stranger is neither — it is provisional, it costs a
 // pairing, and getting it wrong puts the mount on someone else's rig.
 #define REACQ_ADOPT_MARGIN_DB  20
+// The same test at boot — see the note where it is used.  6 dB rather than 20:
+// enough that scan-to-scan noise (a couple of dB at rest) cannot unseat a known
+// base, small enough that a satellite in the same room as the mount actually
+// wins.  Under it, a mount paired only with the hub would ignore the satellite
+// beside it every single boot.
+#define REACQ_BOOT_ADOPT_MARGIN_DB  6
 
 // ---------------------------------------------------------------------------
 // Provisional adoption
@@ -1529,12 +1535,39 @@ static void hub_reacquire_poll() {
     // Compared against the BEST known reading, not merely the current one, so a
     // stranger cannot win a contest a known hub would have won.  Either way the
     // adoption is provisional — see adopt_trial_poll().
+    // The margin is smaller at boot, because what it is protecting is smaller.
+    //
+    // Mid-run, taking a stranger means dropping a link that is working and
+    // betting twenty seconds of trial on the replacement answering — with a
+    // rig live, that has to be nearly certain, hence 20 dB.  At boot nothing is
+    // depending on this mount yet: a trial that fails reverts to the base we
+    // would otherwise have chosen, and costs only startup time nobody is
+    // watching.  So the boot pick can afford to back a merely clear winner.
+    //
+    // Without this, "choose the strongest at boot" quietly means "choose the
+    // strongest base you have already been paired with".  A mount set up
+    // against the hub alone would keep passing over the foyer satellite sitting
+    // beside it, because a satellite is by definition not in the known list —
+    // which is exactly the trap the OUTCLASSED path was written for, reopened
+    // by making the scan happen once instead of continuously.
+    int16_t adopt_margin = was_boot_pick ? REACQ_BOOT_ADOPT_MARGIN_DB
+                                         : REACQ_ADOPT_MARGIN_DB;
     int16_t known_db = (bestdb > curdb) ? bestdb : curdb;
-    bool isolated    = (best < 0) && ((nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS);
-    bool outclassed  = (known_db > -32768) && (adopt_db > known_db + REACQ_ADOPT_MARGIN_DB);
+    // REACQ_ADOPT_MS is a "ride out a momentary dropout" timer, and at boot
+    // there is no dropout to ride out: nothing known answered the scan, so the
+    // minute would be spent re-learning what we already know.  A mount carried
+    // to a room served only by a satellite it has never met should come up on
+    // it, not sit dark for a minute first.
+    bool isolated    = (best < 0) &&
+                       (was_boot_pick || (nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS);
+    bool outclassed  = (known_db > -32768) && (adopt_db > known_db + adopt_margin);
     bool adopt_ok    = adopt_seen && !_adopt_start_ms && (isolated || outclassed);
 
-    if (adopt_ok && isolated)
+    if (adopt_ok && isolated && was_boot_pick)
+        Serial.printf("[REACQ] Boot — no known base in range, trying \"%s\" %02X:%02X "
+                      "on ch %d (%d dB)\n", adopt.ssid, adopt.mac[4], adopt.mac[5],
+                      (int)adopt.channel, (int)adopt_db);
+    else if (adopt_ok && isolated)
         Serial.printf("[REACQ] Isolated %lus — trying \"%s\" %02X:%02X on ch %d (%d dB)\n",
                       (unsigned long)((nowm - _last_hub_rx_ms) / 1000UL),
                       adopt.ssid, adopt.mac[4], adopt.mac[5],
