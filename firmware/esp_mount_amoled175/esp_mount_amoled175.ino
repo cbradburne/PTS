@@ -1225,6 +1225,14 @@ static void hub_remember(const KnownHub &h) {
     _cfg.last_hub = 0;
 }
 
+// Note what the hub row here does and does not do.  It sets the identity and
+// PAIRS with that base — adding it to the known list and making it active — but
+// it does not pin it.  The restart below runs the boot pick, which chooses the
+// strongest KNOWN base, so if a stronger one is in range that is what the mount
+// will come up on.  That is deliberate: picking the strongest at boot is the
+// whole point, and a screen that silently outranked it would be worse than one
+// that never offered the choice.  To force a particular base, it has to be the
+// strongest the mount can hear — or the only one.
 static void setup_apply_save() {
     if (_setup_sel_id < 1 || _setup_sel_hub < 0) return;
     const KnownHub &sel = _scan_hub[_setup_sel_hub];
@@ -1276,52 +1284,54 @@ static void setup_exit() {
 
 #define REACQ_SILENT_MS  20000UL   // hub silence before we start scanning
 #define REACQ_PERIOD_MS  30000UL   // min gap between reacquire scans
-// A mount used to look for a better hub ONLY once its current one had gone
-// quiet.  So a momentary satellite outage dropped it back to the distant hub -
-// which answers, weakly - and it stayed there, never rescanning, never noticing
-// the satellite beside it was 30 dB stronger, until it degraded into isolation.
-// One mount spent 57 minutes off the air that way with a healthy satellite in
-// the same room.
+// WHEN A MOUNT CHOOSES ITS BASE: once, at boot, and then not again.
 //
-// So it now also scans while healthy, far less often, and switches only on a
-// margin large enough that two comparable hubs cannot make it oscillate.
-#define REACQ_HEALTHY_PERIOD_MS  (5UL * 60UL * 1000UL)
-#define REACQ_UPGRADE_MARGIN_DB  15
-// ...but not when the hub we are on is already strong.
+// A mount does not move while it is powered.  It is bolted to a stand, the
+// stand stays where it was put, and nothing about which base is nearest can
+// change between power-on and power-off.  So the choice is made once, on the
+// only occasion the answer can differ from last time — the mount may well have
+// been carried somewhere else while it was off — and after that the radio is
+// left alone to do its job.
 //
-// The healthy scan is not free: WiFi.scanNetworks() takes the radio off-channel
-// for one to three seconds, and for that whole time ESP-NOW fails in BOTH
-// directions.  The hub reads a run of send failures as a TX wedge, refreshes
-// the peer, and the mount blinks OFFLINE and back in the PC app.  An overnight
-// bench log showed it exactly: 174 wedges, one every 300 s to the second, phase
-// locked to the mount's boot, ~100-150 txfail in a single burst each time while
-// 97% of all other samples logged zero.  That mount sat at -15 dBm.
+// This replaces a periodic "look for something stronger" scan that ran every
+// five minutes for the life of the mount.  It was not free.  WiFi.scanNetworks()
+// takes the radio off-channel for one to three seconds, and for that whole time
+// ESP-NOW fails in BOTH directions: the hub reads the run of failures as a TX
+// wedge, refreshes the peer, and the mount blinks OFFLINE and back in the PC
+// app.  An overnight bench log showed it exactly — 174 wedges, one every 300 s
+// to the second, phase locked to the mount's boot, ~100-150 txfail in a single
+// burst each time, while 97% of all other health samples logged zero.  Twice
+// the link failed to come back, the mount sat isolated for the full two-minute
+// timeout and restarted itself.  Paid every five minutes, all night, to answer
+// a question whose answer cannot change.
 //
-// At that strength the scan cannot achieve anything.  Switching needs a hub
-// REACQ_UPGRADE_MARGIN_DB stronger than the current one, so at -15 dBm it would
-// have to find 0 dBm, which does not exist.  The cost is real and the benefit
-// is arithmetically zero.
+// What the periodic scan was originally for is still covered, by the paths
+// below rather than by repetition:
 //
-// -60 dBm is deliberately conservative rather than tuned to that bench.  Both
-// faults this feature was built for involve a WEAK current hub — a mount that
-// dropped back to a distant hub "which answers, weakly", and a mount that never
-// noticed the satellite beside it — so both stay well inside the scanning band
-// and keep the 5-minute check they need.  A link at -60 still has ~20 dB of
-// margin before ESP-NOW cares, and a mount that healthy has no reachability
-// problem for a scan to solve.
+//   a satellite deployed to reach this mount   the boot scan adopts it, and so
+//                                              does the silent scan once the
+//                                              current base stops answering
+//   fell back to a distant hub after an outage the silent scan (REACQ_SILENT_MS)
+//                                              switches freely, no margin needed
 //
-// This only gates the HEALTHY scan.  Once the hub actually goes quiet,
-// REACQ_SILENT_MS takes over and scans regardless of how strong it used to be,
-// so the recovery path is untouched.
-#define REACQ_HEALTHY_SKIP_DBM   (-60)
-#define REACQ_HEALTHY_SKIP_HYST_DB  5
-// How long fully isolated before the mount may adopt a hub it has never been
+// The one case genuinely given up is a base that gets WORSE while still
+// answering — someone re-rigs a wall mid-show and a better base appears.  That
+// needs a power cycle, or the SETUP screen, which is a fair price for a link
+// that stops dropping on its own every five minutes.
+//
+// REACQ_UPGRADE_MARGIN_DB went with the periodic scan.  It existed so a mount
+// sitting between two similar bases could not ping-pong every five minutes;
+// with nothing repeating, there is nothing to oscillate.
+
+// How long fully isolated before the mount may adopt a base it has never been
 // paired with.  Deliberately shorter than ESPNOW_RESTART_MS, so adoption gets
 // a chance BEFORE the isolation restart throws away the attempt.
 #define REACQ_ADOPT_MS   60000UL
-// How much stronger an unknown hub must be to be adopted while a known one is
-// still audible.  Larger than REACQ_UPGRADE_MARGIN_DB on purpose: switching
-// between two hubs we already trust is cheap, taking a stranger is not.
+// How much stronger an unknown base must be to be adopted while a known one is
+// still audible.  Adoption keeps a margin even though choosing between KNOWN
+// bases no longer needs one: moving between bases we already trust is cheap and
+// reversible, taking a stranger is neither — it is provisional, it costs a
+// pairing, and getting it wrong puts the mount on someone else's rig.
 #define REACQ_ADOPT_MARGIN_DB  20
 
 // ---------------------------------------------------------------------------
@@ -1381,8 +1391,7 @@ static void hub_forget(const uint8_t *mac) {
 }
 
 static uint32_t _reacq_last_ms = 0;
-static bool     _reacq_was_silent = false;   // why this scan was started
-static bool     _reacq_skipping   = false;   // healthy scan suppressed: hub is strong
+static bool     _reacq_boot_done   = false;  // the one-time boot pick has run
 
 // Confirm or undo a provisional adoption.  Runs on every poll, not only around
 // a scan: the verdict is about whether traffic arrived, which has nothing to do
@@ -1417,46 +1426,29 @@ static void hub_reacquire_poll() {
     adopt_trial_poll(nowm);
     if (!_reacq_scanning) {
         bool silent = (nowm - _last_hub_rx_ms) > REACQ_SILENT_MS;
-        // A scan takes the radio off-channel for a second or two.  When the hub
+        // A scan takes the radio off-channel for a second or two.  When the base
         // has already gone quiet that costs nothing — we are not hearing it
-        // anyway — but the healthy periodic scan must never happen mid-move: on
-        // a camera rig those seconds are when an operator might press stop, and
-        // deafness is not something to schedule into a live shot.  Waiting for
-        // idle only delays the upgrade to the next tick.
+        // anyway — but a scan must never happen mid-move: on a camera rig those
+        // seconds are when an operator might press stop, and deafness is not
+        // something to schedule into a live shot.  In practice this only guards
+        // the boot pick, since a silent base makes it true anyway, and a mount
+        // that has just powered on is not moving.
         bool safe_to_scan = silent || (_ms.state == STATE_IDLE);
-        // A strong hub makes the healthy scan pointless — see the note on
-        // REACQ_HEALTHY_SKIP_DBM.  rssi 0 means nothing has been received yet,
-        // which is emphatically not "strong", so it must not count as one.
-        //
-        // Hysteresis, because this runs every loop pass and RSSI wanders a few
-        // dB at rest: a mount sitting near the threshold would otherwise flip
-        // state thousands of times a second and log every one of them.  Stop
-        // scanning above -60, resume only once it has genuinely fallen to -65.
-        int8_t thresh = REACQ_HEALTHY_SKIP_DBM
-                      - (_reacq_skipping ? REACQ_HEALTHY_SKIP_HYST_DB : 0);
-        bool strong = !silent && _last_rssi != 0 && _last_rssi > thresh;
-        if (strong != _reacq_skipping) {
-            // Logged on the EDGE only.  Saying it every five minutes for ever
-            // would bury the interesting lines; saying it never would make a
-            // mount that has quietly stopped scanning impossible to tell from
-            // one whose timer has broken.
-            _reacq_skipping = strong;
-            Serial.printf("[REACQ] hub at %d dBm — periodic scan %s\n",
-                          (int)_last_rssi, strong ? "OFF (already strong)" : "back ON");
-        }
-        // Returning without stamping _reacq_last_ms is deliberate: a link that
-        // has just degraded then scans on the very next pass instead of waiting
-        // out the rest of a five-minute window it was never running.  Losing
-        // signal is precisely when looking for something better is worth two
-        // seconds of deafness.
-        if (strong) return;
-        uint32_t period = silent ? REACQ_PERIOD_MS : REACQ_HEALTHY_PERIOD_MS;
-        if (safe_to_scan && (nowm - _reacq_last_ms) > period) {
-            _reacq_last_ms   = nowm;
-            _reacq_scanning  = true;
-            _reacq_was_silent = silent;
-            Serial.println(silent ? "[REACQ] Hub silent — scanning for known hubs"
-                                  : "[REACQ] Periodic check for a stronger hub");
+        // The boot pick.  Deliberately not conditioned on `silent`: for the
+        // first REACQ_SILENT_MS after power-on _last_hub_rx_ms is still 0 and
+        // millis() is small, so a freshly booted mount that has never heard
+        // anything reads as NOT silent.  Waiting for that to age out would put
+        // twenty seconds between power-on and choosing a base.
+        bool boot_pick = !_reacq_boot_done;
+        // Scan only to make the boot choice, or because the base we chose has
+        // stopped answering.  Nothing periodic: see the note above the REACQ
+        // defines for what that cost and what replaces it.
+        bool due = boot_pick || (silent && (nowm - _reacq_last_ms) > REACQ_PERIOD_MS);
+        if (safe_to_scan && due) {
+            _reacq_last_ms  = nowm;
+            _reacq_scanning = true;
+            Serial.println(boot_pick ? "[REACQ] Boot — choosing the strongest base"
+                                     : "[REACQ] Base silent — scanning for known bases");
             WiFi.scanDelete();
             WiFi.scanNetworks(true /*async*/, false);
         }
@@ -1466,6 +1458,13 @@ static void hub_reacquire_poll() {
     int n = WiFi.scanComplete();
     if (n == WIFI_SCAN_RUNNING) return;
     _reacq_scanning = false;
+    // Marked done on COMPLETION, not when the scan started, so a scan cut short
+    // by SETUP or a config reload is retried rather than silently skipped —
+    // which would leave the mount on whatever base NVS last remembered without
+    // anything saying the choice never actually happened.  Set even when the
+    // scan found nothing: the silent path owns it from here.
+    bool was_boot_pick = !_reacq_boot_done;
+    _reacq_boot_done   = true;
 
     int8_t  best   = -1;
     int16_t bestdb = -32768;
@@ -1562,21 +1561,31 @@ static void hub_reacquire_poll() {
         // upgrade, measured in the same scan so the two numbers are comparable,
         // or a mount sitting between two similar hubs would ping-pong and spend
         // its life re-pairing instead of working.
-        bool hub_changed = (best != (int8_t)_cfg.last_hub) &&
-                           (_reacq_was_silent ||
-                            bestdb > curdb + REACQ_UPGRADE_MARGIN_DB);
+        // Straight to the strongest, no margin test.  A margin existed to stop a
+        // mount between two similar bases ping-ponging on a scan it repeated
+        // every five minutes — with the repetition gone there is nothing to
+        // oscillate: this runs once at boot, and otherwise only when the base
+        // we are on has stopped answering, where there is nothing to lose.
+        bool hub_changed = (best != (int8_t)_cfg.last_hub);
         bool ch_changed  = (bestch != _cfg.hubs[best].channel);
         if (hub_changed || ch_changed) {
             _cfg.hubs[best].channel = bestch;
             _cfg.last_hub           = (uint8_t)best;
             cfg_save_deferred();      // a roam is a cache update, not a commitment
             cfg_apply_active_hub();
-            Serial.printf("[REACQ] Following hub \"%s\" %02X:%02X on ch %d (%d dB)%s\n",
+            Serial.printf("[REACQ] %s base \"%s\" %02X:%02X on ch %d (%d dB)%s\n",
+                          was_boot_pick ? "Chose" : "Following",
                           _cfg.hubs[best].ssid, _hub_mac[4], _hub_mac[5],
                           (int)bestch, (int)bestdb,
-                          hub_changed ? " — switched hub" : " — channel changed");
+                          hub_changed ? " — switched" : " — channel changed");
+        } else if (was_boot_pick) {
+            // Say the choice was made even when it changed nothing, so "stayed
+            // on the base it already had" and "the boot scan never ran" are
+            // distinguishable from a serial log.
+            Serial.printf("[REACQ] Chose base \"%s\" %02X:%02X (%d dB) — already active\n",
+                          _cfg.hubs[best].ssid, _hub_mac[4], _hub_mac[5], (int)bestdb);
         } else {
-            Serial.println("[REACQ] Known hub visible on stored channel — waiting");
+            Serial.println("[REACQ] Known base visible on stored channel — waiting");
         }
     }
     // Scanning wandered off-channel — always come back to the active hub.
