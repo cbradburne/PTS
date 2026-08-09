@@ -438,6 +438,27 @@ static volatile bool    _espnow_need_refresh   = false; // peer del/add requeste
 // Uniform health telemetry (bridge node)
 static volatile uint32_t _espnow_fail_total = 0;  // cumulative send failures since boot
 static uint32_t _reinit_count       = 0;          // completed full ESP-NOW reinits
+static uint32_t _espnow_last_reinit_ms = 0;      // for ESPNOW_REINIT_MIN_GAP_MS
+static uint32_t _espnow_reinit_held    = 0;      // requests suppressed by the gap
+
+// Minimum gap between full ESP-NOW reinits.
+//
+// The ladder — 4 consecutive failures refresh the peer, 3 refreshes rebuild the
+// stack — had no brake, and the counters only reset on a SUCCESS.  So a run of
+// failures rebuilt the stack every twelfth one, and since a rebuild is
+// esp_now_deinit(), a 100 ms delay and a re-add, sends fail THROUGH it and count
+// toward the next.  A burst sustains itself.
+//
+// Measured, not theorised: one 7-second burst produced 121 failures and ten full
+// reinits, and an overnight log reached 753 of them — twelve times 753 is very
+// nearly the 9,598 failures recorded, so essentially every failure that night
+// was feeding this.
+//
+// 15 s because the isolation restart is at ESPNOW_RESTART_MS (2 min): that still
+// allows ~8 genuine recovery attempts before the mount gives up and reboots,
+// while turning a burst like the one above into a single rebuild.  Recovery from
+// a genuinely dead stack is unaffected; only the repetition is.
+#define ESPNOW_REINIT_MIN_GAP_MS  15000UL
 static uint32_t _last_jog_fwd_ms    = 0;          // last CMD_JOG forwarded → defer health send
 static uint32_t _health_last_ms     = 0;
 static uint32_t _health_anom_ms     = 0;
@@ -2339,7 +2360,23 @@ void loop() {
     }
     if (_espnow_need_reinit) {
         _espnow_need_reinit = false;
-        espnow_full_reinit();
+        uint32_t rn = millis();
+        if (_espnow_last_reinit_ms &&
+                (rn - _espnow_last_reinit_ms) < ESPNOW_REINIT_MIN_GAP_MS) {
+            // Held off — see ESPNOW_REINIT_MIN_GAP_MS.  Reset the ladder so it
+            // has to climb the full twelve failures again rather than
+            // re-requesting on the very next four.
+            _espnow_refresh_count = 0;
+            _espnow_reinit_held++;
+            if (_espnow_reinit_held == 1 || (_espnow_reinit_held % 10) == 0)
+                Serial.printf("[ESP-NOW] reinit held off (%lu since boot) — "
+                              "%lus since the last one\n",
+                              (unsigned long)_espnow_reinit_held,
+                              (unsigned long)((rn - _espnow_last_reinit_ms) / 1000UL));
+        } else {
+            _espnow_last_reinit_ms = rn ? rn : 1;
+            espnow_full_reinit();
+        }
     }
 
     // ── Hub connection state ─────────────────────────────────────────────
