@@ -236,6 +236,49 @@ static bool     _bc_subscribed = false;
 
 // The sketch supplies this; this layer does not know what a hub is.  Keeps the
 // relay decision (what to do with camera bytes) out of the BLE layer.
+// LAST-KNOWN CAMERA STATE, so a client that was not listening can still see it.
+//
+// Camera status is volunteered, never asked for: the camera sends an indication
+// when a value CHANGES and says nothing otherwise.  Relaying each one live and
+// forgetting it means the numbers exist only for whoever happened to be
+// connected at that instant — so a PC app started after the mount, or reopened
+// later, shows "—" for gain and white balance until somebody physically turns a
+// dial on the camera.  It looks exactly like a broken link, and it is the state
+// a rig is in every single time it powers up.
+//
+// So keep the latest frame per (category, parameter) and re-send them on a slow
+// tick.  Verbatim, through the same callback a live indication uses, so nothing
+// downstream needs to know the difference — and nothing here has to understand
+// what the bytes mean, which is the property that let gain and white balance be
+// added without touching the mount at all.
+#define CAM_CACHE_MAX   8
+#define CAM_REPLAY_MS   5000UL
+
+struct BcCachedStatus { uint8_t len; uint8_t data[CAM_CONTROL_MAX_LEN]; };
+static BcCachedStatus _bc_cache[CAM_CACHE_MAX];
+static uint8_t        _bc_ncache   = 0;
+static uint32_t       _bc_replay_ms = 0;
+
+// BMD framing: [4]=category [5]=parameter identify the value being reported.
+static void bc_cache_store(const uint8_t *d, uint16_t n) {
+    if (n < 6 || n > CAM_CONTROL_MAX_LEN) return;
+    for (uint8_t i = 0; i < _bc_ncache; i++) {
+        if (_bc_cache[i].len < 6) continue;
+        if (_bc_cache[i].data[4] != d[4] || _bc_cache[i].data[5] != d[5]) continue;
+        memcpy(_bc_cache[i].data, d, n);        // same parameter — newest wins
+        _bc_cache[i].len = (uint8_t)n;
+        return;
+    }
+    // Full: drop it rather than evict. The parameters a camera reports settle
+    // within seconds of connecting, so anything arriving after eight distinct
+    // ones is a camera with more to say than this is for — and silently
+    // recycling entries would make the replay flap between two parameters.
+    if (_bc_ncache >= CAM_CACHE_MAX) return;
+    memcpy(_bc_cache[_bc_ncache].data, d, n);
+    _bc_cache[_bc_ncache].len = (uint8_t)n;
+    _bc_ncache++;
+}
+
 static void (*_bc_status_cb)(const uint8_t *, uint16_t) = nullptr;
 void ble_cam_on_status(void (*cb)(const uint8_t *, uint16_t)) { _bc_status_cb = cb; }
 
@@ -434,18 +477,24 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         _bc_notify_handle = 0;
         _bc_cccd_handle   = 0;
         _bc_subscribed    = false;
+        // Forget the readings too.  Replaying them would keep a dead camera's
+        // last gain on screen indefinitely, which is worse than showing nothing:
+        // the dash is honest about not knowing, a stale number is not.
+        _bc_ncache        = 0;
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
         _bc_notifies++;
         // Hand the bytes up untouched — the mount does not decode camera
         // status any more than it decodes camera commands.
-        if (_bc_status_cb && ev->notify_rx.om) {
+        if (ev->notify_rx.om) {
             uint8_t buf[CAM_CONTROL_MAX_LEN];
             uint16_t n = OS_MBUF_PKTLEN(ev->notify_rx.om);
             if (n && n <= sizeof(buf) &&
-                ble_hs_mbuf_to_flat(ev->notify_rx.om, buf, sizeof(buf), &n) == 0)
-                _bc_status_cb(buf, n);
+                ble_hs_mbuf_to_flat(ev->notify_rx.om, buf, sizeof(buf), &n) == 0) {
+                bc_cache_store(buf, n);
+                if (_bc_status_cb) _bc_status_cb(buf, n);
+            }
         }
         return 0;
     }
@@ -823,6 +872,16 @@ static void ble_cam_poll() {
             Serial.println("[CAM] could not start the attempt — rescanning");
             _bc_chosen = false;
         }
+    }
+
+    // Re-offer what the camera has already said.  Only while connected and only
+    // what it actually reported, so this invents nothing — it just stops the
+    // information being a one-shot that a client had to be present to catch.
+    if (_bc_connected && _bc_ncache && (now - _bc_replay_ms) >= CAM_REPLAY_MS) {
+        _bc_replay_ms = now;
+        if (_bc_status_cb)
+            for (uint8_t i = 0; i < _bc_ncache; i++)
+                _bc_status_cb(_bc_cache[i].data, _bc_cache[i].len);
     }
 
     if ((now - _bc_report_ms) >= CAM_REPORT_MS) {
