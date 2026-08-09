@@ -119,14 +119,13 @@ props_for() {
         sat)     [ -n "${SAT_NAME:-}" ] && _f="$_f -DSAT_NAME=\"$SAT_NAME\"" ;;
     esac
     [ -n "${DIAG:-}" ] && _f="$_f -DPTS_DIAG=$DIAG"
-    # Blackmagic camera control is built into every amoled binary.  Only the
-    # one-time PAIRING mode is opt-in, because it stops WiFi and blocks for a
-    # passkey — see ble_camera.h:
-    #   CAM_PAIR=1 tools/build.sh flash amoled  # bench only, once per mount
-    #   CAM_PAIR=2 tools/build.sh flash amoled  # same, WiFi left up (coexistence retest)
-    # The pairing code is typed into the serial monitor when the camera shows
-    # it, so it cannot be a build flag.
-    [ -n "${CAM_PAIR:-}" ] && _f="$_f -DCAM_PAIR=$CAM_PAIR"
+    # Blackmagic camera control and PAIRING are both in every amoled binary —
+    # pairing is a screen (hold twice), not a build.  See ble_camera.h.
+    #
+    # CAM_PAIR_KEEP_WIFI=1 is a diagnostic only: it skips the WiFi stop during
+    # pairing, to retest whether pairing ever needed the radio to itself.
+    [ -n "${CAM_PAIR_KEEP_WIFI:-}" ] && _f="$_f -DCAM_PAIR_KEEP_WIFI=$CAM_PAIR_KEEP_WIFI"
+
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""
     # BLE_VERBOSE=1 turns up the BLE stack's own logging.  Only CAM_VERBOSE

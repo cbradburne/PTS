@@ -176,7 +176,12 @@ a paired one goes straight to the camera it was paired with and ignores the
 rest.  A mount that has never been paired says so
 specifically, in the **CC** panel as *not paired* and in `comms.log` as
 `BLE NOT PAIRED` — distinct from *camera off*, because the fix is different.
-Pairing is a firmware job: see `ble_camera.h`.
+
+To pair, hold the mount's screen to reach SETUP, then hold again for CAMERA
+PAIRING.  The camera shows six digits; type them on the keypad.  **FORGET**
+clears every camera this mount is bonded to, which is what a camera moved to a
+different mount needs.  The mount is off the air while pairing, so the screen
+leaves on its own after two minutes.
 
 `/pts/refresh` asks for that full send on demand.  Bind it to a Companion
 startup trigger, or to a button, for the case the automatic paths do not cover:

@@ -12,7 +12,7 @@ What a row can tell you, and why all three states matter:
                           off, asleep, or out of range
     "not paired"          the mount and camera have no bond, and the mount has
                           stopped trying because reconnecting cannot create one
-                          — a one-time CAM_PAIR=1 bench flash fixes it
+                          — pair it on the mount: hold the screen twice
     "camera ready"        paired; the button will do something
 
 All three look identical from a greyed-out button and need completely

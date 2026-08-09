@@ -13,19 +13,23 @@
 // result is why camera control lives on this chip instead of a second ESP32 per
 // mount, so it is worth re-measuring if the radio picture ever changes.
 //
-//   PAIRING — once per mount, on a bench
+//   PAIRING — once per mount, from the mount's own screen
 //
-//     CAM_PAIR=1 tools/build.sh flash amoled
+//   Hold the screen to reach SETUP, hold again for CAMERA PAIRING.  It searches,
+//   the camera puts six digits on its own display, and they go into the keypad.
+//   FORGET drops every bond this mount holds, for when a camera moves to a
+//   different mount.  The screen leaves on its own after two minutes idle.
 //
-//   That build stops WiFi so BLE has the radio, and disables the task watchdog
-//   because the passkey prompt blocks.  Open a serial monitor: it lists what is
-//   in range, picks the Blackmagic camera if there is exactly one, and asks for
-//   the passkey — the camera shows six digits at that moment.  Type them and
-//   look for "encryption ESTABLISHED — PAIRED".
+//   No build flag and no serial monitor.  It was both, and that was wrong twice
+//   over: it needed two flashes and a laptop per mount, and the mount's USB port
+//   is sealed inside the enclosure on a rig — the one place the old flow could
+//   not be used was the place it was for.  Whoever types the code has to be able
+//   to read the camera's screen, so they are standing at the mount regardless.
 //
-//   Then reflash normally.  The bond is in NVS, so it reconnects on its own and
-//   never asks again.  A pairing build cannot reach a hub and must not be left
-//   on a rig.
+//   Pairing stops WiFi, so the mount is off the air until it finishes and the
+//   hub will see it drop.  Acceptable for a one-time bench job, and the reason
+//   the screen times out rather than waiting for ever.  The bond then lives in
+//   NVS and reconnects on its own for good.
 //
 //   THE MTU WORKAROUND — why this bypasses BLEClient
 //
@@ -69,13 +73,6 @@
 //   turned up.
 // ---------------------------------------------------------------------------
 
-// CAM_PAIR=1 builds the one-time PAIRING mode described above.  Pairing is the
-// only thing here that has to block — someone reads six digits off a camera and
-// types them — and blocking is exactly what a rig cannot afford, so it stays
-// where a person already is.  A normal build never prompts.
-#ifndef CAM_PAIR
-#define CAM_PAIR 0
-#endif
 
 #include <esp_wifi.h>
 #include <esp_task_wdt.h>
@@ -107,43 +104,33 @@
 // digits every attempt, so there is nothing to carry forward between flashes
 // either.  Compile-time was circular twice over.
 //
-// So onPassKeyRequest() waits for the number, which is also what a real
-// implementation would do — from the mount's own touchscreen rather than a
-// serial monitor.
-#define CAM_PIN_WAIT_MS  90000UL
+// So the code is asked for at the moment the camera shows it, from the mount's
+// own touchscreen — see the pairing state machine below.
 
-#if CAM_PAIR
-// Blocking, deliberately.  It runs on the BLE host task during pairing, which
-// is exactly the moment there is nothing else for that task to do, and the
-// alternative — failing the pairing and retrying — cannot work when the camera
-// picks new digits each time.  Compiled only into a pairing build for that
-// reason: nothing on a rig may block like this.
-static uint32_t bc_prompt_passkey() {
-    Serial.println();
-    Serial.println("[CAM] ============================================");
-    Serial.println("[CAM] The camera is now showing a 6-digit code.");
-    Serial.println("[CAM] Type it here and press Enter.");
-    Serial.println("[CAM] ============================================");
-    char buf[8]; uint8_t n = 0;
-    uint32_t deadline = millis() + CAM_PIN_WAIT_MS;
-    while ((int32_t)(millis() - deadline) < 0) {
-        while (Serial.available()) {
-            int c = Serial.read();
-            if (c == '\r' || c == '\n') {
-                if (n == 0) continue;                 // ignore a bare newline
-                buf[n] = 0;
-                uint32_t k = (uint32_t)strtoul(buf, nullptr, 10);
-                Serial.printf("[CAM] using %06lu\n", (unsigned long)k);
-                return k;
-            }
-            if (c >= '0' && c <= '9' && n < 6) buf[n++] = (char)c;
-        }
-        delay(10);
-    }
-    Serial.println("[CAM] no code entered — pairing will fail, it will retry");
-    return 0;
-}
-#endif  // CAM_PAIR
+// PAIRING, as a runtime mode driven by the mount's own screen.
+//
+// It used to be a separate BUILD that blocked the BLE host task for up to 90 s
+// reading six digits off the serial port.  That meant two flashes and a laptop
+// per mount, a task watchdog switched off to survive the block, and a serial
+// port that on a rig is sealed inside the enclosure.  The digits are on the
+// camera's screen, so whoever types them is standing at the mount anyway — and
+// the mount has a touchscreen.
+//
+// Nothing here blocks.  The passkey request parks in BCP_WANT_CODE, the UI puts
+// a keypad up, and ble_cam_pair_submit() injects the code from the main loop
+// whenever it arrives.  The watchdog stays on throughout.
+enum BcPairState : uint8_t {
+    BCP_OFF = 0,     // not in pairing mode
+    BCP_SEARCHING,   // scanning / connecting
+    BCP_NO_CAMERA,   // scan completed with nothing to pair to
+    BCP_WANT_CODE,   // camera is showing six digits, waiting for the keypad
+    BCP_PAIRED,
+    BCP_FAILED,
+};
+static volatile BcPairState _bc_pair_state = BCP_OFF;
+static volatile bool        _bc_pair_mode  = false;
+static uint16_t             _bc_pk_conn    = BLE_HS_CONN_HANDLE_NONE;
+
 
 // BLE_VERBOSE=1 turns the BLE stack's own logging up.  Four rounds of guessing
 // at why connect() returns false have cost more than reading the error would
@@ -453,35 +440,30 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         if (ev->passkey.params.action == BLE_SM_IOACT_INPUT) {
-            struct ble_sm_io io = {};
-            io.action  = BLE_SM_IOACT_INPUT;
-#if CAM_PAIR
-            io.passkey = bc_prompt_passkey();
-            int rc = ble_sm_inject_io(ev->passkey.conn_handle, &io);
-            Serial.printf("[CAM] passkey injected, rc=%d\n", rc);
-#else
-            // No bond, and nobody here to type six digits.  Give up rather than
-            // retry: reconnecting cannot create a bond, so the 10 s retry would
-            // just put a failed-pairing prompt on the camera every 10 seconds,
-            // for as long as the rig is powered.  Latch it, say it once, and let
-            // the health flag carry the instruction to the PC app.
-            (void)io;
-            if (bc_bonded_count() == 0) {
-                // Never paired to anything: no reconnect can create a bond, so
-                // stop rather than reprompt the camera every 10 s for ever.
+            if (_bc_pair_mode) {
+                // Park it.  The camera is displaying the code as of now, and the
+                // answer arrives from a touchscreen an unknown number of seconds
+                // later — a thing to wait for on the UI task, never on this one.
+                _bc_pk_conn    = ev->passkey.conn_handle;
+                _bc_pair_state = BCP_WANT_CODE;
+                Serial.println("[CAM] camera is showing a code — waiting for the keypad");
+            } else if (bc_bonded_count() == 0) {
+                // Not in pairing mode and bonded to nothing: no reconnect can
+                // create a bond, so stop rather than put a failed-pairing prompt
+                // on the camera every 10 s for as long as the rig is powered.
                 _bc_unpaired = true;
                 Serial.println("[CAM] camera is NOT PAIRED with this mount — no more "
-                               "attempts. Reflash with CAM_PAIR=1 on a bench, once.");
+                               "attempts. Hold the screen twice to pair it.");
+                ble_gap_terminate(ev->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             } else {
                 // We ARE paired, just not to this camera — a neighbour's, picked
                 // while ours was out of range.  Recoverable, so drop the choice
-                // and rescan instead of latching a working mount out of service.
+                // and rescan rather than latching a working mount out of service.
                 Serial.println("[CAM] that is not our camera (no bond with it) — "
                                "dropping it and rescanning");
                 _bc_chosen = false;
+                ble_gap_terminate(ev->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             }
-            ble_gap_terminate(ev->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-#endif
         } else {
             Serial.printf("[CAM] unexpected passkey action %d\n",
                           ev->passkey.params.action);
@@ -492,6 +474,8 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         Serial.printf("[CAM] encryption %s (status=%d)\n",
                       ev->enc_change.status ? "FAILED" : "ESTABLISHED — PAIRED",
                       ev->enc_change.status);
+        if (_bc_pair_mode)
+            _bc_pair_state = ev->enc_change.status ? BCP_FAILED : BCP_PAIRED;
         if (ev->enc_change.status == 0) {
             _bc_connected = true;
             _bc_since_ms  = millis();
@@ -686,11 +670,11 @@ class BcScanCb : public BLEAdvertisedDeviceCallbacks {
 };
 
 class BcSecCb : public BLESecurityCallbacks {
-#if CAM_PAIR
-    uint32_t onPassKeyRequest() override { return bc_prompt_passkey(); }
-#else
+    // Never reached: pairing runs through bc_gap_event()'s PASSKEY_ACTION, not
+    // the wrapper.  Returning 0 rather than prompting keeps it that way — a
+    // second, blocking path into the same procedure is how the watchdog problem
+    // started.
     uint32_t onPassKeyRequest() override { return 0; }
-#endif
     void onPassKeyNotify(uint32_t pass) override {
         Serial.printf("[CAM] camera shows %06lu\n", (unsigned long)pass);
     }
@@ -705,55 +689,19 @@ class BcSecCb : public BLESecurityCallbacks {
     bool onAuthorizationRequest(uint16_t, uint16_t, bool) override { return true; }
 };
 
-// Camera support is unconditional in a normal build; only PAIRING is opt-in.
+// Pairing is no longer a build.  It is a runtime mode the operator enters from
+// the mount's screen (ble_cam_pair_begin below), which is why the task watchdog
+// that this used to switch off now stays on: nothing blocks any more.
 //
-// CAM_PAIR=1 stops WiFi for pairing; CAM_PAIR=2 leaves it up.
-//
-// The stop exists because with WiFi running the camera was found every time and
-// the connection never completed — read at the time as the S3 giving WiFi the
-// radio and starving BLE of the sustained time a pairing needs.  That reading
-// predates the discovery that the core's BLEClient was tearing down every
-// connection over the MTU exchange, which explains the same symptom without
-// invoking coexistence at all.  CAM_PAIR=2 is there to settle it: if pairing
-// completes with WiFi up, the stop is unnecessary and the passkey no longer has
-// to be typed at the mount.
+// CAM_PAIR_KEEP_WIFI=1 is the one build-time knob left, and it exists only to
+// retest an assumption.  Pairing stops WiFi because with WiFi running the camera
+// was found every time and the connection never completed — read at the time as
+// the S3 giving WiFi the radio and starving BLE of the sustained time a pairing
+// needs.  That reading predates the discovery that the core's BLEClient was
+// tearing down every connection over the MTU exchange, which explains the same
+// symptom without invoking coexistence at all.  If pairing completes with the
+// radio shared, the stop can go and a mount stays reachable while it pairs.
 static void ble_cam_setup() {
-#if CAM_PAIR
-#if CAM_PAIR == 2
-    // CAM_PAIR=2 — pair with WiFi LEFT RUNNING, to retest the assumption below.
-    //
-    // "WiFi must be off to pair" was concluded in e66217e, BEFORE 636902d found
-    // that the core's BLEClient tears down every connection when the camera
-    // wins the MTU exchange.  That bug explained the failure on its own: the
-    // connection succeeded and the library dropped it.  Coexistence was blamed
-    // for a fault that had a different cause entirely, and the conclusion has
-    // never been retested since the cause was fixed.
-    //
-    // It matters well beyond a build flag.  If pairing works with WiFi up, the
-    // mount stays reachable throughout, the passkey can be typed into the PC
-    // app and sent over ESP-NOW, and all five mounts pair from the desk — no
-    // keypad on a 466 px circle, no ladder.  If it genuinely does not, the
-    // passkey has to be entered on the mount itself, because nothing can reach
-    // it while its radio is off.
-    Serial.println("[CAM] PAIRING BUILD — WiFi LEFT UP (CAM_PAIR=2, coexistence retest).");
-    Serial.println("[CAM] If this pairs, pairing does not need the radio to itself.");
-#else
-    Serial.println("[CAM] PAIRING BUILD — WiFi stopped so BLE has the radio.");
-    Serial.println("[CAM] This mount will NOT talk to a hub. Pair, then reflash normally.");
-    esp_wifi_stop();
-    delay(200);
-#endif
-
-    // Watchdog off for PAIRING ONLY.  The blocking connect() that first tripped
-    // it is long gone — ble_gap_connect() is asynchronous — but the passkey
-    // prompt still blocks the NimBLE host task for as long as it takes someone
-    // to type six digits, and a watchdog that fires while a human is reading a
-    // camera screen is no use to anyone.  This build cannot reach a hub, so
-    // nothing here is protecting a rig.  A normal build never prompts and keeps
-    // the watchdog exactly as every other build has it.
-    esp_task_wdt_deinit();
-    Serial.println("[CAM] pairing build — task watchdog OFF");
-#endif
     BLEDevice::init("PTS-Mount");
     BLEDevice::setPower(ESP_PWR_LVL_P9);          // as BlueMagic32 does
     BLEDevice::setSecurityCallbacks(new BcSecCb());
@@ -921,7 +869,15 @@ static void ble_cam_poll() {
                 return;
             }
             _bc_scan_ready = false;
-            if (!bc_choose()) return;      // nothing picked — rescan next time
+            if (!bc_choose()) {
+                // Tell the pairing screen, rather than leaving it saying
+                // "searching" at somebody who is standing there with a camera
+                // that is switched off.
+                if (_bc_pair_mode) _bc_pair_state = BCP_NO_CAMERA;
+                return;                    // nothing picked — rescan next time
+            }
+            if (_bc_pair_mode && _bc_pair_state == BCP_NO_CAMERA)
+                _bc_pair_state = BCP_SEARCHING;
         }
         // NimBLE will not start a connection while discovery is running.
         BLEDevice::getScan()->stop();
@@ -956,3 +912,99 @@ static void ble_cam_poll() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Pairing, driven by the mount's screen
+// ---------------------------------------------------------------------------
+
+#ifndef CAM_PAIR_KEEP_WIFI
+#define CAM_PAIR_KEEP_WIFI 0
+#endif
+
+BcPairState ble_cam_pair_state() { return _bc_pair_state; }
+
+// Enter pairing mode.  Stops WiFi so BLE has the radio (see ble_cam_setup), so
+// the mount goes off the air until pairing ends — deliberate and acceptable for
+// a one-time bench operation, but it does mean the hub will see this mount drop.
+void ble_cam_pair_begin() {
+    if (_bc_pair_mode) return;
+    _bc_pair_mode  = true;
+    _bc_pair_state = BCP_SEARCHING;
+
+    // Clear the giving-up latch and the current choice, so a mount that has
+    // already decided it is unpaired will actually go and look again — without
+    // this, entering pairing on the mount that most needs it would do nothing.
+    _bc_unpaired = false;
+    _bc_chosen   = false;
+    _bc_retry_ms = 0;
+
+#if !CAM_PAIR_KEEP_WIFI
+    Serial.println("[CAM] pairing — stopping WiFi, this mount is off the air");
+    esp_wifi_stop();
+    delay(200);
+#else
+    Serial.println("[CAM] pairing with WiFi LEFT UP (CAM_PAIR_KEEP_WIFI)");
+#endif
+}
+
+// Leave pairing mode.  Restarting the chip rather than restarting WiFi by hand:
+// the bond is already in NVS, a fresh boot re-runs the base pick and the normal
+// camera connect, and it avoids having to unpick WiFi/ESP-NOW state that was
+// torn down mid-flight.  setup_apply_save() takes the same view for the same
+// reason.
+void ble_cam_pair_end() {
+    _bc_pair_mode  = false;
+    _bc_pair_state = BCP_OFF;
+#if !CAM_PAIR_KEEP_WIFI
+    Serial.println("[CAM] leaving pairing — restarting");
+    delay(300);
+    esp_restart();
+#endif
+}
+
+// The keypad's answer.  Runs on the UI task; ble_sm_inject_io takes the host
+// lock itself, so it does not have to be marshalled onto the BLE task.
+bool ble_cam_pair_submit(uint32_t code) {
+    if (_bc_pair_state != BCP_WANT_CODE) return false;
+    struct ble_sm_io io = {};
+    io.action  = BLE_SM_IOACT_INPUT;
+    io.passkey = code;
+    int rc = ble_sm_inject_io(_bc_pk_conn, &io);
+    Serial.printf("[CAM] passkey %06lu injected, rc=%d\n", (unsigned long)code, rc);
+    // Back to SEARCHING rather than straight to a verdict: the answer is
+    // BLE_GAP_EVENT_ENC_CHANGE, a moment later.  Claiming success here would
+    // show PAIRED for a code the camera is about to reject.
+    _bc_pair_state = rc ? BCP_FAILED : BCP_SEARCHING;
+    return rc == 0;
+}
+
+// Forget every camera this mount is bonded to.
+//
+// Needed because cameras move between mounts.  A stale bond is not inert: the
+// boot pick PREFERS the bonded camera, so a mount still holding a bond to a
+// camera that now lives on another mount will keep reaching for it instead of
+// pairing with the one in front of it.
+//
+// Note this only clears OUR side.  The camera keeps its own bond, and a camera
+// that thinks it is still paired may refuse to show a code — its own "forget"
+// may be needed too.  Said on serial rather than guessed at silently.
+void ble_cam_forget() {
+    if (_bc_conn != BLE_HS_CONN_HANDLE_NONE)
+        ble_gap_terminate(_bc_conn, BLE_ERR_REM_USER_CONN_TERM);
+
+    ble_addr_t peers[8]; int n = 0;
+    int gone = 0;
+    if (ble_store_util_bonded_peers(peers, &n, 8) == 0)
+        for (int i = 0; i < n; i++)
+            if (ble_gap_unpair(&peers[i]) == 0) gone++;
+
+    _bc_ncache     = 0;
+    _bc_cache_full = false;
+    _bc_unpaired   = false;
+    _bc_chosen     = false;
+    _bc_replay_i   = 0;
+    _bc_retry_ms   = 0;
+    if (_bc_pair_mode) _bc_pair_state = BCP_SEARCHING;
+    Serial.printf("[CAM] forgot %d bond(s). If the camera still thinks it is "
+                  "paired, forget this mount on the camera too.\n", gone);
+}

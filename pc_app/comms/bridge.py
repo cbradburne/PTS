@@ -692,7 +692,7 @@ class Bridge:
             if unpaired:
                 # Terminal until someone reflashes: the mount has no bond and
                 # has stopped trying, so this will not clear on its own.
-                ble = " | BLE NOT PAIRED (needs CAM_PAIR=1 bench flash)"
+                ble = " | BLE NOT PAIRED (pair on the mount: hold screen twice)"
             else:
                 ble = " | BLE PAIRED" if linked else " | BLE down"
             if linked:

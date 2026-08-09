@@ -107,6 +107,9 @@ static uint8_t     _hub_mac[6]  = {};     // active hub ESP-NOW address
 static uint8_t     _hub_channel = 1;
 static bool        _setup_active = false; // SETUP screen is showing (declared
                                           // early: gates main/level touch zones)
+static bool        _pair_active  = false; // camera-pairing screen is showing —
+                                          // same reason, and the touch zones
+                                          // must not fire underneath it either
 
 static void cfg_apply_active_hub() {
     const KnownHub &h = _cfg.hubs[_cfg.last_hub];
@@ -1000,7 +1003,7 @@ static void build_level_screen() {
     lv_obj_remove_flag(back, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(back, [](lv_event_t *) {
-        if (_setup_active) return;   // hold-gesture switched to SETUP mid-press
+        if (_setup_active || _pair_active) return;   // hold switched screen mid-press
         _level_active = false;
         lv_scr_load(_main_scr);
     }, LV_EVENT_CLICKED, nullptr);
@@ -1626,6 +1629,182 @@ static void hub_reacquire_poll() {
     espnow_peer_refresh();
 }
 
+// ---------------------------------------------------------------------------
+// Camera pairing screen
+// ---------------------------------------------------------------------------
+// Reached by holding the screen again from SETUP.  A second hidden gesture
+// rather than another button, because SETUP is already full and this is a
+// commissioning job done once per mount, by whoever built the rig.
+//
+// The mount goes OFF THE AIR while this is open — pairing stops WiFi so BLE has
+// the radio — so it must not be possible to wander off and leave it here.
+// Hence CAMPAIR_IDLE_MS: a mount silently out of service is the kind of fault
+// that is discovered during a show.
+#define CAMPAIR_IDLE_MS  (2UL * 60UL * 1000UL)
+
+static lv_obj_t *_pair_scr    = nullptr;
+static lv_obj_t *_pair_status = nullptr;
+static lv_obj_t *_pair_code   = nullptr;
+static char      _pair_buf[7] = "";
+static uint8_t   _pair_n      = 0;
+static uint32_t  _pair_idle_ms = 0;
+// File-scope, not a function static, so re-entering the screen starts from a
+// known state instead of inheriting the verdict from the last visit.
+static BcPairState _pair_last_state = BCP_OFF;
+
+static void campair_refresh() {
+    if (!_pair_active) return;
+    // Six slots always drawn, so the number of digits still owed is visible at
+    // a glance rather than being counted.
+    char shown[16] = "";
+    for (uint8_t i = 0; i < 6; i++) {
+        shown[i * 2]     = (i < _pair_n) ? _pair_buf[i] : '-';
+        shown[i * 2 + 1] = ' ';
+    }
+    shown[12] = 0;
+    lv_label_set_text(_pair_code, shown);
+
+    const char *msg;
+    switch (ble_cam_pair_state()) {
+        case BCP_SEARCHING:  msg = "Searching for a camera..."; break;
+        case BCP_NO_CAMERA:  msg = "No camera in range";        break;
+        case BCP_WANT_CODE:  msg = "Enter the code on the camera"; break;
+        case BCP_PAIRED:     msg = "PAIRED";                    break;
+        case BCP_FAILED:     msg = "Pairing FAILED - try again"; break;
+        default:             msg = "";                          break;
+    }
+    lv_label_set_text(_pair_status, msg);
+    lv_obj_set_style_text_color(_pair_status,
+        ble_cam_pair_state() == BCP_PAIRED ? COL_SETUP_SEL : COL_DIM, 0);
+}
+
+static void campair_exit() {
+    _pair_active = false;
+    ble_cam_pair_end();          // restarts the chip unless WiFi was left up
+    lv_scr_load(_main_scr);
+}
+
+static void campair_enter() {
+    if (_pair_active) return;
+    _pair_active   = true;
+    _setup_active  = false;      // we came from SETUP; it is no longer showing
+    _pair_n        = 0;
+    _pair_buf[0]   = 0;
+    _pair_idle_ms    = millis();
+    _pair_last_state = BCP_OFF;
+    ble_cam_pair_begin();
+    lv_scr_load(_pair_scr);
+    campair_refresh();
+}
+
+static void campair_key(char c) {
+    _pair_idle_ms = millis();
+    if (c == '<') {                       // backspace
+        if (_pair_n) _pair_buf[--_pair_n] = 0;
+    } else if (c == '#') {                // confirm
+        if (_pair_n == 6) ble_cam_pair_submit((uint32_t)strtoul(_pair_buf, nullptr, 10));
+    } else if (_pair_n < 6) {
+        _pair_buf[_pair_n++] = c;
+        _pair_buf[_pair_n]   = 0;
+    }
+    campair_refresh();
+}
+
+static void campair_poll(uint32_t now) {
+    if (!_pair_active) return;
+    // Redraw only when something changed.  This runs every loop pass, and
+    // rewriting the labels at ~1 kHz would spend the whole frame budget
+    // repainting text that has not moved.  Key presses refresh themselves.
+    BcPairState st = ble_cam_pair_state();
+    if (st != _pair_last_state) {
+        // A fresh attempt means a fresh code: clear whatever was half-typed so
+        // the operator is not appending to an abandoned entry.
+        if (st == BCP_WANT_CODE || st == BCP_FAILED) { _pair_n = 0; _pair_buf[0] = 0; }
+        _pair_last_state = st;
+        _pair_idle_ms    = now;
+        campair_refresh();
+    }
+    if ((now - _pair_idle_ms) > CAMPAIR_IDLE_MS) {
+        Serial.println("[CAM] pairing screen idle — leaving, mount back on the air");
+        campair_exit();
+    }
+}
+
+static void campair_build() {
+    _pair_scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(_pair_scr, COL_BG, 0);
+    lv_obj_set_style_bg_opa(_pair_scr, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(_pair_scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *t = lv_label_create(_pair_scr);
+    lv_label_set_text(t, "CAMERA PAIRING");
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(t, COL_TEXT, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 45);
+
+    _pair_status = lv_label_create(_pair_scr);
+    lv_label_set_text(_pair_status, "");
+    lv_obj_set_style_text_font(_pair_status, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(_pair_status, COL_DIM, 0);
+    lv_obj_align(_pair_status, LV_ALIGN_TOP_MID, 0, 72);
+
+    _pair_code = lv_label_create(_pair_scr);
+    lv_label_set_text(_pair_code, "- - - - - -");
+    lv_obj_set_style_text_font(_pair_code, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(_pair_code, COL_TEXT, 0);
+    lv_obj_align(_pair_code, LV_ALIGN_TOP_MID, 0, 100);
+
+    // 3x4 keypad inside the circle's inscribed square.  466 across the panel
+    // leaves ~330 usable at these rows; 110x50 keys clear a fingertip at this
+    // pixel density with room between them.
+    static const char *KEYS[12] = { "1","2","3", "4","5","6", "7","8","9", "<","0","#" };
+    for (int i = 0; i < 12; i++) {
+        lv_obj_t *b = lv_obj_create(_pair_scr);
+        lv_obj_set_size(b, 104, 46);
+        lv_obj_set_pos(b, 68 + (i % 3) * 110, 145 + (i / 3) * 52);
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_bg_color(b, COL_SETUP_BTN, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(0x555555), 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *l = lv_label_create(b);
+        lv_label_set_text(l, KEYS[i][0] == '<' ? LV_SYMBOL_BACKSPACE
+                           : KEYS[i][0] == '#' ? LV_SYMBOL_OK : KEYS[i]);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(l, COL_TEXT, 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, [](lv_event_t *e) {
+            campair_key((char)(intptr_t)lv_event_get_user_data(e));
+        }, LV_EVENT_CLICKED, (void *)(intptr_t)KEYS[i][0]);
+    }
+
+    // FORGET | BACK.  Kept narrow and low, where the circle still allows it.
+    auto foot = [&](lv_coord_t x, const char *txt, lv_event_cb_t cb) {
+        lv_obj_t *b = lv_obj_create(_pair_scr);
+        lv_obj_set_size(b, 148, 42);
+        lv_obj_set_pos(b, x, 356);
+        lv_obj_set_style_radius(b, 10, 0);
+        lv_obj_set_style_bg_color(b, COL_SETUP_BTN, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(0x555555), 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *l = lv_label_create(b);
+        lv_label_set_text(l, txt);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(l, COL_TEXT, 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+    };
+    foot(78,  "FORGET", [](lv_event_t *) { ble_cam_forget(); campair_refresh(); });
+    foot(240, "BACK",   [](lv_event_t *) { campair_exit(); });
+}
+
 static void setup_build() {
     _setup_scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(_setup_scr, COL_BG, 0);
@@ -1853,7 +2032,7 @@ static void ui_build() {
     lv_obj_remove_flag(z_level, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(z_level, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(z_level, [](lv_event_t *) {
-        if (_setup_active) return;   // hold-gesture switched to SETUP mid-press
+        if (_setup_active || _pair_active) return;   // hold switched screen mid-press
         if (_dimmed) {
             set_dim(false);   // first touch just wakes the screen
         } else {
@@ -1866,6 +2045,7 @@ static void ui_build() {
 
     build_level_screen();
     setup_build();
+    campair_build();
 }
 
 // ---------------------------------------------------------------------------
@@ -2120,15 +2300,19 @@ void loop() {
     //    while LVGL was flushing to the display
     drain_teensy_serial();
 
-    // ── Touch & hold (~1.5 s) opens SETUP from any screen ────────────────
-    if (!_setup_active && _press_started_ms &&
-            (millis() - _press_started_ms >= SETUP_HOLD_MS)) {
+    // ── Touch & hold (~1.5 s): main -> SETUP -> CAMERA PAIRING ───────────
+    // Chained rather than given a button of its own: SETUP has no room left,
+    // and pairing is a once-per-mount commissioning job for whoever built the
+    // rig, not something an operator needs to find.
+    if (_press_started_ms && (millis() - _press_started_ms >= SETUP_HOLD_MS)) {
         _press_started_ms = 0;
-        setup_enter();
+        if (!_setup_active && !_pair_active)      setup_enter();
+        else if (_setup_active && !_pair_active)  campair_enter();
     }
 
     // ── SETUP scan poller + hub reacquire ────────────────────────────────
     setup_poll_scan();
+    campair_poll(millis());
     hub_reacquire_poll();
     cfg_save_poll();
 
