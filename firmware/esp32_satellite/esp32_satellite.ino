@@ -701,7 +701,11 @@ static uint8_t  _dn_recover_run = 0;
 // until somebody notices.  The mount already restarts itself when isolated and
 // the hub has its own ladder; the satellite was the one node that could fail
 // silently for ever.
-#define DN_RESTART_AFTER_MS  (60UL * 1000UL)   // wedged this long past the cap
+// Was 60 s, cut to 15 after watching it happen. The rebuilds take ~30 s to
+// exhaust and have never once cleared this, so the grace after them was 60 s of
+// known-dead air on top: a 90-second outage every six minutes. 15 s still guards
+// against restarting over a brief hiccup, and takes the outage to ~45 s.
+#define DN_RESTART_AFTER_MS  (15UL * 1000UL)   // wedged this long past the cap
 // Boot-loop guard, same shape as the hub's.  RTC_NOINIT survives a restart but
 // is undefined after a power-on, hence the magic.
 #define SAT_RST_MAGIC          0x5A7E11E0UL
