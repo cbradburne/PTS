@@ -119,7 +119,16 @@ props_for() {
         sat)     [ -n "${SAT_NAME:-}" ] && _f="$_f -DSAT_NAME=\"$SAT_NAME\""
                  # Which channel this satellite's AP runs on.  Worth changing
                  # only on evidence: the boot [SURVEY] counts APs per channel,
-                 # and mount txfail says whether it helped.  Mounts follow a
+                 # and mount txfail says whether it helped.
+                 #
+                 # NOT currently needed.  This was added on 2026-08-10 to chase
+                 # 682 and 4053 txfail on the two satellite-attached mounts,
+                 # which looked like congestion on ch11.  It was not: the hub had
+                 # rebooted while those mounts were powered, and a mount with no
+                 # hub fails every send it makes.  Both counters froze the moment
+                 # the hub came back and did not move again in 74 minutes.  Check
+                 # a failure RATE over a settled window before reaching for this;
+                 # a total is not a rate, and mine wasn't.  Mounts follow a
                  # channel change on their own — they match a base by BSSID and
                  # re-learn the channel — so this needs no re-pairing.
                  #   SAT_CH=1 SAT_NAME=Foyer tools/build.sh flash sat
