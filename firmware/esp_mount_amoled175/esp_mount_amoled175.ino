@@ -2448,8 +2448,24 @@ void loop() {
     if (_lbl_rssi && (now - _last_rssi_update_ms >= 2000)) {
         _last_rssi_update_ms = now;
         if (_ms.hub_connected) {
-            char rssi_buf[12];
-            snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm", (int)_last_rssi);
+            // Camera state rides on the RSSI line rather than a line of its
+            // own: the gap between here and the first row of slot circles is
+            // ~19 px, too tight for another label, and there is 450 px of width
+            // going spare.
+            //
+            // It is here at all because a mount that has just rebooted takes
+            // some seconds to find its camera again, and with nothing on screen
+            // saying so, the honest reading is "did that work?".  The wait was
+            // never the complaint — the silence was.
+            const char *cam = "";
+            switch (ble_cam_ui_state()) {
+                case BCU_LINKING:  cam = "  CAM...";        break;
+                case BCU_READY:    cam = "  CAM " LV_SYMBOL_OK; break;
+                case BCU_UNPAIRED: cam = "  CAM --";        break;
+                default:           cam = "";                break;
+            }
+            char rssi_buf[28];
+            snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm%s", (int)_last_rssi, cam);
             lv_label_set_text(_lbl_rssi, rssi_buf);
             lv_color_t rssi_col;
             if      (_last_rssi >= -65) rssi_col = lv_color_hex(0x4CAF50);

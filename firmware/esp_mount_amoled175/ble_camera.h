@@ -345,7 +345,11 @@ static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
         int rc = ble_gattc_write_flat(conn, _bc_cccd_handle, on, sizeof(on),
                                       nullptr, nullptr);
         _bc_subscribed = (rc == 0);
-        Serial.printf("[CAM] status indications %s\n", rc ? "FAILED" : "enabled");
+        // Timed from boot because that is the wait people actually experience —
+        // a mount restarts and someone stands watching the camera do nothing.
+        // Reported so "it feels like a while" can be checked against a number.
+        Serial.printf("[CAM] status indications %s — camera usable %lu ms after boot\n",
+                      rc ? "FAILED" : "enabled", (unsigned long)millis());
     } else if (err->status == BLE_HS_EDONE) {
         Serial.println("[CAM] no CCCD found — camera will not notify");
     }
@@ -853,8 +857,17 @@ static void ble_cam_poll() {
     // task watchdog to trip over — the reason it had to be disabled was the
     // wrapper's blocking connect(), which is gone.
     bool busy = _bc_connected || _bc_conn != BLE_HS_CONN_HANDLE_NONE || _bc_scanning;
-    if (!busy && !_bc_unpaired && (now - _bc_retry_ms) > CAM_RETRY_MS) {
-        _bc_retry_ms = now;
+    // _bc_retry_ms == 0 means "try now".  Without that case the arithmetic
+    // below reads (now - 0) > CAM_RETRY_MS, so a freshly booted mount sits for
+    // a full ten seconds before it even begins looking for its camera — dead
+    // time on top of the 5 s scan and the connect, which is most of why a
+    // reboot feels slow to someone standing at the mount.
+    //
+    // The same zero is written by ble_cam_forget() and ble_cam_pair_begin(),
+    // where "try now" is exactly what is wanted too.
+    bool due = (_bc_retry_ms == 0) || ((now - _bc_retry_ms) > CAM_RETRY_MS);
+    if (!busy && !_bc_unpaired && due) {
+        _bc_retry_ms = now ? now : 1;
         if (!_bc_chosen) {
             if (!_bc_scan_ready) {
                 // Asynchronous.  The blocking form stopped loop() dead for its
@@ -922,6 +935,20 @@ static void ble_cam_poll() {
 #endif
 
 BcPairState ble_cam_pair_state() { return _bc_pair_state; }
+
+// Camera state for the mount's OWN screen.  Separate from ble_cam_health_flags()
+// because that one latches — it clears _bc_write_err as a side effect — and a
+// UI refresh must never consume a fault the PC app has not seen yet.
+//
+// BCU_NONE for a mount with no camera bond, so the four mounts without one show
+// nothing rather than a permanent empty indicator.
+enum BcUiState : uint8_t { BCU_NONE = 0, BCU_LINKING, BCU_READY, BCU_UNPAIRED };
+BcUiState ble_cam_ui_state() {
+    if (_bc_connected && _bc_subscribed) return BCU_READY;
+    if (_bc_unpaired)                    return BCU_UNPAIRED;
+    if (bc_bonded_count() > 0)           return BCU_LINKING;
+    return BCU_NONE;
+}
 
 // Enter pairing mode.  Stops WiFi so BLE has the radio (see ble_cam_setup), so
 // the mount goes off the air until pairing ends — deliberate and acceptable for
