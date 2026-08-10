@@ -684,6 +684,31 @@ static uint32_t _dn_last_recover_ms = 0;
 // coming back.  Mirrors ESPNOW_RESTART_MAX on the mount, for the same reason.
 #define DN_RECOVER_MAX  5
 static uint8_t  _dn_recover_run = 0;
+
+// ...and if the rebuilds do not clear it, RESTART, rather than shed for ever.
+//
+// Shedding was the old end of the ladder, on the reasoning that the mounts
+// would "age out and go looking for another hub".  Watched on a rig, they do
+// not: the AP is still beaconing and RECEIVE still works, so a satellite with a
+// dead transmit path looks like a perfectly good base.  A mount goes quiet,
+// rescans, picks the same satellite as the strongest known base, and lands back
+// on the same dead path.  Measured 2026-08-10: sent frozen at 363,019 for ten
+// minutes, ~200 nomem per 30 s, uplink still carrying 900 frames a window, and
+// two mounts unreachable until the box was power-cycled by hand.
+//
+// A reboot is the one remedy that reliably clears it — it did, immediately —
+// and it costs a few seconds of relay against a link that is otherwise gone
+// until somebody notices.  The mount already restarts itself when isolated and
+// the hub has its own ladder; the satellite was the one node that could fail
+// silently for ever.
+#define DN_RESTART_AFTER_MS  (60UL * 1000UL)   // wedged this long past the cap
+// Boot-loop guard, same shape as the hub's.  RTC_NOINIT survives a restart but
+// is undefined after a power-on, hence the magic.
+#define SAT_RST_MAGIC          0x5A7E11E0UL
+#define SAT_RESTART_MAX_STREAK 3
+#define SAT_HEALTHY_CLEAR_MS   (10UL * 60UL * 1000UL)
+RTC_NOINIT_ATTR static uint32_t _sat_rst_magic;
+RTC_NOINIT_ATTR static uint32_t _sat_rst_streak;
 #define DN_REPORT_MS  30000UL
 
 // ---------------------------------------------------------------------------
@@ -817,9 +842,31 @@ static void dn_pump(uint32_t now) {
                 } else if (_dn_recover_run == DN_RECOVER_MAX) {
                     _dn_recover_run++;              // say this once
                     Serial.printf("[DOWN] %d rebuilds did not clear the stall — "
-                                  "shedding downlink instead of thrashing the "
-                                  "radio.  Mounts on this satellite will age out "
-                                  "and look elsewhere.\n", DN_RECOVER_MAX);
+                                  "restarting in %lus if it does not clear\n",
+                                  DN_RECOVER_MAX,
+                                  (unsigned long)(DN_RESTART_AFTER_MS / 1000UL));
+                } else if (now - _dn_last_ok_ms > DN_RESTART_AFTER_MS) {
+                    // Nothing has been accepted by the radio for a full minute
+                    // past the rebuilds.  Restart — see DN_RESTART_AFTER_MS.
+                    if (_sat_rst_streak < SAT_RESTART_MAX_STREAK) {
+                        _sat_rst_streak++;
+                        Serial.printf("[DOWN] still stalled — RESTARTING "
+                                      "(attempt %lu of %d)\n",
+                                      (unsigned long)_sat_rst_streak,
+                                      SAT_RESTART_MAX_STREAK);
+                        Serial.flush();
+                        delay(50);
+                        esp_restart();
+                    } else {
+                        static bool said = false;
+                        if (!said) {
+                            said = true;
+                            Serial.printf("[DOWN] %d restarts did not clear it — "
+                                          "staying up and shedding.  This needs a "
+                                          "human: check the radio and the channel.\n",
+                                          SAT_RESTART_MAX_STREAK);
+                        }
+                    }
                 }
             }
             return;
@@ -1011,6 +1058,16 @@ void setup() {
     Serial.begin(115200);
     delay(200);
     Serial.println("\n=== PTS satellite ===");
+    // Restart-streak guard.  RTC_NOINIT holds whatever was in RAM after a
+    // power-on, so it is only trusted behind a magic — otherwise a random value
+    // either disables the restarts entirely or spends the quota immediately.
+    // A power-on also means a human was here, which resets the count.
+    if (_sat_rst_magic != SAT_RST_MAGIC || esp_reset_reason() != ESP_RST_SW) {
+        _sat_rst_magic  = SAT_RST_MAGIC;
+        _sat_rst_streak = 0;
+    }
+    if (_sat_rst_streak)
+        Serial.printf("Self-restart streak: %lu\n", (unsigned long)_sat_rst_streak);
 
     _prefs.begin("sat", false);
     _prefs.getString("hubhost", _hub_host, sizeof(_hub_host));
