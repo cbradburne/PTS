@@ -61,6 +61,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
    unused page, it is outside the page entirely, so no amount of layout work
    inside could reclaim it.
    The insets then have to be honoured by hand, and NOT symmetrically:
+     top         PORTRAIT puts the status bar and Dynamic Island here and they
+                 sit OVER the page, so the first row must be padded clear or it
+                 is simply unreadable — which is exactly what happened: the cam
+                 bar came up underneath the clock and battery.  In landscape
+                 this inset is 0, so the rule costs nothing there.
      left/right  the notch physically covers content, so pad it away
      bottom      the home indicator is a translucent bar over the top of the
                  app.  Background and layout may run underneath it; only
@@ -68,6 +73,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
                  below.  Padding it away here would give back exactly the
                  band this change exists to recover. */
 .view{display:none;width:100%;height:100%;flex-direction:column;
+  padding-top:env(safe-area-inset-top);
   padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);}
 .view.show{display:flex;}
 
