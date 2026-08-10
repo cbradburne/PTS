@@ -271,6 +271,28 @@ static Arduino_CO5300 *_gfx = new Arduino_CO5300(
 
 // Draw buffers are heap-allocated from PSRAM in setup() via ps_malloc.
 // Keeping them as pointers (not static arrays) removes them from the DRAM BSS segment.
+// UI_PROFILE=1 — a temporary diagnostic, off by default.
+//
+// The mount's loop hits ~220 ms during a move, on every mount including the two
+// with no camera at all, so it is UI cost rather than anything added recently.
+// Two candidates that want opposite fixes: LVGL RENDERING is slow (the draw
+// buffers are 37 KB each in PSRAM, and rendering into PSRAM on an S3 is
+// bandwidth-bound), or the FLUSH is slow (466x466 over QSPI, 12 chunks for a
+// full redraw).  Timing them apart is the only way to know which.
+//
+// It borrows node_u32, which for a mount is the ESP-NOW reinit count — static
+// at 1 on a healthy rig, and the brake it exists to prove is already confirmed.
+// Packed (lvgl_ms << 16) | flush_ms so one health line carries both, with no
+// protocol change and no serial monitor, which a mount on a rig does not have.
+#ifndef UI_PROFILE
+#define UI_PROFILE 0
+#endif
+#if UI_PROFILE
+static uint16_t _ui_lvgl_max_ms  = 0;   // worst lv_timer_handler(), whole call
+static uint16_t _ui_flush_max_ms = 0;   // ...of which, worst time inside flush
+static uint32_t _ui_flush_accum_us = 0; // this lv_timer_handler()'s flush total
+#endif
+
 #define LVGL_BUF_LINES 40
 #define LVGL_BUF_BYTES (SCR_W * LVGL_BUF_LINES * sizeof(lv_color_t))
 static lv_color_t *_lvgl_buf1 = nullptr;
@@ -281,7 +303,15 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area,
                           uint8_t *px_map) {
     uint32_t w = (uint32_t)(area->x2 - area->x1 + 1);
     uint32_t h = (uint32_t)(area->y2 - area->y1 + 1);
+#if UI_PROFILE
+    uint32_t _t0 = micros();
+#endif
     _gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, w, h);
+#if UI_PROFILE
+    // Summed across every chunk of one render pass, so it is comparable with
+    // the lv_timer_handler() total rather than being one twelfth of it.
+    _ui_flush_accum_us += micros() - _t0;
+#endif
     lv_display_flush_ready(disp);
 }
 
@@ -657,12 +687,19 @@ static void send_health(bool anomaly) {
     h.tx_fail       = (uint16_t)_espnow_fail_total;
     h.rssi          = _last_rssi;
     h.flags         = (anomaly ? HEALTH_FLAG_ANOMALY : 0) | ble_cam_health_flags();
+#if UI_PROFILE
+    h.node_u32      = ((uint32_t)_ui_lvgl_max_ms << 16) | _ui_flush_max_ms;
+#else
     h.node_u32      = _reinit_count;
+#endif
     uint8_t p[24];
     encode_health_payload(p, &h);
     send_to_hub(CMD_HEALTH, p, 24);   // no-op while unpaired (send_to_hub guards)
     _health_last_ms     = millis();
     _health_loop_max_ms = 0;
+#if UI_PROFILE
+    _ui_lvgl_max_ms = _ui_flush_max_ms = 0;
+#endif
     _health_last_txfail = _espnow_fail_total;
     _health_first_sent  = true;
 }
@@ -2338,7 +2375,19 @@ void loop() {
     const uint32_t now = millis();
     lv_tick_inc(now - _prev_ms);
     _prev_ms = now;
+#if UI_PROFILE
+    _ui_flush_accum_us = 0;
+    uint32_t _ui_t0 = micros();
+#endif
     lv_timer_handler();
+#if UI_PROFILE
+    {
+        uint16_t total = (uint16_t)((micros() - _ui_t0) / 1000UL);
+        uint16_t flush = (uint16_t)(_ui_flush_accum_us / 1000UL);
+        if (total > _ui_lvgl_max_ms)  _ui_lvgl_max_ms  = total;
+        if (flush > _ui_flush_max_ms) _ui_flush_max_ms = flush;
+    }
+#endif
 
     // ── Teensy serial — drain AFTER rendering to catch bytes that arrived
     //    while LVGL was flushing to the display
