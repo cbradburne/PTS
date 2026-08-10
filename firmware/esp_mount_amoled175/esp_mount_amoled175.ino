@@ -981,6 +981,11 @@ static void build_arc_strip(ArcStrip *s, lv_obj_t *scr,
 }
 
 static void update_arc_strip(ArcStrip *s, uint8_t preset) {
+    // Nothing to do if the preset has not moved.  lv_arc_set_value() and every
+    // set_style_bg_color() below mark their object dirty whether or not the
+    // value differs, and these arcs are large — see ui_update().
+    if (s->shown == preset) return;
+    s->shown = preset;
     lv_arc_set_value(s->arc, preset);
     // Dots 0..preset lit (dot 0 = arc-start tick, always lit; dots 1-4 = segment ends)
     for (int i = 0; i < 5; i++) {
@@ -2161,16 +2166,44 @@ static void ui_build() {
 // UI update — called whenever _ms changes
 // ---------------------------------------------------------------------------
 
+// Repaint only what actually changed.
+//
+// Measured before touching it: during a move this was redrawing 474 kpx per
+// render pass — 2.18 whole screens — for 150 ms of LVGL time, on a mount whose
+// loop then could not service a stop command for that long.
+//
+// The cause is that every lv_obj_set_style_*() marks its object dirty whether
+// the value differs or not, and ui_update() ran on EVERY status change with a
+// STATUS packet arriving many times a second during a move.  The first line was
+// the worst of it: _ring is a full-circle border, so its bounding box is the
+// entire 466x466 panel and recolouring it to the colour it already was cost a
+// whole screen.
+//
+// Two earlier guesses at this missed — the QSPI flush (a quarter of the cost)
+// and PSRAM draw buffers (no measurable difference, and confirmed to have been
+// in internal RAM when it did not help). The area counter is what found it.
 static void ui_update() {
     if (!_ring) return;
 
-    /* Status ring */
-    lv_obj_set_style_border_color(_ring, ring_color(), 0);
+    /* Status ring — full-screen bounding box, so this guard is the big one */
+    static lv_color_t s_ring;
+    static bool       s_ring_valid = false;
+    lv_color_t rc = ring_color();
+    if (!s_ring_valid || !lv_color_eq(rc, s_ring)) {
+        lv_obj_set_style_border_color(_ring, rc, 0);
+        s_ring = rc; s_ring_valid = true;
+    }
 
     /* State label */
-    lv_label_set_text(_lbl_state, state_str(_ms.state));
-    lv_obj_set_style_text_color(_lbl_state,
-        _ms.hub_connected ? COL_TEXT : COL_DIM, 0);
+    static const char *s_state_txt = nullptr;
+    static bool        s_state_dim = true;
+    const char *st = state_str(_ms.state);
+    if (st != s_state_txt) { lv_label_set_text(_lbl_state, st); s_state_txt = st; }
+    bool dim = !_ms.hub_connected;
+    if (dim != s_state_dim) {
+        lv_obj_set_style_text_color(_lbl_state, dim ? COL_DIM : COL_TEXT, 0);
+        s_state_dim = dim;
+    }
 
     /* Arc strips */
     update_arc_strip(&_pt_strip, _ms.pt_preset);
@@ -2191,11 +2224,19 @@ static void ui_update() {
             col = COL_SLOT_OCC;
         else
             col = COL_SLOT_EMPTY;
-        lv_obj_set_style_bg_color(_slot_obj[i], col, 0);
-
-        lv_obj_t *nlbl = lv_obj_get_child(_slot_obj[i], 0);
-        if (nlbl) lv_obj_set_style_text_color(nlbl,
-            (_ms.slot_occupied & bit) ? COL_TEXT : COL_DIM, 0);
+        static lv_color_t s_slot[10];
+        static bool       s_slot_valid = false;
+        static uint16_t   s_slot_occ   = 0xFFFF;
+        if (!s_slot_valid || !lv_color_eq(col, s_slot[i])) {
+            lv_obj_set_style_bg_color(_slot_obj[i], col, 0);
+            s_slot[i] = col;
+        }
+        if (((s_slot_occ ^ _ms.slot_occupied) & bit) || !s_slot_valid) {
+            lv_obj_t *nlbl = lv_obj_get_child(_slot_obj[i], 0);
+            if (nlbl) lv_obj_set_style_text_color(nlbl,
+                (_ms.slot_occupied & bit) ? COL_TEXT : COL_DIM, 0);
+        }
+        if (i == 9) { s_slot_valid = true; s_slot_occ = _ms.slot_occupied; }
     }
 }
 
