@@ -2317,14 +2317,27 @@ void setup() {
 
     lv_init();
 
-    // ONE draw buffer, in INTERNAL RAM, and both halves of that are measured
-    // rather than assumed.
+    // ONE draw buffer, in PSRAM, and both of those are measured rather than
+    // assumed.
     //
     // UI_PROFILE on a moving mount said the loop stall is 220 ms, of which
-    // lv_timer_handler() is 215 and the QSPI flush only 57.  So ~160 ms is
-    // LVGL RENDERING, not the bus — and it was rendering into ps_malloc'd
-    // buffers.  PSRAM writes on an S3 go through the cache at a fraction of
-    // SRAM bandwidth, and a partial-mode render touches every pixel it draws.
+    // lv_timer_handler() is 215 and the QSPI flush only 57.  So ~160 ms is LVGL
+    // RENDERING rather than the bus.
+    //
+    // The obvious next move was internal RAM, since PSRAM writes on an S3 go
+    // through the cache at a fraction of SRAM bandwidth.  It was tried, and the
+    // profile confirmed the buffer really did land in internal RAM: rendering
+    // went 160 ms to 150 ms.  Nothing.  So the cost is the drawing itself —
+    // anti-aliased arcs, a full-circle ring and ten round slot indicators — and
+    // not where the pixels live.
+    //
+    // Back in PSRAM for that reason.  Internal RAM is the scarce pool on this
+    // board, wanted by WiFi, NimBLE and a 48 KB LVGL heap, and spending 37 KB of
+    // it on a change measured at zero is a poor trade.  The remaining stall is
+    // accepted deliberately: it only happens while a mount is moving, and ACK
+    // round-trip measured across 214 move windows was unchanged at the median
+    // (63 ms moving, 63 ms idle) — so the screen redraws slowly and nothing
+    // else waits on it.
     //
     // The second buffer bought nothing and cost 37 KB.  Double buffering only
     // pays when a flush is asynchronous, so rendering can overlap it — but
@@ -2338,9 +2351,9 @@ void setup() {
     // last resort so a mount still boots and draws either way — saying which,
     // because "the UI is slow again" is otherwise unattributable.
     struct { size_t bytes; uint32_t caps; const char *what; } tries[] = {
+        { LVGL_BUF_BYTES,     MALLOC_CAP_SPIRAM,                    "PSRAM, 40 lines" },
         { LVGL_BUF_BYTES,     MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, "internal, 40 lines" },
         { LVGL_BUF_BYTES / 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, "internal, 20 lines" },
-        { LVGL_BUF_BYTES,     MALLOC_CAP_SPIRAM,                    "PSRAM, 40 lines (SLOW)" },
     };
     size_t lvgl_buf_bytes = 0;
     for (auto &t : tries) {
