@@ -135,10 +135,12 @@ props_for() {
                  [ -n "${SAT_CH:-}" ] && _f="$_f -DAP_CHANNEL=$SAT_CH" ;;
     esac
     [ -n "${DIAG:-}" ] && _f="$_f -DPTS_DIAG=$DIAG"
-    # UI_PROFILE=1 (amoled) — temporary: splits the mount's loop stall into LVGL
-    # render vs QSPI flush and packs both into node_u32 (n32) as
-    # (lvgl_ms << 16) | flush_ms.  Costs the reinit count from that field while
-    # it is on, which is why it is opt-in.
+    # UI_PROFILE (amoled) — temporary, packs into node_u32 (n32) and so costs the
+    # reinit count from that field while it is on.  Two modes:
+    #   1  (lvgl_ms << 16) | flush_ms          render vs bus
+    #   2  (lvgl_ms << 20) | (buf << 17) | kpx area redrawn, and which draw
+    #                                          buffer the ladder got (1=int40
+    #                                          2=int20 3=PSRAM)
     [ -n "${UI_PROFILE:-}" ] && _f="$_f -DUI_PROFILE=$UI_PROFILE"
     # Blackmagic camera control and PAIRING are both in every amoled binary —
     # pairing is a screen (hold twice), not a build.  See ble_camera.h.

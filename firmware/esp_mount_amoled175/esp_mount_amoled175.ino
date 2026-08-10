@@ -291,6 +291,23 @@ static Arduino_CO5300 *_gfx = new Arduino_CO5300(
 static uint16_t _ui_lvgl_max_ms  = 0;   // worst lv_timer_handler(), whole call
 static uint16_t _ui_flush_max_ms = 0;   // ...of which, worst time inside flush
 static uint32_t _ui_flush_accum_us = 0; // this lv_timer_handler()'s flush total
+// UI_PROFILE=2 answers the question mode 1 raised.  Moving the draw buffer from
+// PSRAM to internal RAM took rendering from ~160 ms to ~150 ms — near enough
+// nothing — so it is not memory bandwidth.  The remaining suspect is how MUCH
+// is being redrawn: this panel is a full-circle status ring, two arcs with
+// detent dots and ten round slot indicators, all anti-aliased, and if a small
+// arc change invalidates most of the screen then all of it re-renders.
+//
+// So count the pixels LVGL was asked to redraw, per pass, in kilopixels — the
+// whole screen is 217 kpx, which fits a uint16 with room to spare.
+//   area near 217 kpx  -> invalidation is the problem, not the drawing
+//   area small, still slow -> the round anti-aliased shapes are the cost
+static uint32_t _ui_inval_accum_px = 0;
+static uint16_t _ui_inval_max_kpx  = 0;
+// Which buffer the ladder actually got.  Printed on serial at boot, which a
+// mount on a rig has no way to read — so it rides along here too, or "internal
+// RAM did not help" cannot be told from "it never got internal RAM".
+static uint8_t  _ui_buf_kind = 0;       // 1=int40  2=int20  3=PSRAM
 #endif
 
 #define LVGL_BUF_LINES 40
@@ -328,6 +345,10 @@ static void lvgl_rounder_cb(lv_event_t *e) {
     a->x2 |= 1;     // end on an odd column  → even width
     a->y1 &= ~1;
     a->y2 |= 1;
+#if UI_PROFILE >= 2
+    // After rounding, so it counts what will actually be drawn.
+    _ui_inval_accum_px += (uint32_t)(a->x2 - a->x1 + 1) * (a->y2 - a->y1 + 1);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -686,7 +707,12 @@ static void send_health(bool anomaly) {
     h.tx_fail       = (uint16_t)_espnow_fail_total;
     h.rssi          = _last_rssi;
     h.flags         = (anomaly ? HEALTH_FLAG_ANOMALY : 0) | ble_cam_health_flags();
-#if UI_PROFILE
+#if UI_PROFILE >= 2
+    // lvgl_ms | buffer kind | invalidated kilopixels
+    h.node_u32      = ((uint32_t)_ui_lvgl_max_ms << 20)
+                    | ((uint32_t)_ui_buf_kind    << 17)
+                    |  (uint32_t)(_ui_inval_max_kpx & 0x1FFFF);
+#elif UI_PROFILE
     h.node_u32      = ((uint32_t)_ui_lvgl_max_ms << 16) | _ui_flush_max_ms;
 #else
     h.node_u32      = _reinit_count;
@@ -698,6 +724,9 @@ static void send_health(bool anomaly) {
     _health_loop_max_ms = 0;
 #if UI_PROFILE
     _ui_lvgl_max_ms = _ui_flush_max_ms = 0;
+#if UI_PROFILE >= 2
+    _ui_inval_max_kpx = 0;
+#endif
 #endif
     _health_last_txfail = _espnow_fail_total;
     _health_first_sent  = true;
@@ -2263,6 +2292,9 @@ void setup() {
         _lvgl_buf1 = (lv_color_t *)heap_caps_malloc(t.bytes, t.caps);
         if (_lvgl_buf1) {
             lvgl_buf_bytes = t.bytes;
+#if UI_PROFILE >= 2
+            _ui_buf_kind = (uint8_t)(&t - tries) + 1;
+#endif
             Serial.printf("LVGL draw buffer: %s (%u bytes), free internal %u\n",
                           t.what, (unsigned)t.bytes,
                           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -2418,6 +2450,11 @@ void loop() {
         uint16_t flush = (uint16_t)(_ui_flush_accum_us / 1000UL);
         if (total > _ui_lvgl_max_ms)  _ui_lvgl_max_ms  = total;
         if (flush > _ui_flush_max_ms) _ui_flush_max_ms = flush;
+#if UI_PROFILE >= 2
+        uint16_t kpx = (uint16_t)(_ui_inval_accum_px / 1000UL);
+        if (kpx > _ui_inval_max_kpx) _ui_inval_max_kpx = kpx;
+        _ui_inval_accum_px = 0;
+#endif
     }
 #endif
 
