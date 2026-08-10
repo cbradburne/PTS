@@ -116,7 +116,14 @@ props_for() {
         # NOT be escaped.  Escaping them compiles happily and bakes the quote
         # characters into the SSID: PTS-"Foyer".  Use _ for spaces; a literal
         # space here would be split into two arguments.
-        sat)     [ -n "${SAT_NAME:-}" ] && _f="$_f -DSAT_NAME=\"$SAT_NAME\"" ;;
+        sat)     [ -n "${SAT_NAME:-}" ] && _f="$_f -DSAT_NAME=\"$SAT_NAME\""
+                 # Which channel this satellite's AP runs on.  Worth changing
+                 # only on evidence: the boot [SURVEY] counts APs per channel,
+                 # and mount txfail says whether it helped.  Mounts follow a
+                 # channel change on their own — they match a base by BSSID and
+                 # re-learn the channel — so this needs no re-pairing.
+                 #   SAT_CH=1 SAT_NAME=Foyer tools/build.sh flash sat
+                 [ -n "${SAT_CH:-}" ] && _f="$_f -DAP_CHANNEL=$SAT_CH" ;;
     esac
     [ -n "${DIAG:-}" ] && _f="$_f -DPTS_DIAG=$DIAG"
     # Blackmagic camera control and PAIRING are both in every amoled binary —
