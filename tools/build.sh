@@ -148,6 +148,9 @@ props_for() {
     # CAM_PAIR_KEEP_WIFI=1 is a diagnostic only: it skips the WiFi stop during
     # pairing, to retest whether pairing ever needed the radio to itself.
     [ -n "${CAM_PAIR_KEEP_WIFI:-}" ] && _f="$_f -DCAM_PAIR_KEEP_WIFI=$CAM_PAIR_KEEP_WIFI"
+    # CAM_REPLAY_MS=0 turns the camera status replay OFF, to test whether its
+    # 3.3 sends/s are what tips a satellite-attached mount into isolating.
+    [ -n "${CAM_REPLAY_MS:-}" ] && _f="$_f -DCAM_REPLAY_MS=${CAM_REPLAY_MS}UL"
 
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""

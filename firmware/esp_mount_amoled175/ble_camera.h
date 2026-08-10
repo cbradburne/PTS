@@ -272,7 +272,25 @@ static bool     _bc_subscribed = false;
 // reads as a run of send failures, which it calls a TX wedge.  A steady trickle
 // costs the same bytes and never bursts — ~3 packets/s against a ~32 packets/s
 // baseline, constant no matter how much the camera has to say.
+// Overridable so the replay can be switched OFF for a test:
+//     CAM_REPLAY_MS=0 tools/build.sh flash amoled
+//
+// Why that test exists.  At the venue, the one mount with a camera isolated
+// itself three times in 90 minutes — ESP-NOW dead for the full two-minute
+// timeout, then SW(esp_restart) — while its BLE link stayed PAIRED and
+// subscribed right up to the reboot, and the mount beside it on the same
+// satellite and channel, without a camera, never faltered.  So it is not the
+// air and not the satellite; it is something about carrying a camera.
+//
+// This replay is the traffic that was ADDED today: 3.3 extra ESP-NOW sends a
+// second that a cameraless mount never makes.  Turning it off separates "the
+// extra traffic tips a marginal link" from "BLE coexistence starves ESP-NOW",
+// which want completely different answers.  The cost while off is only that a
+// late-joining client waits for the camera to report something before its gain
+// and white balance appear.
+#ifndef CAM_REPLAY_MS
 #define CAM_REPLAY_MS   300UL
+#endif
 
 struct BcCachedStatus { uint8_t len; uint8_t data[CAM_CONTROL_MAX_LEN]; };
 static BcCachedStatus _bc_cache[CAM_CACHE_MAX];
@@ -950,7 +968,8 @@ static void ble_cam_poll() {
     // Re-offer what the camera has already said.  Only while connected and only
     // what it actually reported, so this invents nothing — it just stops the
     // information being a one-shot that a client had to be present to catch.
-    if (_bc_connected && _bc_ncache && (now - _bc_replay_ms) >= CAM_REPLAY_MS) {
+    if (CAM_REPLAY_MS && _bc_connected && _bc_ncache &&
+            (now - _bc_replay_ms) >= CAM_REPLAY_MS) {
         _bc_replay_ms = now;
         if (_bc_replay_i >= _bc_ncache) _bc_replay_i = 0;
         if (_bc_status_cb)
