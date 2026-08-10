@@ -296,7 +296,6 @@ static uint32_t _ui_flush_accum_us = 0; // this lv_timer_handler()'s flush total
 #define LVGL_BUF_LINES 40
 #define LVGL_BUF_BYTES (SCR_W * LVGL_BUF_LINES * sizeof(lv_color_t))
 static lv_color_t *_lvgl_buf1 = nullptr;
-static lv_color_t *_lvgl_buf2 = nullptr;
 static lv_display_t *_level_disp = nullptr;
 
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area,
@@ -2234,11 +2233,44 @@ void setup() {
 
     lv_init();
 
-    // Allocate LVGL draw buffers from PSRAM
-    _lvgl_buf1 = (lv_color_t *)ps_malloc(LVGL_BUF_BYTES);
-    _lvgl_buf2 = (lv_color_t *)ps_malloc(LVGL_BUF_BYTES);
-    if (!_lvgl_buf1 || !_lvgl_buf2) {
-        Serial.println("FATAL: PSRAM alloc failed for LVGL buffers");
+    // ONE draw buffer, in INTERNAL RAM, and both halves of that are measured
+    // rather than assumed.
+    //
+    // UI_PROFILE on a moving mount said the loop stall is 220 ms, of which
+    // lv_timer_handler() is 215 and the QSPI flush only 57.  So ~160 ms is
+    // LVGL RENDERING, not the bus — and it was rendering into ps_malloc'd
+    // buffers.  PSRAM writes on an S3 go through the cache at a fraction of
+    // SRAM bandwidth, and a partial-mode render touches every pixel it draws.
+    //
+    // The second buffer bought nothing and cost 37 KB.  Double buffering only
+    // pays when a flush is asynchronous, so rendering can overlap it — but
+    // draw16bitRGBBitmap() blocks and lvgl_flush_cb() calls
+    // lv_display_flush_ready() the instant it returns.  There was never
+    // anything to overlap; LVGL just alternated between two buffers.
+    //
+    // Ladder rather than one attempt: internal DMA-capable RAM is the scarce
+    // thing on this board, with WiFi, NimBLE and a 48 KB LVGL pool already in
+    // it.  Take the big buffer if it fits, half of it if not, and PSRAM as a
+    // last resort so a mount still boots and draws either way — saying which,
+    // because "the UI is slow again" is otherwise unattributable.
+    struct { size_t bytes; uint32_t caps; const char *what; } tries[] = {
+        { LVGL_BUF_BYTES,     MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, "internal, 40 lines" },
+        { LVGL_BUF_BYTES / 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, "internal, 20 lines" },
+        { LVGL_BUF_BYTES,     MALLOC_CAP_SPIRAM,                    "PSRAM, 40 lines (SLOW)" },
+    };
+    size_t lvgl_buf_bytes = 0;
+    for (auto &t : tries) {
+        _lvgl_buf1 = (lv_color_t *)heap_caps_malloc(t.bytes, t.caps);
+        if (_lvgl_buf1) {
+            lvgl_buf_bytes = t.bytes;
+            Serial.printf("LVGL draw buffer: %s (%u bytes), free internal %u\n",
+                          t.what, (unsigned)t.bytes,
+                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            break;
+        }
+    }
+    if (!_lvgl_buf1) {
+        Serial.println("FATAL: no memory anywhere for an LVGL draw buffer");
         while (true) delay(1000);
     }
 
@@ -2246,8 +2278,8 @@ void setup() {
     _level_disp = disp;
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
     lv_display_add_event_cb(disp, lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
-    lv_display_set_buffers(disp, _lvgl_buf1, _lvgl_buf2,
-                           LVGL_BUF_BYTES, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(disp, _lvgl_buf1, nullptr,
+                           lvgl_buf_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
