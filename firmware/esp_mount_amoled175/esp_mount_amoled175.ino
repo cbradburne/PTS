@@ -304,6 +304,14 @@ static uint32_t _ui_flush_accum_us = 0; // this lv_timer_handler()'s flush total
 //   area small, still slow -> the round anti-aliased shapes are the cost
 static uint32_t _ui_inval_accum_px = 0;
 static uint16_t _ui_inval_max_kpx  = 0;
+// The total says how much, not what.  2.00 screens per pass could be one
+// full-screen invalidation plus a half-screen arc twice over, or fifty small
+// ones — and those want completely different fixes.  So also carry the LARGEST
+// single invalidated area: near 217 kpx means something is dirtying the whole
+// panel, and the only objects with a full-screen bounding box are the status
+// ring and the transparent touch zone laid over everything.
+static uint32_t _ui_inval_big_px   = 0;   // largest single area, this pass
+static uint16_t _ui_inval_big_kpx  = 0;   // ...worst seen since the last report
 // Which buffer the ladder actually got.  Printed on serial at boot, which a
 // mount on a rig has no way to read — so it rides along here too, or "internal
 // RAM did not help" cannot be told from "it never got internal RAM".
@@ -347,7 +355,11 @@ static void lvgl_rounder_cb(lv_event_t *e) {
     a->y2 |= 1;
 #if UI_PROFILE >= 2
     // After rounding, so it counts what will actually be drawn.
-    _ui_inval_accum_px += (uint32_t)(a->x2 - a->x1 + 1) * (a->y2 - a->y1 + 1);
+    {
+        uint32_t px = (uint32_t)(a->x2 - a->x1 + 1) * (a->y2 - a->y1 + 1);
+        _ui_inval_accum_px += px;
+        if (px > _ui_inval_big_px) _ui_inval_big_px = px;
+    }
 #endif
 }
 
@@ -708,10 +720,12 @@ static void send_health(bool anomaly) {
     h.rssi          = _last_rssi;
     h.flags         = (anomaly ? HEALTH_FLAG_ANOMALY : 0) | ble_cam_health_flags();
 #if UI_PROFILE >= 2
-    // lvgl_ms | buffer kind | invalidated kilopixels
-    h.node_u32      = ((uint32_t)_ui_lvgl_max_ms << 20)
-                    | ((uint32_t)_ui_buf_kind    << 17)
-                    |  (uint32_t)(_ui_inval_max_kpx & 0x1FFFF);
+    // lvgl_ms(12) | largest single invalidation kpx(9) | total kpx(11).
+    // The buffer kind is dropped: it has already answered (internal, 40 lines),
+    // and knowing WHICH invalidation is big now matters more than repeating it.
+    h.node_u32      = ((uint32_t)(_ui_lvgl_max_ms  & 0xFFF) << 20)
+                    | ((uint32_t)(_ui_inval_big_kpx & 0x1FF) << 11)
+                    |  (uint32_t)(_ui_inval_max_kpx & 0x7FF);
 #elif UI_PROFILE
     h.node_u32      = ((uint32_t)_ui_lvgl_max_ms << 16) | _ui_flush_max_ms;
 #else
@@ -725,7 +739,7 @@ static void send_health(bool anomaly) {
 #if UI_PROFILE
     _ui_lvgl_max_ms = _ui_flush_max_ms = 0;
 #if UI_PROFILE >= 2
-    _ui_inval_max_kpx = 0;
+    _ui_inval_max_kpx = _ui_inval_big_kpx = 0;
 #endif
 #endif
     _health_last_txfail = _espnow_fail_total;
@@ -2494,7 +2508,10 @@ void loop() {
 #if UI_PROFILE >= 2
         uint16_t kpx = (uint16_t)(_ui_inval_accum_px / 1000UL);
         if (kpx > _ui_inval_max_kpx) _ui_inval_max_kpx = kpx;
+        uint16_t big = (uint16_t)(_ui_inval_big_px / 1000UL);
+        if (big > _ui_inval_big_kpx) _ui_inval_big_kpx = big;
         _ui_inval_accum_px = 0;
+        _ui_inval_big_px   = 0;
 #endif
     }
 #endif
