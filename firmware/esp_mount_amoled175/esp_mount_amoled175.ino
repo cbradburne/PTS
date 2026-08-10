@@ -1722,8 +1722,10 @@ static void campair_key(char c) {
     _pair_idle_ms = millis();
     if (c == '<') {                       // backspace
         if (_pair_n) _pair_buf[--_pair_n] = 0;
-    } else if (c == '#') {                // confirm
+    } else if (c == '#') {                // confirm — the green lobe tab
         if (_pair_n == 6) ble_cam_pair_submit((uint32_t)strtoul(_pair_buf, nullptr, 10));
+    } else if (c == 'B') {                // leave, and put the mount back on air
+        campair_exit();
     } else if (_pair_n < 6) {
         _pair_buf[_pair_n++] = c;
         _pair_buf[_pair_n]   = 0;
@@ -1775,22 +1777,29 @@ static void campair_build() {
     lv_obj_set_style_text_color(_pair_code, COL_TEXT, 0);
     lv_obj_align(_pair_code, LV_ALIGN_TOP_MID, 0, 100);
 
-    // 3x4 keypad inside the circle's inscribed square.  466 across the panel
-    // leaves ~330 usable at these rows; 110x50 keys clear a fingertip at this
-    // pixel density with room between them.
+    // Keypad 3x4, with FORGET and OK moved out to the circle's side lobes.
     //
-    // TO REVISIT: these are small in the hand.  The keypad is squared off inside
-    // a round panel, so the widest part of the circle goes unused — at mid-height
-    // the full 466 is available and only 330 is taken, leaving ~68 px lobes down
-    // each side.  Enough for icon-only OK and BACKSPACE buttons, which would free
-    // two grid cells AND the bottom row, and let the digits grow into both.
-    // Deferred deliberately: functionality first, and the layout is cosmetic
-    // until the pairing handshake itself is proven on hardware.
-    static const char *KEYS[12] = { "1","2","3", "4","5","6", "7","8","9", "<","0","#" };
+    // Squaring a keypad inside a round panel wastes the widest part of it, and
+    // the first version spent a whole row on FORGET | BACK along the bottom.
+    // Moving those two into the lobes buys that row back and gives every key
+    // ~30% more height, which is the dimension that was short: at ~266 DPI the
+    // old 46 px rows were about 4.4 mm, well under a fingertip.
+    //
+    // The keypad is deliberately NARROWER than the space allows.  It could run
+    // to the lobes, but then its edge keys would sit hard against FORGET and OK
+    // — and of the two, FORGET is the one you least want caught by a thumb that
+    // missed 1 or 7.  32 px of clearance each side is cheap insurance.
+    //
+    // Geometry, so the next person does not re-derive it: the panel is 466 across
+    // with centre 233, and the usable width at a given y is 2*sqrt(233^2 - dy^2).
+    // The bottom row at y=388 has x=60..406, so 98..366 clears it; the side tabs
+    // at y=168..298 have x=9..457, so 12 and 400 clear too.
+    static const char *KEYS[12] = { "1","2","3", "4","5","6", "7","8","9",
+                                    "B","0","<" };
     for (int i = 0; i < 12; i++) {
         lv_obj_t *b = lv_obj_create(_pair_scr);
-        lv_obj_set_size(b, 104, 46);
-        lv_obj_set_pos(b, 68 + (i % 3) * 110, 145 + (i / 3) * 52);
+        lv_obj_set_size(b, 86, 60);
+        lv_obj_set_pos(b, 98 + (i % 3) * 91, 136 + (i / 3) * 64);
         lv_obj_set_style_radius(b, 8, 0);
         lv_obj_set_style_bg_color(b, COL_SETUP_BTN, 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
@@ -1800,38 +1809,44 @@ static void campair_build() {
         lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_t *l = lv_label_create(b);
-        lv_label_set_text(l, KEYS[i][0] == '<' ? LV_SYMBOL_BACKSPACE
-                           : KEYS[i][0] == '#' ? LV_SYMBOL_OK : KEYS[i]);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+        const char *k = KEYS[i];
+        lv_label_set_text(l, k[0] == '<' ? LV_SYMBOL_BACKSPACE
+                           : k[0] == 'B' ? "BACK" : k);
+        lv_obj_set_style_text_font(l, k[0] == 'B' ? &lv_font_montserrat_12
+                                                  : &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(l, COL_TEXT, 0);
         lv_obj_center(l);
         lv_obj_add_event_cb(b, [](lv_event_t *e) {
             campair_key((char)(intptr_t)lv_event_get_user_data(e));
-        }, LV_EVENT_CLICKED, (void *)(intptr_t)KEYS[i][0]);
+        }, LV_EVENT_CLICKED, (void *)(intptr_t)k[0]);
     }
 
-    // FORGET | BACK.  Kept narrow and low, where the circle still allows it.
-    auto foot = [&](lv_coord_t x, const char *txt, lv_event_cb_t cb) {
+    // The two lobe tabs.  Coloured because they are the only irreversible and
+    // the only committing action on the screen, and on a round panel colour
+    // reads faster than position.
+    auto tab = [&](lv_coord_t x, uint32_t bg, const char *txt,
+                   const lv_font_t *font, lv_event_cb_t cb) {
         lv_obj_t *b = lv_obj_create(_pair_scr);
-        lv_obj_set_size(b, 148, 42);
-        lv_obj_set_pos(b, x, 356);
-        lv_obj_set_style_radius(b, 10, 0);
-        lv_obj_set_style_bg_color(b, COL_SETUP_BTN, 0);
+        lv_obj_set_size(b, 54, 130);
+        lv_obj_set_pos(b, x, 168);
+        lv_obj_set_style_radius(b, 26, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(b, lv_color_hex(0x555555), 0);
-        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_set_style_border_width(b, 0, 0);
         lv_obj_set_style_pad_all(b, 0, 0);
         lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_t *l = lv_label_create(b);
         lv_label_set_text(l, txt);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(l, font, 0);
         lv_obj_set_style_text_color(l, COL_TEXT, 0);
         lv_obj_center(l);
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
     };
-    foot(78,  "FORGET", [](lv_event_t *) { ble_cam_forget(); campair_refresh(); });
-    foot(240, "BACK",   [](lv_event_t *) { campair_exit(); });
+    tab(12,  0xB71C1C, "FORGET", &lv_font_montserrat_12,
+        [](lv_event_t *) { ble_cam_forget(); campair_refresh(); });
+    tab(400, 0x2E7D32, LV_SYMBOL_OK, &lv_font_montserrat_24,
+        [](lv_event_t *) { if (_pair_n == 6) campair_key('#'); });
 }
 
 static void setup_build() {
