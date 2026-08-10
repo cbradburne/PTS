@@ -10,14 +10,15 @@ What a row can tell you, and why all three states matter:
                           support — nothing here works until it is reflashed
     "camera off"          firmware is current, but no link — the camera is
                           off, asleep, or out of range
-    "not paired"          the mount and camera have no bond, and the mount has
-                          stopped trying because reconnecting cannot create one
-                          — pair it on the mount: hold the screen twice
+    "no camera paired"    no bond on this mount, so it never reaches for a
+                          camera at all — the normal state for a mount without
+                          one, not a fault.  Pair it on the mount (hold the
+                          screen twice) if it should have one.
     "camera ready"        paired; the button will do something
 
-All three look identical from a greyed-out button and need completely
-different actions — reflash the mount, go and check the camera, or pair it — so
-they are spelled out rather than implied.
+All of these look identical from a greyed-out button and need completely
+different actions — reflash the mount, go and check the camera, pair one, or
+nothing at all — so they are spelled out rather than implied.
 
 Commands are fire-and-forget.  The Blackmagic control protocol has no
 acknowledgement of any kind — the mount ACKs receiving the relay packet, but
@@ -70,7 +71,11 @@ def _step(table, current, direction):
 _STATE_STYLE = {
     "ready":   ("camera ready",       "#2E7D32"),
     "off":     ("camera off",         "#B71C1C"),
-    "unpaired":("not paired",         "#E65100"),
+    # Grey, not orange: a mount with no camera is not a fault to be chased, it
+    # is most of the rig.  Still worth naming, because "no camera paired" and
+    # "camera off" want completely different actions — pair one, or go and
+    # switch one on.
+    "unpaired":("no camera paired",   "#5A6472"),
     "nobuild": ("no camera support",  "#5A6472"),
     "nomount": ("mount offline",      "#5A6472"),
 }

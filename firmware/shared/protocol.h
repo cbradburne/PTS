@@ -316,12 +316,15 @@ typedef enum : uint8_t {
 // relay that is dropping the packets afterwards.
 #define HEALTH_FLAG_CAM_RX     0x20
 
-// Latched when a camera asks for a passkey on a build that cannot answer one.
-// That mount has no bond, and no amount of reconnecting will create one — it
-// needs a CAM_PAIR=1 bench flash.  Worth its own bit because it is the one
-// camera fault the PC app can give a precise instruction for, and because it
-// otherwise hides behind "camera off", which tells someone to go check a camera
-// that is working perfectly well.
+// This mount has no camera bond at all.  NOT a fault — on a rig with fewer
+// cameras than mounts it is the normal state for most of them, so a client
+// should stay quiet about it rather than warn.
+//
+// It is worth a bit because it separates two things that otherwise look
+// identical: a mount with no camera, and a mount whose camera is switched off.
+// The second is worth saying; the first is just Tuesday.  A mount reporting
+// this also never initiates a camera connection, so it cannot take the link
+// from whichever mount the camera belongs to.
 #define HEALTH_FLAG_CAM_UNPAIRED 0x40
 
 // The mount's camera-status cache is full, so at least one parameter is being

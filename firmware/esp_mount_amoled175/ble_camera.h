@@ -205,7 +205,21 @@ static uint16_t _bc_notify_handle = 0;
 static uint16_t _bc_cccd_handle   = 0;
 static uint16_t _bc_svc_start = 0, _bc_svc_end = 0;
 // volatile: written by the NimBLE host task, read by loop() to gate retries.
-static volatile bool _bc_unpaired = false;  // asked for a passkey we cannot supply
+// Does this mount have a camera bond at all?  Cached rather than asked每 loop:
+// bc_bonded_count() reads NVS-backed state and this gates a hot path.
+//
+// It replaces a latch that was set when a camera asked for a passkey we could
+// not answer, and that latch was solving the wrong problem.  On a rig with one
+// camera and five mounts, every cameraless mount in range CONNECTED to the one
+// camera, got as far as the security exchange, and gave up — and a Blackmagic
+// camera takes one connection at a time, so each of those attempts stole the
+// link from the mount the camera actually belongs to.  Measured: cam4 with no
+// camera of its own spent 486 health samples reporting NOT PAIRED, having
+// reached for mount 5's.
+//
+// So the rule is now: only ever connect to a camera we are BONDED to, unless
+// the operator has deliberately opened the pairing screen.
+static volatile bool _bc_have_bond = false;
 static bool     _bc_subscribed = false;
 
 // NimBLE runs ONE GATT procedure per connection at a time.  The first version
@@ -455,9 +469,12 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
                 // Not in pairing mode and bonded to nothing: no reconnect can
                 // create a bond, so stop rather than put a failed-pairing prompt
                 // on the camera every 10 s for as long as the rig is powered.
-                _bc_unpaired = true;
-                Serial.println("[CAM] camera is NOT PAIRED with this mount — no more "
-                               "attempts. Hold the screen twice to pair it.");
+                // Should be unreachable now that an unbonded mount never
+                // initiates outside pairing mode.  Kept as a backstop: if it
+                // ever fires, something reached a camera it had no business
+                // reaching, and saying so beats failing quietly.
+                Serial.println("[CAM] passkey asked for with no bond and not in "
+                               "pairing mode — declining");
                 ble_gap_terminate(ev->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             } else {
                 // We ARE paired, just not to this camera — a neighbour's, picked
@@ -480,6 +497,9 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
                       ev->enc_change.status);
         if (_bc_pair_mode)
             _bc_pair_state = ev->enc_change.status ? BCP_FAILED : BCP_PAIRED;
+        // Encryption established means the bond is now in NVS, so the mount may
+        // reconnect on its own from here without the pairing screen.
+        if (ev->enc_change.status == 0) _bc_have_bond = true;
         if (ev->enc_change.status == 0) {
             _bc_connected = true;
             _bc_since_ms  = millis();
@@ -710,6 +730,14 @@ static void ble_cam_setup() {
     BLEDevice::setPower(ESP_PWR_LVL_P9);          // as BlueMagic32 does
     BLEDevice::setSecurityCallbacks(new BcSecCb());
 
+    // Read the bond store once, now the host is up.  Everything downstream
+    // gates on this rather than re-asking, and a mount with no bond will not
+    // touch a camera at all — see _bc_have_bond.
+    _bc_have_bond = bc_bonded_count() > 0;
+    Serial.printf("[CAM] %s\n", _bc_have_bond
+                  ? "bonded to a camera — will reconnect on its own"
+                  : "no camera bond — idle until paired from the screen");
+
     // Taken from schoolpost/BlueMagic32, which is proven against the BMPCC4K,
     // after my own guess at this failed to connect at all.
     //
@@ -792,6 +820,19 @@ static bool bc_choose() {
         pick = bonded_i;
         Serial.printf("[CAM] paired camera in range — using %u%s\n", pick + 1,
                       n_bonded > 1 ? " (strongest of several bonded)" : "");
+    } else if (!_bc_pair_mode) {
+        // A bonded mount reaches for ITS camera or for nothing.  Falling
+        // through to "one Blackmagic camera in range" would have a mount whose
+        // own camera is switched off go and connect to a NEIGHBOUR's — getting
+        // as far as the security exchange before being refused, and taking that
+        // camera's one connection slot with it on the way.
+        //
+        // Picking a camera you are not bonded to is only ever right when a
+        // human has opened the pairing screen and is standing there to type the
+        // code.  Everywhere else it is a mount interfering with another mount.
+        Serial.println("[CAM] our camera is not in range — waiting (will not "
+                       "reach for another mount's)");
+        return false;
     } else if (n_named == 1) {
         pick = only_named;
         Serial.printf("[CAM] one Blackmagic camera in range — using %u\n", pick + 1);
@@ -840,7 +881,7 @@ static bool bc_choose() {
 // apart from "camera switched off", which look the same from a dark button.
 static uint8_t ble_cam_health_flags() {
     uint8_t f = HEALTH_FLAG_BLE_BUILD | (_bc_connected ? HEALTH_FLAG_BLE_LINK : 0)
-              | (_bc_unpaired  ? HEALTH_FLAG_CAM_UNPAIRED : 0)
+              | (_bc_have_bond ? 0 : HEALTH_FLAG_CAM_UNPAIRED)
               | (_bc_cache_full ? HEALTH_FLAG_CAM_CACHE_FULL : 0)
               | (_bc_subscribed ? HEALTH_FLAG_CAM_SUBSCR : 0)
               | (_bc_notifies   ? HEALTH_FLAG_CAM_RX     : 0);
@@ -866,7 +907,10 @@ static void ble_cam_poll() {
     // The same zero is written by ble_cam_forget() and ble_cam_pair_begin(),
     // where "try now" is exactly what is wanted too.
     bool due = (_bc_retry_ms == 0) || ((now - _bc_retry_ms) > CAM_RETRY_MS);
-    if (!busy && !_bc_unpaired && due) {
+    // No bond and not pairing: do not go looking.  See _bc_have_bond — an
+    // unbonded mount that hunts for cameras takes the link away from whichever
+    // mount owns the one it finds.
+    if (!busy && (_bc_pair_mode || _bc_have_bond) && due) {
         _bc_retry_ms = now ? now : 1;
         if (!_bc_chosen) {
             if (!_bc_scan_ready) {
@@ -945,7 +989,11 @@ BcPairState ble_cam_pair_state() { return _bc_pair_state; }
 enum BcUiState : uint8_t { BCU_NONE = 0, BCU_LINKING, BCU_READY, BCU_UNPAIRED };
 BcUiState ble_cam_ui_state() {
     if (_bc_connected && _bc_subscribed) return BCU_READY;
-    if (_bc_unpaired)                    return BCU_UNPAIRED;
+    // Deliberately NOT reporting "unpaired" on the mount's own screen: on a rig
+    // with fewer cameras than mounts that is most of them, and a permanent
+    // warning about a camera a mount does not have is noise where it stands.
+    // The PC app still shows it, which is where someone decides what to pair.
+    if (!_bc_have_bond)                  return BCU_NONE;
     if (bc_bonded_count() > 0)           return BCU_LINKING;
     return BCU_NONE;
 }
@@ -961,7 +1009,6 @@ void ble_cam_pair_begin() {
     // Clear the giving-up latch and the current choice, so a mount that has
     // already decided it is unpaired will actually go and look again — without
     // this, entering pairing on the mount that most needs it would do nothing.
-    _bc_unpaired = false;
     _bc_chosen   = false;
     _bc_retry_ms = 0;
 
@@ -1027,7 +1074,7 @@ void ble_cam_forget() {
 
     _bc_ncache     = 0;
     _bc_cache_full = false;
-    _bc_unpaired   = false;
+    _bc_have_bond  = false;   // just deleted every bond we had
     _bc_chosen     = false;
     _bc_replay_i   = 0;
     _bc_retry_ms   = 0;

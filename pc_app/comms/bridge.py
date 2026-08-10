@@ -689,10 +689,13 @@ class Bridge:
         if h.flags & HEALTH_FLAG_BLE_BUILD:
             linked = bool(h.flags & HEALTH_FLAG_BLE_LINK)
             unpaired = bool(h.flags & HEALTH_FLAG_CAM_UNPAIRED)
+            # No bond: say NOTHING.  This is the normal state for every mount
+            # without a camera of its own, and on a five-mount rig with one
+            # camera that was four nodes each repeating a non-event every ten
+            # seconds — 486 lines in one 93-minute log. A health line should
+            # carry what changed or what is wrong, and this is neither.
             if unpaired:
-                # Terminal until someone reflashes: the mount has no bond and
-                # has stopped trying, so this will not clear on its own.
-                ble = " | BLE NOT PAIRED (pair on the mount: hold screen twice)"
+                ble = ""
             else:
                 ble = " | BLE PAIRED" if linked else " | BLE down"
             if linked:
