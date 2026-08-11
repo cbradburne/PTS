@@ -193,6 +193,7 @@ class MountManager(QObject):
         self._mount_table: list[bytes] = [b"\x00" * 6 for _ in range(NUM_MOUNTS)]
         # 0 = the hub reaches that cam directly, N = relayed by satellite N.
         self._mount_route: list[int] = [0] * NUM_MOUNTS
+        self._route_logged = False
         self._sat_names: dict[int, str] = {}
         self._cam_params_seen: set[tuple[int, int, int]] = set()
 
@@ -474,9 +475,24 @@ class MountManager(QObject):
             try:
                 route = decode_mount_route(pkt.payload)
                 changed = (route != self._mount_route)
+                first   = not self._route_logged
                 self._mount_route = route
                 if changed:
                     self.mount_route_updated.emit(list(route))
+                # Which base each mount is on has only ever existed in the UI.
+                # That left comms.log unable to tell a mount whose signal is
+                # DEGRADING from one that is ALTERNATING between two bases —
+                # they look identical in the rssi column, and mount 5 swinging
+                # 13 dB between consecutive samples on 2026-08-11 could have
+                # been either.  Logged on change, plus once at startup so a log
+                # that begins mid-session still says where everything is.
+                if changed or first:
+                    self._route_logged = True
+                    where = ", ".join(
+                        "cam%d %s" % (i + 1,
+                                      "direct" if s == 0 else "via " + self.sat_label(s))
+                        for i, s in enumerate(route))
+                    log.info("MOUNT ROUTE: %s", where)
             except Exception as e:
                 log.error(f"MOUNT_ROUTE decode failed: {e}")
             return
