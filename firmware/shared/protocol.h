@@ -311,6 +311,15 @@ typedef enum : uint8_t {
 #define HEALTH_NODE_BRIDGE   1   // mount-side ESP32 (AMOLED)
 #define HEALTH_NODE_TEENSY   2
 #define HEALTH_NODE_DISPLAY  3
+#define HEALTH_NODE_SATELLITE 4  // relay box; see SAT_ADDR_BASE for who it is
+
+// A satellite's health packet is addressed SAT_ADDR_BASE + slot (1-based), so
+// slots 1-6 occupy 0xF1-0xF6 — clear of mounts (1-5), the hub (0xFE) and the
+// display (0xFD).  The satellite cannot fill this in itself: the slot is the
+// hub's TCP accept order and is only known at the far end, so the satellite
+// sends with mount_id 0 and the hub stamps it on the way past, exactly as it
+// already does for the satellite's name.
+#define SAT_ADDR_BASE      0xF0
 
 // Uniform health cadence / anomaly thresholds (shared by all nodes)
 #define HEALTH_INTERVAL_MS        10000UL

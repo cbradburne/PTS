@@ -533,6 +533,14 @@ static uint32_t _loop_max_us  = 0;   // slowest single pass
 // reported its own cost, so it is not double-counted as a stall.
 static bool     _skip_pass_max = false;
 static uint32_t _dn_nomem     = 0;   // esp_now_send() refusals
+// Cumulative twins of the counters above, kept for the health record.  Every
+// counter in this block is WINDOWED — downlink_report() zeroes them each
+// DN_REPORT_MS so the [RATE] line reads as a rate — and a health line built
+// from those would sawtooth back to zero every window.  That is precisely the
+// shape a fault looks like when it clears itself, so it would get read as one.
+static uint32_t _sat_nomem_total   = 0;   // send refusals since boot
+static uint32_t _sat_unacked_total = 0;   // downlink sends no mount acked, since boot
+static uint32_t _sat_loopmax_ms    = 0;   // worst single pass since boot
 static uint32_t _up_writes    = 0;   // actual send() calls (batches, not frames)
 static uint32_t _up_frames    = 0;   // envelopes queued — comparable to the old count
 static uint32_t _up_dropped   = 0;   // uplink frames the hub would not take
@@ -765,7 +773,7 @@ static uint32_t _dn_overflow = 0;
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
     (void)info;
     if (status == ESP_NOW_SEND_SUCCESS) _dn_acked++;
-    else                                _dn_unacked++;
+    else                              { _dn_unacked++; _sat_unacked_total++; }
 }
 
 // Push onto the ring.  Dropping the OLDEST on overflow, not the newest: these
@@ -839,6 +847,7 @@ static void dn_pump(uint32_t now) {
         esp_err_t e = esp_now_send(_peer[f.idx].mac, f.data, f.len);
         if (e == ESP_ERR_ESPNOW_NO_MEM) {
             _dn_nomem++;
+            _sat_nomem_total++;
             // Saturated.  Holding position is right for a moment - the radio
             // is busy and will drain - but it must not be forever.  Written as
             // a bare "return", it was: the driver stopped accepting frames and
@@ -1028,6 +1037,62 @@ static void uplink_send_hello() {
     uint16_t en = sat_env_build(env, mac, 0, frame, fn);
     if (en) _uplink.write(env, en);
     Serial.printf("[UPLINK] introduced myself as \"%s\"\n", _hub_name);
+}
+
+// The satellite's own health, on the same 10 s cadence and in the same record
+// every other node uses.
+//
+// Until now it sent none.  Every counter this box keeps went to its serial
+// port, and its serial port is behind the box, in a foyer, with nobody at it —
+// so the node that relays traffic for half the rig, that wedged badly enough to
+// need a self-restart ladder, and whose reboot makes every mount rescan, was
+// the one node invisible in comms.log.  Its uptime, heap and refusals were all
+// tracked and none of them were ever said out loud.
+//
+// Sent with mount_id 0: the slot is the hub's TCP accept order, so only the hub
+// can say which satellite this is, and it stamps SAT_ADDR_BASE + slot on the
+// way past — the same trick as the name.
+static uint32_t _sat_health_ms  = 0;
+static uint16_t _sat_health_seq = 0;
+
+static void sat_send_health(uint32_t now) {
+    if (!_uplink.connected()) return;      // nowhere to send it
+    if (_sat_health_ms && (now - _sat_health_ms) < HEALTH_INTERVAL_MS) return;
+    bool first = !_sat_health_ms;
+    _sat_health_ms = now ? now : 1;
+
+    PayloadHealth h = {};
+    h.node_type     = HEALTH_NODE_SATELLITE;
+    h.reset_reason  = (uint8_t)esp_reset_reason();
+    h.uptime_s      = now / 1000UL;
+    h.free_heap     = (uint32_t)esp_get_free_heap_size();
+    h.min_free_heap = (uint32_t)esp_get_minimum_free_heap_size();
+    h.loop_max_ms   = (uint16_t)(_sat_loopmax_ms > 0xFFFF ? 0xFFFF : _sat_loopmax_ms);
+    // Downlink sends the mount never acked — the same thing tx_fail means on a
+    // mount, so the column compares straight across.
+    h.tx_fail       = (uint16_t)(_sat_unacked_total > 0xFFFF ? 0xFFFF
+                                                             : _sat_unacked_total);
+    // No single RSSI to report: this box talks to several mounts at once, and
+    // its own uplink is wired.  0, as the hub does, rather than a number that
+    // would invite comparison with a mount's.
+    h.rssi          = 0;
+    h.flags         = (first || _sat_rst_streak) ? HEALTH_FLAG_ANOMALY : 0;
+    // Packed as the mount's is: refusals high, self-restart streak low.  These
+    // are the two numbers that explain this box — NO_MEM is how its transmit
+    // path wedges, and the streak is how close it is to giving up on fixing
+    // itself.  A streak stuck at its cap is the state that left two mounts
+    // unreachable with every windowed counter reading zero.
+    h.node_u32      = ((_sat_nomem_total & 0xFFFFUL) << 16) |
+                      (_sat_rst_streak   & 0xFFFFUL);
+
+    uint8_t  frame[PKT_BUF_SIZE + 4];
+    uint16_t fn = build_health(frame, 0, ++_sat_health_seq, &h);
+
+    uint8_t  mac[6];
+    WiFi.softAPmacAddress(mac);
+    uint8_t  env[SAT_ENV_MAX];
+    uint16_t en = sat_env_build(env, mac, 0, frame, fn);
+    if (en) _uplink.write(env, en);
 }
 
 static void uplink_service(uint32_t now) {
@@ -1238,9 +1303,14 @@ void loop() {
 
     downlink_report(now);
     sat_restart_streak_poll(now);
+    sat_send_health(now);
 
     _loop_count++;
     uint32_t _dt = micros() - _t0;
     if (_skip_pass_max)            _skip_pass_max = false;
-    else if (_dt > _loop_max_us)   _loop_max_us   = _dt;
+    else {
+        if (_dt > _loop_max_us)    _loop_max_us   = _dt;
+        uint32_t dtms = _dt / 1000UL;
+        if (dtms > _sat_loopmax_ms) _sat_loopmax_ms = dtms;
+    }
 }

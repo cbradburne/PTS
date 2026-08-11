@@ -35,7 +35,8 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_WR_ERR,
                        HEALTH_FLAG_CAM_SUBSCR,
                        HEALTH_FLAG_CAM_RX,
-                       HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL)
+                       HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL,
+                       HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names)
 
 log = logging.getLogger(__name__)
 
@@ -305,6 +306,9 @@ class Bridge:
         self._node_uptime: dict[str, int] = {}
         # mount_id -> BLE camera link state, from CMD_HEALTH; absent = no camera build
         self._cam_ble: dict[int, bool] = {}
+        # Satellite slot → name, so a satellite's health line can be headed
+        # "Foyer" rather than "SAT 1".  Empty until the hub sends SAT_NAMES.
+        self._sat_names: dict[int, str] = {}
         # Same thing across restarts of THIS app: {node: {uptime_s, reset, at}}.
         self._node_state_prev: dict = self._node_state_load()
         self._node_state_cur:  dict = {}
@@ -563,12 +567,28 @@ class Bridge:
         self._note_rx_ack(pkt)
         self._note_hub_diag(pkt)
         self._note_hub_event(pkt)
+        self._note_sat_names(pkt)
         self._note_node_health(pkt)
         for cb in self._callbacks:
             try:
                 cb(pkt)
             except Exception as e:
                 log.error(f"Packet callback error: {e}")
+
+    def _note_sat_names(self, pkt: Packet) -> None:
+        """Learn satellite names here rather than borrowing MountManager's copy.
+
+        The names arrive on this packet stream anyway, and the health line needs
+        them at the moment it is formatted — reaching across to the UI layer for
+        a label would couple logging to a component that may not exist yet when
+        the first health packet lands.
+        """
+        if pkt.cmd != Cmd.SAT_NAMES:
+            return
+        try:
+            self._sat_names = decode_sat_names(pkt.payload)
+        except Exception as e:
+            log.warning("SAT_NAMES decode failed in bridge: %s", e)
 
     # A node up X seconds when we last looked must be up at least X + elapsed
     # now.  The slack absorbs clock skew and the couple of seconds between a
@@ -679,6 +699,12 @@ class Bridge:
             who = "hub"
         elif pkt.mount_id == 0xFD:
             who = "display"
+        elif h.node_type == HEALTH_NODE_SATELLITE:
+            # Named, not numbered, for the same reason the route line is: the
+            # slot is TCP accept order and means nothing to someone standing in
+            # the building, whereas "Foyer" is the box they can go and look at.
+            slot = pkt.mount_id - SAT_ADDR_BASE
+            who  = self._sat_names.get(slot) or f"SAT {slot}"
         else:
             who = f"cam{pkt.mount_id}/{h.node_name}"
         # BLE camera state, on builds that have it.  A mount on a rig has no
@@ -735,6 +761,17 @@ class Bridge:
             n32txt  = "n32 %d" % (n32 & 0xFFFF)
             if refused:
                 n32txt += " | TX REFUSED %d" % refused
+        elif h.node_type == HEALTH_NODE_SATELLITE:
+            # Same packing, different pair: refusals high, self-restart streak
+            # low.  The streak is spelled out rather than left as a number
+            # because a satellite sitting at its cap has stopped trying to fix
+            # itself, and that is the state that left two mounts unreachable
+            # with every other counter reading zero.
+            nomem  = (n32 >> 16) & 0xFFFF
+            streak = n32 & 0xFFFF
+            n32txt = "nomem %d" % nomem
+            if streak:
+                n32txt += " | SELF-RESTARTS %d" % streak
         else:
             n32txt = "n32 %d" % n32
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "

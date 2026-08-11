@@ -3093,9 +3093,29 @@ void loop() {
                 // through would hand an unknown address to the pairing rules.
                 {
                     PacketParser hp; pkt_parser_init(&hp); ParsedPacket hpk;
-                    bool hello = false;
+                    // Set by anything that is the SATELLITE talking about
+                    // itself rather than a mount's traffic passing through.
+                    bool consumed = false;
                     for (uint8_t k = 0; k < env.frame_len; k++) {
                         if (!pkt_feed(&hp, env.frame[k], &hpk)) continue;
+                        // The satellite's own health, not mount traffic.  It
+                        // sends with mount_id 0 because the slot is OUR accept
+                        // order and it cannot know it; stamped here so the PC
+                        // app can say which satellite it is looking at.  Only
+                        // the header changes — the 24-byte record is forwarded
+                        // exactly as the satellite built it.
+                        if (hpk.cmd == CMD_HEALTH &&
+                            hpk.payload_len >= 1 &&
+                            hpk.payload[0] == HEALTH_NODE_SATELLITE) {
+                            uint8_t  sb[PKT_BUF_SIZE + 4];
+                            uint16_t sn = build_packet(sb,
+                                                       (uint8_t)(SAT_ADDR_BASE + i + 1),
+                                                       hpk.seq, CMD_HEALTH,
+                                                       hpk.payload, hpk.payload_len);
+                            broadcast_to_all(sb, sn);
+                            consumed = true;
+                            break;
+                        }
                         if (hpk.cmd == CMD_SAT_HELLO &&
                             hpk.payload_len == SAT_HELLO_PAYLOAD_LEN) {
                             memcpy(_sat[i].name, hpk.payload, SAT_NAME_LEN);
@@ -3125,11 +3145,11 @@ void loop() {
                                     send_to_mount_routed(k, rb, rn);
                                 Serial.println("[SAT] satellite back — asking mounts to rescan");
                             }
-                            hello = true;
+                            consumed = true;
                         }
                         break;
                     }
-                    if (hello) continue;
+                    if (consumed) continue;
                 }
 
                 RelayMsg msg;
