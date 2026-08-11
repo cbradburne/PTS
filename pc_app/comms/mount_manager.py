@@ -105,6 +105,17 @@ class MountState_:
     mount_id:    int
     connected:   bool = False
     last_pong_ms: float = 0.0
+    # Heard-but-not-obeying.  Presence and RESPONSIVENESS are different things,
+    # and conflating them cost a whole session: "any packet proves it is alive"
+    # fixed cameras loading greyed out, and in doing so pinned mount 4 to
+    # "connected" while 79% of its commands went unacknowledged — its health
+    # packets still trickling through were enough to keep it looking perfect.
+    # The rule it replaced flapped the mount on and off every few seconds, and
+    # that flapping was HONEST.  A mount that shows offline is annoying; one
+    # that shows connected and ignores four commands in five is something you
+    # find out about mid-shot.
+    unacked:      int = 0
+    unresponsive: bool = False
 
     # Motion
     state:       MountState = MountState.IDLE
@@ -356,9 +367,29 @@ class MountManager(QObject):
                                 preset: int) -> None:
         self._send(pkt_set_active_preset(mount_id, axis_group, preset))
 
+    # Consecutive unacknowledged ack-tracked commands before a mount is called
+    # unresponsive.  Three, against a ~4 s idle probe, means ~12 s of being told
+    # things and doing none of them — long enough not to trip on one lost frame,
+    # short enough to notice before an operator reaches for the joystick.
+    UNACKED_LIMIT = 3
+
+    def _note_tracked_send(self, mount_id: int) -> None:
+        st = self._states.get(mount_id)
+        if not st or not st.connected:
+            return
+        st.unacked += 1
+        if st.unacked >= self.UNACKED_LIMIT and not st.unresponsive:
+            st.unresponsive = True
+            log.warning("Mount %d is HEARD BUT NOT RESPONDING — %d commands "
+                        "unacknowledged. It will keep reporting health, so it "
+                        "looks connected; it is not accepting commands.",
+                        mount_id, st.unacked)
+            self.mount_disconnected.emit(mount_id)
+
     def send_get_config(self, mount_id: int) -> None:
         """Request speed presets and orientation from a mount."""
         self._send(pkt_get_config(mount_id))
+        self._note_tracked_send(mount_id)
 
     def send_cam_autofocus(self, mount_id: int) -> None:
         """Instantaneous autofocus on that mount's Blackmagic camera.
@@ -548,9 +579,14 @@ class MountManager(QObject):
         #
         # Deliberately before the per-command handling, so it covers ACK, NACK,
         # POSITION, CAM_STATUS and anything added later.
+        # ...but "alive" is not "usable".  A mount that is heard and does not
+        # ACK stays greyed until an ACK arrives, or its own health packets would
+        # walk it straight back to looking connected — which is exactly how 79%
+        # command loss displayed as a perfectly healthy mount 4.
         if not st.connected:
             st.connected = True
-            self.mount_connected.emit(mid)
+            if not st.unresponsive:
+                self.mount_connected.emit(mid)
             self._send(pkt_get_state(mid))     # as the STATUS path does
         st.last_pong_ms = time.monotonic() * 1000
 
@@ -769,10 +805,18 @@ class MountManager(QObject):
             except Exception as e:
                 log.warning(f"Bad POSITION from mount {mid}: {e}")
 
+        elif pkt.cmd == Cmd.ACK:
+            # Proof the mount is not just audible but ACTING on what it is told.
+            st.unacked = 0
+            if st.unresponsive:
+                st.unresponsive = False
+                log.warning("Mount %d is responding again", mid)
+                self.mount_connected.emit(mid)
+
         elif pkt.cmd == Cmd.PONG:
             st.connected    = True
             st.last_pong_ms = time.monotonic() * 1000
-            self._send(pkt_get_status(mid)) 
+            self._send(pkt_get_status(mid))
 
         elif pkt.cmd == Cmd.NACK:
             try:
