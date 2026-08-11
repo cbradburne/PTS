@@ -44,7 +44,8 @@ from .protocol import (
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
     decode_mount_table, decode_mount_route, decode_sat_names,
-    MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, RF_REPORT_PAYLOAD_LEN,
+    MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, MOUNT_EVENT_TX_WEDGE,
+    RF_REPORT_PAYLOAD_LEN,
     decode_pair_conflict, PairConflictPayload,
 )
 
@@ -604,6 +605,20 @@ class MountManager(QObject):
             tx_s = (b[7] << 8) | b[8]
             ref  = (b[9] << 8) | b[10]
             err  = (b[11] << 8) | b[12]
+            wifi = b[13]
+            if kind == MOUNT_EVENT_TX_WEDGE:
+                # Not a restart: the mount recovered itself without rebooting.
+                # Worth a WARNING all the same — this is the failure that used
+                # to persist silently for an hour because the mount was only
+                # half-dead and the isolation rule needed it fully dead.
+                log.warning(
+                    "MOUNT EVENT cam%d RECOVERED A ONE-WAY TX WEDGE with a "
+                    "WiFi-level restart (%d since boot) | it was still "
+                    "receiving normally, so the isolation restart could never "
+                    "have fired | %d sends failed over %ds, %d stack reinits "
+                    "| %s",
+                    mid, wifi, txf, tx_s, rei, _espnow_err_text(ref, err))
+                return
             what = ("isolated — no RX and no TX" if kind == MOUNT_EVENT_ISOLATED
                     else f"kind {kind}")
             # RX silence is pinned to the mount's 2-minute restart threshold by

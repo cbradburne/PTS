@@ -592,6 +592,33 @@ static uint32_t _espnow_reinit_held    = 0;      // requests suppressed by the g
 // while turning a burst like the one above into a single rebuild.  Recovery from
 // a genuinely dead stack is unaffected; only the repetition is.
 #define ESPNOW_REINIT_MIN_GAP_MS  15000UL
+
+// ── One-way transmit wedge ──────────────────────────────────────────────────
+// The isolation restart needs no RX *and* no TX for two minutes.  Mount 4 spent
+// an hour on 2026-08-11 failing 79% of its commands — 90 of 114 unacknowledged,
+// txfail climbing ~40/s — while receiving perfectly well.  It was never
+// isolated, so it was never eligible for the one remedy that works, and it sat
+// there being told things and doing none of them until it was reflashed by hand.
+// Its health packets kept arriving throughout, which is why it looked fine.
+//
+// A mount that cannot transmit is broken whether or not it can still hear. So
+// the rate is watched too: sends failing this fast, for this long, while RX is
+// healthy, is a wedge and gets the WiFi-level restart.
+//
+// 10/s is well clear of ordinary loss — a mount at the edge of range failed 40/s
+// and a healthy one on the same rig failed 0 over ten minutes — and 30 s is far
+// longer than any burst of interference or a base rebooting underneath it.
+#define TXWEDGE_FAILS_PER_S   10UL
+#define TXWEDGE_SUSTAIN_MS    30000UL
+// Two WiFi restarts that both failed to hold means the fault is below anything
+// short of a boot, so stop repeating a remedy that is not working and let the
+// isolation path have it.
+#define TXWEDGE_MAX_RESTARTS  2
+static uint32_t _wifi_restarts     = 0;   // WiFi-level restarts since boot
+static uint32_t _txw_window_ms     = 0;   // when the current bad run started
+static uint32_t _txw_window_fails  = 0;   // _espnow_fail_total when it started
+static uint32_t _txw_restarts      = 0;   // WiFi restarts spent on this wedge
+static bool     _txw_report_due    = false;
 static uint32_t _last_jog_fwd_ms    = 0;          // last CMD_JOG forwarded → defer health send
 static uint32_t _health_last_ms     = 0;
 static uint32_t _health_anom_ms     = 0;
@@ -1002,6 +1029,71 @@ static void espnow_full_reinit() {
     _espnow_need_refresh  = false;
     _reinit_count++;                                // health telemetry
     Serial.println("[ESP-NOW] Full stack reinit done");
+}
+
+// The rung above espnow_full_reinit(), and the reason it exists: that function
+// is called a "full stack reinit" and is nothing of the sort.  It deinits and
+// reinits ESP-NOW, and stops there — the WiFi driver and PHY underneath are
+// never touched.  So when the damage is below ESP-NOW, the ladder can climb
+// forever without reaching it, which is exactly what was measured on
+// 2026-08-11: mount 4 ran up to six reinits while failing ~40 sends a second,
+// and a chip reboot cleared it instantly at an unchanged -78 dBm with the noise
+// floor at -99.  Nothing was wrong with the air.  Every rung that has ever
+// demonstrably worked has been a full restart.
+//
+// This is that, minus the cost: no boot, so the camera stays paired, the screen
+// stays up, RTC state survives and no isolation quota is spent.
+//
+// ESP-NOW must be down across the WiFi restart — it is a client of the driver
+// being stopped — and the channel, power and protocol are all re-applied
+// afterwards rather than assumed to survive.  esp_wifi_set_max_tx_power() in
+// particular is documented as only taking effect after esp_wifi_start().
+static bool espnow_wifi_restart() {
+    if (!_cfg_valid) return false;
+    Serial.println("[ESP-NOW] WiFi-level restart start");
+    esp_now_deinit();
+    esp_err_t e = esp_wifi_stop();
+    if (e != ESP_OK) Serial.printf("[ESP-NOW] esp_wifi_stop: %s\n", esp_err_to_name(e));
+    delay(150);
+    e = esp_wifi_start();
+    if (e != ESP_OK) {
+        // Nothing left below this but the isolation restart, so say so plainly
+        // rather than leaving a silent failed rung in the log.
+        Serial.printf("[ESP-NOW] esp_wifi_start FAILED: %s — only a reboot left\n",
+                      esp_err_to_name(e));
+        return false;
+    }
+    delay(150);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_max_tx_power(84);
+    esp_wifi_set_protocol(WIFI_IF_STA,
+        WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+    esp_wifi_set_channel(_hub_channel, WIFI_SECOND_CHAN_NONE);
+
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[ESP-NOW] re-init after WiFi restart FAILED");
+        return false;
+    }
+    esp_now_register_recv_cb(on_espnow_recv);
+    esp_now_register_send_cb(on_espnow_sent);
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, _hub_mac, 6);
+    peer.channel = _hub_channel;
+    peer.ifidx   = WIFI_IF_STA;
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
+    espnow_peer_long_range(peer.peer_addr);
+    _espnow_consec_fails  = 0;
+    _espnow_refresh_count = 0;
+    _espnow_need_refresh  = false;
+    _espnow_need_reinit   = false;
+    // Give the recovered link the same grace a fresh boot gets, so the very
+    // restart that fixed things is not immediately counted as more silence.
+    _last_espnow_tx_ok_ms = millis();
+    _wifi_restarts++;
+    Serial.printf("[ESP-NOW] WiFi-level restart done (%lu since boot)\n",
+                  (unsigned long)_wifi_restarts);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2765,6 +2857,65 @@ void loop() {
         }
     }
 
+    // ── One-way transmit wedge ───────────────────────────────────────────
+    // Watched on the RATE of send failures, not on silence, so a mount that is
+    // still receiving is not excused.  See TXWEDGE_FAILS_PER_S.
+    {
+        uint32_t nw   = millis();
+        bool rx_alive = (nw - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
+        uint32_t fails = _espnow_fail_total;
+        if (!_cfg_valid || _setup_active || !rx_alive) {
+            _txw_window_ms = 0;                  // not our case; isolation has it
+        } else if (!_txw_window_ms) {
+            _txw_window_ms    = nw ? nw : 1;
+            _txw_window_fails = fails;
+        } else {
+            uint32_t held = nw - _txw_window_ms;
+            uint32_t got  = fails - _txw_window_fails;
+            // Rate below threshold at any point: this is not a wedge, it is a
+            // link having a bad moment.  Start the window again from here.
+            if (held >= 1000 && (got * 1000UL / held) < TXWEDGE_FAILS_PER_S) {
+                _txw_window_ms    = nw ? nw : 1;
+                _txw_window_fails = fails;
+            } else if (held >= TXWEDGE_SUSTAIN_MS) {
+                Serial.printf("[ESP-NOW] TX wedged: %lu sends failed in %lus "
+                              "while RX is healthy\n",
+                              (unsigned long)got, (unsigned long)(held / 1000UL));
+                _txw_window_ms = 0;
+                if (_txw_restarts < TXWEDGE_MAX_RESTARTS) {
+                    _txw_restarts++;
+                    if (espnow_wifi_restart()) {
+                        // Reported once TX works again — it cannot be reported
+                        // now, which is the whole problem being fixed.
+                        _txw_report_due = true;
+                        _evt_txfail  = (uint16_t)fails;
+                        _evt_reinits = (uint16_t)_reinit_count;
+                        _evt_rx_s    = 0;   // RX was fine; that is the point
+                        _evt_tx_s    = (uint16_t)(held / 1000UL);
+                        _evt_refused = (uint16_t)_espnow_tx_refused;
+                        _evt_txerr   = _espnow_last_tx_err;
+                    }
+                } else {
+                    // Out of WiFi restarts.  Say so, and let the isolation path
+                    // take it if the mount ever goes fully quiet — repeating a
+                    // remedy that has already failed twice only wastes airtime.
+                    static uint32_t moaned = 0;
+                    if (!moaned || (nw - moaned) > 60000UL) {
+                        moaned = nw ? nw : 1;
+                        Serial.printf("[ESP-NOW] TX still wedged after %d WiFi "
+                                      "restarts — needs a reboot\n",
+                                      TXWEDGE_MAX_RESTARTS);
+                    }
+                }
+            }
+        }
+        // A clean spell hands the quota back, so a wedge hours ago does not
+        // leave the mount unable to rescue itself from the next one.
+        if (_txw_restarts && (nw - _last_espnow_tx_ok_ms) < 1000 &&
+                _espnow_fail_total == _txw_window_fails)
+            _txw_restarts = 0;
+    }
+
     // ── Hub connection state ─────────────────────────────────────────────
     bool hub_ok = (millis() - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
     // Contact restored — hand back the full quota, so a mount that recovers
@@ -2785,7 +2936,26 @@ void loop() {
             (uint8_t)(_evt_rx_s    >> 8), (uint8_t)_evt_rx_s,
             (uint8_t)(_evt_tx_s    >> 8), (uint8_t)_evt_tx_s,
             (uint8_t)(_evt_refused >> 8), (uint8_t)_evt_refused,
-            (uint8_t)(_evt_txerr   >> 8), (uint8_t)_evt_txerr };
+            (uint8_t)(_evt_txerr   >> 8), (uint8_t)_evt_txerr,
+            (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
+        send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
+    }
+
+    // A one-way TX wedge that the WiFi-level restart cleared.  Gated on TX
+    // actually working again, not on hub_ok: hub_ok is an RX test, and RX was
+    // never the problem — sending this the instant the restart returned would
+    // fire it straight back into the wedge it is reporting.
+    if (_txw_report_due && (millis() - _last_espnow_tx_ok_ms) < 2000) {
+        _txw_report_due = false;
+        uint8_t p[MOUNT_EVENT_PAYLOAD_LEN] = {
+            MOUNT_EVENT_TX_WEDGE,
+            (uint8_t)(_evt_txfail  >> 8), (uint8_t)_evt_txfail,
+            (uint8_t)(_evt_reinits >> 8), (uint8_t)_evt_reinits,
+            (uint8_t)(_evt_rx_s    >> 8), (uint8_t)_evt_rx_s,
+            (uint8_t)(_evt_tx_s    >> 8), (uint8_t)_evt_tx_s,
+            (uint8_t)(_evt_refused >> 8), (uint8_t)_evt_refused,
+            (uint8_t)(_evt_txerr   >> 8), (uint8_t)_evt_txerr,
+            (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
         send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
     }
     if (hub_ok != _ms.hub_connected) {

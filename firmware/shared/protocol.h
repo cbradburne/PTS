@@ -82,13 +82,19 @@
 // one end knows is how a parser starts reading the next packet's header.
 #define SAT_SLOTS                   6
 // kind(1) + txfail(2) + reinits(2) + rx_stale_s(2) + tx_stale_s(2)
-//        + tx_refused(2) + last_tx_err(2)
+//        + tx_refused(2) + last_tx_err(2) + wifi_restarts(1)
 // The last two were added after the first real capture: txfail stayed frozen
 // across a three-minute outage, which means the sends were never reaching the
 // send callback at all — esp_now_send() was refusing them synchronously.  The
 // count says how often, and the esp_err_t says which refusal.
-#define MOUNT_EVENT_PAYLOAD_LEN     13
+#define MOUNT_EVENT_PAYLOAD_LEN     14
 #define MOUNT_EVENT_ISOLATED        1   // restarted itself: no RX and no TX
+// Transmit wedged one-way — sends failing fast while RX stayed healthy, so the
+// isolation restart could never fire.  Recovered with a WiFi-level restart
+// rather than a reboot, and reported afterwards because a wedged mount cannot
+// report at the time.  rx_stale_s is 0 by definition here: RX was fine, which
+// is exactly why the old rule missed it.
+#define MOUNT_EVENT_TX_WEDGE        2
 // rssi min/mean/max (3 × int8) + noise floor min/mean/max (3 × int8)
 // + frames the window was measured over (2).  Signed dBm throughout; a report
 // with frames == 0 means nothing was heard at all, which is itself the answer.
