@@ -247,6 +247,20 @@ typedef enum : uint8_t {
     // that slot is unoccupied, or is a satellite too old to introduce itself —
     // in both cases a client should fall back to showing the slot number.
     CMD_SAT_NAMES         = 0xA4,
+    // Hub → all mounts, no payload: "a satellite just came up — look again".
+    //
+    // A mount picks its base once, at boot, and never rescans while the base it
+    // has still answers.  That is deliberate (a five-minute rescan cost 174 TX
+    // wedges a night) but it has one bad case: restart a satellite mid-show and
+    // the mounts that fell back to the distant hub STAY there.  Seen on a rig —
+    // mount 4 sat on the hub at -77 dBm when the satellite beside it was back
+    // and would have given it -45, and only a power cycle moved it.
+    //
+    // The hub already learns the exact moment a satellite returns, because the
+    // satellite introduces itself with CMD_SAT_HELLO on every connect.  This
+    // passes that on.  One scan, not a schedule — the thing being avoided is a
+    // standing rescan, not a rescan.
+    CMD_RESCAN_BASES      = 0xA5,
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
     // Camera → mount → hub → clients: the camera's own status notifications,
     // relayed verbatim in the same framing as CMD_CAM_CONTROL.  Same reasoning

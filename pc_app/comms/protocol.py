@@ -135,6 +135,7 @@ class Cmd(IntEnum):
     MOUNT_ROUTE       = 0xA0   # hub→clients, 5B: per-cam 0 = direct, N = via satellite N
     SAT_HELLO         = 0xA3   # satellite→hub, 13B: its location name
     SAT_NAMES         = 0xA4   # hub→clients, 6×13B: slot → location name
+    RESCAN_BASES      = 0xA5   # hub→mounts: a satellite returned, re-pick a base
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
     CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
 

@@ -3103,6 +3103,28 @@ void loop() {
                             Serial.printf("[SAT] satellite %d is \"%s\"\n",
                                           i + 1, _sat[i].name);
                             send_sat_names();
+                            // A satellite is back.  Mounts that fell back to
+                            // this hub while it was away cannot know that, so
+                            // tell them to look again.  Rate-limited because a
+                            // flapping satellite reconnects repeatedly, and a
+                            // rescan storm is the thing this must not become.
+                            static uint32_t last_rescan_ms = 0;
+                            uint32_t nowr = millis();
+                            if (!last_rescan_ms || (nowr - last_rescan_ms) > 30000UL) {
+                                last_rescan_ms = nowr ? nowr : 1;
+                                uint8_t rb[PKT_BUF_SIZE + 4];
+                                uint16_t rn = build_packet(rb, MOUNT_BROADCAST,
+                                                           ++_pair_seq,
+                                                           CMD_RESCAN_BASES, nullptr, 0);
+                                // Per mount through the routed path, not a
+                                // radio broadcast: the mounts that most need
+                                // this are the ones that fell back to THIS hub,
+                                // and send_to_mount_routed() reaches each one
+                                // wherever it currently is.
+                                for (int k = 0; k < NUM_MOUNTS; k++)
+                                    send_to_mount_routed(k, rb, rn);
+                                Serial.println("[SAT] satellite back — asking mounts to rescan");
+                            }
                             hello = true;
                         }
                         break;

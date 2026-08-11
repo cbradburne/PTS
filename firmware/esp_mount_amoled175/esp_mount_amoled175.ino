@@ -107,6 +107,12 @@ static uint8_t     _hub_mac[6]  = {};     // active hub ESP-NOW address
 static uint8_t     _hub_channel = 1;
 static bool        _setup_active = false; // SETUP screen is showing (declared
                                           // early: gates main/level touch zones)
+// Set by CMD_RESCAN_BASES, acted on in hub_reacquire_poll().  A flag rather
+// than reaching into the reacquire state directly, because that state is
+// declared several hundred lines below the packet handler that sets this.
+static volatile bool _reacq_requested = false;
+static uint32_t      _reacq_hold_ms   = 0;   // stagger, so mounts scan one at a time
+
 static bool        _pair_active  = false; // camera-pairing screen is showing —
                                           // same reason, and the touch zones
                                           // must not fire underneath it either
@@ -878,6 +884,22 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
     uint8_t ack[PKT_BUF_SIZE + 4];
     esp_now_send(_hub_mac, ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
 
+    // "A satellite just came up — look again."  One scan, not a schedule.
+    //
+    // Staggered by mount id, because a scan takes the radio off-channel for a
+    // second or two and five mounts doing that together would blind the whole
+    // rig at once.  ~700 ms apart spreads it while still finishing inside four
+    // seconds.  hub_reacquire_poll()'s safe_to_scan already refuses to scan a
+    // mount that is MOVING, so a show in progress is not interrupted — it just
+    // rescans at the next idle moment.
+    if (pkt.cmd == CMD_RESCAN_BASES) {
+        _reacq_requested = true;       // hub_reacquire_poll() acts on it
+        _reacq_hold_ms   = millis() + (uint32_t)_mount_id * 700UL;
+        Serial.printf("[REACQ] hub says a satellite is back — rescanning in %lu ms\n",
+                      (unsigned long)((uint32_t)_mount_id * 700UL));
+        return;
+    }
+
     // Camera control stops here — it goes out over BLE, not down to the Teensy,
     // which has no idea what a Blackmagic command is and would log it as a bad
     // packet.  ACKed above either way: the ACK says the mount received the
@@ -1557,6 +1579,14 @@ static void hub_reacquire_poll() {
         // Scan only to make the boot choice, or because the base we chose has
         // stopped answering.  Nothing periodic: see the note above the REACQ
         // defines for what that cost and what replaces it.
+        // A satellite came back and the hub said so.  Re-arm the one-time pick,
+        // after the per-mount stagger so five mounts do not deafen themselves
+        // together.  safe_to_scan still applies, so a MOVING mount waits.
+        if (_reacq_requested && (int32_t)(nowm - _reacq_hold_ms) >= 0) {
+            _reacq_requested = false;
+            _reacq_boot_done = false;
+            _reacq_last_ms   = 0;
+        }
         bool due = boot_pick || (silent && (nowm - _reacq_last_ms) > REACQ_PERIOD_MS);
         if (safe_to_scan && due) {
             _reacq_last_ms  = nowm;
