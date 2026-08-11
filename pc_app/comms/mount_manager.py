@@ -648,10 +648,20 @@ class MountManager(QObject):
             # in the rssi column and want opposite remedies.
             snr = rmean - nmean
             worst = rmin - nmax          # the moment the frames actually died
+            # The floor is AGC-relative, not absolute: on 2026-08-11 mount 4
+            # reported -99 while hearing -79, and mounts 1 and 5 reported -90
+            # while hearing -48 and -41.  A receiver at high gain reports a
+            # different floor from one turned down.  So this reads as "high in
+            # any gain state", and the number to watch is a mount's own floor
+            # MOVING, not one mount against another.
             verdict = ("interference — the noise floor is up, not the signal down"
                        if nmax > -75 else
                        "quiet band — the noise floor is where it should be")
-            fn = log.warning if worst < 20 else log.info
+            # 10 dB, not 20.  20 was a guess and it cried wolf immediately:
+            # mount 4 sat at 18-19 dB for an hour, warning on every line, while
+            # failing 4 sends in 160 s.  802.11b at 1 Mbps needs roughly 4-10 dB,
+            # so below 10 is genuinely thin and above it is not worth a colour.
+            fn = log.warning if worst < 10 else log.info
             fn("RF cam%d: rssi %d/%d/%d  noise %d/%d/%d  (min/mean/max, dBm) "
                "| SNR %d dB, worst %d dB over %d frames | %s",
                mid, rmin, rmean, rmax, nmin, nmean, nmax, snr, worst, n, verdict)
