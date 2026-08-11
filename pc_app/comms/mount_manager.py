@@ -45,6 +45,7 @@ from .protocol import (
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
     decode_mount_table, decode_mount_route, decode_sat_names,
     MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, MOUNT_EVENT_TX_WEDGE,
+    MOUNT_EVENT_TX_WEDGE_REBOOT,
     RF_REPORT_PAYLOAD_LEN,
     decode_pair_conflict, PairConflictPayload,
 )
@@ -606,6 +607,16 @@ class MountManager(QObject):
             ref  = (b[9] << 8) | b[10]
             err  = (b[11] << 8) | b[12]
             wifi = b[13]
+            if kind == MOUNT_EVENT_TX_WEDGE_REBOOT:
+                # The escalation, and the only remedy with evidence behind it:
+                # 99 WiFi-level restarts on one mount changed nothing, and one
+                # reboot cleared the same fault for hours at identical signal.
+                log.warning(
+                    "MOUNT EVENT cam%d REBOOTED to clear a TX wedge — the "
+                    "WiFi-level restart did not hold (%d tried since boot) | "
+                    "%d sends failed, %d stack reinits | %s",
+                    mid, wifi, txf, rei, _espnow_err_text(ref, err))
+                return
             if kind == MOUNT_EVENT_TX_WEDGE:
                 # Not a restart: the mount recovered itself without rebooting.
                 # Worth a WARNING all the same — this is the failure that used

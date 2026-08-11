@@ -610,15 +610,43 @@ static uint32_t _espnow_reinit_held    = 0;      // requests suppressed by the g
 // longer than any burst of interference or a base rebooting underneath it.
 #define TXWEDGE_FAILS_PER_S   10UL
 #define TXWEDGE_SUSTAIN_MS    30000UL
-// Two WiFi restarts that both failed to hold means the fault is below anything
-// short of a boot, so stop repeating a remedy that is not working and let the
-// isolation path have it.
-#define TXWEDGE_MAX_RESTARTS  2
+// Escalation, rewritten after watching it fail for two and a half hours.
+//
+// The first version tried the WiFi-level restart up to twice per wedge and then
+// gave up and waited for the isolation path — which cannot fire during a TX
+// wedge, because RX is healthy by definition.  Both halves were wrong.  The cap
+// never applied at all: espnow_wifi_restart() sets _last_espnow_tx_ok_ms, and
+// the quota-reset three lines below tested that same timestamp, so every
+// restart satisfied its own recovery condition and handed the quota straight
+// back.  Mount 4 ran 99 of them, thirty seconds apart, failing 12 sends/s
+// before and after every single one.
+//
+// Then it rebooted itself and was clean for hours, at a byte-identical -76 dBm
+// with the noise floor at -99.  99 restarts: no effect.  One reboot: fixed.
+// So the WiFi restart is kept as a first try — it costs 300 ms against a boot's
+// ten seconds and a camera re-pair — but it is now PROVED, not assumed: after
+// it, the failure rate is watched for TXWEDGE_PROBATION_MS, and if the wedge is
+// still there the mount reboots rather than repeating a remedy 99 attempts say
+// does not work.
+#define TXWEDGE_PROBATION_MS  10000UL   // prove the WiFi restart worked, or escalate
+// Genuinely quiet, measured on the failure counter itself.  Deliberately NOT on
+// _last_espnow_tx_ok_ms: that is what the restart touches, and testing a clock
+// the remedy sets is how the old cap defeated itself.
+#define TXWEDGE_CLEAR_MS      60000UL
+#define TXWEDGE_MAX_REBOOTS   3         // then stay up rather than boot-loop
 static uint32_t _wifi_restarts     = 0;   // WiFi-level restarts since boot
 static uint32_t _txw_window_ms     = 0;   // when the current bad run started
 static uint32_t _txw_window_fails  = 0;   // _espnow_fail_total when it started
-static uint32_t _txw_restarts      = 0;   // WiFi restarts spent on this wedge
+static uint32_t _txw_probation_ms  = 0;   // watching a WiFi restart prove itself
+static uint32_t _txw_probation_f   = 0;   // failure count when probation began
+static uint32_t _txw_quiet_ms      = 0;   // last time the failure counter MOVED
+static uint32_t _txw_quiet_val     = 0;
 static bool     _txw_report_due    = false;
+// Survives the reboot it counts, so a mount cannot boot-loop on a fault a boot
+// does not fix.  Guarded by the same magic as _iso_restarts, and deliberately
+// NOT cleared by hub_ok: RX is healthy throughout a TX wedge, so an RX-based
+// reset would be no cap at all — the exact bug being fixed here.
+RTC_NOINIT_ATTR static uint32_t _wedge_reboots;
 static uint32_t _last_jog_fwd_ms    = 0;          // last CMD_JOG forwarded → defer health send
 static uint32_t _health_last_ms     = 0;
 static uint32_t _health_anom_ms     = 0;
@@ -2529,14 +2557,22 @@ void setup() {
     if (_evt_magic == MOUNT_EVT_MAGIC) {
         _evt_magic   = 0;
         _evt_pending = true;
+        if (_wedge_reboots)
+            Serial.printf("[ESPNOW] wedge reboot %lu of %d\n",
+                          (unsigned long)_wedge_reboots, TXWEDGE_MAX_REBOOTS);
         Serial.printf("[ESPNOW] last restart: kind %u, txfail %u, reinits %u, "
                       "RX stale %us, TX stale %us, refused %u (last err 0x%04X)\n",
                       _evt_kind, _evt_txfail, _evt_reinits, _evt_rx_s, _evt_tx_s,
                       _evt_refused, _evt_txerr);
     }
     if (_iso_magic != ISOLATION_RTC_MAGIC) {
-        _iso_magic    = ISOLATION_RTC_MAGIC;
-        _iso_restarts = 0;
+        _iso_magic     = ISOLATION_RTC_MAGIC;
+        _iso_restarts  = 0;
+        // Same magic, same reasoning: RTC_NOINIT holds whatever was in RAM
+        // after a power-on, and an unvalidated value here either disables the
+        // wedge reboots or spends the quota a human just reset by pulling the
+        // power.
+        _wedge_reboots = 0;
     } else if (_iso_restarts) {
         Serial.printf("[ESPNOW] Resumed after isolation restart %lu of %d\n",
                       (unsigned long)_iso_restarts, ESPNOW_RESTART_MAX);
@@ -2861,11 +2897,62 @@ void loop() {
     // Watched on the RATE of send failures, not on silence, so a mount that is
     // still receiving is not excused.  See TXWEDGE_FAILS_PER_S.
     {
-        uint32_t nw   = millis();
-        bool rx_alive = (nw - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
+        uint32_t nw    = millis();
         uint32_t fails = _espnow_fail_total;
-        if (!_cfg_valid || _setup_active || !rx_alive) {
-            _txw_window_ms = 0;                  // not our case; isolation has it
+        bool rx_alive  = (nw - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
+
+        // Track when the failure counter last MOVED.  This is the only honest
+        // measure of "recovered" available: nothing a remedy does can fake it.
+        if (fails != _txw_quiet_val) { _txw_quiet_val = fails; _txw_quiet_ms = nw; }
+        if (!_txw_quiet_ms) _txw_quiet_ms = nw;
+
+        // A genuinely quiet spell hands the reboot quota back, so a wedge hours
+        // ago does not leave the mount unable to rescue itself from the next.
+        if (_wedge_reboots && (nw - _txw_quiet_ms) > TXWEDGE_CLEAR_MS)
+            _wedge_reboots = 0;
+
+        // Probation: did the WiFi restart actually work?  Assumed before,
+        // measured now.
+        if (_txw_probation_ms && (nw - _txw_probation_ms) >= TXWEDGE_PROBATION_MS) {
+            uint32_t held = nw - _txw_probation_ms;
+            uint32_t got  = fails - _txw_probation_f;
+            _txw_probation_ms = 0;
+            if ((got * 1000UL / held) >= TXWEDGE_FAILS_PER_S) {
+                Serial.printf("[ESP-NOW] WiFi restart did NOT hold (%lu more fails "
+                              "in %lus) — rebooting\n",
+                              (unsigned long)got, (unsigned long)(held / 1000UL));
+                if (_wedge_reboots < TXWEDGE_MAX_REBOOTS) {
+                    _wedge_reboots++;
+                    // Stash it before the reboot; this is the only chance.
+                    _evt_magic   = MOUNT_EVT_MAGIC;
+                    _evt_kind    = MOUNT_EVENT_TX_WEDGE_REBOOT;
+                    _evt_txfail  = (uint16_t)fails;
+                    _evt_reinits = (uint16_t)_reinit_count;
+                    _evt_rx_s    = 0;              // RX was fine; that is the point
+                    _evt_tx_s    = (uint16_t)(held / 1000UL);
+                    _evt_refused = (uint16_t)_espnow_tx_refused;
+                    _evt_txerr   = _espnow_last_tx_err;
+                    esp_restart();
+                } else {
+                    // A boot has not fixed it either.  Stay up and keep working
+                    // as best we can rather than cycling: a mount that reboots
+                    // forever is worse than one that limps, and the log now says
+                    // which this is.
+                    static uint32_t moaned = 0;
+                    if (!moaned || (nw - moaned) > 60000UL) {
+                        moaned = nw ? nw : 1;
+                        Serial.printf("[ESP-NOW] TX still wedged after %d reboots — "
+                                      "staying up; this needs a human\n",
+                                      TXWEDGE_MAX_REBOOTS);
+                    }
+                }
+            } else {
+                Serial.println("[ESP-NOW] WiFi restart held — TX recovered");
+            }
+        }
+
+        if (!_cfg_valid || _setup_active || !rx_alive || _txw_probation_ms) {
+            _txw_window_ms = 0;                  // not our case, or already acting
         } else if (!_txw_window_ms) {
             _txw_window_ms    = nw ? nw : 1;
             _txw_window_fails = fails;
@@ -2882,38 +2969,22 @@ void loop() {
                               "while RX is healthy\n",
                               (unsigned long)got, (unsigned long)(held / 1000UL));
                 _txw_window_ms = 0;
-                if (_txw_restarts < TXWEDGE_MAX_RESTARTS) {
-                    _txw_restarts++;
-                    if (espnow_wifi_restart()) {
-                        // Reported once TX works again — it cannot be reported
-                        // now, which is the whole problem being fixed.
-                        _txw_report_due = true;
-                        _evt_txfail  = (uint16_t)fails;
-                        _evt_reinits = (uint16_t)_reinit_count;
-                        _evt_rx_s    = 0;   // RX was fine; that is the point
-                        _evt_tx_s    = (uint16_t)(held / 1000UL);
-                        _evt_refused = (uint16_t)_espnow_tx_refused;
-                        _evt_txerr   = _espnow_last_tx_err;
-                    }
-                } else {
-                    // Out of WiFi restarts.  Say so, and let the isolation path
-                    // take it if the mount ever goes fully quiet — repeating a
-                    // remedy that has already failed twice only wastes airtime.
-                    static uint32_t moaned = 0;
-                    if (!moaned || (nw - moaned) > 60000UL) {
-                        moaned = nw ? nw : 1;
-                        Serial.printf("[ESP-NOW] TX still wedged after %d WiFi "
-                                      "restarts — needs a reboot\n",
-                                      TXWEDGE_MAX_RESTARTS);
-                    }
+                if (espnow_wifi_restart()) {
+                    // Reported once TX works again — it cannot be reported now,
+                    // which is the whole problem being fixed.
+                    _txw_report_due   = true;
+                    _evt_txfail       = (uint16_t)fails;
+                    _evt_reinits      = (uint16_t)_reinit_count;
+                    _evt_rx_s         = 0;
+                    _evt_tx_s         = (uint16_t)(held / 1000UL);
+                    _evt_refused      = (uint16_t)_espnow_tx_refused;
+                    _evt_txerr        = _espnow_last_tx_err;
+                    // ...and now prove it worked, instead of assuming.
+                    _txw_probation_ms = millis();
+                    _txw_probation_f  = _espnow_fail_total;
                 }
             }
         }
-        // A clean spell hands the quota back, so a wedge hours ago does not
-        // leave the mount unable to rescue itself from the next one.
-        if (_txw_restarts && (nw - _last_espnow_tx_ok_ms) < 1000 &&
-                _espnow_fail_total == _txw_window_fails)
-            _txw_restarts = 0;
     }
 
     // ── Hub connection state ─────────────────────────────────────────────

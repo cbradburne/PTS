@@ -95,6 +95,13 @@
 // report at the time.  rx_stale_s is 0 by definition here: RX was fine, which
 // is exactly why the old rule missed it.
 #define MOUNT_EVENT_TX_WEDGE        2
+// The same wedge, escalated to a full chip reboot because the WiFi-level
+// restart did not hold.  Measured 2026-08-11: 99 consecutive WiFi restarts on
+// one mount left the failure rate at 12/s throughout, and a single esp_restart()
+// cleared it for hours at a byte-identical -76 dBm / -99 dBm noise floor.  So
+// something survives esp_wifi_stop()/start() that does not survive a boot, and
+// only the boot is a remedy.
+#define MOUNT_EVENT_TX_WEDGE_REBOOT 3
 // rssi min/mean/max (3 × int8) + noise floor min/mean/max (3 × int8)
 // + frames the window was measured over (2).  Signed dBm throughout; a report
 // with frames == 0 means nothing was heard at all, which is itself the answer.
