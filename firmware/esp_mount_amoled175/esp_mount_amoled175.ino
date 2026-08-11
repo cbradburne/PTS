@@ -548,6 +548,7 @@ static volatile int32_t  _rf_rssi_sum = 0, _rf_nf_sum = 0;
 static volatile int8_t   _rf_rssi_min = 0, _rf_rssi_max = 0;
 static volatile int8_t   _rf_nf_min   = 0, _rf_nf_max   = 0;
 static volatile uint16_t _rf_frames   = 0;
+static uint32_t          _rf_last_ms  = 0;
 static portMUX_TYPE      _rf_mux      = portMUX_INITIALIZER_UNLOCKED;
 
 static inline void rf_accumulate(int8_t rssi, int8_t nf) {
@@ -868,6 +869,20 @@ static void send_health(bool anomaly) {
 // than 2 s past its slot — one 33-byte frame among a 50 Hz jog stream is noise.
 static void health_check_bridge(uint32_t now) {
     if (!_cfg_valid) return;
+
+    // On its OWN clock, above every early return below.  Hung off the end of
+    // the health path first, which disabled it on exactly the mounts it was
+    // built for: a mount whose txfail is jumping is in permanent anomaly, takes
+    // the anomaly branch and its return on every pass, and never reaches the
+    // tail.  Mount 4 was failing 40 sends a second, flagged ANOMALY on every
+    // health line, and emitted not one RF report in the whole log.  A
+    // diagnostic that switches itself off when the fault appears is worse than
+    // none, because its silence reads as nothing to see.
+    if (now - _rf_last_ms >= HEALTH_INTERVAL_MS) {
+        _rf_last_ms = now;
+        send_rf_report();
+    }
+
     bool anomaly =
         (!_health_first_sent && now > 3000) ||
         (esp_get_free_heap_size() < HEALTH_LOW_HEAP_BYTES) ||
@@ -883,7 +898,6 @@ static void health_check_bridge(uint32_t now) {
     bool overdue  = (now - _health_last_ms) > HEALTH_INTERVAL_MS + 2000;
     if (jog_busy && !overdue) return;
     send_health(false);
-    send_rf_report();      // same cadence, so the two read side by side
 }
 
 // ---------------------------------------------------------------------------
