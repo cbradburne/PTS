@@ -289,6 +289,19 @@ class MountManager(QObject):
         from the hub once satellites are in play."""
         return list(self._mount_route)
 
+    def _log_route(self) -> None:
+        """Say which base every mount is on, using the best labels we have yet.
+
+        Which base a mount is on had only ever existed in the UI, which left
+        comms.log unable to tell a mount whose signal is DEGRADING from one
+        that is ALTERNATING between two bases — identical in the rssi column,
+        and opposite in what they need doing about them.
+        """
+        self._route_logged = True
+        log.info("MOUNT ROUTE: %s", ", ".join(
+            "cam%d %s" % (i + 1, "direct" if s == 0 else "via " + self.sat_label(s))
+            for i, s in enumerate(self._mount_route)))
+
     def sat_label(self, slot: int) -> str:
         """How to refer to satellite `slot` (1-based, as mount_route reports).
 
@@ -488,12 +501,7 @@ class MountManager(QObject):
                 # been either.  Logged on change, plus once at startup so a log
                 # that begins mid-session still says where everything is.
                 if changed or first:
-                    self._route_logged = True
-                    where = ", ".join(
-                        "cam%d %s" % (i + 1,
-                                      "direct" if s == 0 else "via " + self.sat_label(s))
-                        for i, s in enumerate(route))
-                    log.info("MOUNT ROUTE: %s", where)
+                    self._log_route()
             except Exception as e:
                 log.error(f"MOUNT_ROUTE decode failed: {e}")
             return
@@ -503,6 +511,14 @@ class MountManager(QObject):
                 if names != self._sat_names:
                     self._sat_names = names
                     self.sat_names_updated.emit(dict(names))
+                    # The route almost always arrives BEFORE the names — the hub
+                    # sends both in answer to one request, routes first — so the
+                    # first route line reads "via SAT 1" for a satellite that is
+                    # perfectly well named a moment later.  Say it again now
+                    # that it can be said properly; "via Foyer" is the whole
+                    # point of the names existing.
+                    if self._route_logged and any(self._mount_route):
+                        self._log_route()
             except Exception as e:
                 log.error(f"SAT_NAMES decode failed: {e}")
             return
