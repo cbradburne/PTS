@@ -137,6 +137,7 @@ class Cmd(IntEnum):
     SAT_NAMES         = 0xA4   # hub→clients, 6×13B: slot → location name
     RESCAN_BASES      = 0xA5   # hub→mounts: a satellite returned, re-pick a base
     MOUNT_EVENT       = 0xA6   # mount→clients, 13B: why it restarted itself
+    RF_REPORT         = 0xA7   # mount→clients, 8B: rssi + noise floor min/mean/max
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
     CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
 
@@ -1257,6 +1258,8 @@ MOUNT_EVENT_PAYLOAD_LEN   = 13
 # Satellite health arrives addressed SAT_ADDR_BASE + slot (1-based): the
 # satellite cannot know its own slot, so the hub stamps it on the way past.
 SAT_ADDR_BASE             = 0xF0
+# rssi min/mean/max + noise floor min/mean/max (6 × int8) + frames (2).
+RF_REPORT_PAYLOAD_LEN     = 8
 MOUNT_EVENT_ISOLATED      = 1
 CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
 

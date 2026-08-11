@@ -529,6 +529,47 @@ static volatile uint32_t _espnow_fail_total = 0;  // cumulative send failures si
 static volatile uint32_t _espnow_tx_refused  = 0; // sends the stack would not accept
 static volatile uint16_t _espnow_last_tx_err = 0; // esp_err_t of the most recent refusal
 static uint32_t _reinit_count       = 0;          // completed full ESP-NOW reinits
+
+// ---------------------------------------------------------------------------
+// RF window: rssi and noise floor, accumulated per frame.
+//
+// A link fails on signal-to-NOISE, and only the signal half has ever been
+// measured here.  -59 dBm on a -95 dBm floor has 36 dB of margin; the same
+// -59 dBm on a -65 dBm floor has six and dies.  Those two are indistinguishable
+// in the rssi column, want opposite remedies — leave the room alone and hunt an
+// interferer, or move the hardware — and an afternoon went into guessing
+// between them from where a mount happened to be standing.
+//
+// Written from the WiFi task's receive callback and read from loop(), so the
+// accumulators are volatile and the read swaps them under a critical section:
+// a torn min/max pair would read as a burst that never happened.
+// ---------------------------------------------------------------------------
+static volatile int32_t  _rf_rssi_sum = 0, _rf_nf_sum = 0;
+static volatile int8_t   _rf_rssi_min = 0, _rf_rssi_max = 0;
+static volatile int8_t   _rf_nf_min   = 0, _rf_nf_max   = 0;
+static volatile uint16_t _rf_frames   = 0;
+static portMUX_TYPE      _rf_mux      = portMUX_INITIALIZER_UNLOCKED;
+
+static inline void rf_accumulate(int8_t rssi, int8_t nf) {
+    portENTER_CRITICAL_ISR(&_rf_mux);
+    if (!_rf_frames) {
+        _rf_rssi_min = _rf_rssi_max = rssi;
+        _rf_nf_min   = _rf_nf_max   = nf;
+        _rf_rssi_sum = _rf_nf_sum  = 0;
+    } else {
+        if (rssi < _rf_rssi_min) _rf_rssi_min = rssi;
+        if (rssi > _rf_rssi_max) _rf_rssi_max = rssi;
+        if (nf   < _rf_nf_min)   _rf_nf_min   = nf;
+        if (nf   > _rf_nf_max)   _rf_nf_max   = nf;
+    }
+    if (_rf_frames < 0xFFFF) {
+        _rf_frames   = _rf_frames + 1;
+        _rf_rssi_sum = _rf_rssi_sum + rssi;
+        _rf_nf_sum   = _rf_nf_sum   + nf;
+    }
+    portEXIT_CRITICAL_ISR(&_rf_mux);
+}
+
 static uint32_t _espnow_last_reinit_ms = 0;      // for ESPNOW_REINIT_MIN_GAP_MS
 static uint32_t _espnow_reinit_held    = 0;      // requests suppressed by the gap
 
@@ -708,6 +749,32 @@ static void send_to_hub(CmdType cmd, const uint8_t *payload, uint8_t plen) {
     espnow_tx(_tx_buf, n);
 }
 
+// Drain the RF window and report it, then start a fresh one.  Swapped under the
+// same lock the callback writes with: a min taken from this window against a
+// max from the next would read as a burst that never happened.
+static void send_rf_report() {
+    int8_t   rmin, rmax, nmin, nmax;
+    int32_t  rsum, nsum;
+    uint16_t n;
+    portENTER_CRITICAL(&_rf_mux);
+    rmin = _rf_rssi_min; rmax = _rf_rssi_max; rsum = _rf_rssi_sum;
+    nmin = _rf_nf_min;   nmax = _rf_nf_max;   nsum = _rf_nf_sum;
+    n    = _rf_frames;
+    _rf_frames = 0;
+    portEXIT_CRITICAL(&_rf_mux);
+
+    // Nothing heard.  Reported rather than skipped: silence is the strongest
+    // reading there is, and a gap in the log would be indistinguishable from
+    // the mount being off.
+    int8_t rmean = n ? (int8_t)(rsum / (int32_t)n) : 0;
+    int8_t nmean = n ? (int8_t)(nsum / (int32_t)n) : 0;
+    uint8_t p[RF_REPORT_PAYLOAD_LEN] = {
+        (uint8_t)rmin, (uint8_t)rmean, (uint8_t)rmax,
+        (uint8_t)nmin, (uint8_t)nmean, (uint8_t)nmax,
+        (uint8_t)(n >> 8), (uint8_t)n };
+    send_to_hub(CMD_RF_REPORT, p, sizeof(p));
+}
+
 static void send_estop_to_teensy() {
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_packet(buf, _mount_id, ++_tx_seq, CMD_E_STOP, nullptr, 0);
@@ -816,6 +883,7 @@ static void health_check_bridge(uint32_t now) {
     bool overdue  = (now - _health_last_ms) > HEALTH_INTERVAL_MS + 2000;
     if (jog_busy && !overdue) return;
     send_health(false);
+    send_rf_report();      // same cadence, so the two read side by side
 }
 
 // ---------------------------------------------------------------------------
@@ -826,8 +894,15 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
                            const uint8_t *data, int len) {
     _last_hub_rx_ms = millis();
     _watchdog_fired = false;
-    if (recv_info && recv_info->rx_ctrl)
+    if (recv_info && recv_info->rx_ctrl) {
         _last_rssi = (int8_t)recv_info->rx_ctrl->rssi;
+        // The noise floor arrives with every frame, beside the rssi, and has
+        // never been read.  Accumulated rather than sampled: interference is
+        // bursty, and a spot reading taken every 10 s misses the burst that
+        // killed the frames in between.
+        rf_accumulate((int8_t)recv_info->rx_ctrl->rssi,
+                      (int8_t)recv_info->rx_ctrl->noise_floor);
+    }
     if (len <= 0 || len > ESPNOW_MAX_LEN) return;
     EspNowMsg msg;
     msg.len = (uint8_t)len;

@@ -44,7 +44,7 @@ from .protocol import (
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
     decode_mount_table, decode_mount_route, decode_sat_names,
-    MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED,
+    MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, RF_REPORT_PAYLOAD_LEN,
     decode_pair_conflict, PairConflictPayload,
 )
 
@@ -581,6 +581,29 @@ class MountManager(QObject):
                         " | %s",
                         mid, what, txf, rei, rx_s, tx_s, when,
                         _espnow_err_text(ref, err))
+            return
+
+        if pkt.cmd == Cmd.RF_REPORT and len(pkt.payload) >= RF_REPORT_PAYLOAD_LEN:
+            b = bytes(pkt.payload)
+            sig = [int.from_bytes(b[i:i+1], "big", signed=True) for i in range(6)]
+            rmin, rmean, rmax, nmin, nmean, nmax = sig
+            n = (b[6] << 8) | b[7]
+            if not n:
+                log.warning("RF cam%d: heard NOTHING in the last window", mid)
+                return
+            # SNR is the number that decides it.  A link fails on signal-to-
+            # noise, not signal: -59 dBm on a -95 dBm floor has 36 dB of margin
+            # and the same -59 on a -65 dBm floor has six.  Those are identical
+            # in the rssi column and want opposite remedies.
+            snr = rmean - nmean
+            worst = rmin - nmax          # the moment the frames actually died
+            verdict = ("interference — the noise floor is up, not the signal down"
+                       if nmax > -75 else
+                       "quiet band — the noise floor is where it should be")
+            fn = log.warning if worst < 20 else log.info
+            fn("RF cam%d: rssi %d/%d/%d  noise %d/%d/%d  (min/mean/max, dBm) "
+               "| SNR %d dB, worst %d dB over %d frames | %s",
+               mid, rmin, rmean, rmax, nmin, nmean, nmax, snr, worst, n, verdict)
             return
 
         if pkt.cmd == Cmd.STATUS:

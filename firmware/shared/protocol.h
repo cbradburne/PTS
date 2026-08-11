@@ -89,6 +89,10 @@
 // count says how often, and the esp_err_t says which refusal.
 #define MOUNT_EVENT_PAYLOAD_LEN     13
 #define MOUNT_EVENT_ISOLATED        1   // restarted itself: no RX and no TX
+// rssi min/mean/max (3 × int8) + noise floor min/mean/max (3 × int8)
+// + frames the window was measured over (2).  Signed dBm throughout; a report
+// with frames == 0 means nothing was heard at all, which is itself the answer.
+#define RF_REPORT_PAYLOAD_LEN       8
 #define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
 #define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients
 // Longest BMD camera-control command we will relay.  Theirs are a 4-byte header
@@ -283,6 +287,22 @@ typedef enum : uint8_t {
     // afterwards.  It rides the ordinary relay path, which forwards any mount
     // packet to serial and TCP, so no hub change is needed.
     CMD_MOUNT_EVENT       = 0xA6,
+    // Mount → clients, RF_REPORT_PAYLOAD_LEN: what the radio actually sees.
+    //
+    // rssi alone cannot answer the question that matters.  It is signal
+    // strength, and a link fails on signal-to-NOISE: -59 dBm on a -95 dBm floor
+    // is bulletproof, and the same -59 on a -65 dBm floor is dead.  A whole
+    // afternoon went into inferring which of those was happening from where a
+    // mount sat in a room, and three plausible physical explanations were
+    // disproved one after another by going and looking at the hardware.
+    //
+    // The noise floor was available the entire time, in the same rx_ctrl struct
+    // the rssi is read from, one line away and never read.
+    //
+    // min/mean/max over the window rather than an instantaneous sample, because
+    // interference is bursty: a radio mic keying up between two 10 s samples is
+    // invisible to a spot reading and obvious in a max.
+    CMD_RF_REPORT         = 0xA7,
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
     // Camera → mount → hub → clients: the camera's own status notifications,
     // relayed verbatim in the same framing as CMD_CAM_CONTROL.  Same reasoning
