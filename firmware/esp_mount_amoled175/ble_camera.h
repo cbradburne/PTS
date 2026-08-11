@@ -299,6 +299,21 @@ static uint32_t       _bc_replay_ms = 0;
 static uint8_t        _bc_replay_i  = 0;   // next cache entry to re-offer
 static bool           _bc_cache_full = false;  // dropped at least one parameter
 
+// When to ask the camera for a slower connection interval, and why it waits.
+//
+// Asking the instant the CCCD write is issued renegotiates the connection at
+// exactly the moment the camera starts dumping its parameters — and part of the
+// dump is lost.  Measured: 36 parameters arrived instead of the usual 41-42,
+// with ISO (1/14) and white balance (1/2) among the missing, so the PC app had
+// no numbers to show.  Same class of mistake as the overlapping GATT procedures
+// this file already carries a warning about: right operation, wrong moment.
+//
+// So it waits until the dump has been quiet for a while.  The interval only
+// matters for the steady state — the seconds after connecting are not where the
+// radio contention that this exists to fix does its damage.
+#define CAM_SLOW_AFTER_MS  8000UL
+static uint32_t       _bc_slow_at_ms = 0;   // 0 = nothing pending
+
 // BMD framing: [4]=category [5]=parameter identify the value being reported.
 static void bc_cache_store(const uint8_t *d, uint16_t n) {
     if (n < 6 || n > CAM_CONTROL_MAX_LEN) return;
@@ -383,36 +398,8 @@ static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
         Serial.printf("[CAM] status indications %s — camera usable %lu ms after boot\n",
                       rc ? "FAILED" : "enabled", (unsigned long)millis());
 
-        // Now the link is useful, ask the camera to slow it down.
-        //
-        // Measured at the venue: the mount carrying a camera lost ~200 ESP-NOW
-        // sends a MINUTE, continuously, and isolated itself every 15-60 minutes.
-        // Unpair the camera and the same mount, same satellite, same position
-        // ran 45 minutes with txfail moving 24 -> 24.  Zero.  The two mounts
-        // without cameras were clean throughout, and the same firmware with the
-        // same camera is fine at home where the mount talks straight to the hub.
-        // So it is the BLE connection itself taking radio time that ESP-NOW
-        // needs, and only the satellite path lacks the margin to absorb it.
-        //
-        // A camera negotiates an aggressive interval by default — it expects to
-        // be the only thing talking to a phone.  100-200 ms instead cuts BLE's
-        // share of the radio several-fold, and costs nothing that anyone can
-        // perceive: an autofocus arrives up to a tenth of a second later, and
-        // gain and white balance are already slower than that.
-        //
-        // Units are 1.25 ms for the interval and 10 ms for the timeout.  The
-        // timeout must exceed (1 + latency) * max_interval * 2 or the link drops
-        // on the first missed event; 4 s against a 200 ms interval is ten times
-        // the minimum, which is the right way round for a link that must not
-        // flap on a rig.
-        struct ble_gap_upd_params up = {};
-        up.itvl_min            = 80;    // 100 ms
-        up.itvl_max            = 160;   // 200 ms
-        up.latency             = 0;
-        up.supervision_timeout = 400;   // 4 s
-        int urc = ble_gap_update_params(conn, &up);
-        Serial.printf("[CAM] asked for a 100-200 ms connection interval, rc=%d%s\n",
-                      urc, urc ? " (camera may refuse — it is a request)" : "");
+        // The slower connection interval is asked for LATER — see _bc_slow_at_ms.
+        _bc_slow_at_ms = millis() + CAM_SLOW_AFTER_MS;
     } else if (err->status == BLE_HS_EDONE) {
         Serial.println("[CAM] no CCCD found — camera will not notify");
     }
@@ -574,6 +561,7 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         _bc_ncache        = 0;
         _bc_cache_full    = false;
         _bc_replay_i      = 0;
+        _bc_slow_at_ms    = 0;   // the next connection arms its own
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
@@ -999,6 +987,23 @@ static void ble_cam_poll() {
     // Re-offer what the camera has already said.  Only while connected and only
     // what it actually reported, so this invents nothing — it just stops the
     // information being a one-shot that a client had to be present to catch.
+    // Ask for the slower interval once the initial parameter dump has settled.
+    // See CAM_SLOW_AFTER_MS — doing this inline with the CCCD write cost the
+    // camera's ISO and white balance.
+    if (_bc_slow_at_ms && _bc_connected && (int32_t)(now - _bc_slow_at_ms) >= 0) {
+        _bc_slow_at_ms = 0;
+        struct ble_gap_upd_params up = {};
+        up.itvl_min            = 80;    // 100 ms, in 1.25 ms units
+        up.itvl_max            = 160;   // 200 ms
+        up.latency             = 0;
+        up.supervision_timeout = 400;   // 4 s, in 10 ms units — ten times the
+                                        // minimum for a 200 ms interval, so the
+                                        // link cannot flap on one missed event
+        int urc = ble_gap_update_params(_bc_conn, &up);
+        Serial.printf("[CAM] asked for a 100-200 ms connection interval, rc=%d%s\n",
+                      urc, urc ? " (camera may refuse — it is a request)" : "");
+    }
+
     if (CAM_REPLAY_MS && _bc_connected && _bc_ncache &&
             (now - _bc_replay_ms) >= CAM_REPLAY_MS) {
         _bc_replay_ms = now;
