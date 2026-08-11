@@ -194,6 +194,7 @@ class MountManager(QObject):
         # 0 = the hub reaches that cam directly, N = relayed by satellite N.
         self._mount_route: list[int] = [0] * NUM_MOUNTS
         self._route_logged = False
+        self._asked_for_table = False
         self._sat_names: dict[int, str] = {}
         self._cam_params_seen: set[tuple[int, int, int]] = set()
 
@@ -748,7 +749,22 @@ class MountManager(QObject):
 
     def _heartbeat(self) -> None:
         if not self._bridge.connected:
+            # Ask again on the next connection, and say the route again with
+            # it: a reconnect is exactly when the layout may have changed
+            # underneath us, and repeating it costs one line.
+            self._asked_for_table = False
+            self._route_logged    = False
             return
+
+        # Ask once per connection for the hub's pairing table.  The hub answers
+        # with the table, the ROUTES and the satellite names together, and until
+        # now nothing requested any of it except the pairing dialog — so a
+        # session where nobody opened that dialog never learned which base each
+        # mount was on, and the route logging added for exactly that question
+        # sat waiting for a packet that was never going to arrive.
+        if not self._asked_for_table:
+            self._asked_for_table = True
+            self.request_mount_table()
 
         self._send(pkt_ping(MOUNT_BROADCAST))
 
