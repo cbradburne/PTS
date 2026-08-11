@@ -710,7 +710,21 @@ static uint8_t  _dn_recover_run = 0;
 // is undefined after a power-on, hence the magic.
 #define SAT_RST_MAGIC          0x5A7E11E0UL
 #define SAT_RESTART_MAX_STREAK 3
-#define SAT_HEALTHY_CLEAR_MS   (10UL * 60UL * 1000UL)
+// Give the quota back once the box has been UP this long.
+//
+// 5 minutes, chosen against the observed failure: the stall recurs about every
+// six minutes, so a longer window would never be reached and the streak would
+// creep to the cap exactly as it did — three restarts last night, then
+// permanently shedding, with both mounts unreachable until someone power-cycled
+// it.  A box that manages five minutes of real service is not boot-looping; it
+// is working badly, and it should keep rescuing itself indefinitely rather than
+// give up.  A genuine boot loop never reaches five minutes, so the cap still
+// catches that.
+//
+// Cleared on UPTIME, not on "wedge-free", for the reason the hub already
+// records: requiring wedge-free deadlocks a persistently wedged box, because
+// the wedge keeps restamping the timer and the streak can never clear.
+#define SAT_HEALTHY_CLEAR_MS   (5UL * 60UL * 1000UL)
 RTC_NOINIT_ATTR static uint32_t _sat_rst_magic;
 RTC_NOINIT_ATTR static uint32_t _sat_rst_streak;
 #define DN_REPORT_MS  30000UL
@@ -911,6 +925,19 @@ static void forward_frame(const uint8_t *frame, uint16_t len) {
 
 // Called from loop().  Silent while nothing is being dropped, so this cannot
 // bury the log the way an unconditional heartbeat would.
+// Hand the restart quota back after a healthy spell.  Its absence was the bug:
+// the constant existed, the reasoning was written down, and nothing ever called
+// it — so the streak only counted up, reached the cap of 3, and left the box
+// shedding for good with two mounts unreachable.
+static void sat_restart_streak_poll(uint32_t now) {
+    if (_sat_rst_streak && now >= SAT_HEALTHY_CLEAR_MS) {
+        Serial.printf("[SELF] %lu min up — clearing self-restart streak (%lu)\n",
+                      (unsigned long)(SAT_HEALTHY_CLEAR_MS / 60000UL),
+                      (unsigned long)_sat_rst_streak);
+        _sat_rst_streak = 0;
+    }
+}
+
 static void downlink_report(uint32_t now) {
     if (now - _dn_last_report_ms < DN_REPORT_MS) return;
     _dn_last_report_ms = now;
@@ -1210,6 +1237,7 @@ void loop() {
     _ws.cleanupClients();
 
     downlink_report(now);
+    sat_restart_streak_poll(now);
 
     _loop_count++;
     uint32_t _dt = micros() - _t0;
