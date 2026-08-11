@@ -467,6 +467,25 @@ class MountManager(QObject):
 
         st = self._states[mid]
 
+        # ANY packet from a mount proves it is alive.  Until now only STATUS and
+        # PONG set this, so a mount could sit ACKing GET_CONFIG every four
+        # seconds — its speeds populating the UI perfectly — while the app still
+        # showed it greyed out as disconnected.  That is what the dimmed camera
+        # rows were: the app had the data and was ignoring the evidence.
+        #
+        # It also could not recover on its own, because the idle probe only
+        # polls mounts already believed connected, so a mount that missed the
+        # one PONG at startup was skipped by the very thing that would have
+        # noticed it.  Restarting the app was the only cure.
+        #
+        # Deliberately before the per-command handling, so it covers ACK, NACK,
+        # POSITION, CAM_STATUS and anything added later.
+        if not st.connected:
+            st.connected = True
+            self.mount_connected.emit(mid)
+            self._send(pkt_get_state(mid))     # as the STATUS path does
+        st.last_pong_ms = time.monotonic() * 1000
+
         if pkt.cmd == Cmd.STATUS:
             try:
                 s = decode_status(pkt.payload)
