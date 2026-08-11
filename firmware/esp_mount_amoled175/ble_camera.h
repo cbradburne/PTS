@@ -382,6 +382,37 @@ static int bc_on_dsc(uint16_t conn, const struct ble_gatt_error *err,
         // Reported so "it feels like a while" can be checked against a number.
         Serial.printf("[CAM] status indications %s — camera usable %lu ms after boot\n",
                       rc ? "FAILED" : "enabled", (unsigned long)millis());
+
+        // Now the link is useful, ask the camera to slow it down.
+        //
+        // Measured at the venue: the mount carrying a camera lost ~200 ESP-NOW
+        // sends a MINUTE, continuously, and isolated itself every 15-60 minutes.
+        // Unpair the camera and the same mount, same satellite, same position
+        // ran 45 minutes with txfail moving 24 -> 24.  Zero.  The two mounts
+        // without cameras were clean throughout, and the same firmware with the
+        // same camera is fine at home where the mount talks straight to the hub.
+        // So it is the BLE connection itself taking radio time that ESP-NOW
+        // needs, and only the satellite path lacks the margin to absorb it.
+        //
+        // A camera negotiates an aggressive interval by default — it expects to
+        // be the only thing talking to a phone.  100-200 ms instead cuts BLE's
+        // share of the radio several-fold, and costs nothing that anyone can
+        // perceive: an autofocus arrives up to a tenth of a second later, and
+        // gain and white balance are already slower than that.
+        //
+        // Units are 1.25 ms for the interval and 10 ms for the timeout.  The
+        // timeout must exceed (1 + latency) * max_interval * 2 or the link drops
+        // on the first missed event; 4 s against a 200 ms interval is ten times
+        // the minimum, which is the right way round for a link that must not
+        // flap on a rig.
+        struct ble_gap_upd_params up = {};
+        up.itvl_min            = 80;    // 100 ms
+        up.itvl_max            = 160;   // 200 ms
+        up.latency             = 0;
+        up.supervision_timeout = 400;   // 4 s
+        int urc = ble_gap_update_params(conn, &up);
+        Serial.printf("[CAM] asked for a 100-200 ms connection interval, rc=%d%s\n",
+                      urc, urc ? " (camera may refuse — it is a request)" : "");
     } else if (err->status == BLE_HS_EDONE) {
         Serial.println("[CAM] no CCCD found — camera will not notify");
     }
