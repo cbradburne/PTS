@@ -65,6 +65,40 @@ HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
 IDLE_PROBE_INTERVAL_S  = 3.0
 
 
+# esp_now_send() refusals, named.  ESP_ERR_ESPNOW_BASE is ESP_ERR_WIFI_BASE
+# (0x3000) + 100, and these are the codes the mount can actually hit; anything
+# else prints as hex rather than being guessed at.  Named here because the whole
+# point of the exercise is a log line an operator can read at the rig — a bare
+# 0x3067 is the same dead end as no number at all.
+_ESPNOW_ERRS = {
+    0x3065: "ESP-NOW not initialised",
+    0x3066: "invalid argument",
+    0x3067: "OUT OF MEMORY — the stack's TX queue was full",
+    0x3068: "peer list full",
+    0x3069: "peer not found — the base it was sending to had gone",
+    0x306A: "internal error",
+    0x306B: "peer already exists",
+    0x306C: "wifi interface error",
+    0x306D: "wrong channel",
+}
+
+
+def _espnow_err_text(refused: int, err: int) -> str:
+    """Describe the synchronous send refusals leading up to a restart.
+
+    These are the sends esp_now_send() rejected outright rather than queued.
+    They never reach the send callback, so they move neither txfail nor the
+    last-good-TX clock: the mount goes quiet with every counter frozen, which
+    is precisely how mount 5 looked on 2026-08-11 — txfail pinned at 70 for the
+    whole three-minute outage.  A zero here is therefore a real answer, not a
+    missing one: it rules the refusal path out and points back at the radio.
+    """
+    if not refused:
+        return "the stack accepted every send (0 refused) — TX stopped below that"
+    name = _ESPNOW_ERRS.get(err, f"unknown error 0x{err:04X}")
+    return f"{refused} sends REFUSED by the stack, last: {name}"
+
+
 @dataclass
 class MountState_:
     """Live state for one mount."""
@@ -499,11 +533,21 @@ class MountManager(QObject):
             rei  = (b[3] << 8) | b[4]
             rx_s = (b[5] << 8) | b[6]
             tx_s = (b[7] << 8) | b[8]
+            ref  = (b[9] << 8) | b[10]
+            err  = (b[11] << 8) | b[12]
             what = ("isolated — no RX and no TX" if kind == MOUNT_EVENT_ISOLATED
                     else f"kind {kind}")
+            # RX silence is pinned to the mount's 2-minute restart threshold by
+            # construction, so it is the GAP that means something: TX dying
+            # first, then RX following, is a stack going down in stages rather
+            # than a mount driving out of range.
+            gap = tx_s - rx_s
+            when = (f", TX died {gap}s before RX" if gap > 0 else "")
             log.warning("MOUNT EVENT cam%d RESTARTED ITSELF: %s | at the time: "
-                        "txfail %d, %d stack reinits, RX silent %ds, TX silent %ds",
-                        mid, what, txf, rei, rx_s, tx_s)
+                        "txfail %d, %d stack reinits, RX silent %ds, TX silent %ds%s"
+                        " | %s",
+                        mid, what, txf, rei, rx_s, tx_s, when,
+                        _espnow_err_text(ref, err))
             return
 
         if pkt.cmd == Cmd.STATUS:

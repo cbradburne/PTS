@@ -82,7 +82,12 @@
 // one end knows is how a parser starts reading the next packet's header.
 #define SAT_SLOTS                   6
 // kind(1) + txfail(2) + reinits(2) + rx_stale_s(2) + tx_stale_s(2)
-#define MOUNT_EVENT_PAYLOAD_LEN     9
+//        + tx_refused(2) + last_tx_err(2)
+// The last two were added after the first real capture: txfail stayed frozen
+// across a three-minute outage, which means the sends were never reaching the
+// send callback at all — esp_now_send() was refusing them synchronously.  The
+// count says how often, and the esp_err_t says which refusal.
+#define MOUNT_EVENT_PAYLOAD_LEN     13
 #define MOUNT_EVENT_ISOLATED        1   // restarted itself: no RX and no TX
 #define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
 #define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients

@@ -722,11 +722,26 @@ class Bridge:
             # plumbing for an update rate nothing can perceive.
             if 1 <= pkt.mount_id <= 5:
                 self._cam_ble[pkt.mount_id] = "unpaired" if unpaired else linked
+        # A bridge packs two counters into the node-specific u32: refusals in the
+        # high half, ESP-NOW reinits in the low half.  Refusals are sends that
+        # esp_now_send() rejected outright, so they never reach the send callback
+        # and never move txfail — a mount can go completely silent with txfail
+        # frozen, which is what mount 5 did on 2026-08-11.  Shown next to txfail
+        # because that is the number it has to be read against.  The low half is
+        # unchanged, so older logs still read the same.
+        n32 = h.node_u32
+        if h.node_name == "bridge":
+            refused = (n32 >> 16) & 0xFFFF
+            n32txt  = "n32 %d" % (n32 & 0xFFFF)
+            if refused:
+                n32txt += " | TX REFUSED %d" % refused
+        else:
+            n32txt = "n32 %d" % n32
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "
-                "loopmax %4dms | txfail %d | rssi %d | n32 %d | reset %d%s") % (
+                "loopmax %4dms | txfail %d | rssi %d | %s | reset %d%s") % (
             who, h.uptime_s / 3600.0,
             h.free_heap // 1024, h.min_free_heap // 1024,
-            h.loop_max_ms, h.tx_fail, h.rssi, h.node_u32, h.reset_reason, ble)
+            h.loop_max_ms, h.tx_fail, h.rssi, n32txt, h.reset_reason, ble)
         # Any node whose uptime goes BACKWARDS has restarted.  Derived from
         # CMD_HEALTH rather than the hub's USB byte counter, so it works on
         # every transport and for every node — the counter-based HUB REBOOTED

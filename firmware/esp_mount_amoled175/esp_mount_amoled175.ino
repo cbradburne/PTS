@@ -251,6 +251,7 @@ RTC_NOINIT_ATTR static uint32_t _iso_restarts;
 RTC_NOINIT_ATTR static uint32_t _evt_magic;
 RTC_NOINIT_ATTR static uint8_t  _evt_kind;
 RTC_NOINIT_ATTR static uint16_t _evt_txfail, _evt_reinits, _evt_rx_s, _evt_tx_s;
+RTC_NOINIT_ATTR static uint16_t _evt_refused, _evt_txerr;
 static bool _evt_pending = false;   // set at boot, cleared once sent
 #define STATUS_HEARTBEAT_MS    5000
 #define TEENSY_PROBE_MS        2000
@@ -515,6 +516,18 @@ static volatile bool    _espnow_need_refresh   = false; // peer del/add requeste
                                                         // send callback — it can corrupt the stack)
 // Uniform health telemetry (bridge node)
 static volatile uint32_t _espnow_fail_total = 0;  // cumulative send failures since boot
+// esp_now_send() can refuse a frame outright rather than queue it — NO_MEM when
+// the stack's transmit queue is full, NOT_FOUND for a peer that has gone, and a
+// handful of others.  A refusal never reaches the send callback, so it moves
+// NEITHER tx_fail NOR _last_espnow_tx_ok_ms, and the mount goes silent with every
+// counter frozen.  That is exactly how mount 5 looked on 2026-08-11: txfail
+// pinned at 70 across the whole outage while TX died, so the one number being
+// watched said "healthy radio" throughout.  The satellite had the same wedge and
+// the same blind spot until it started reading this return; the mount ignored it
+// at all four send sites, which is why three minutes of downtime left no trace
+// beyond "it went quiet".
+static volatile uint32_t _espnow_tx_refused  = 0; // sends the stack would not accept
+static volatile uint16_t _espnow_last_tx_err = 0; // esp_err_t of the most recent refusal
 static uint32_t _reinit_count       = 0;          // completed full ESP-NOW reinits
 static uint32_t _espnow_last_reinit_ms = 0;      // for ESPNOW_REINIT_MIN_GAP_MS
 static uint32_t _espnow_reinit_held    = 0;      // requests suppressed by the gap
@@ -676,10 +689,23 @@ static void espnow_peer_long_range(const uint8_t *mac) {
     esp_now_set_peer_rate_config(mac, &rate);
 }
 
+// Every ESP-NOW send to the hub goes through here, so a refusal is counted
+// exactly once and in one place.  Returning void keeps the call sites unchanged:
+// none of them can do anything useful about a refusal in the moment — the point
+// is that the refusal is now visible afterwards instead of invisible always.
+static void espnow_tx(const uint8_t *buf, uint16_t n) {
+    esp_err_t e = esp_now_send(_hub_mac, buf, n);
+    if (e != ESP_OK) {
+        // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
+        _espnow_tx_refused  = _espnow_tx_refused + 1;
+        _espnow_last_tx_err = (uint16_t)e;
+    }
+}
+
 static void send_to_hub(CmdType cmd, const uint8_t *payload, uint8_t plen) {
     if (!_cfg_valid) return;   // unpaired — no hub to send to
     uint16_t n = build_packet(_tx_buf, _mount_id, ++_tx_seq, cmd, payload, plen);
-    esp_now_send(_hub_mac, _tx_buf, n);
+    espnow_tx(_tx_buf, n);
 }
 
 static void send_estop_to_teensy() {
@@ -745,7 +771,15 @@ static void send_health(bool anomaly) {
 #elif UI_PROFILE
     h.node_u32      = ((uint32_t)_ui_lvgl_max_ms << 16) | _ui_flush_max_ms;
 #else
-    h.node_u32      = _reinit_count;
+    // Packed: refusals in the high half, reinits in the low half.  The field is
+    // defined as node-specific, and this keeps the wire format, the golden test
+    // and every existing log line unchanged — a bridge's reinit count has only
+    // ever been 0-3, so the low half still reads exactly as it always did.
+    // Worth the packing: a refusal count climbing is the wedge STARTING, which
+    // is two minutes of warning before the mount takes itself down, whereas the
+    // event report only ever arrives after the fact.
+    h.node_u32      = ((_espnow_tx_refused & 0xFFFFUL) << 16) |
+                      (_reinit_count & 0xFFFFUL);
 #endif
     uint8_t p[24];
     encode_health_payload(p, &h);
@@ -892,7 +926,7 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
     _last_hub_rx_ms = millis();
     if (pkt.cmd == CMD_JOG) _last_jog_fwd_ms = _last_hub_rx_ms;  // health-send deferral
     uint8_t ack[PKT_BUF_SIZE + 4];
-    esp_now_send(_hub_mac, ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
+    espnow_tx(ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
 
     // "A satellite just came up — look again."  One scan, not a schedule.
     //
@@ -962,9 +996,9 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
     }
     if (!_cfg_valid) return;   // unpaired — don't forward Teensy traffic anywhere
     uint8_t fwd[PKT_BUF_SIZE + 4];
-    esp_now_send(_hub_mac, fwd, build_packet(fwd, _mount_id, pkt.seq,
-                                             pkt.cmd, pkt.payload,
-                                             pkt.payload_len));
+    espnow_tx(fwd, build_packet(fwd, _mount_id, pkt.seq,
+                                pkt.cmd, pkt.payload,
+                                pkt.payload_len));
 }
 
 // ---------------------------------------------------------------------------
@@ -2315,8 +2349,9 @@ void setup() {
         _evt_magic   = 0;
         _evt_pending = true;
         Serial.printf("[ESPNOW] last restart: kind %u, txfail %u, reinits %u, "
-                      "RX stale %us, TX stale %us\n", _evt_kind, _evt_txfail,
-                      _evt_reinits, _evt_rx_s, _evt_tx_s);
+                      "RX stale %us, TX stale %us, refused %u (last err 0x%04X)\n",
+                      _evt_kind, _evt_txfail, _evt_reinits, _evt_rx_s, _evt_tx_s,
+                      _evt_refused, _evt_txerr);
     }
     if (_iso_magic != ISOLATION_RTC_MAGIC) {
         _iso_magic    = ISOLATION_RTC_MAGIC;
@@ -2512,8 +2547,8 @@ void setup() {
     ble_cam_on_status([](const uint8_t *d, uint16_t n) {
         if (!n || n > CAM_CONTROL_MAX_LEN) return;
         uint8_t buf[PKT_BUF_SIZE + 4];
-        esp_now_send(_hub_mac, buf,
-                     build_packet(buf, _mount_id, ++_tx_seq, CMD_CAM_STATUS, d, n));
+        espnow_tx(buf,
+                  build_packet(buf, _mount_id, ++_tx_seq, CMD_CAM_STATUS, d, n));
     });
     ble_cam_setup();
 }
@@ -2654,13 +2689,15 @@ void loop() {
     // event in the first place.
     if (_evt_pending && hub_ok) {
         _evt_pending = false;
-        uint8_t p9[MOUNT_EVENT_PAYLOAD_LEN] = {
+        uint8_t p[MOUNT_EVENT_PAYLOAD_LEN] = {
             _evt_kind,
             (uint8_t)(_evt_txfail  >> 8), (uint8_t)_evt_txfail,
             (uint8_t)(_evt_reinits >> 8), (uint8_t)_evt_reinits,
             (uint8_t)(_evt_rx_s    >> 8), (uint8_t)_evt_rx_s,
-            (uint8_t)(_evt_tx_s    >> 8), (uint8_t)_evt_tx_s };
-        send_to_hub(CMD_MOUNT_EVENT, p9, sizeof(p9));
+            (uint8_t)(_evt_tx_s    >> 8), (uint8_t)_evt_tx_s,
+            (uint8_t)(_evt_refused >> 8), (uint8_t)_evt_refused,
+            (uint8_t)(_evt_txerr   >> 8), (uint8_t)_evt_txerr };
+        send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
     }
     if (hub_ok != _ms.hub_connected) {
         _ms.hub_connected = hub_ok;
@@ -2688,8 +2725,14 @@ void loop() {
             _evt_kind    = MOUNT_EVENT_ISOLATED;
             _evt_txfail  = (uint16_t)_espnow_fail_total;
             _evt_reinits = (uint16_t)_reinit_count;
+            // _evt_rx_s is pinned near ESPNOW_RESTART_MS by construction — the
+            // restart fires the moment the LATER of the two crosses it, and RX
+            // is the later one whenever TX died first.  So it is the gap between
+            // the two that carries the information, not either on its own.
             _evt_rx_s    = (uint16_t)((millis() - _last_hub_rx_ms) / 1000UL);
             _evt_tx_s    = (uint16_t)((millis() - _last_espnow_tx_ok_ms) / 1000UL);
+            _evt_refused = (uint16_t)_espnow_tx_refused;
+            _evt_txerr   = _espnow_last_tx_err;
             esp_restart();
         } else {
             // Restarting has been tried and did not help.  Stay up and keep
