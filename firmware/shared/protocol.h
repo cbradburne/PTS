@@ -81,6 +81,9 @@
 // It lives here because it sizes a wire payload, and a payload length that only
 // one end knows is how a parser starts reading the next packet's header.
 #define SAT_SLOTS                   6
+// kind(1) + txfail(2) + reinits(2) + rx_stale_s(2) + tx_stale_s(2)
+#define MOUNT_EVENT_PAYLOAD_LEN     9
+#define MOUNT_EVENT_ISOLATED        1   // restarted itself: no RX and no TX
 #define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
 #define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients
 // Longest BMD camera-control command we will relay.  Theirs are a 4-byte header
@@ -261,6 +264,20 @@ typedef enum : uint8_t {
     // passes that on.  One scan, not a schedule — the thing being avoided is a
     // standing rescan, not a rescan.
     CMD_RESCAN_BASES      = 0xA5,
+    // Mount → clients, MOUNT_EVENT_PAYLOAD_LEN: why this mount restarted itself,
+    // reported once after it comes back.
+    //
+    // The isolation restart is the mount's own last resort, and until now it
+    // was invisible: while it is isolated it cannot transmit, so nothing
+    // reaches comms.log, and the restart that rescues it resets every counter
+    // that would have explained it.  A mount went from txfail 21 and a flat
+    // -48 dBm to total silence in one step, was gone three minutes, and came
+    // back with nothing to say about it.
+    //
+    // So the numbers are stashed in RTC_NOINIT before the restart and sent
+    // afterwards.  It rides the ordinary relay path, which forwards any mount
+    // packet to serial and TCP, so no hub change is needed.
+    CMD_MOUNT_EVENT       = 0xA6,
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
     // Camera → mount → hub → clients: the camera's own status notifications,
     // relayed verbatim in the same framing as CMD_CAM_CONTROL.  Same reasoning

@@ -44,6 +44,7 @@ from .protocol import (
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
     decode_mount_table, decode_mount_route, decode_sat_names,
+    MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED,
     decode_pair_conflict, PairConflictPayload,
 )
 
@@ -485,6 +486,25 @@ class MountManager(QObject):
             self.mount_connected.emit(mid)
             self._send(pkt_get_state(mid))     # as the STATUS path does
         st.last_pong_ms = time.monotonic() * 1000
+
+        if pkt.cmd == Cmd.MOUNT_EVENT and len(pkt.payload) >= MOUNT_EVENT_PAYLOAD_LEN:
+            # A mount explaining, after the fact, why it restarted itself.  It
+            # cannot say so at the time — while isolated it cannot transmit at
+            # all, and the restart clears the counters — so this is carried
+            # across the reboot in RTC memory.  WARNING level: a mount that had
+            # to rescue itself is worth noticing even when it came back.
+            b = bytes(pkt.payload)
+            kind = b[0]
+            txf  = (b[1] << 8) | b[2]
+            rei  = (b[3] << 8) | b[4]
+            rx_s = (b[5] << 8) | b[6]
+            tx_s = (b[7] << 8) | b[8]
+            what = ("isolated — no RX and no TX" if kind == MOUNT_EVENT_ISOLATED
+                    else f"kind {kind}")
+            log.warning("MOUNT EVENT cam%d RESTARTED ITSELF: %s | at the time: "
+                        "txfail %d, %d stack reinits, RX silent %ds, TX silent %ds",
+                        mid, what, txf, rei, rx_s, tx_s)
+            return
 
         if pkt.cmd == Cmd.STATUS:
             try:

@@ -242,6 +242,16 @@ static void cfg_load() {
 // and it should hand the mount its full quota of attempts back.
 RTC_NOINIT_ATTR static uint32_t _iso_magic;
 RTC_NOINIT_ATTR static uint32_t _iso_restarts;
+
+// Why the last restart happened, carried across it in RTC_NOINIT and reported
+// once the mount is back on the air.  See CMD_MOUNT_EVENT: while a mount is
+// isolated it cannot transmit, so the event is invisible in comms.log, and the
+// restart that rescues it clears every counter that would have explained it.
+#define MOUNT_EVT_MAGIC 0x4D0E5701UL
+RTC_NOINIT_ATTR static uint32_t _evt_magic;
+RTC_NOINIT_ATTR static uint8_t  _evt_kind;
+RTC_NOINIT_ATTR static uint16_t _evt_txfail, _evt_reinits, _evt_rx_s, _evt_tx_s;
+static bool _evt_pending = false;   // set at boot, cleared once sent
 #define STATUS_HEARTBEAT_MS    5000
 #define TEENSY_PROBE_MS        2000
 #define TOUCH_POLL_MS            50
@@ -2298,6 +2308,16 @@ void setup() {
     // brownout this holds whatever was in RAM — which could be a huge value
     // that silently disables the restarts entirely, or a small one that spends
     // a quota the operator has just reset by pulling the power.
+    // A note from the restart that just happened, if there was one.  Checked
+    // before anything can overwrite it, and consumed once so a power-cycle
+    // later does not re-report an old event.
+    if (_evt_magic == MOUNT_EVT_MAGIC) {
+        _evt_magic   = 0;
+        _evt_pending = true;
+        Serial.printf("[ESPNOW] last restart: kind %u, txfail %u, reinits %u, "
+                      "RX stale %us, TX stale %us\n", _evt_kind, _evt_txfail,
+                      _evt_reinits, _evt_rx_s, _evt_tx_s);
+    }
     if (_iso_magic != ISOLATION_RTC_MAGIC) {
         _iso_magic    = ISOLATION_RTC_MAGIC;
         _iso_restarts = 0;
@@ -2627,6 +2647,21 @@ void loop() {
     // and is later isolated again gets to retry rather than staying passive
     // because of an outage hours ago.
     if (hub_ok && _iso_restarts) _iso_restarts = 0;
+
+    // Report the last restart, once, as soon as there is somewhere to report it.
+    // Deliberately gated on hub_ok rather than sent at boot: a mount that comes
+    // back still isolated would otherwise shout into the same void that hid the
+    // event in the first place.
+    if (_evt_pending && hub_ok) {
+        _evt_pending = false;
+        uint8_t p9[MOUNT_EVENT_PAYLOAD_LEN] = {
+            _evt_kind,
+            (uint8_t)(_evt_txfail  >> 8), (uint8_t)_evt_txfail,
+            (uint8_t)(_evt_reinits >> 8), (uint8_t)_evt_reinits,
+            (uint8_t)(_evt_rx_s    >> 8), (uint8_t)_evt_rx_s,
+            (uint8_t)(_evt_tx_s    >> 8), (uint8_t)_evt_tx_s };
+        send_to_hub(CMD_MOUNT_EVENT, p9, sizeof(p9));
+    }
     if (hub_ok != _ms.hub_connected) {
         _ms.hub_connected = hub_ok;
         ui_update();
@@ -2648,6 +2683,13 @@ void loop() {
             Serial.printf("[ESPNOW] Mount isolated (no RX or TX) — restarting chip to "
                           "recover stack (attempt %lu of %d)\n",
                           (unsigned long)_iso_restarts, ESPNOW_RESTART_MAX);
+            // Leave a note for after the reboot — this is the only chance.
+            _evt_magic   = MOUNT_EVT_MAGIC;
+            _evt_kind    = MOUNT_EVENT_ISOLATED;
+            _evt_txfail  = (uint16_t)_espnow_fail_total;
+            _evt_reinits = (uint16_t)_reinit_count;
+            _evt_rx_s    = (uint16_t)((millis() - _last_hub_rx_ms) / 1000UL);
+            _evt_tx_s    = (uint16_t)((millis() - _last_espnow_tx_ok_ms) / 1000UL);
             esp_restart();
         } else {
             // Restarting has been tried and did not help.  Stay up and keep
