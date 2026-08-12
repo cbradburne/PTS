@@ -1081,20 +1081,38 @@ static void espnow_full_reinit() {
 // particular is documented as only taking effect after esp_wifi_start().
 static bool espnow_wifi_restart() {
     if (!_cfg_valid) return false;
-    Serial.println("[ESP-NOW] WiFi-level restart start");
+    Serial.println("[ESP-NOW] WiFi teardown start");
     esp_now_deinit();
-    esp_err_t e = esp_wifi_stop();
-    if (e != ESP_OK) Serial.printf("[ESP-NOW] esp_wifi_stop: %s\n", esp_err_to_name(e));
-    delay(150);
-    e = esp_wifi_start();
-    if (e != ESP_OK) {
-        // Nothing left below this but the isolation restart, so say so plainly
-        // rather than leaving a silent failed rung in the log.
-        Serial.printf("[ESP-NOW] esp_wifi_start FAILED: %s — only a reboot left\n",
-                      esp_err_to_name(e));
-        return false;
-    }
-    delay(150);
+
+    // WiFi.mode(WIFI_OFF), not esp_wifi_stop().
+    //
+    // The first version of this called esp_wifi_stop()/esp_wifi_start(), and it
+    // never once worked: mount 4 ran 99 of them thirty seconds apart, failing
+    // 12 sends/s before and after every single one, then rebooted itself and was
+    // clean for fourteen hours at identical signal.
+    //
+    // esp_wifi_stop() leaves the driver INITIALISED, so its TX buffer pool stays
+    // allocated — and espressif/esp-idf#18682 reports exactly this fault as a
+    // leak of that pool: esp_now_send() returns NO_MEM once enough buffers are
+    // never returned by a send-complete callback that does not fire.  A pool
+    // that is leaking cannot be fixed by a remedy that does not free it, which
+    // is why only the reboot worked.  That issue reports esp_now_deinit/init as
+    // failing and a full WiFi teardown as recovering, which is what this is.
+    //
+    // Arduino's WiFi.mode(WIFI_OFF) reaches esp_wifi_deinit() via
+    // espWiFiStop()->wifiLowLevelDeinit(), and going through the Arduino API
+    // rather than calling esp_wifi_deinit() directly keeps WiFiGeneric's own
+    // lowLevelInitDone bookkeeping in step — behind its back, the next
+    // WiFi.mode() would not re-initialise.
+    WiFi.mode(WIFI_OFF);
+    delay(200);
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(200);
+
+    // Re-applied rather than assumed to survive: the driver has been destroyed
+    // and rebuilt, and esp_wifi_set_max_tx_power() only takes effect after the
+    // interface is up at all.
     esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_set_max_tx_power(84);
     esp_wifi_set_protocol(WIFI_IF_STA,
@@ -1102,7 +1120,7 @@ static bool espnow_wifi_restart() {
     esp_wifi_set_channel(_hub_channel, WIFI_SECOND_CHAN_NONE);
 
     if (esp_now_init() != ESP_OK) {
-        Serial.println("[ESP-NOW] re-init after WiFi restart FAILED");
+        Serial.println("[ESP-NOW] re-init after WiFi teardown FAILED — only a reboot left");
         return false;
     }
     esp_now_register_recv_cb(on_espnow_recv);
@@ -1119,10 +1137,10 @@ static bool espnow_wifi_restart() {
     _espnow_need_refresh  = false;
     _espnow_need_reinit   = false;
     // Give the recovered link the same grace a fresh boot gets, so the very
-    // restart that fixed things is not immediately counted as more silence.
+    // teardown that fixed things is not immediately counted as more silence.
     _last_espnow_tx_ok_ms = millis();
     _wifi_restarts++;
-    Serial.printf("[ESP-NOW] WiFi-level restart done (%lu since boot)\n",
+    Serial.printf("[ESP-NOW] WiFi teardown done (%lu since boot)\n",
                   (unsigned long)_wifi_restarts);
     return true;
 }
