@@ -550,7 +550,13 @@ static uint16_t  _la_dir_seq = 0;       // sequence counter for hub-injected CMD
 
 #include "esp_attr.h"
 
-#define SELF_WEDGE_ALIVE_MS      7000UL   // "mount is alive" = STATUS within this (AMOLED heartbeats every 5 s)
+// "Mount is alive" = STATUS seen within this.  Was 7 s against a 10 Hz STATUS
+// stream, which made it unmissable.  The mount now sends STATUS on CHANGE plus a
+// 5 s refresh, so 7 s left exactly one refresh of margin: a single lost packet
+// dropped a healthy mount out of the live set, and this window gates the hub's
+// wedge detector, its reinit ladder and its own restart.  16 s tolerates three
+// consecutive misses and is still far inside any real outage.
+#define SELF_WEDGE_ALIVE_MS     16000UL
 #define SELF_WEDGE_MIN_FAILS     2        // uninterrupted send fails before the wedge clock starts
 #define SELF_REINIT_AFTER_MS     6000UL   // wedge age → full ESP-NOW reinit
 #define SELF_WIFI_REINIT_AFTER_MS 14000UL // wedge age → bounce WiFi (below ESP-NOW)
@@ -1871,11 +1877,20 @@ static void health_check(uint32_t now) {
     for (int i = 0; i < NUM_MOUNTS; i++)
         if (_mount_last_seen[i] && (now - _mount_last_seen[i]) < SELF_WEDGE_ALIVE_MS)
             fail_live += _espnow_fail_cum[i];
+    // fail_live sums only the mounts currently alive, so it FALLS when one ages
+    // out and rises when it returns — it is not monotonic, and both operands are
+    // unsigned.  Written as a bare subtraction it wrapped to ~4 billion the
+    // moment a mount went quiet, which is always over any threshold: 427 of 522
+    // hub health lines came out flagged, 82%, on a hub whose heap, loop time and
+    // txfail were all perfectly healthy.  A warning that is on four times out of
+    // five is not a warning.
+    bool txfail_jump = (fail_live > _health_last_txfail) &&
+                       ((fail_live - _health_last_txfail) >= HEALTH_TXFAIL_JUMP);
     bool anomaly =
         (!_health_first_sent && now > 3000) ||
         (esp_get_free_heap_size() < HEALTH_LOW_HEAP_BYTES) ||
         (_health_loop_max_ms > HEALTH_LOOP_STALL_MS) ||
-        (fail_live - _health_last_txfail >= HEALTH_TXFAIL_JUMP);
+        txfail_jump;
     _health_fail_live = fail_live;
     if (anomaly && (now - _health_anom_ms) >= HEALTH_ANOMALY_GAP_MS) {
         _health_anom_ms = now;
