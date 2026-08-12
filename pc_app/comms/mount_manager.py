@@ -852,7 +852,17 @@ class MountManager(QObject):
         elif pkt.cmd == Cmd.PONG:
             st.connected    = True
             st.last_pong_ms = time.monotonic() * 1000
-            self._send(pkt_get_status(mid))
+            # No GET_STATUS here.  This turned one heartbeat into two downlink
+            # frames per mount — ping out, pong back, status request out — and
+            # measuring the relay showed the two of them were 95% of everything
+            # it carried: PING x60 and GET_STATUS x60 per 10 s against 126 frames
+            # total.  Half of that was the app asking a question it had just
+            # provoked itself into asking.
+            #
+            # It is also now redundant: the mount sends STATUS when state
+            # CHANGES, plus a 5 s refresh, so polling on every pong asks for
+            # something already volunteered.  A pong proves the mount is alive,
+            # which is all a pong was ever for.
 
         elif pkt.cmd == Cmd.NACK:
             try:
