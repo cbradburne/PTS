@@ -151,6 +151,13 @@ props_for() {
     # CAM_REPLAY_MS=0 turns the camera status replay OFF, to test whether its
     # 3.3 sends/s are what tips a satellite-attached mount into isolating.
     [ -n "${CAM_REPLAY_MS:-}" ] && _f="$_f -DCAM_REPLAY_MS=${CAM_REPLAY_MS}UL"
+    # TEENSY_FWD_FILTER=0 restores the old behaviour: forward every Teensy packet
+    # over the air, including POSITION at 5 Hz and STATUS at 10 Hz.  Default 1
+    # sends state on CHANGE plus a 5 s refresh, and drops the position stream
+    # nothing subscribes to.  Here as a toggle so the two can be compared on the
+    # same rig rather than argued about.
+    #   TEENSY_FWD_FILTER=0 tools/build.sh flash amoled
+    [ -n "${TEENSY_FWD_FILTER:-}" ] && _f="$_f -DTEENSY_FWD_FILTER=${TEENSY_FWD_FILTER}"
 
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""

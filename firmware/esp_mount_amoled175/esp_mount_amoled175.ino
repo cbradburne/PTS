@@ -503,6 +503,9 @@ static uint32_t _last_hub_rx_ms      = 0;
 static volatile uint32_t _last_espnow_tx_ok_ms = 0;
 static bool     _watchdog_fired      = false;
 static uint32_t _last_teensy_st_ms   = 0;
+// When a client last asked for a position.  The unsolicited 5 Hz stream is
+// filtered out; an explicit request still gets answered.
+static uint32_t _last_getpos_ms      = 0;
 static uint32_t _last_heartbeat_ms   = 0;
 static int8_t   _last_rssi           = 0;
 static uint32_t _last_rssi_update_ms = 0;
@@ -1134,8 +1137,22 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
     if (pkt.mount_id != _mount_id && pkt.mount_id != MOUNT_BROADCAST) return;
     _last_hub_rx_ms = millis();
     if (pkt.cmd == CMD_JOG) _last_jog_fwd_ms = _last_hub_rx_ms;  // health-send deferral
-    uint8_t ack[PKT_BUF_SIZE + 4];
-    espnow_tx(ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
+    if (pkt.cmd == CMD_GET_POSITION) _last_getpos_ms = _last_hub_rx_ms;
+    // Everything gets an ACK except JOG.
+    //
+    // Jog runs at 20 Hz to the active mount, and this replied to every frame —
+    // so jogging put 20 packets a second back on the air that nothing reads.
+    // The PC app has JOG in _TX_QUIET_CMDS and does not track its ACKs; the
+    // 802.11 layer has already acknowledged the frame, which is what made the
+    // hub's send succeed in the first place.  It was the single highest-rate
+    // transmission on the rig and every one of them was discarded on arrival.
+    //
+    // Losing a jog frame costs 50 ms of a superseding stream.  Losing a
+    // COMMAND matters, so those still answer.
+    if (pkt.cmd != CMD_JOG) {
+        uint8_t ack[PKT_BUF_SIZE + 4];
+        espnow_tx(ack, build_ack(ack, _mount_id, ++_tx_seq, pkt.seq));
+    }
 
     // "A satellite just came up — look again."  One scan, not a schedule.
     //
@@ -1167,6 +1184,94 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
     uint8_t fwd[PKT_BUF_SIZE + 4];
     Serial1.write(fwd, build_packet(fwd, pkt.mount_id, pkt.seq,
                                     pkt.cmd, pkt.payload, pkt.payload_len));
+}
+
+// ---------------------------------------------------------------------------
+// What is worth putting on the air
+// ---------------------------------------------------------------------------
+// Every Teensy packet used to be forwarded, unconditionally: STATUS at 10 Hz,
+// POSITION at 5 Hz while moving, LOOK_AT_STATUS at 10 Hz.  Most of it was read
+// by nobody.
+//
+// POSITION had no subscriber at all — pc_app/comms/position_log.py says so in
+// its own opening comment, and the logger there was written afterwards to give
+// the stream a purpose.  LOOK_AT_STATUS carries three positional floats and the
+// only consumer reads two fields, subject_id and look_at_active, ignoring the
+// rest.  STATUS carries state, presets and slot masks, which change a few times
+// a minute and were being sent six hundred times a minute.
+//
+// So: send state when it CHANGES, plus a slow refresh in case a change was
+// lost, and stop streaming positions nothing reads.  A stream is self-healing —
+// miss one and the truth arrives 100 ms later — and removing it removes that,
+// which is what the refresh is for.  It is not belt and braces; it is the thing
+// that stops a lost transition being wrong forever.
+#ifndef TEENSY_FWD_FILTER
+#define TEENSY_FWD_FILTER 1          // 0 restores the old forward-everything
+#endif
+// Long enough that it is not a stream, short enough that a lost change is a
+// hitch rather than a fault.  5 s, not 10, because the look-at Run advances on
+// a transition and stalls until it sees one.
+#define STATE_REFRESH_MS   5000UL
+// An explicit CMD_GET_POSITION is answered for this long afterwards, so the
+// on-demand path still works while the unsolicited stream does not.
+#define POS_ON_DEMAND_MS   2000UL
+
+static uint32_t _fwd_status_ms = 0;
+static uint8_t  _fwd_status[10] = {};
+static uint8_t  _fwd_status_len = 0;
+static uint32_t _fwd_la_ms      = 0;
+static uint8_t  _fwd_la_subj    = 0xFE;   // not a valid subject or 0xFF
+static uint8_t  _fwd_la_flags   = 0xFF;
+
+static bool teensy_frame_worth_sending(const ParsedPacket &pkt) {
+#if !TEENSY_FWD_FILTER
+    return true;
+#else
+    uint32_t now = millis();
+    switch (pkt.cmd) {
+
+    case CMD_POSITION:
+        // Only when someone actually asked.  _last_getpos_ms is set when a
+        // CMD_GET_POSITION arrives from the hub, so a client that wants a
+        // reading still gets one; the 5 Hz stream behind it stops.
+        return (now - _last_getpos_ms) < POS_ON_DEMAND_MS;
+
+    case CMD_STATUS: {
+        // On change, or on the refresh.  Compared over the whole payload
+        // because every byte of it is state someone acts on.
+        uint8_t n = pkt.payload_len > sizeof(_fwd_status)
+                  ? (uint8_t)sizeof(_fwd_status) : pkt.payload_len;
+        bool changed = (n != _fwd_status_len) ||
+                       memcmp(_fwd_status, pkt.payload, n) != 0;
+        if (!changed && (now - _fwd_status_ms) < STATE_REFRESH_MS) return false;
+        memcpy(_fwd_status, pkt.payload, n);
+        _fwd_status_len = n;
+        _fwd_status_ms  = now;
+        return true;
+    }
+
+    case CMD_LOOK_AT_STATUS: {
+        // Compared on subject_id and flags ONLY.  The three floats beside them
+        // change every single frame, so comparing the payload would forward
+        // every frame and change nothing — and those floats are exactly the
+        // positional data nothing reads.
+        if (pkt.payload_len < 14) return true;      // malformed; let it through
+        uint8_t subj = pkt.payload[12], flags = pkt.payload[13];
+        bool changed = (subj != _fwd_la_subj) || (flags != _fwd_la_flags);
+        if (!changed && (now - _fwd_la_ms) < STATE_REFRESH_MS) return false;
+        _fwd_la_subj  = subj;
+        _fwd_la_flags = flags;
+        _fwd_la_ms    = now;
+        return true;
+    }
+
+    default:
+        // Everything else is already an event: LIMITS_FOUND, HOME_COMPLETE,
+        // SUBJECT_LIST, CALIB_PROMPT, REF_CONFIRMED, ACK, NACK.  Each is sent
+        // once because something happened, and each is the only notice of it.
+        return true;
+    }
+#endif
 }
 
 static void handle_teensy_packet(const ParsedPacket &pkt) {
@@ -1204,6 +1309,7 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
         }
     }
     if (!_cfg_valid) return;   // unpaired — don't forward Teensy traffic anywhere
+    if (!teensy_frame_worth_sending(pkt)) return;
     uint8_t fwd[PKT_BUF_SIZE + 4];
     espnow_tx(fwd, build_packet(fwd, _mount_id, pkt.seq,
                                 pkt.cmd, pkt.payload,
