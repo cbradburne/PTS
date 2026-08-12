@@ -3284,11 +3284,32 @@ void loop() {
     static uint32_t _last_bcast_report_ms = 0;
     if (now - _last_bcast_report_ms >= 30000UL) {
         _last_bcast_report_ms = now;
-        if (_bcast_dropped)
+        if (_bcast_dropped) {
             DIAG_PRINTF("[BCAST] %lu of %lu client writes dropped "
                           "(slow reader — frames shed, loop NOT blocked)\n",
                           (unsigned long)_bcast_dropped,
                           (unsigned long)_bcast_sent);
+            // ...and say it where it can actually be read.
+            //
+            // This counter has existed all along and been unreachable twice
+            // over: DIAG_PRINTF compiles out unless the build sets DIAG=1, and
+            // even then it goes to a serial port nothing is attached to.  So
+            // the hub has been shedding frames to the PC, counting them
+            // exactly, and filing the count nowhere.
+            //
+            // It matters more than the comment above it assumed.  "Status is
+            // superseded within 200 ms" is true of STATUS and false of an ACK:
+            // an acknowledgement is never repeated, so a shed one is
+            // indistinguishable from a command the mount ignored.  Mount 1 is
+            // currently showing 20% of its commands unanswered while both radios
+            // report every send succeeding, which is what that looks like.
+            uint8_t e[9] = { 10,
+                (uint8_t)(_bcast_dropped >> 24), (uint8_t)(_bcast_dropped >> 16),
+                (uint8_t)(_bcast_dropped >>  8), (uint8_t)_bcast_dropped,
+                (uint8_t)(_bcast_sent    >> 24), (uint8_t)(_bcast_sent    >> 16),
+                (uint8_t)(_bcast_sent    >>  8), (uint8_t)_bcast_sent };
+            send_hub_event_raw(e);
+        }
         _bcast_dropped = _bcast_sent = 0;
     }
 

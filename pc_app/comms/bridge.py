@@ -984,6 +984,18 @@ class Bridge:
                 note = f" | {drop}% of serial frames dropped"
             fn("HUB LOOP: %d loops/s | worst pass %d ms | worst section '%s' "
                "%d ms%s", lps, pms, sec, sms, note)
+        elif kind == 10:
+            # Frames the hub SHED to a slow TCP client — counted since 2026-06,
+            # reported only to a serial port nothing reads, in a build where the
+            # report was compiled out.  It is the hub's one deliberate
+            # frame-discard path, and it does not distinguish a STATUS (replaced
+            # 200 ms later, safe to drop) from an ACK (never repeated, so a
+            # dropped one looks exactly like a command the mount ignored).
+            drop = int.from_bytes(pkt.payload[1:5], "big")
+            sent = int.from_bytes(pkt.payload[5:9], "big")
+            log.warning("HUB SHED %d of %d client writes (%.1f%%) — a dropped ACK "
+                        "is indistinguishable from a command that never landed",
+                        drop, sent, 100.0 * drop / max(1, sent))
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "
