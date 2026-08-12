@@ -198,6 +198,15 @@ class Bridge:
     # a few seconds is a large margin; the post-connect grace below covers the
     # slower cold-start ACKs (~1–3 s) seen right after a (re)connect.
     WEDGE_DETECT_S = 3.0
+    # Command ledger.  A command unanswered for this long is counted lost — well
+    # past any ordinary round trip (steady state is 47-80 ms) and past the late
+    # answers that the wedge dict throws away.
+    CMD_DEADLINE_S = 10.0
+    # Acknowledged, but slowly enough that an operator would have noticed. A
+    # separate count from lost, because "it worked eventually" and "it never
+    # happened" feel identical at the time and want different fixes.
+    CMD_SLOW_MS    = 750.0
+    CMD_REPORT_S   = 300.0
     # A mount that has ACKED something within this window is NOT wedged, however
     # many other commands are outstanding.  The discriminator has to be the ACK,
     # not merely a packet arriving:
@@ -278,6 +287,20 @@ class Bridge:
         self._diag_lock = threading.Lock()
         # seq → (sent_monotonic_ts, cmd_name, mount_id)
         self._pending_acks: dict[int, tuple[float, str, int]] = {}
+        # Command ledger — a RECORD, deliberately separate from _pending_acks.
+        # That dict exists for wedge detection and prunes hard: when an ACK
+        # arrives it deletes every earlier entry for the same mount, and an ACK
+        # whose entry has gone is dropped without even being logged.  Sensible
+        # for deciding "is this mount wedged right now"; useless as a history,
+        # and reading it as one produced a 19% loss figure for a mount that had
+        # simply been answering a little late.
+        #
+        # This answers the question that actually matters: of the commands sent
+        # to a mount, how many did it acknowledge, and how quickly.  Nothing
+        # prunes it but the deadline below.
+        self._cmd_ledger: dict[int, tuple[float, int]] = {}   # seq -> (sent_t, mount)
+        self._cmd_stat: dict[int, dict] = {}
+        self._cmd_report_t = 0.0
         # Mounts known to be PRESENT (so an unacked command to them is a real
         # wedge, not just an absent mount we shouldn't reconnect-loop on).  A
         # mount counts as present if it has ACKed a command OR sent us any packet
@@ -1004,6 +1027,46 @@ class Bridge:
     # Diagnostic helpers — TX command / ACK round-trip tracking
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _new_cmd_stat() -> dict:
+        return {"sent": 0, "acked": 0, "lost": 0, "slow": 0,
+                "rtt_sum": 0.0, "rtt_max": 0.0}
+
+    def _cmd_ledger_tick(self, now: float) -> None:
+        """Age out commands nothing answered, and report per mount.
+
+        The report is what the operator actually asked for: not "did anything
+        reboot", but what fraction of what the app asked a mount to do, the
+        mount did.  Those are different questions and a rig can pass the first
+        while failing the second — mount 4 spent an hour looking perfectly
+        connected while dropping 79% of its commands.
+        """
+        with self._diag_lock:
+            for seq in [q for q, (t, _m) in self._cmd_ledger.items()
+                        if now - t > self.CMD_DEADLINE_S]:
+                _t, mnt = self._cmd_ledger.pop(seq)
+                self._cmd_stat.setdefault(mnt, self._new_cmd_stat())["lost"] += 1
+            if now - self._cmd_report_t < self.CMD_REPORT_S:
+                return
+            self._cmd_report_t = now
+            snapshot = {m: dict(v) for m, v in self._cmd_stat.items()}
+            self._cmd_stat = {}
+        for mnt in sorted(snapshot):
+            v = snapshot[mnt]
+            done = v["acked"]
+            # In flight at the cut-off: neither answered nor yet late.  Excluded
+            # from the denominator rather than counted as either.
+            settled = done + v["lost"]
+            if not settled:
+                continue
+            pct  = 100.0 * done / settled
+            mean = (v["rtt_sum"] / done) if done else 0.0
+            who  = "hub" if mnt == 0xFE else f"cam{mnt}"
+            fn = log.warning if v["lost"] or v["slow"] else log.info
+            fn("CMD %-5s %d/%d acknowledged (%.3f%%) | lost %d, slow %d | "
+               "rtt mean %.0f ms, worst %.0f ms",
+               who, done, settled, pct, v["lost"], v["slow"], mean, v["rtt_max"])
+
     def _note_tx_command(self, data: bytes) -> None:
         """Called from the TX thread after an interesting command is written.
         Logs it and records its seq so the matching ACK can be timed."""
@@ -1020,6 +1083,8 @@ class Bridge:
         self._last_tracked_tx_t = now
         with self._diag_lock:
             self._pending_acks[seq] = (now, name, mount)
+            self._cmd_ledger[seq] = (now, mount)
+            self._cmd_stat.setdefault(mount, self._new_cmd_stat())["sent"] += 1
         log.info("TX → %-18s mount=%d seq=%d (%d bytes) — awaiting ACK",
                  name, mount, seq, len(data))
 
@@ -1036,6 +1101,18 @@ class Bridge:
         if len(pkt.payload) < 2:
             return
         acked_seq = (pkt.payload[0] << 8) | pkt.payload[1]
+        # Ledger first, and unconditionally: this must not inherit the pruning
+        # below, which is what hid late answers from the record.
+        with self._diag_lock:
+            rec = self._cmd_ledger.pop(acked_seq, None)
+            if rec is not None:
+                sent_t, mnt = rec
+                st = self._cmd_stat.setdefault(mnt, self._new_cmd_stat())
+                rtt = (time.monotonic() - sent_t) * 1000.0
+                st["acked"] += 1
+                st["rtt_sum"] += rtt
+                if rtt > st["rtt_max"]: st["rtt_max"] = rtt
+                if rtt > self.CMD_SLOW_MS: st["slow"] += 1
         with self._diag_lock:
             entry = self._pending_acks.pop(acked_seq, None)
             # An ACK proves the mount is responding *now*, so anything we sent it
@@ -1245,6 +1322,8 @@ class Bridge:
                                     wedged_mount, oldest, self.WEDGE_DETECT_S)
 
             # ── Health snapshot (slow cadence) ────────────────────────────
+            self._cmd_ledger_tick(now)
+
             if self.HEALTH_LOG_INTERVAL > 0 and (now - last_health) >= self.HEALTH_LOG_INTERVAL:
                 last_health = now
                 rx_age = (now - self._last_rx_t) if self._last_rx_t is not None else -1.0
