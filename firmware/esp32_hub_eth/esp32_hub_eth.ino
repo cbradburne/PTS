@@ -3104,13 +3104,14 @@ void loop() {
                         // app can say which satellite it is looking at.  Only
                         // the header changes — the 24-byte record is forwarded
                         // exactly as the satellite built it.
-                        if (hpk.cmd == CMD_HEALTH &&
-                            hpk.payload_len >= 1 &&
-                            hpk.payload[0] == HEALTH_NODE_SATELLITE) {
+                        if ((hpk.cmd == CMD_HEALTH &&
+                             hpk.payload_len >= 1 &&
+                             hpk.payload[0] == HEALTH_NODE_SATELLITE) ||
+                            hpk.cmd == CMD_SAT_DOWNLINK) {
                             uint8_t  sb[PKT_BUF_SIZE + 4];
                             uint16_t sn = build_packet(sb,
                                                        (uint8_t)(SAT_ADDR_BASE + i + 1),
-                                                       hpk.seq, CMD_HEALTH,
+                                                       hpk.seq, hpk.cmd,
                                                        hpk.payload, hpk.payload_len);
                             broadcast_to_all(sb, sn);
                             consumed = true;

@@ -36,7 +36,8 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_SUBSCR,
                        HEALTH_FLAG_CAM_RX,
                        HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL,
-                       HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names)
+                       HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names,
+                       SAT_DOWNLINK_PAYLOAD_LEN)
 
 log = logging.getLogger(__name__)
 
@@ -309,6 +310,9 @@ class Bridge:
         # Satellite slot → name, so a satellite's health line can be headed
         # "Foyer" rather than "SAT 1".  Empty until the hub sends SAT_NAMES.
         self._sat_names: dict[int, str] = {}
+        # Last cumulative downlink ledger per satellite, so each line can be
+        # reported as a delta rather than an ever-growing total.
+        self._sat_dn_prev: dict[str, tuple] = {}
         # Same thing across restarts of THIS app: {node: {uptime_s, reset, at}}.
         self._node_state_prev: dict = self._node_state_load()
         self._node_state_cur:  dict = {}
@@ -568,12 +572,50 @@ class Bridge:
         self._note_hub_diag(pkt)
         self._note_hub_event(pkt)
         self._note_sat_names(pkt)
+        self._note_sat_downlink(pkt)
         self._note_node_health(pkt)
         for cb in self._callbacks:
             try:
                 cb(pkt)
             except Exception as e:
                 log.error(f"Packet callback error: {e}")
+
+    def _note_sat_downlink(self, pkt: Packet) -> None:
+        """What the relay was asked to do, against what its radio took.
+
+        Refusals were the only thing counted, and a refusal count on its own
+        cannot be read.  The Foyer satellite restarted 36 times in 17 hours with
+        ~1100 refusals before each — which is a stopped radio if only ~1200 were
+        offered, and a flooded relay if a million were.  Differencing two of
+        these lines answers it directly, so the traffic question stops being an
+        argument and becomes a subtraction.
+        """
+        if pkt.cmd != Cmd.SAT_DOWNLINK or len(pkt.payload) < SAT_DOWNLINK_PAYLOAD_LEN:
+            return
+        b = bytes(pkt.payload)
+        offered, attempts, sent, refused = (
+            int.from_bytes(b[i:i+4], "big") for i in (0, 4, 8, 12))
+        slot = pkt.mount_id - SAT_ADDR_BASE
+        who  = self._sat_names.get(slot) or f"SAT {slot}"
+        prev = self._sat_dn_prev.get(who)
+        self._sat_dn_prev[who] = (offered, attempts, sent, refused)
+        if prev is None:
+            return                        # nothing to difference against yet
+        d_off, d_att, d_sent, d_ref = (a - b_ for a, b_ in
+                                       zip((offered, attempts, sent, refused), prev))
+        if d_off < 0 or d_att < 0:        # the satellite rebooted; counters reset
+            return
+        # A refusal burst with attempts far above offered is ONE frame being
+        # retried, not many frames arriving — the pump holds the head frame on
+        # NO_MEM and tries it again next pass.  That distinction is the whole
+        # point of counting both.
+        note = ""
+        if d_ref:
+            note = (" | REFUSING — %d retries per frame offered"
+                    % (d_att // max(1, d_off)) if d_off else " | REFUSING")
+        fn = log.warning if d_ref else log.info
+        fn("SAT DOWNLINK %-12s offered %d, sent %d, refused %d (%d send calls)%s",
+           who, d_off, d_sent, d_ref, d_att, note)
 
     def _note_sat_names(self, pkt: Packet) -> None:
         """Learn satellite names here rather than borrowing MountManager's copy.

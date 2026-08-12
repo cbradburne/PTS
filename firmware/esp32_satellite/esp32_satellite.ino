@@ -539,6 +539,15 @@ static uint32_t _dn_nomem     = 0;   // esp_now_send() refusals
 // from those would sawtooth back to zero every window.  That is precisely the
 // shape a fault looks like when it clears itself, so it would get read as one.
 static uint32_t _sat_nomem_total   = 0;   // send refusals since boot
+// What the relay was ASKED to do, against what the radio took.  Only refusals
+// were ever counted, and a refusal count alone cannot be read: this box
+// restarted itself 36 times in 17 hours with ~1100 refusals before each, and
+// 1100 out of 1150 offered is a radio that stopped while 1100 out of a million
+// is a relay being flooded.  Opposite diagnoses, opposite fixes, and nothing in
+// the log could separate them.
+static uint32_t _sat_dn_offered    = 0;   // frames the hub gave us to relay
+static uint32_t _sat_dn_attempts   = 0;   // esp_now_send() calls — see below
+static uint32_t _sat_dn_sent_total = 0;   // ...of which returned ESP_OK
 static uint32_t _sat_unacked_total = 0;   // downlink sends no mount acked, since boot
 static uint32_t _sat_loopmax_ms    = 0;   // worst single pass since boot
 static uint32_t _up_writes    = 0;   // actual send() calls (batches, not frames)
@@ -781,6 +790,7 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
 // intention — a stale jog is worth less than the stop that followed it.
 static void dn_enqueue(uint8_t idx, const uint8_t *frame, uint16_t len) {
     if (len > sizeof(((DnFrame *)0)->data)) return;
+    _sat_dn_offered++;
     uint8_t next = (uint8_t)((_dn_head + 1) % DN_QUEUE_DEPTH);
     if (next == _dn_tail) {
         _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
@@ -844,6 +854,12 @@ static void dn_pump(uint32_t now) {
             _dn_no_peer++;
             continue;
         }
+        // Counted per CALL, not per frame: a NO_MEM makes the pump hold this
+        // frame and try it again next pass, so one stuck frame can raise the
+        // refusal count without limit.  attempts vs refusals is what tells the
+        // two apart, and it is the whole reason this counter exists separately
+        // from _sat_dn_offered.
+        _sat_dn_attempts++;
         esp_err_t e = esp_now_send(_peer[f.idx].mac, f.data, f.len);
         if (e == ESP_ERR_ESPNOW_NO_MEM) {
             _dn_nomem++;
@@ -901,6 +917,7 @@ static void dn_pump(uint32_t now) {
         _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
         if (e == ESP_OK) {
             _dn_sent++;
+            _sat_dn_sent_total++;
             _dn_last_ok_ms = now;
             _dn_recover_run = 0;        // a real send proves the stack is back
         } else {
@@ -1088,6 +1105,35 @@ static void sat_send_health(uint32_t now) {
     uint8_t  frame[PKT_BUF_SIZE + 4];
     uint16_t fn = build_health(frame, 0, ++_sat_health_seq, &h);
 
+    uint8_t  mac[6];
+    WiFi.softAPmacAddress(mac);
+    uint8_t  env[SAT_ENV_MAX];
+    uint16_t en = sat_env_build(env, mac, 0, frame, fn);
+    if (en) _uplink.write(env, en);
+}
+
+// The downlink ledger, on the same clock as health.  Cumulative since boot, so
+// it can be differenced across any two lines in the log; the [RATE] counters
+// next door are windowed and cannot be.
+static uint32_t _sat_dn_report_ms = 0;
+
+static void sat_send_downlink(uint32_t now) {
+    if (!_uplink.connected()) return;
+    // Its own clock, deliberately.  Hung off the end of sat_send_health() this
+    // would inherit that function's early returns, which is exactly how the
+    // mount's RF report ended up disabled on the one mount that had the fault.
+    if (_sat_dn_report_ms && (now - _sat_dn_report_ms) < HEALTH_INTERVAL_MS) return;
+    _sat_dn_report_ms = now ? now : 1;
+    uint32_t v[4] = { _sat_dn_offered, _sat_dn_attempts,
+                      _sat_dn_sent_total, _sat_nomem_total };
+    uint8_t p[SAT_DOWNLINK_PAYLOAD_LEN];
+    for (int i = 0; i < 4; i++) {
+        p[i*4+0] = (uint8_t)(v[i] >> 24); p[i*4+1] = (uint8_t)(v[i] >> 16);
+        p[i*4+2] = (uint8_t)(v[i] >>  8); p[i*4+3] = (uint8_t)(v[i]);
+    }
+    uint8_t  frame[PKT_BUF_SIZE + 4];
+    uint16_t fn = build_packet(frame, 0, ++_sat_health_seq,
+                               CMD_SAT_DOWNLINK, p, sizeof(p));
     uint8_t  mac[6];
     WiFi.softAPmacAddress(mac);
     uint8_t  env[SAT_ENV_MAX];
@@ -1304,6 +1350,7 @@ void loop() {
     downlink_report(now);
     sat_restart_streak_poll(now);
     sat_send_health(now);
+    sat_send_downlink(now);
 
     _loop_count++;
     uint32_t _dt = micros() - _t0;

@@ -106,6 +106,8 @@
 // + frames the window was measured over (2).  Signed dBm throughout; a report
 // with frames == 0 means nothing was heard at all, which is itself the answer.
 #define RF_REPORT_PAYLOAD_LEN       8
+// offered(4) + attempts(4) + sent(4) + refused(4), all cumulative since boot.
+#define SAT_DOWNLINK_PAYLOAD_LEN   16
 #define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
 #define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients
 // Longest BMD camera-control command we will relay.  Theirs are a 4-byte header
@@ -316,6 +318,22 @@ typedef enum : uint8_t {
     // interference is bursty: a radio mic keying up between two 10 s samples is
     // invisible to a spot reading and obvious in a max.
     CMD_RF_REPORT         = 0xA7,
+    // Satellite → clients, SAT_DOWNLINK_PAYLOAD_LEN: what the relay was ASKED
+    // to do versus what the radio took.
+    //
+    // Only refusals were ever counted, and a refusal count alone cannot be
+    // read.  The satellite restarted itself 36 times in 17 hours with nomem at
+    // ~1100 before each one, and 1100 refused could be 1100 out of 1150 offered
+    // (a radio that stopped) or 1100 out of a million (a relay being flooded).
+    // Those are opposite diagnoses wanting opposite fixes, and the log could not
+    // tell them apart.
+    //
+    // attempts is counted separately from offered on purpose: a NO_MEM makes the
+    // pump hold the frame and try it again, so one stuck frame can raise the
+    // refusal count indefinitely.  offered vs sent says whether traffic is
+    // getting through; attempts vs nomem says whether the refusals are many
+    // frames or one frame hammered.
+    CMD_SAT_DOWNLINK      = 0xA8,
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
     // Camera → mount → hub → clients: the camera's own status notifications,
     // relayed verbatim in the same framing as CMD_CAM_CONTROL.  Same reasoning
