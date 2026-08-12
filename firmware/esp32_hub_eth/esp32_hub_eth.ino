@@ -958,9 +958,18 @@ static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
     uint8_t  raw[PKT_BUF_SIZE + 4];
     uint16_t raw_len = build_packet(raw, mount_id, ++ui_seq, cmd, payload, plen);
     if (mount_id == MOUNT_BROADCAST) {
-        for (int i = 0; i < NUM_MOUNTS; i++)
-            if (mount_mac_valid(i))
-                send_to_mount_routed(i, raw, raw_len);
+        // E-STOP is deliberately NOT de-duplicated.  Every other broadcast goes
+        // down a satellite link once, because the satellite fans it to its own
+        // peers and a second copy is pure waste.  A stop command is the one
+        // where a wasted copy is cheaper than a lost one, and the extra copies
+        // were there — by accident — before this.  Removing them quietly from
+        // the one safety-critical path would be a poor trade.
+        if (cmd == CMD_E_STOP) {
+            for (int i = 0; i < NUM_MOUNTS; i++)
+                if (mount_mac_valid(i)) send_to_mount_routed(i, raw, raw_len);
+        } else {
+            broadcast_to_mounts_routed(raw, raw_len, true);
+        }
     } else if (mount_id >= 1 && mount_id <= NUM_MOUNTS) {
         if (mount_mac_valid(mount_id - 1))
             send_to_mount_routed(mount_id - 1, raw, raw_len);
@@ -1096,6 +1105,36 @@ static void serial_write_frame(const uint8_t *d, uint16_t n) {
 // Dropped frames per client, reported below.  A slow client losing status
 // frames is not interesting; a client losing them steadily is.
 static uint32_t _bcast_dropped = 0, _bcast_sent = 0;
+
+// Fan a MOUNT_BROADCAST frame out per route, sending it down each satellite
+// link ONCE.
+//
+// The obvious loop — send_to_mount_routed() for every mount — puts the same
+// broadcast-addressed frame down a satellite's socket once per mount routed
+// there, and the satellite then fans EACH copy to every peer it holds.  Two
+// mounts on one satellite therefore cost four radio transmissions per
+// broadcast, not two.  Measured: PING x60 per 10 s at the relay against 1.5
+// logical broadcasts a second, which is exactly 4x.
+//
+// The satellite already fans a broadcast correctly on its own, so one copy per
+// link is all it needs.  Directly-attached mounts still get one send each: the
+// hub must address them individually, because esp_now_send(NULL, ...) is
+// unreliable in ESP-IDF v5.
+static void broadcast_to_mounts_routed(const uint8_t *raw, uint16_t len,
+                                       bool require_valid_mac) {
+    uint8_t sat_done = 0;   // bit per satellite slot already sent this frame
+    static_assert(MAX_SATELLITES <= 8, "sat_done bitmask is a uint8_t");
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        int8_t sat = _mount_sat[i];
+        if (sat >= 0) {
+            if (sat_done & (uint8_t)(1u << sat)) continue;   // link already has it
+            sat_done |= (uint8_t)(1u << sat);
+        } else if (require_valid_mac && !mount_mac_valid(i)) {
+            continue;
+        }
+        send_to_mount_routed(i, raw, len);
+    }
+}
 
 static void broadcast_to_all(const uint8_t *data, uint16_t len) {
     serial_write_frame(data, len);
@@ -1434,8 +1473,7 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
     // Route per mount: a mount attached to a satellite is unreachable by radio
     // from here, and one that is not has no satellite to send through.
     if (pkt.mount_id == MOUNT_BROADCAST) {
-        for (int i = 0; i < NUM_MOUNTS; i++)
-            send_to_mount_routed(i, raw, raw_len);
+        broadcast_to_mounts_routed(raw, raw_len, false);
     } else if (pkt.mount_id >= 1 && pkt.mount_id <= NUM_MOUNTS) {
         send_to_mount_routed(pkt.mount_id - 1, raw, raw_len);
     }
@@ -3142,8 +3180,7 @@ void loop() {
                                 // this are the ones that fell back to THIS hub,
                                 // and send_to_mount_routed() reaches each one
                                 // wherever it currently is.
-                                for (int k = 0; k < NUM_MOUNTS; k++)
-                                    send_to_mount_routed(k, rb, rn);
+                                broadcast_to_mounts_routed(rb, rn, false);
                                 Serial.println("[SAT] satellite back — asking mounts to rescan");
                             }
                             consumed = true;
