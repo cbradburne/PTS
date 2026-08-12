@@ -609,13 +609,26 @@ class Bridge:
         # retried, not many frames arriving — the pump holds the head frame on
         # NO_MEM and tries it again next pass.  That distinction is the whole
         # point of counting both.
+        # What the traffic actually IS.  Windowed, straight from the satellite,
+        # so it cannot be argued with from the hub's source — which was tried
+        # twice and was wrong twice.
+        tops = []
+        for i in range(3):
+            off = 16 + i*3
+            if off + 3 > len(b):
+                break
+            c = b[off]
+            n = (b[off+1] << 8) | b[off+2]
+            if n:
+                tops.append(f"{_cmd_name(c)}×{n}")
+        breakdown = ("  [" + ", ".join(tops) + "]") if tops else ""
         note = ""
         if d_ref:
             note = (" | REFUSING — %d retries per frame offered"
                     % (d_att // max(1, d_off)) if d_off else " | REFUSING")
         fn = log.warning if d_ref else log.info
-        fn("SAT DOWNLINK %-12s offered %d, sent %d, refused %d (%d send calls)%s",
-           who, d_off, d_sent, d_ref, d_att, note)
+        fn("SAT DOWNLINK %-12s offered %d, sent %d, refused %d (%d send calls)%s%s",
+           who, d_off, d_sent, d_ref, d_att, note, breakdown)
 
     def _note_sat_names(self, pkt: Packet) -> None:
         """Learn satellite names here rather than borrowing MountManager's copy.

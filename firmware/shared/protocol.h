@@ -106,8 +106,16 @@
 // + frames the window was measured over (2).  Signed dBm throughout; a report
 // with frames == 0 means nothing was heard at all, which is itself the answer.
 #define RF_REPORT_PAYLOAD_LEN       8
-// offered(4) + attempts(4) + sent(4) + refused(4), all cumulative since boot.
-#define SAT_DOWNLINK_PAYLOAD_LEN   16
+// offered(4) + attempts(4) + sent(4) + refused(4), all cumulative since boot,
+// then the three commands most offered in the last window as cmd(1)+count(2).
+//
+// The totals alone raised a question they could not answer: a healthy relay
+// showed 312 frames offered per 10 s, dead steady, against ~3.6/s that could be
+// accounted for from the hub's heartbeat and the PC app's polling. Eight times
+// more traffic than anyone had ordered, and no way to see what it was — two
+// guesses at it were wrong before this was written.
+#define SAT_DOWNLINK_PAYLOAD_LEN   25
+#define SAT_DOWNLINK_TOP_CMDS       3
 #define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
 #define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients
 // Longest BMD camera-control command we will relay.  Theirs are a 4-byte header

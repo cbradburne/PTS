@@ -548,6 +548,10 @@ static uint32_t _sat_nomem_total   = 0;   // send refusals since boot
 static uint32_t _sat_dn_offered    = 0;   // frames the hub gave us to relay
 static uint32_t _sat_dn_attempts   = 0;   // esp_now_send() calls — see below
 static uint32_t _sat_dn_sent_total = 0;   // ...of which returned ESP_OK
+// Which commands make up the offered traffic, counted per window.  A total says
+// there is eight times more downlink than anyone ordered; only a breakdown says
+// what it is, and guessing at it from the hub's source was wrong twice.
+static uint16_t _sat_dn_by_cmd[256] = {};
 static uint32_t _sat_unacked_total = 0;   // downlink sends no mount acked, since boot
 static uint32_t _sat_loopmax_ms    = 0;   // worst single pass since boot
 static uint32_t _up_writes    = 0;   // actual send() calls (batches, not frames)
@@ -791,6 +795,8 @@ static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t sta
 static void dn_enqueue(uint8_t idx, const uint8_t *frame, uint16_t len) {
     if (len > sizeof(((DnFrame *)0)->data)) return;
     _sat_dn_offered++;
+    // Packet layout: AA 55 LEN MOUNT SEQ_HI SEQ_LO CMD ...  — byte 6.
+    if (len > 6) _sat_dn_by_cmd[frame[6]]++;
     uint8_t next = (uint8_t)((_dn_head + 1) % DN_QUEUE_DEPTH);
     if (next == _dn_tail) {
         _dn_tail = (uint8_t)((_dn_tail + 1) % DN_QUEUE_DEPTH);
@@ -1126,11 +1132,26 @@ static void sat_send_downlink(uint32_t now) {
     _sat_dn_report_ms = now ? now : 1;
     uint32_t v[4] = { _sat_dn_offered, _sat_dn_attempts,
                       _sat_dn_sent_total, _sat_nomem_total };
-    uint8_t p[SAT_DOWNLINK_PAYLOAD_LEN];
+    uint8_t p[SAT_DOWNLINK_PAYLOAD_LEN] = {};
     for (int i = 0; i < 4; i++) {
         p[i*4+0] = (uint8_t)(v[i] >> 24); p[i*4+1] = (uint8_t)(v[i] >> 16);
         p[i*4+2] = (uint8_t)(v[i] >>  8); p[i*4+3] = (uint8_t)(v[i]);
     }
+    // Top commands this window, then start a fresh window.  Windowed on purpose:
+    // the totals above are cumulative and answer "how much", this answers "what
+    // is it right now", and a cumulative breakdown would bury a change.
+    for (int slot = 0; slot < SAT_DOWNLINK_TOP_CMDS; slot++) {
+        int best = -1;
+        for (int c = 0; c < 256; c++)
+            if (_sat_dn_by_cmd[c] && (best < 0 || _sat_dn_by_cmd[c] > _sat_dn_by_cmd[best]))
+                best = c;
+        if (best < 0) break;
+        p[16 + slot*3 + 0] = (uint8_t)best;
+        p[16 + slot*3 + 1] = (uint8_t)(_sat_dn_by_cmd[best] >> 8);
+        p[16 + slot*3 + 2] = (uint8_t)(_sat_dn_by_cmd[best]);
+        _sat_dn_by_cmd[best] = 0;          // taken; find the next
+    }
+    memset(_sat_dn_by_cmd, 0, sizeof(_sat_dn_by_cmd));
     uint8_t  frame[PKT_BUF_SIZE + 4];
     uint16_t fn = build_packet(frame, 0, ++_sat_health_seq,
                                CMD_SAT_DOWNLINK, p, sizeof(p));

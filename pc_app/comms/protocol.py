@@ -138,7 +138,7 @@ class Cmd(IntEnum):
     RESCAN_BASES      = 0xA5   # hub→mounts: a satellite returned, re-pick a base
     MOUNT_EVENT       = 0xA6   # mount→clients, 14B: why it restarted/recovered
     RF_REPORT         = 0xA7   # mount→clients, 8B: rssi + noise floor min/mean/max
-    SAT_DOWNLINK      = 0xA8   # satellite→clients, 16B: offered/attempts/sent/refused
+    SAT_DOWNLINK      = 0xA8   # satellite→clients, 25B: offered/attempts/sent/refused + top cmds
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
     CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
 
@@ -1261,7 +1261,8 @@ MOUNT_EVENT_PAYLOAD_LEN   = 14
 SAT_ADDR_BASE             = 0xF0
 # rssi min/mean/max + noise floor min/mean/max (6 × int8) + frames (2).
 RF_REPORT_PAYLOAD_LEN     = 8
-SAT_DOWNLINK_PAYLOAD_LEN  = 16
+SAT_DOWNLINK_PAYLOAD_LEN  = 25
+SAT_DOWNLINK_TOP_CMDS     = 3
 MOUNT_EVENT_ISOLATED      = 1
 MOUNT_EVENT_TX_WEDGE      = 2
 MOUNT_EVENT_TX_WEDGE_REBOOT = 3
