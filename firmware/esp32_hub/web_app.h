@@ -1086,12 +1086,21 @@ function _onOnePkt(buf, off) {
             const pt = v.getUint8(2);
             const sl = v.getUint8(3);
             if (pt >= 1 && pt <= 4) {
+                const was = cs.activePtPreset;
                 cs.activePtPreset = pt;
                 if (mountId === selCam) setPreset('pt', pt, false);
+                // The extended positions page draws a dial per mount from
+                // camSt, not just for selCam, so it needs telling too — it is
+                // the page whose dials used to move on touch.
+                if (was !== pt && _extActive && _extPage === 'positions')
+                    refreshExtPositions();
             }
             if (sl >= 1 && sl <= 4) {
+                const was = cs.activeSlPreset;
                 cs.activeSlPreset = sl;
                 if (mountId === selCam) setPreset('sz', sl, false);
+                if (was !== sl && _extActive && _extPage === 'positions')
+                    refreshExtPositions();
             }
             cs.slotOccupied = v.getUint16(4, false);
             cs.slotAt       = v.getUint16(6, false);
@@ -2402,12 +2411,14 @@ function buildExtPositionsTable() {
                 const grp = (which === 'sz') ? GROUP_SLIDER_ZOOM : GROUP_PAN_TILT;
                 const p = new Uint8Array(2); p[0] = grp; p[1] = next;
                 wsSend(buildPkt(i, CMD_SET_ACTIVE_PRESET, p));
-                // Optimistically update local state so the dial redraws immediately
-                if (which === 'sz') cs2.activeSlPreset = next;
-                else                cs2.activePtPreset = next;
-                // Keep portrait/landscape arc dials in sync if this is selCam
-                if (i === selCam) setPreset(which, next, false);
-                refreshExtPositions();
+                // Nothing moves here.  A dial shows what the MOUNT reports, not
+                // what we just asked it for: STATUS carries the active presets,
+                // and the handler for it redraws this page.  Updating locally
+                // first made the dial answer for the mount — so a command lost
+                // on the radio left the display showing a speed the rig was not
+                // running at, which is the one thing a speed indicator must
+                // never do.  Every other dial in this app already waited; this
+                // page was the exception.
             });
             dialWrap.appendChild(wrap);
         });
