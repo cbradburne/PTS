@@ -539,7 +539,7 @@ static uint16_t _usb_diag_seq = 0;
 // Set when any client sends CMD_START_LOOK_AT_MOVE; broadcast to all clients.
 static int8_t    _la_dir[NUM_MOUNTS];   // initialised to -1 in setup()
 static uint16_t  _la_dir_seq = 0;       // sequence counter for hub-injected CMD_LA_MOVE_DIR packets
-#define MOUNT_TIMEOUT_MS  3000
+#define MOUNT_TIMEOUT_MS  MOUNT_PRESENCE_TIMEOUT_MS   // see shared/protocol.h
 
 // ---------------------------------------------------------------------------
 // Autonomous self-recovery — no PC required
@@ -565,7 +565,7 @@ static uint16_t  _la_dir_seq = 0;       // sequence counter for hub-injected CMD
 // dropped a healthy mount out of the live set, and this window gates the hub's
 // wedge detector, its reinit ladder and its own restart.  16 s tolerates three
 // consecutive misses and is still far inside any real outage.
-#define SELF_WEDGE_ALIVE_MS     16000UL
+#define SELF_WEDGE_ALIVE_MS     MOUNT_PRESENCE_TIMEOUT_MS  // see shared/protocol.h
 #define SELF_WEDGE_MIN_FAILS     2        // uninterrupted send fails before the wedge clock starts
 #define SELF_REINIT_AFTER_MS     6000UL   // wedge age → full ESP-NOW reinit
 #define SELF_WIFI_REINIT_AFTER_MS 14000UL // wedge age → bounce WiFi (below ESP-NOW)

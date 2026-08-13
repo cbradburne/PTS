@@ -1247,7 +1247,7 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
 // Long enough that it is not a stream, short enough that a lost change is a
 // hitch rather than a fault.  5 s, not 10, because the look-at Run advances on
 // a transition and stalls until it sees one.
-#define STATE_REFRESH_MS   5000UL
+#define STATE_REFRESH_MS   MOUNT_STATUS_REFRESH_MS   // see shared/protocol.h
 // An explicit CMD_GET_POSITION is answered for this long afterwards, so the
 // on-demand path still works while the unsolicited stream does not.
 #define POS_ON_DEMAND_MS   2000UL

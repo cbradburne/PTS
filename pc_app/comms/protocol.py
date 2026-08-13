@@ -1261,6 +1261,11 @@ MOUNT_EVENT_PAYLOAD_LEN   = 14
 SAT_ADDR_BASE             = 0xF0
 # rssi min/mean/max + noise floor min/mean/max (6 × int8) + frames (2).
 RF_REPORT_PAYLOAD_LEN     = 10
+# Mount presence — two halves of one contract, kept together so they cannot
+# drift apart again (a 3 s hub timeout against a 5 s mount refresh declared
+# every healthy mount disconnected between packets).
+MOUNT_STATUS_REFRESH_MS   = 5000
+MOUNT_PRESENCE_TIMEOUT_MS = 3 * MOUNT_STATUS_REFRESH_MS + 1000
 SAT_DOWNLINK_PAYLOAD_LEN  = 25
 SAT_DOWNLINK_TOP_CMDS     = 3
 MOUNT_EVENT_ISOLATED      = 1

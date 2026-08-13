@@ -112,6 +112,24 @@
 // because the application queue was full — leaving both ends reporting success
 // for a command that never happened.
 #define RF_REPORT_PAYLOAD_LEN       10
+// ── Mount presence: one number, shared, because two ends must agree ────────
+// How often a mount re-sends STATUS when nothing has changed, and how long a
+// hub waits before calling it gone.  These are two halves of one contract and
+// they used to live in different files with no link between them: the mount
+// sent STATUS at 10 Hz and the hub timed out at 3 s, which worked only because
+// 3 s was thirty times the interval.
+//
+// Cutting the mount to a 5 s refresh made every ordinary gap exceed that
+// timeout, so the hub declared a healthy mount disconnected between every pair
+// of packets — the display flapped it in and out and the log filled with
+// "mount N ONLINE" every five seconds.  A second threshold, the hub's own
+// alive-check, broke the same way at the same time for the same reason.
+//
+// So they live here, together, derived from one another.  Three missed refreshes
+// plus a second of slack: long enough that a lost packet is not an outage, short
+// enough to notice a real one well inside any show cue.
+#define MOUNT_STATUS_REFRESH_MS    5000UL
+#define MOUNT_PRESENCE_TIMEOUT_MS  (3UL * MOUNT_STATUS_REFRESH_MS + 1000UL)
 // offered(4) + attempts(4) + sent(4) + refused(4), all cumulative since boot,
 // then the three commands most offered in the last window as cmd(1)+count(2).
 //
