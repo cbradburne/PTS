@@ -551,6 +551,14 @@ static volatile int32_t  _rf_rssi_sum = 0, _rf_nf_sum = 0;
 static volatile int8_t   _rf_rssi_min = 0, _rf_rssi_max = 0;
 static volatile int8_t   _rf_nf_min   = 0, _rf_nf_max   = 0;
 static volatile uint16_t _rf_frames   = 0;
+// Frames the receive queue would not take.  xQueueSend() was called with a zero
+// timeout and its result discarded, so a full queue drops a command in the WiFi
+// task before the application ever sees it — no ACK is generated, while the
+// sender's frame WAS acknowledged at the MAC layer and looks entirely
+// successful.  Both ends report success and the command simply vanishes, which
+// is exactly what mount 1 looks like: 19% of its commands unanswered for twelve
+// hours with every counter on both sides reading clean.
+static volatile uint16_t _rf_rx_dropped = 0;
 static uint32_t          _rf_last_ms  = 0;
 static portMUX_TYPE      _rf_mux      = portMUX_INITIALIZER_UNLOCKED;
 
@@ -827,10 +835,17 @@ static void send_rf_report() {
     // the mount being off.
     int8_t rmean = n ? (int8_t)(rsum / (int32_t)n) : 0;
     int8_t nmean = n ? (int8_t)(nsum / (int32_t)n) : 0;
+    uint16_t drop;
+    portENTER_CRITICAL(&_rf_mux);
+    drop = _rf_rx_dropped; _rf_rx_dropped = 0;
+    portEXIT_CRITICAL(&_rf_mux);
+    // Beside "frames heard", because "frames heard and thrown away" is the same
+    // question asked one layer up.
     uint8_t p[RF_REPORT_PAYLOAD_LEN] = {
         (uint8_t)rmin, (uint8_t)rmean, (uint8_t)rmax,
         (uint8_t)nmin, (uint8_t)nmean, (uint8_t)nmax,
-        (uint8_t)(n >> 8), (uint8_t)n };
+        (uint8_t)(n >> 8), (uint8_t)n,
+        (uint8_t)(drop >> 8), (uint8_t)drop };
     send_to_hub(CMD_RF_REPORT, p, sizeof(p));
 }
 
@@ -979,7 +994,10 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
     EspNowMsg msg;
     msg.len = (uint8_t)len;
     memcpy(msg.data, data, len);
-    xQueueSend(_espnow_rx_q, &msg, 0);
+    if (xQueueSend(_espnow_rx_q, &msg, 0) != pdTRUE) {
+        // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
+        _rf_rx_dropped = _rf_rx_dropped + 1;
+    }
 }
 
 static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {

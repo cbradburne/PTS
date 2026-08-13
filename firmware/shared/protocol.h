@@ -103,9 +103,15 @@
 // only the boot is a remedy.
 #define MOUNT_EVENT_TX_WEDGE_REBOOT 3
 // rssi min/mean/max (3 × int8) + noise floor min/mean/max (3 × int8)
-// + frames the window was measured over (2).  Signed dBm throughout; a report
-// with frames == 0 means nothing was heard at all, which is itself the answer.
-#define RF_REPORT_PAYLOAD_LEN       8
+// + frames the window was measured over (2) + frames the receive queue refused
+// (2).  Signed dBm throughout; a report with frames == 0 means nothing was heard
+// at all, which is itself the answer.
+//
+// The refused count sits here because it is the same question one layer up: a
+// frame can be heard perfectly, acknowledged at the MAC layer, and then dropped
+// because the application queue was full — leaving both ends reporting success
+// for a command that never happened.
+#define RF_REPORT_PAYLOAD_LEN       10
 // offered(4) + attempts(4) + sent(4) + refused(4), all cumulative since boot,
 // then the three commands most offered in the last window as cmd(1)+count(2).
 //

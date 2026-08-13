@@ -649,7 +649,17 @@ class MountManager(QObject):
             b = bytes(pkt.payload)
             sig = [int.from_bytes(b[i:i+1], "big", signed=True) for i in range(6)]
             rmin, rmean, rmax, nmin, nmean, nmax = sig
-            n = (b[6] << 8) | b[7]
+            n    = (b[6] << 8) | b[7]
+            drop = (b[8] << 8) | b[9] if len(b) >= 10 else 0
+            if drop:
+                # Heard, MAC-acknowledged, then thrown away because the
+                # application queue was full.  The sender sees a successful send
+                # and the command never happens — both ends reporting success
+                # for something that did not occur.
+                log.warning("RF cam%d: receive queue FULL — %d frames dropped "
+                            "after being received (a dropped command is never "
+                            "acknowledged, so it reads as a mount ignoring it)",
+                            mid, drop)
             if not n:
                 log.warning("RF cam%d: heard NOTHING in the last window", mid)
                 return
