@@ -53,6 +53,11 @@ HUB_DEFAULT_PORT = 7777
 _TX_QUIET_CMDS = frozenset({
     int(Cmd.JOG), int(Cmd.GET_STATUS), int(Cmd.PING), int(Cmd.GET_STATE),
     int(Cmd.GET_POSITION),   # replied with CMD_POSITION, never ACKed
+    # Hub-scoped, answered with a MOUNT_TABLE push rather than an ACK.  Tracked,
+    # it reported "CMD hub 0/1 acknowledged (0.000%)" at WARNING once per
+    # connection — a warning that is always wrong, which is how a log teaches
+    # people to skim past warnings.
+    int(Cmd.GET_MOUNT_TABLE),
     # Hub-control, fire-and-forget — the hub does not ACK these, so they must NOT
     # be ACK-tracked or they would themselves look like wedged commands.
     int(Cmd.HUB_REINIT_ESPNOW), int(Cmd.HUB_RESTART),
