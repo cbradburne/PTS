@@ -683,6 +683,7 @@ static uint8_t mount_table_observe(const uint8_t mac[6], uint8_t claimed_id,
                       "(%02X:%02X:%02X:%02X:%02X:%02X)\n",
                       cur + 1, claimed_id,
                       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        send_pair_event((uint8_t)cur, 1 /*renumber*/, mac);
         memset(_mount_mac[cur], 0, 6);
         _mount_last_seen[cur]   = 0;
         _mount_last_state[cur]  = 0xFF;
@@ -732,6 +733,7 @@ static void pair_decide(uint8_t cam, uint8_t decision, const uint8_t *mac) {
         // elsewhere (renumber onto an occupied slot), free its old home.
         int8_t cur = mount_table_find(mac);
         if (cur >= 0 && cur != (int8_t)slot) {
+            send_pair_event((uint8_t)cur, 2 /*replace*/, mac);
             memset(_mount_mac[cur], 0, 6);
             _mount_last_seen[cur]  = 0;
             _mount_last_state[cur] = 0xFF;
@@ -775,6 +777,7 @@ static void pair_forget(uint8_t cam) {
                   "unbound from display\n", cam,
                   _mount_mac[slot][0], _mount_mac[slot][1], _mount_mac[slot][2],
                   _mount_mac[slot][3], _mount_mac[slot][4], _mount_mac[slot][5]);
+    send_pair_event((uint8_t)slot, 3 /*forget*/, _mount_mac[slot]);
     esp_now_del_peer(_mount_mac[slot]);
     memset(_mount_mac[slot], 0, 6);
     mount_table_save();
@@ -1136,6 +1139,25 @@ static uint32_t _bcast_dropped = 0, _bcast_sent = 0;
 // link is all it needs.  Directly-attached mounts still get one send each: the
 // hub must address them individually, because esp_now_send(NULL, ...) is
 // unreliable in ESP-IDF v5.
+// Pairing actions, as an EVENT rather than only a Serial.printf.
+//
+// Every place the hub rebinds or unbinds a mount announces itself with
+// Serial.printf and nothing else — and on a bench rig the PC app owns that
+// port, reading it as a packet stream, so the announcements are discarded as
+// noise between frames.  The hub can therefore renumber a mount repeatedly and
+// the only record of it is unreadable.
+//
+// That matters because rebinding zeroes _mount_last_seen, which is exactly what
+// makes the next STATUS look like a fresh connect: the display flaps the mount
+// in and out, and comms.log shows "mount N ONLINE" every few seconds with no
+// stated cause.
+//   kind 12: [1] slot+1  [2] action  [3..8] MAC
+static void send_pair_event(uint8_t slot, uint8_t action, const uint8_t *mac) {
+    uint8_t e[9] = { 12, (uint8_t)(slot + 1), action,
+                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+    send_hub_event_raw(e);
+}
+
 static void broadcast_to_mounts_routed(const uint8_t *raw, uint16_t len,
                                        bool require_valid_mac) {
     uint8_t sat_done = 0;   // bit per satellite slot already sent this frame

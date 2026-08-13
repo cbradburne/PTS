@@ -1009,6 +1009,20 @@ class Bridge:
                         "arriving from mounts; a dropped ACK reads as a command "
                         "the mount ignored",
                         drop, q, 100.0 * drop / max(1, q))
+        elif kind == 12:
+            # The hub rebinding a mount.  Every one of these zeroes the hub's
+            # last-seen for that slot, so the next STATUS reads as a fresh
+            # connect: the display flaps the mount in and out and the log fills
+            # with "mount N ONLINE" for no stated reason.  Until now these were
+            # announced only by Serial.printf — on a bench rig the PC app owns
+            # that port and reads it as a packet stream, so they were discarded
+            # as noise between frames.
+            acts = {1: "RENUMBERED to an empty slot", 2: "REPLACED (rebound)",
+                    3: "FORGOTTEN (unbound)"}
+            mac = ":".join(f"{b:02X}" for b in pkt.payload[3:9])
+            log.warning("HUB PAIRING: cam%d %s — %s | this resets the hub's "
+                        "last-seen, so the next STATUS looks like a new connect",
+                        pkt.payload[1], acts.get(pkt.payload[2], f"action {pkt.payload[2]}"), mac)
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "
