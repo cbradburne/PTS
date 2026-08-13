@@ -996,6 +996,19 @@ class Bridge:
             log.warning("HUB SHED %d of %d client writes (%.1f%%) — a dropped ACK "
                         "is indistinguishable from a command that never landed",
                         drop, sent, 100.0 * drop / max(1, sent))
+        elif kind == 11:
+            # The relay queue refusing a frame — until now the one discard on
+            # this rig with no counter at all: xQueueSend() with a zero timeout
+            # and its result thrown away.  It only bites mounts on the hub's own
+            # radio, whose frames are enqueued by the WiFi task asynchronously;
+            # satellite frames are enqueued inside loop() in the same pass that
+            # drains the queue, so they never find it full.
+            drop = int.from_bytes(pkt.payload[1:5], "big")
+            q    = int.from_bytes(pkt.payload[5:9], "big")
+            log.warning("HUB RELAY QUEUE FULL — dropped %d of %d frames (%.1f%%) "
+                        "arriving from mounts; a dropped ACK reads as a command "
+                        "the mount ignored",
+                        drop, q, 100.0 * drop / max(1, q))
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "

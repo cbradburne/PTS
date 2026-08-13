@@ -491,6 +491,15 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
 static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
                            uint8_t state, uint8_t flags);
 
+// Frames the relay queue would not take.  xQueueSend() was called with a zero
+// timeout and its return value discarded, so a full queue dropped mount traffic
+// in complete silence — no counter, no log, nothing.  The only unmetered
+// discard on the rig, and it sits on the path used by exactly one mount:
+// frames from our OWN radio are enqueued by the WiFi task, asynchronously,
+// while satellite frames are enqueued inside loop() in the same pass that
+// drains the queue and so never find it full.
+static uint32_t _relay_dropped = 0, _relay_queued = 0;
+
 #define RELAY_QUEUE_DEPTH 32
 static QueueHandle_t _relay_queue;
 
@@ -1005,7 +1014,8 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
     memcpy(msg.data, data, len);
     msg.via_sat = -1;                  // arrived on our own radio
 
-    xQueueSend(_relay_queue, &msg, 0);
+    _relay_queued++;
+    if (xQueueSend(_relay_queue, &msg, 0) != pdTRUE) _relay_dropped++;
 }
 
 // ---------------------------------------------------------------------------
@@ -3213,7 +3223,8 @@ void loop() {
                 memcpy(msg.src_mac, env.mac, 6);
                 memcpy(msg.data, env.frame, env.frame_len);
                 msg.via_sat = (int8_t)i;           // arrived over this satellite
-                xQueueSend(_relay_queue, &msg, 0);
+                _relay_queued++;
+                if (xQueueSend(_relay_queue, &msg, 0) != pdTRUE) _relay_dropped++;
             }
         }
     }
@@ -3311,6 +3322,15 @@ void loop() {
             send_hub_event_raw(e);
         }
         _bcast_dropped = _bcast_sent = 0;
+        if (_relay_dropped) {
+            uint8_t r[9] = { 11,
+                (uint8_t)(_relay_dropped >> 24), (uint8_t)(_relay_dropped >> 16),
+                (uint8_t)(_relay_dropped >>  8), (uint8_t)_relay_dropped,
+                (uint8_t)(_relay_queued  >> 24), (uint8_t)(_relay_queued  >> 16),
+                (uint8_t)(_relay_queued  >>  8), (uint8_t)_relay_queued };
+            send_hub_event_raw(r);
+        }
+        _relay_dropped = _relay_queued = 0;
     }
 
     MARK(SEC_USB);
