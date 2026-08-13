@@ -1859,7 +1859,11 @@ static void send_usb_diag() {
     // received - hub firmware may predate the diagnostic", which is both
     // alarming and wrong: the firmware is current, the packet simply never
     // left by the door the client was listening at.
-    serial_write_frame(buf, n);
+    // broadcast_to_all() writes to Serial itself before fanning out to the TCP
+    // clients, so calling serial_write_frame() here as well put every hub event
+    // on the wire twice — visible as doubled "mount 1 ONLINE" lines on a
+    // serial-connected rig, and pure pressure on a TX buffer that is already
+    // dropping frames.
     broadcast_to_all(buf, n);
     _ws.binaryAll(buf, (size_t)n);
 }
@@ -1894,7 +1898,11 @@ static void send_own_health(bool anomaly) {
     // has just rebooted.  Sending it over USB alone meant that running the PC
     // app on TCP, which is what stops the host resetting the hub, silently
     // traded away every means of noticing that the hub restarted at all.
-    serial_write_frame(buf, n);
+    // broadcast_to_all() writes to Serial itself before fanning out to the TCP
+    // clients, so calling serial_write_frame() here as well put every hub event
+    // on the wire twice — visible as doubled "mount 1 ONLINE" lines on a
+    // serial-connected rig, and pure pressure on a TX buffer that is already
+    // dropping frames.
     broadcast_to_all(buf, n);
     _ws.binaryAll(buf, (size_t)n);
     _health_last_ms     = millis();
@@ -1948,7 +1956,11 @@ static void send_hub_event_raw(const uint8_t p[9]) {
     // structured notable events (mount online, pairing, wedge ladder,
     // restart imminent); losing them on TCP left the PC app blind to the
     // hub's own account of what it was doing.
-    serial_write_frame(buf, n);
+    // broadcast_to_all() writes to Serial itself before fanning out to the TCP
+    // clients, so calling serial_write_frame() here as well put every hub event
+    // on the wire twice — visible as doubled "mount 1 ONLINE" lines on a
+    // serial-connected rig, and pure pressure on a TX buffer that is already
+    // dropping frames.
     broadcast_to_all(buf, n);
     _ws.binaryAll(buf, (size_t)n);
 }
@@ -2575,6 +2587,18 @@ static void osc_poll() {
 // ---------------------------------------------------------------------------
 
 void setup() {
+    // The HWCDC default TX ring is a few hundred bytes — about eight of our
+    // frames — and serial_write_frame() DROPS anything that will not fit right
+    // now rather than waiting.  On the bench rig that discarded 47% of
+    // everything the hub said to the PC, acknowledgements included, which reads
+    // downstream as a mount ignoring commands.
+    //
+    // 8 KB is roughly 250 frames of headroom, which covers any burst the relay
+    // produces between host polls.  setTxTimeoutMs(0) below still stands: a host
+    // that stops draining must never stall the hub, and the drop is the correct
+    // behaviour once the buffer really is full — it just should not be full
+    // during ordinary traffic.
+    Serial.setTxBufferSize(8192);
     Serial.begin(921600);
     // Make USB CDC TX non-blocking.  Default timeout is 100 ms — if the PC app
     // stops draining the port (Python thread stall, GIL contention, etc.) every
