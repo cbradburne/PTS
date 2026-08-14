@@ -489,9 +489,16 @@ class MountManager(QObject):
         self._send(pkt_set_slider_move(mount_id, start_mm, end_mm, speed_preset))
 
     def send_start_look_at_move(self, mount_id: int, subject_id: int,
-                                 direction: int, speed_preset: int = 2) -> None:
-        """Start a look-at move toward the min (direction=0) or max (direction=1) slider limit."""
-        self._send(pkt_start_look_at_move(mount_id, subject_id, direction, speed_preset))
+                                 direction: int, speed_preset: int = 2,
+                                 repeat: bool = False) -> None:
+        """Start a look-at move toward the min (direction=0) or max (direction=1) limit.
+
+        repeat=True hands the whole run to the mount: it flips direction and
+        starts the next leg itself when one ends.  This app then does nothing
+        further — see _on_look_at_status_from_mount, which used to drive it.
+        """
+        self._send(pkt_start_look_at_move(mount_id, subject_id, direction,
+                                          speed_preset, repeat))
 
     def send_switch_subject(self, mount_id: int, subject_id: int) -> None:
         """Switch to a different subject mid look-at move."""

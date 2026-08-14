@@ -506,6 +506,26 @@ static uint32_t _last_teensy_st_ms   = 0;
 // When a client last asked for a position.  The unsolicited 5 Hz stream is
 // filtered out; an explicit request still gets answered.
 static uint32_t _last_getpos_ms      = 0;
+// ── The look-at run, owned here ──────────────────────────────────────────
+// See RUN_DEADMAN_MS in shared/protocol.h for why this moved and what replaced
+// the deadman it removed.
+static bool     _run_active  = false;
+static uint8_t  _run_subj    = 0;
+static uint8_t  _run_dir     = 0;
+static uint8_t  _run_preset  = 2;
+
+static void run_send_leg() {
+    uint8_t p[3] = { (uint8_t)(_run_subj & 0x07), (uint8_t)(_run_dir & 1), _run_preset };
+    uint8_t buf[PKT_BUF_SIZE + 4];
+    Serial1.write(buf, build_packet(buf, _mount_id, ++_tx_seq,
+                                    CMD_START_LOOK_AT_MOVE, p, sizeof(p)));
+}
+
+static void run_stop(const char *why) {
+    if (!_run_active) return;
+    _run_active = false;
+    Serial.printf("[RUN] stopped: %s\n", why);
+}
 static uint32_t _last_heartbeat_ms   = 0;
 static int8_t   _last_rssi           = 0;
 static uint32_t _last_rssi_update_ms = 0;
@@ -1217,6 +1237,26 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
         return;
     }
 
+    // A run is a property of the mount now, not a sequence the PC drives.
+    if (pkt.cmd == CMD_START_LOOK_AT_MOVE && pkt.payload_len >= 3) {
+        _run_subj   = pkt.payload[0] & 0x07;
+        _run_dir    = pkt.payload[1] & 1;
+        _run_preset = pkt.payload[2];
+        // Byte 3 is `repeat`.  Absent (an older client) means a single leg,
+        // which is the behaviour that has always existed.
+        bool rep = (pkt.payload_len >= 4) && pkt.payload[3];
+        if (rep && !_run_active) Serial.println("[RUN] started — mount owns it");
+        if (!rep) run_stop("single leg requested");
+        _run_active = rep;
+    }
+    // Anything that means "the operator has taken over" ends the run.  A jog is
+    // a person moving the rig by hand; continuing to ping-pong underneath them
+    // would be the mount arguing with the operator.
+    if (pkt.cmd == CMD_E_STOP)  run_stop("E-STOP");
+    if (pkt.cmd == CMD_JOG)     run_stop("operator jogged");
+    if (pkt.cmd == CMD_GOTO || pkt.cmd == CMD_GOTO_SLOT || pkt.cmd == CMD_MOVE_REL)
+        run_stop("a move was commanded");
+
     uint8_t fwd[PKT_BUF_SIZE + 4];
     Serial1.write(fwd, build_packet(fwd, pkt.mount_id, pkt.seq,
                                     pkt.cmd, pkt.payload, pkt.payload_len));
@@ -1342,6 +1382,20 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
         if (_ms.active_la_subject != subj) {
             _ms.active_la_subject = subj;
             ui_update();
+        }
+        // Leg finished.  The Teensy sends exactly one of these with the active
+        // bit clear when a look-at sequence ends, so this is the transition —
+        // and the whole decision now happens here rather than 400 km round the
+        // houses and back.
+        if (pkt.payload_len >= 14 && _run_active) {
+            static bool was_active = false;
+            bool la_now = (pkt.payload[13] & 0x01);
+            if (was_active && !la_now) {
+                _run_dir ^= 1;
+                Serial.printf("[RUN] leg done — next leg, direction %u\n", _run_dir);
+                run_send_leg();
+            }
+            was_active = la_now;
         }
     }
     if (!_cfg_valid) return;   // unpaired — don't forward Teensy traffic anywhere
@@ -3235,6 +3289,18 @@ void loop() {
     }
 
     // ── Watchdog ─────────────────────────────────────────────────────────
+    // The run's own deadman, ahead of the blunt one below.  The round trip this
+    // replaced was accidentally a deadman: a run advanced only while the PC
+    // could reach the mount, so unplugging the hub stopped it.  Owning the run
+    // locally would otherwise have a mount ping-ponging a camera indefinitely
+    // with nobody able to tell it to stop.
+    //
+    // Stops repeating rather than halting: the current leg finishes under its
+    // own deceleration, and WATCHDOG_MS below still hard-stops everything two
+    // seconds later if contact does not come back.
+    if (_run_active && (millis() - _last_hub_rx_ms) > RUN_DEADMAN_MS)
+        run_stop("no contact with any base");
+
     if (!_watchdog_fired && (millis() - _last_hub_rx_ms > WATCHDOG_MS)) {
         _watchdog_fired = true;
         send_estop_to_teensy();

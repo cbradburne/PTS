@@ -1225,11 +1225,20 @@ def pkt_set_slider_move(mount_id: int, slot: int, start_mm: float,
 
 
 def pkt_start_look_at_move(mount_id: int, subject_id: int,
-                            direction: int, speed_preset: int = 2) -> bytes:
-    """3 bytes: subject_id(1) + direction(1) + speed_preset(1).
+                            direction: int, speed_preset: int = 2,
+                            repeat: bool = False) -> bytes:
+    """4 bytes: subject_id(1) + direction(1) + speed_preset(1) + repeat(1).
+
     direction: 0 = go to min/left limit, 1 = go to max/right limit.
-    speed_preset: 1–4."""
-    payload = bytes([subject_id & 0x07, direction & 0x01, max(1, min(4, speed_preset))])
+    speed_preset: 1-4.
+    repeat: the MOUNT ping-pongs the slider itself, flipping direction when a
+    leg ends.  Without it the app had to watch look-at telemetry, notice the
+    leg finish and send the next one back — a round trip for a decision the
+    mount had already made, which stalled the run for good if either half was
+    lost.  The mount stops repeating on E-STOP, on any operator jog or move,
+    and after RUN_DEADMAN_MS with no contact."""
+    payload = bytes([subject_id & 0x07, direction & 0x01,
+                     max(1, min(4, speed_preset)), 1 if repeat else 0])
     return build_packet(mount_id, Cmd.START_LOOK_AT_MOVE, payload)
 
 

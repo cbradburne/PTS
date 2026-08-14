@@ -688,11 +688,24 @@ class MainWindow(QMainWindow):
         rs['la_dir']  = 0        # start toward min limit
         rs['la_subj'] = subj
         rs['slots']   = []       # not used in look-at mode
+        # repeat=True hands the whole ping-pong to the mount.  The app no longer
+        # watches for a leg ending and sends the next one — that round trip was
+        # the run's single point of failure, and it is gone.
         self._mm.send_start_look_at_move(
-            mount_id, subj, 0, self._grid.get_sl_preset(mount_id))
+            mount_id, subj, 0, self._grid.get_sl_preset(mount_id), repeat=True)
         self._update_run_cam_btn(mount_id)
 
     def _stop_run(self, mount_id: int) -> None:
+        # The mount owns the run now, so Stop has to SAY so.  Clearing a local
+        # flag was enough when this app drove each leg — stopping meant simply
+        # not sending the next one — but a mount that ping-pongs by itself keeps
+        # going until told, and would have carried on after the button was
+        # pressed.
+        #
+        # A zero jog, which is how Stop is already expressed everywhere else:
+        # the firmware's stopAll decelerates every axis cleanly, and the mount
+        # reads any jog as the operator taking over and ends the run.
+        self._mm.send_jog(mount_id, 0, 0, 0, 0)
         self._run_states[mount_id]['active'] = False
         self._update_run_cam_btn(mount_id)
 
@@ -1313,17 +1326,18 @@ class MainWindow(QMainWindow):
             self._active_la_subject[mount_id] = new_subj
             self._grid.set_active_la_subject(mount_id, new_subj)
 
-        # Look-at Run advancement: slider reached limit → reverse direction.
-        rs = self._run_states[mount_id]
-        if rs['active'] and self._config.mount(mount_id).look_at_mode:
-            if not la.look_at_active:
-                rs['la_dir'] = 1 - rs['la_dir']   # flip 0 ↔ 1
-                # Always use the currently selected subject — never the one locked
-                # in at run start — so the user can switch subjects mid-run freely.
-                subj = self._active_la_subject.get(mount_id, rs['la_subj'])
-                self._mm.send_start_look_at_move(
-                    mount_id, subj, rs['la_dir'],
-                    self._grid.get_sl_preset(mount_id))
+        # Run advancement used to live here: watch the telemetry, notice the leg
+        # end, send the next leg back.  The mount owns that now — it flips
+        # direction and starts the next leg itself the moment its Teensy says a
+        # leg finished, with no round trip and nothing to lose in flight.
+        #
+        # This mattered beyond tidiness.  The "leg finished" notice is a single
+        # packet the Teensy sends once; lose it and the run stalled for good,
+        # waiting on an instruction that was never coming.  A decision made where
+        # the information already is cannot be lost on the way to being made.
+        #
+        # Subject switching still works mid-run: SWITCH_SUBJECT reaches the mount
+        # directly and the mount carries the new subject into its next leg.
 
     # ------------------------------------------------------------------
     # Subject calibration (PositionGrid signals + MountManager signals)

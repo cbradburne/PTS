@@ -144,6 +144,24 @@
 // rather than within half a minute.
 #define BASE_HEARTBEAT_MS   2000UL
 #define BASE_SILENT_MS      (3UL * BASE_HEARTBEAT_MS)
+// ── Look-at RUN: owned by the mount ────────────────────────────────────────
+// CMD_START_LOOK_AT_MOVE payload gained a 4th byte, `repeat`.  With it set the
+// mount ping-pongs the slider itself: when a leg finishes it flips direction and
+// starts the next one locally, without asking anyone.
+//
+// It used to ask. The mount ended a leg, streamed that fact 10 Hz across the
+// radio, the PC app noticed look_at_active go false and sent the next leg back —
+// a full round trip, through a satellite, for a decision the mount had already
+// made. Two chances to lose a packet, and if either was lost the run stalled
+// forever waiting for an instruction that was never coming.
+//
+// THE SAFETY NOTE THAT MATTERS: that round trip was also, accidentally, a
+// deadman. The run advanced only while the PC could reach the mount, so pulling
+// the hub stopped it. Owning the run locally removes that, so it is replaced
+// explicitly here — and the mount's existing WATCHDOG_MS (10 s, E-STOP to the
+// Teensy on total silence) remains underneath as the hard backstop. This is the
+// softer one: stop repeating, let the current leg finish, no abrupt halt.
+#define RUN_DEADMAN_MS      8000UL
 // offered(4) + attempts(4) + sent(4) + refused(4), all cumulative since boot,
 // then the three commands most offered in the last window as cmd(1)+count(2).
 //
