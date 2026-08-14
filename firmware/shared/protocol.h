@@ -130,6 +130,20 @@
 // enough to notice a real one well inside any show cue.
 #define MOUNT_STATUS_REFRESH_MS    5000UL
 #define MOUNT_PRESENCE_TIMEOUT_MS  (3UL * MOUNT_STATUS_REFRESH_MS + 1000UL)
+// ── Base presence: the same contract, pointing the other way ───────────────
+// How often a base (hub or satellite) sends its heartbeat, and how long a mount
+// waits in silence before deciding that base has gone and scanning for another.
+//
+// Kept together for the same reason as the pair above, which drifted apart and
+// cost a day: a mount cannot know a hub's heartbeat interval unless it is
+// written down somewhere both can see.
+//
+// Three missed heartbeats. Long enough that ordinary loss is not a failover,
+// short enough that a mount whose only base has died — which is every mount in
+// a room reached by one satellite — is looking for another within seconds
+// rather than within half a minute.
+#define BASE_HEARTBEAT_MS   2000UL
+#define BASE_SILENT_MS      (3UL * BASE_HEARTBEAT_MS)
 // offered(4) + attempts(4) + sent(4) + refused(4), all cumulative since boot,
 // then the three commands most offered in the last window as cmd(1)+count(2).
 //

@@ -1813,7 +1813,7 @@ static void on_ws_event(AsyncWebSocket *server, AsyncWebSocketClient *client,
 
 #define HW_WDT_TIMEOUT_MS  30000   // hardware watchdog — reset if loop stalls
 
-const uint32_t HEARTBEAT_MS = 2000;   // 2 s — well within mount's 5 s timeout
+const uint32_t HEARTBEAT_MS = BASE_HEARTBEAT_MS;   // see shared/protocol.h
 uint32_t last_hb = 0;
 
 // ---- USB wedge diagnostic ----

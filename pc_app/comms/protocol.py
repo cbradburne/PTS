@@ -1266,6 +1266,10 @@ RF_REPORT_PAYLOAD_LEN     = 10
 # every healthy mount disconnected between packets).
 MOUNT_STATUS_REFRESH_MS   = 5000
 MOUNT_PRESENCE_TIMEOUT_MS = 3 * MOUNT_STATUS_REFRESH_MS + 1000
+# Base presence — how often a hub/satellite beats, and how long a mount waits
+# in silence before scanning for another base.  Three missed heartbeats.
+BASE_HEARTBEAT_MS         = 2000
+BASE_SILENT_MS            = 3 * BASE_HEARTBEAT_MS
 SAT_DOWNLINK_PAYLOAD_LEN  = 25
 SAT_DOWNLINK_TOP_CMDS     = 3
 MOUNT_EVENT_ISOLATED      = 1

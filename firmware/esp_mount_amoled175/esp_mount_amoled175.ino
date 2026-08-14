@@ -1807,8 +1807,23 @@ static void setup_exit() {
 // the strongest one found.  Runs only outside SETUP; scanning is safe here
 // because the hub is silent anyway.
 
-#define REACQ_SILENT_MS  20000UL   // hub silence before we start scanning
-#define REACQ_PERIOD_MS  30000UL   // min gap between reacquire scans
+// Base silence before scanning for another.  Was 20 s — ten missed heartbeats,
+// during which a mount whose only base has died sits deaf and does nothing.
+// That is survivable where a mount can fall back to the hub and is the whole of
+// the outage where it cannot: a basement mount reached by one satellite has no
+// second path, so this interval IS its downtime.
+//
+// Now three missed heartbeats, derived from the base's own interval in
+// shared/protocol.h so the two cannot drift apart.
+#define REACQ_SILENT_MS  BASE_SILENT_MS
+// Gap between retries while still silent.  Was 30 s, which undid the faster
+// detection whenever the base took a moment to come back — a satellite reboot
+// is ~15 s, so the first scan found nothing and the mount then waited half a
+// minute before trying again.  10 s covers a reboot in two attempts.
+//
+// Still not a standing rescan: this only applies WHILE the base is silent.  A
+// mount with a working base never scans at all.
+#define REACQ_PERIOD_MS  10000UL
 // WHEN A MOUNT CHOOSES ITS BASE: once, at boot, and then not again.
 //
 // A mount does not move while it is powered.  It is bolted to a stand, the
