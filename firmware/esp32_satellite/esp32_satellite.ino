@@ -220,15 +220,39 @@ static WiFiClient _client_link;
 static IPAddress _hub_ip;
 static bool      _hub_ip_valid = false;
 
+// Consecutive failures against the cached IP before giving up on it.
+//
+// One failure used to be enough, and that was backwards: the commonest reason a
+// connect fails is the hub REBOOTING, during which its address has not changed
+// at all.  Throwing the cache away on the first failure guaranteed the next
+// attempt took the mDNS path — and an mDNS resolve blocks this satellite's whole
+// loop for many seconds, during which it relays nothing for its mounts.  Two
+// stalls of 12.8 s and 13.2 s were measured, both in windows where the hub was
+// being flashed.
+//
+// Three strikes: a genuinely moved hub costs three fast failures before the
+// slow lookup, and a rebooting one costs none.
+// Declared here because client_link_service() above the loop timer needs it.
+extern bool _skip_pass_max;
+#define HUB_IP_STRIKES  3
+static uint8_t _hub_ip_fails = 0;
+
 static bool hub_connect(WiFiClient &c, uint16_t port) {
     bool ok = _hub_ip_valid ? c.connect(_hub_ip,   port, 2000)
                             : c.connect(_hub_host, port, 2000);
-    if (ok && !_hub_ip_valid) {
-        _hub_ip = c.remoteIP(); _hub_ip_valid = true;
-        Serial.printf("[NET] %s is %s — cached, reconnects skip the lookup\n",
-                      _hub_host, _hub_ip.toString().c_str());
-    } else if (!ok && _hub_ip_valid) {
-        _hub_ip_valid = false;        // stale — fall back to the name next try
+    if (ok) {
+        _hub_ip_fails = 0;
+        if (!_hub_ip_valid) {
+            _hub_ip = c.remoteIP(); _hub_ip_valid = true;
+            Serial.printf("[NET] %s is %s — cached, reconnects skip the lookup\n",
+                          _hub_host, _hub_ip.toString().c_str());
+        }
+    } else if (_hub_ip_valid && ++_hub_ip_fails >= HUB_IP_STRIKES) {
+        _hub_ip_valid = false;        // really gone — fall back to the name
+        _hub_ip_fails = 0;
+        Serial.printf("[NET] %d failed connects to the cached IP — resolving "
+                      "%s again (this blocks the loop)\n",
+                      HUB_IP_STRIKES, _hub_host);
     }
     return ok;
 }
@@ -275,10 +299,19 @@ static void on_ws_event(AsyncWebSocket *, AsyncWebSocketClient *client,
 // the address.
 static void client_link_service(uint32_t now) {
     if (_client_link.connected()) return;
+    // Whatever this costs is a blocking call, not a stall — the same accounting
+    // the uplink connect already does.  Without it the client link's connect was
+    // the ONLY unexcluded blocking call in the loop, which is why the satellite's
+    // worst-pass figure read 13224 ms while the uplink's identical block was
+    // correctly discounted.  The stall was real either way; only half of it was
+    // visible.
+    uint32_t _cl_t0 = millis();
     if (_cl_len) _cl_len = 0;                  // stale half-frame from the drop
     if (!eth_is_up() || now < _cl_next_try_ms) return;
 
-    if (hub_connect(_client_link, SAT_HUB_CLIENT_PORT)) {
+    bool _cl_ok = hub_connect(_client_link, SAT_HUB_CLIENT_PORT);
+    if (millis() - _cl_t0 > 20) _skip_pass_max = true;
+    if (_cl_ok) {
         _client_link.setNoDelay(true);
         _cl_backoff_ms = 1000;
         Serial.printf("[WEB] hub client link up (%s:%d)\n",
@@ -531,7 +564,7 @@ static uint32_t _loop_count   = 0;   // passes since the last report
 static uint32_t _loop_max_us  = 0;   // slowest single pass
 // Set when a pass is dominated by a known blocking call that has already
 // reported its own cost, so it is not double-counted as a stall.
-static bool     _skip_pass_max = false;
+bool     _skip_pass_max = false;
 static uint32_t _dn_nomem     = 0;   // esp_now_send() refusals
 // Cumulative twins of the counters above, kept for the health record.  Every
 // counter in this block is WINDOWED — downlink_report() zeroes them each
