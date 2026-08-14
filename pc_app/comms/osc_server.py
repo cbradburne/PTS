@@ -48,6 +48,11 @@ log = logging.getLogger(__name__)
 
 JOG_STREAM_HZ   = 20
 JOG_TTL_S       = 15.0     # max hold without a refresh — lost-release safety
+
+# Fraction of the requested zoom velocity actually sent for OSC jogs.
+# Companion/Stream Deck buttons have no travel — they send full scale or zero —
+# so zoom always arrived at 100%, which is too fast for a lens on a live shot.
+OSC_ZOOM_SCALE = 0.60
 DEFAULT_PORT    = 9700
 
 
@@ -258,6 +263,20 @@ class OscServer:
                 return
             vals = [max(-1000, min(1000, _as_int(args, i, 0) or 0))
                     for i in range(4)]
+            # Zoom only.  A Stream Deck button is all-or-nothing — it sends full
+            # scale or nothing — so the zoom axis arrived at 100% every time,
+            # which is faster than anyone wants a lens to move on a shot.  Pan,
+            # tilt and slider come from a stick that can be feathered, so they
+            # are left alone.
+            #
+            # Scaled here rather than on the mount so it applies to OSC only:
+            # the joystick and the web app still reach full speed.
+            if vals[3]:
+                z = int(vals[3] * OSC_ZOOM_SCALE)
+                # Never round a deliberate nudge down to nothing — an all-zero
+                # jog is how a stop is expressed, and a tiny zoom request must
+                # not become one.
+                vals[3] = z if z else (1 if vals[3] > 0 else -1)
             if any(vals):
                 with self._jog_lock:
                     self._jogs[mid] = (*vals,
