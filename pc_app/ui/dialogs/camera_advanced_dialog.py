@@ -125,38 +125,62 @@ class _Confirmed:
     is inferred — it is the camera's own value or it is not shown.
     """
 
-    def __init__(self):
+    def __init__(self, gated: bool = False, tol: float = 0.03):
         self.value = None
         self._seen_at = 0.0        # timestamp of the last report we acted on
-        self._pending = False
+        self._gated = gated
+        self._tol = tol
+        self._sent = None          # what the operator last asked for, or None
         self._before = None
-        self._repeats = 0
+        self._applied_at = None    # when the camera agreed it holds _sent
 
-    def mark_sent(self) -> None:
+    def mark_sent(self, target=None) -> None:
         """The operator has changed the control this number describes."""
-        if not self._pending:
+        if self._sent is None:
             self._before = self.value
-            self._repeats = 0
-        self._pending = True
+        self._sent = target if target is not None else True
+        self._applied_at = None    # a fresh request voids the old confirmation
+
+    def note_setting(self, reported: float, heard_at: float) -> None:
+        """The camera's report of the CONTROL, not of the number derived from it.
+
+        For iris this is the normalised aperture — the very parameter we set —
+        and the camera answers it in about 1.2s against 4.8s for the f-number.
+        Once it agrees it holds the value we asked for, any aperture reported
+        from that moment on describes the new position.  Before then an aperture
+        report describes wherever the iris was previously, which is exactly the
+        stale number that kept appearing.
+        """
+        if self._sent is None or self._applied_at is not None:
+            return
+        if not isinstance(self._sent, (int, float)):
+            return
+        if abs(reported - self._sent) <= self._tol:
+            self._applied_at = heard_at
 
     def offer(self, value, heard_at: float) -> None:
         if heard_at <= self._seen_at:
             return                 # the stored value again, not a fresh report
         self._seen_at = heard_at
-        if not self._pending:
-            self.value = value
+        if self._sent is None:
+            self.value = value     # nobody has touched it; the camera is the truth
             return
+        if self._gated:
+            # Wait for the camera to confirm the control itself, then take the
+            # first number measured at or after that.
+            if self._applied_at is not None and heard_at >= self._applied_at:
+                self.value = value
+                self._sent = None
+            return
+        # No confirmation of the control is available (the camera never reports
+        # normalised zoom), so the best signal left is the number changing.
         if value != self._before:
-            self.value = value     # the camera has moved — this is the new one
-            self._pending = False
-        else:
-            self._repeats += 1
-            if self._repeats >= 2:
-                self._pending = False   # said twice, so it really did not change
+            self.value = value
+            self._sent = None
 
     @property
     def confirmed(self) -> bool:
-        return self.value is not None and not self._pending
+        return self.value is not None and self._sent is None
 
 
 class _ListSpin(QSpinBox):
@@ -251,8 +275,8 @@ class CameraAdvancedDialog(QDialog):
         # is held back until the camera has confirmed a NEW value — see
         # _Confirmed for why the first report after a change cannot be
         # trusted.
-        self._f_stop = _Confirmed()
-        self._zoom_mm = _Confirmed()
+        self._f_stop = _Confirmed(gated=True)   # camera reports normalised iris
+        self._zoom_mm = _Confirmed()            # it never reports normalised zoom
         self._readouts: list = []
         self.setWindowTitle("Camera Control — Advanced")
         self.resize(1500, 1000)
@@ -451,14 +475,20 @@ class CameraAdvancedDialog(QDialog):
             val.setText(fmt())
 
     def _iris_text(self) -> str:
-        """The percentage we sent until the camera confirms a new f-number."""
+        """The f-number, or nothing.
+
+        No percentage: the handle's position already says where the slider is,
+        so a percentage beside it only repeated that in a form nobody reads an
+        exposure in.  The f-number is the one thing this readout adds, and while
+        the camera has yet to confirm one there is genuinely nothing to say.
+        """
         if self._iris.isSliderDown() or not self._f_stop.confirmed:
-            return f"{self._iris.value()}%"
+            return "—"
         return f"f/{self._f_stop.value:g}"
 
     def _zoom_text(self) -> str:
         if self._zoom.isSliderDown() or not self._zoom_mm.confirmed:
-            return f"{self._zoom.value()}%"
+            return "—"
         return f"{self._zoom_mm.value} mm"
 
     def _focus_text(self) -> str:
@@ -655,7 +685,7 @@ class CameraAdvancedDialog(QDialog):
 
     def _send_iris(self) -> None:
         if not self._loading:
-            self._f_stop.mark_sent()
+            self._f_stop.mark_sent(self._iris.value() / 100.0)
         self._send(self._mm.send_cam_iris, self._iris.value() / 100.0)
 
     def _send_zoom(self) -> None:
@@ -763,12 +793,18 @@ class CameraAdvancedDialog(QDialog):
             # No "is it one of our stops?" test — the box learns any stop the
             # camera reports, and screening them out here was half of why a
             # reported ISO could vanish without trace.
+            # Straight from cam_adv and cam_heard_at — what the CAMERA said.
+            # cam_known() merges in what we sent, which would confirm our own
+            # command to itself.
             st = self._mm.state(self._mount) if hasattr(self._mm, "state") else None
+            said = getattr(st, "cam_adv", {}) if st else {}
             heard = getattr(st, "cam_heard_at", {}) if st else {}
-            if adv.get("f_stop") is not None:
-                self._f_stop.offer(adv["f_stop"], heard.get("f_stop", 0.0))
-            if adv.get("zoom_mm") is not None:
-                self._zoom_mm.offer(adv["zoom_mm"], heard.get("zoom_mm", 0.0))
+            if said.get("iris") is not None:
+                self._f_stop.note_setting(said["iris"], heard.get("iris", 0.0))
+            if said.get("f_stop") is not None:
+                self._f_stop.offer(said["f_stop"], heard.get("f_stop", 0.0))
+            if said.get("zoom_mm") is not None:
+                self._zoom_mm.offer(said["zoom_mm"], heard.get("zoom_mm", 0.0))
             if adv.get("iso") is not None and not self._held(self._iso):
                 self._iso.set_value_of(adv["iso"])
             for key, wheel in (("lift", self._w_lift), ("gamma", self._w_gamma),
@@ -787,10 +823,20 @@ class CameraAdvancedDialog(QDialog):
             if "luma_mix" in adv:
                 self._set_if_free(self._sliders["Lum Mix"],
                                   int(adv["luma_mix"] * 100))
-            for key, w, scale in (("iris", self._iris, 100), ("zoom", self._zoom, 100),
+            for key, w, scale in (("zoom", self._zoom, 100),
                                   ("focus", self._focus, 100)):
                 if key in adv:
                     self._set_if_free(w, int(adv[key] * scale))
+            # Iris deliberately NOT in that loop.  The camera's normalised iris
+            # is still decoded, still logged, and still used to know when the
+            # f-number can be trusted — it just does not move the handle.  It
+            # reports 0.798 for a slider set to 80, so letting it write back
+            # nudged the control by a percent every time the camera spoke, and
+            # the operator would then drag from somewhere they had not left it.
+            # The slider restores from what WE sent, so reopening still works.
+            sent_iris = (getattr(st, "cam_sent", {}) or {}).get("iris") if st else None
+            if sent_iris is not None:
+                self._set_if_free(self._iris, int(round(sent_iris * 100)))
             if ("shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS
                     and not self._held(self._shut)):
                 self._shut.setCurrentIndex(_SHUTTERS.index(adv["shutter_speed"]))
