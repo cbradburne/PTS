@@ -72,6 +72,11 @@ HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
 # wedge only surfacing the next time the user presses a button.
 IDLE_PROBE_INTERVAL_S  = 3.0
 
+# Camera-parameter logging: how many changes one parameter may report
+# before it is treated as a measurement rather than a setting.
+_CAM_CHANGE_BUDGET   = 6
+_CAM_CHANGE_WINDOW_S = 60.0
+
 
 # esp_now_send() refusals, named.  ESP_ERR_ESPNOW_BASE is ESP_ERR_WIFI_BASE
 # (0x3000) + 100, and these are the codes the mount can actually hit; anything
@@ -246,6 +251,8 @@ class MountManager(QObject):
         self._sat_names: dict[int, str] = {}
         # (mount, category, parameter) -> the value last logged for it.
         self._cam_params_seen: dict[tuple[int, int, int], object] = {}
+        # key -> (window start, changes this window, gone quiet)
+        self._cam_param_rate: dict[tuple[int, int, int], tuple] = {}
 
         bridge.on_packet(self._on_packet)
         self.destroyed.connect(lambda: bridge.off_packet(self._on_packet))
@@ -465,6 +472,26 @@ class MountManager(QObject):
         if not first and self._cam_params_seen[key] == value:
             return
         self._cam_params_seen[key] = value
+
+        # Logging on change is right for a setting and useless for a MEASUREMENT.
+        # The battery voltage ticks by a millivolt every few seconds, and on its
+        # own it was 215 of 328 lines — two thirds of the log, burying the ISO
+        # and aperture changes it exists to show.  A parameter is allowed a few
+        # changes a minute; past that it says so once and goes quiet until the
+        # minute rolls, so a chatty measurement cannot drown a real event.
+        now = time.monotonic()
+        start, count, quiet = self._cam_param_rate.get(key, (now, 0, False))
+        if now - start >= _CAM_CHANGE_WINDOW_S:
+            start, count, quiet = now, 0, False
+        count += 1
+        if count > _CAM_CHANGE_BUDGET:
+            self._cam_param_rate[key] = (start, count, True)
+            if not quiet:
+                log.info("CAM PARAM cam%d category=%d parameter=%d — changing "
+                         "continuously (%s); further changes quiet for %ds",
+                         mount_id, raw[4], raw[5], value, int(_CAM_CHANGE_WINDOW_S))
+            return
+        self._cam_param_rate[key] = (start, count, quiet)
         log.info("CAM PARAM cam%d category=%d parameter=%d len=%d — %s%s",
                  mount_id, raw[4], raw[5], len(raw), describe_cam_param(raw),
                  "" if first else "   (changed)")

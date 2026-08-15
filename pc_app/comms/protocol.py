@@ -1259,14 +1259,21 @@ _CAM_PARAM_NAMES = {
     (4, 7): "display setting",
     (8, 0): "lift", (8, 1): "gamma", (8, 2): "gain", (8, 3): "offset",
     (8, 4): "contrast", (8, 5): "luma mix", (8, 6): "hue/saturation",
-    (9, 0): "codec",            (9, 1): "TRANSPORT",     (9, 2): "playback",
-    (10, 0): "PTZ pan/tilt",    (10, 1): "PTZ preset",
+    # Corrected against what this camera actually sends, not the spec reading
+    # that produced them.  9/0 was called "codec" and carries 11669, 98, 3 —
+    # millivolts, percent, flags: it is the BATTERY.  Everything from 12/9 on
+    # was shifted by one: 12/9 holds "OLYMPUS M.12-40mm F2.8" and 12/10 holds
+    # "f12.5", so they are the lens type and the lens iris, not iris and focal
+    # length.  Where the data does not settle what a parameter is, it gets no
+    # name at all — describe_cam_param prints "?" and the values, which is more
+    # use than a confident wrong label.
+    (9, 0): "battery",          (9, 1): "TRANSPORT",     (9, 2): "playback",
     (12, 0): "reel",            (12, 1): "scene tag",    (12, 2): "take",
-    (12, 3): "good take",       (12, 4): "camera id",    (12, 5): "operator",
-    (12, 6): "director",        (12, 7): "project",      (12, 8): "lens type",
-    (12, 9): "lens iris",       (12, 10): "lens focal length",
-    (12, 11): "lens distance",  (12, 12): "lens filter", (12, 13): "slate name",
-    (12, 14): "slate type",     (12, 15): "slate",
+    (12, 3): "good take",       (12, 5): "operator",
+    (12, 6): "director",        (12, 7): "project",
+    (12, 9): "lens type",       (12, 10): "lens iris",
+    (12, 11): "lens focal length", (12, 12): "lens distance",
+    (12, 15): "slate",
 }
 
 # Transport mode, byte 0 of category 9 parameter 1.
@@ -1313,6 +1320,8 @@ def describe_cam_param(payload: bytes) -> str:
         return f"{name} [{tname}] raw {payload[8:].hex()}"
     if category == 9 and parameter == 1 and vals:
         return f"{name} = {_TRANSPORT_NAMES.get(vals[0], vals[0])} {vals[1:]}"
+    if category == 9 and parameter == 0 and len(vals) >= 2:
+        return f"{name} = {vals[0] / 1000.0:.2f}V  {vals[1]}%  {vals[2:]}"
     if category == 1 and parameter == 9 and len(vals) >= 4:
         return (f"{name} = {vals[2]}x{vals[3]} @ {vals[0]}fps "
                 f"(sensor {vals[1]}fps) flags {vals[4:]}")
