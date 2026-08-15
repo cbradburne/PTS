@@ -72,9 +72,12 @@ HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
 # wedge only surfacing the next time the user presses a button.
 IDLE_PROBE_INTERVAL_S  = 3.0
 
-# Camera-parameter logging: how many changes one parameter may report
-# before it is treated as a measurement rather than a setting.
-_CAM_CHANGE_BUDGET   = 6
+# Camera-parameter logging: how many changes one parameter may report in a
+# minute before it is silenced as a runaway.  Generous, because a setting
+# being actively adjusted legitimately changes often and that is exactly when
+# the log is worth having; the battery, which prompted the limit, is
+# suppressed outright by CAM_MEASUREMENTS instead.
+_CAM_CHANGE_BUDGET   = 40
 _CAM_CHANGE_WINDOW_S = 60.0
 
 
