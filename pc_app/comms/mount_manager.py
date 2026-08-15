@@ -34,7 +34,8 @@ from .protocol import (
     pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
     pkt_cam_focus, pkt_cam_iris, pkt_cam_auto_iris, pkt_cam_zoom_norm,
-    pkt_cam_zoom_speed, pkt_cam_shutter_speed,
+    pkt_cam_zoom_speed, pkt_cam_shutter_speed, pkt_cam_transport,
+    describe_cam_param, TRANSPORT_RECORD, TRANSPORT_PREVIEW,
     pkt_cam_shutter_angle, pkt_cam_nd, pkt_cam_auto_wb, pkt_cam_restore_auto_wb,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
@@ -142,6 +143,10 @@ class MountState_:
     # Blackmagic camera, as REPORTED by the camera — never what we last sent.
     # None until the camera says so, which is what lets the UI grey a control
     # rather than invent a starting value and drift from the real one.
+    # Recording, as the camera reports it (media category, transport mode).
+    # None until it has said so — greying a Record button is honest, and a
+    # tally that guesses is worse than no tally.
+    cam_recording: Optional[bool] = None
     cam_iso:  Optional[int] = None
     cam_wb:   Optional[int] = None
     cam_tint: Optional[int] = None
@@ -209,6 +214,10 @@ class MountManager(QObject):
     # v2 — look-at tracking
     subject_list_received  = pyqtSignal(int)           # mount_id — subjects updated
     cam_status_received    = pyqtSignal(int)           # mount_id — camera settings updated
+    # Fired only on a CHANGE of transport mode, so anything downstream — the
+    # Record button, the OSC tally — reacts to the camera starting or stopping,
+    # not to it repeating itself every few seconds.
+    cam_recording_changed  = pyqtSignal(int, bool)     # mount_id, recording
     look_at_status_updated = pyqtSignal(int)           # mount_id — LookAtStatusPayload updated
     calib_prompt_received  = pyqtSignal(int, int)      # mount_id, CalibPrompt value
     ref_confirmed          = pyqtSignal(int, float, float)  # mount_id, pan_deg, tilt_deg
@@ -451,14 +460,13 @@ class MountManager(QObject):
         if len(raw) < 6:
             return
         key = (mount_id, raw[4], raw[5])
-        value = tuple(sorted(upd.items())) if upd else None
+        value = describe_cam_param(raw)
         first = key not in self._cam_params_seen
         if not first and self._cam_params_seen[key] == value:
             return
         self._cam_params_seen[key] = value
-        known = ", ".join(f"{k}={v}" for k, v in upd.items()) if upd else "not decoded"
         log.info("CAM PARAM cam%d category=%d parameter=%d len=%d — %s%s",
-                 mount_id, raw[4], raw[5], len(raw), known,
+                 mount_id, raw[4], raw[5], len(raw), describe_cam_param(raw),
                  "" if first else "   (changed)")
 
     def send_cam_iso(self, mount_id: int, iso: int) -> None:
@@ -601,6 +609,13 @@ class MountManager(QObject):
 
     def send_cam_zoom_speed(self, m, spd):      self._send(pkt_cam_zoom_speed(m, spd))
     def send_cam_auto_iris(self, m):            self._send(pkt_cam_auto_iris(m))
+    def send_cam_record(self, m, on: bool) -> None:
+        """Start or stop recording.  Nothing is assumed about the result:
+        cam_recording only moves when the camera reports the transport mode,
+        so a Record button that lights up is a camera that IS rolling, not one
+        that was asked to."""
+        self._send(pkt_cam_transport(m, TRANSPORT_RECORD if on else TRANSPORT_PREVIEW))
+
     def send_cam_auto_wb(self, m):              self._send(pkt_cam_auto_wb(m))
     def send_cam_restore_auto_wb(self, m):      self._send(pkt_cam_restore_auto_wb(m))
 
@@ -920,6 +935,14 @@ class MountManager(QObject):
 
                 if st:
 
+                    if "recording" in upd:
+                        was = st.cam_recording
+                        st.cam_recording = upd["recording"]
+                        if was != st.cam_recording:
+                            log.info("CAM%d %s", pkt.mount_id,
+                                     "RECORDING" if st.cam_recording else "stopped recording")
+                            self.cam_recording_changed.emit(pkt.mount_id,
+                                                           bool(st.cam_recording))
                     if "iso" in upd:           st.cam_iso  = upd["iso"]
 
                     if "white_balance" in upd: st.cam_wb   = upd["white_balance"]

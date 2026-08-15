@@ -99,6 +99,12 @@ class AppConfig:
     joystick_deadzone: float = 0.08
     osc_enabled: bool = True           # OSC control server (Companion / QLab)
     osc_port: int = 9700               # UDP port for /pts/... addresses
+    # Where feedback goes.  Empty host = reply to whoever sent the last
+    # command, which is right for QLab and for testing but wrong for
+    # Companion, whose listener is on a fixed port and not the ephemeral one
+    # it sends from.  Set the host to point feedback somewhere specific.
+    osc_feedback_host: str = ""
+    osc_feedback_port: int = 12321     # Companion's default OSC listener
     virtual_keyboard: bool = True      # on-screen keyboard for text entry
                                        # (touchscreen setups with no keyboard)
     numeric_keypad: bool = True        # keypad beside Settings for spin boxes
@@ -189,6 +195,8 @@ def load_config() -> AppConfig:
         cfg.joystick_deadzone = data.get("joystick_deadzone", 0.08)
         cfg.osc_enabled       = data.get("osc_enabled", True)
         cfg.osc_port          = data.get("osc_port", 9700)
+        cfg.osc_feedback_host = data.get("osc_feedback_host", "")
+        cfg.osc_feedback_port = data.get("osc_feedback_port", 12321)
         cfg.virtual_keyboard  = data.get("virtual_keyboard", True)
         cfg.numeric_keypad    = data.get("numeric_keypad", True)
         # Load only the display label for each mount — everything else is in EEPROM
@@ -222,6 +230,8 @@ def save_config(cfg: AppConfig) -> None:
             "joystick_deadzone": cfg.joystick_deadzone,
             "osc_enabled":       cfg.osc_enabled,
             "osc_port":          cfg.osc_port,
+            "osc_feedback_host": cfg.osc_feedback_host,
+            "osc_feedback_port": cfg.osc_feedback_port,
             "virtual_keyboard":  cfg.virtual_keyboard,
             "numeric_keypad":    cfg.numeric_keypad,
             # Only the display label is app-specific; all other mount settings are in EEPROM

@@ -122,8 +122,14 @@ def main() -> None:
     osc = None
     if config.osc_enabled:
         from comms.osc_server import OscServer
-        osc = OscServer(mm, port=config.osc_port)
+        osc = OscServer(mm, port=config.osc_port,
+                        feedback_host=config.osc_feedback_host,
+                        feedback_port=config.osc_feedback_port)
         osc.start()   # logs + returns False on bind failure; app runs regardless
+        # Tally out.  Driven by the CAMERA's reported transport mode, so a lit
+        # tally downstream means a camera that is rolling, not one that was
+        # asked to roll — the command itself is never acknowledged.
+        mm.cam_recording_changed.connect(osc.publish_recording)
         app.aboutToQuit.connect(osc.stop)
 
     window = MainWindow(config, bridge, mm, store, joystick)

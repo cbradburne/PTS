@@ -122,7 +122,38 @@ class _CamRow(QWidget):
         self._iso_lbl = self._add_stepper(hl, "ISO", self._iso_down, self._iso_up)
         self._wb_lbl  = self._add_stepper(hl, "WB",   self._wb_down,  self._wb_up)
 
+        # Record, far right.  It shows the camera's REPORTED transport mode, not
+        # what was asked for: red and reading "Stop" means that camera is
+        # actually rolling.  Until the camera has reported one way or the other
+        # it stays disabled rather than guessing, because a tally that lies is
+        # worse than no tally on a live rig.
+        self._rec = QPushButton("Record")
+        self._rec.setFixedHeight(44)
+        self._rec.setMinimumWidth(110)
+        self._rec.clicked.connect(self._on_record)
+        hl.addWidget(self._rec)
+
         self.refresh()
+
+    def _on_record(self) -> None:
+        st = self._mm.state(self._mount_id)
+        self._mm.send_cam_record(self._mount_id, not bool(st.cam_recording))
+
+    def _set_rec_style(self) -> None:
+        st  = self._mm.state(self._mount_id)
+        rec = st.cam_recording
+        ready = self._link_state() == "ready"
+        self._rec.setEnabled(ready and rec is not None)
+        self._rec.setText("Stop" if rec else "Record")
+        bg = "#C62828" if rec else "#2A3038"          # red only while rolling
+        self._rec.setStyleSheet(f"""
+            QPushButton {{
+                background: {bg}; color: white; font-size: 14px; font-weight: 600;
+                border: none; border-radius: 6px; padding: 0 14px;
+            }}
+            QPushButton:disabled {{ background: #23272C; color: #6B7683; }}
+            QPushButton:pressed  {{ background: #8E1F1F; }}
+        """)
 
     def _add_stepper(self, hl, caption, on_down, on_up) -> QLabel:
         cap = QLabel(caption)
@@ -160,6 +191,7 @@ class _CamRow(QWidget):
         ready = (key == "ready")
         self._af.setEnabled(ready)
         self._set_btn_style()
+        self._set_rec_style()
 
         st  = self._mm.state(self._mount_id)
         for lbl, value, suffix in ((self._iso_lbl, st.cam_iso, ""),

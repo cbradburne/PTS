@@ -24,6 +24,21 @@ ADDRESS SPACE  (cam N = 1-5; slots are 1-based here, matching every UI)
     /pts/cam/N/lookat   <0|1>           look-at move to min (0/◀) or max (1/▶)
                                         using the selected subject + active
                                         slider preset
+    /pts/cam/N/record   <0|1>           stop / start recording on that camera
+    /pts/cam/N/record/toggle            start if stopped, stop if rolling
+
+FEEDBACK (out)
+    /pts/cam/N/recording <0|1>          sent whenever the CAMERA reports its
+                                        transport mode changing.  It is the
+                                        camera's own account, not an echo of
+                                        the command: a lit tally means that
+                                        camera is rolling, and a command that
+                                        never took effect produces nothing.
+                                        Destination is osc_feedback_host/port
+                                        in the config; with no host set it
+                                        replies to whoever sent the last
+                                        command, which suits QLab but not
+                                        Companion (fixed listener port).
 
 COMPANION: add a "Generic: OSC" connection → target = this PC's IP, port
 below.  Button press/release action pairs give hold-to-jog.  See
@@ -109,6 +124,32 @@ def parse_osc(data: bytes) -> list[tuple[str, list]]:
     return out
 
 
+def build_osc(address: str, *args) -> bytes:
+    """Encode one OSC message.  Ints, floats, strings and bools.
+
+    Bools go out as the OSC T/F tags AND, for consumers that only read numeric
+    arguments, nothing else — Companion reads T/F fine and QLab prefers an int,
+    so callers that want a number send int(bool) explicitly.
+    """
+    out = address.encode("ascii") + b"\0"
+    out += b"\0" * (_pad4(len(out)) - len(out))
+    tags = ","
+    body = b""
+    for a in args:
+        if isinstance(a, bool):
+            tags += "T" if a else "F"
+        elif isinstance(a, int):
+            tags += "i"; body += struct.pack(">i", a)
+        elif isinstance(a, float):
+            tags += "f"; body += struct.pack(">f", a)
+        else:
+            s = str(a).encode("ascii", "replace") + b"\0"
+            tags += "s"; body += s + b"\0" * (_pad4(len(s)) - len(s))
+    t = tags.encode("ascii") + b"\0"
+    out += t + b"\0" * (_pad4(len(t)) - len(t)) + body
+    return out
+
+
 def _as_int(args: list, idx: int, default: Optional[int] = None) -> Optional[int]:
     if idx >= len(args):
         return default
@@ -133,10 +174,18 @@ class OscServer:
     test runs the real manager against the mount simulator)."""
 
     def __init__(self, manager, port: int = DEFAULT_PORT,
-                 host: str = "0.0.0.0"):
+                 host: str = "0.0.0.0",
+                 feedback_host: str = "", feedback_port: int = 12321):
         self._mgr     = manager
         self._port    = port
         self._host    = host
+        # Where feedback goes.  With no host configured it goes back to
+        # whoever last sent us a command, which is right for QLab and for a
+        # bench test; Companion listens on a fixed port rather than the
+        # ephemeral one it sends from, so it wants the host set explicitly.
+        self._fb_host = feedback_host
+        self._fb_port = feedback_port
+        self._last_peer: Optional[tuple] = None
         self._sock: Optional[socket.socket] = None
         self._running = False
         self._threads: list[threading.Thread] = []
@@ -172,11 +221,34 @@ class OscServer:
             try: self._sock.close()
             except OSError: pass
 
+    # ── send ─────────────────────────────────────────────────────────────
+    def send(self, address: str, *args) -> None:
+        """Fire-and-forget feedback.  Never raises: a tally light that is not
+        listening must not take the control surface down with it."""
+        if not self._sock:
+            return
+        dest = ((self._fb_host, self._fb_port) if self._fb_host
+                else (self._last_peer[0], self._fb_port) if self._last_peer
+                else None)
+        if dest is None:
+            return
+        try:
+            self._sock.sendto(build_osc(address, *args), dest)
+        except OSError as e:
+            log.debug("OSC feedback to %s failed: %s", dest, e)
+
+    def publish_recording(self, mid: int, recording: bool) -> None:
+        """Tally out.  Sent only when the CAMERA reports a change, so a lit
+        tally means a camera that is rolling — not one that was asked to."""
+        self.send(f"/pts/cam/{mid}/recording", int(bool(recording)))
+        log.info("OSC tally out: cam%d recording=%d", mid, int(bool(recording)))
+
     # ── receive ──────────────────────────────────────────────────────────
     def _rx_loop(self) -> None:
         while self._running:
             try:
                 data, addr = self._sock.recvfrom(4096)
+                self._last_peer = addr
             except socket.timeout:
                 continue
             except OSError:
@@ -236,7 +308,17 @@ class OscServer:
         verb = parts[3]
         st = self._mgr.state(mid)
 
-        if verb == "estop":
+        if verb == "record":
+            # /pts/cam/N/record 1|0, or .../record/toggle
+            if len(parts) > 4 and parts[4] == "toggle":
+                on = not bool(getattr(st, "cam_recording", False))
+            else:
+                v = _as_int(args, 0)
+                on = bool(args[0]) if (v is None and args) else bool(v)
+            log.info("OSC: cam%d record %s", mid, "START" if on else "STOP")
+            self._mgr.send_cam_record(mid, on)
+
+        elif verb == "estop":
             self._stop_jog(mid)
             self._mgr.send_e_stop(mid)
 

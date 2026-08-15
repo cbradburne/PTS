@@ -13,6 +13,7 @@ Packet format:
 from __future__ import annotations
 
 import logging
+import math
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -1178,6 +1179,23 @@ def pkt_cam_restore_auto_wb(mount_id: int) -> bytes:
     return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 4, BMD_TYPE_VOID)
 
 
+BMD_CAT_MEDIA = 9
+
+
+def pkt_cam_transport(mount_id: int, mode: int) -> bytes:
+    """Start or stop recording — media category, parameter 1, int8.
+
+    Three bytes, not the five the spec lists, because three is what this
+    camera REPORTS for the same parameter (len 11, an 8-byte header and 3
+    bytes of data).  Matching what it says about itself beats matching the
+    document, which is the lesson gain taught.
+
+    mode: 0 preview, 1 play, 2 record.  Speed and flags follow as zero.
+    """
+    return pkt_cam_raw(mount_id, BMD_CAT_MEDIA, 1, BMD_TYPE_I8,
+                       bytes([mode & 0xFF, 0, 0]))
+
+
 # ── Decoding what the camera reports ────────────────────────────────────────
 # CMD_CAM_STATUS carries a Blackmagic status message verbatim, in the same
 # framing as a command:
@@ -1187,11 +1205,112 @@ def pkt_cam_restore_auto_wb(mount_id: int) -> bytes:
 # Returns {"iso": n} / {"white_balance": k, "tint": t} / {} for anything not
 # understood — an unknown parameter is normal traffic, not an error, because
 # the camera reports everything it feels like reporting.
+# Blackmagic's own data-type codes, from byte 6 of every report.  Decoding by
+# the type the CAMERA declares beats guessing per parameter: a parameter whose
+# meaning we have wrong still yields correct numbers, and the log can show
+# something useful for every report instead of "not decoded".
+_CAM_WIDTH = {1: 1, 2: 2, 3: 4, 4: 8, 128: 2}
+_CAM_TYPE_NAME = {0: "void", 1: "int8", 2: "int16", 3: "int32",
+                  4: "int64", 5: "string", 128: "fixed16"}
+
+# What each (category, parameter) is, per the published spec.  Naming is
+# separate from decoding on purpose: a wrong name here mislabels a line, it does
+# not corrupt the numbers beside it.
+_CAM_PARAM_NAMES = {
+    (0, 0): "focus",            (0, 1): "autofocus",     (0, 2): "aperture (AV)",
+    (0, 3): "iris",             (0, 5): "auto aperture", (0, 7): "zoom (mm)",
+    (0, 8): "zoom",             (0, 9): "zoom speed",
+    (1, 2): "white balance",    (1, 7): "dynamic range", (1, 8): "sharpening",
+    (1, 9): "recording format", (1, 10): "auto exposure", (1, 11): "shutter angle",
+    (1, 12): "shutter speed",   (1, 13): "gain (dB)",    (1, 14): "ISO",
+    (1, 15): "display LUT",     (1, 16): "ND filter",
+    (3, 0): "overlay enables",  (3, 3): "overlays",
+    (4, 7): "display setting",
+    (8, 0): "lift", (8, 1): "gamma", (8, 2): "gain", (8, 3): "offset",
+    (8, 4): "contrast", (8, 5): "luma mix", (8, 6): "hue/saturation",
+    (9, 0): "codec",            (9, 1): "TRANSPORT",     (9, 2): "playback",
+    (10, 0): "PTZ pan/tilt",    (10, 1): "PTZ preset",
+    (12, 0): "reel",            (12, 1): "scene tag",    (12, 2): "take",
+    (12, 3): "good take",       (12, 4): "camera id",    (12, 5): "operator",
+    (12, 6): "director",        (12, 7): "project",      (12, 8): "lens type",
+    (12, 9): "lens iris",       (12, 10): "lens focal length",
+    (12, 11): "lens distance",  (12, 12): "lens filter", (12, 13): "slate name",
+    (12, 14): "slate type",     (12, 15): "slate",
+}
+
+# Transport mode, byte 0 of category 9 parameter 1.
+TRANSPORT_PREVIEW, TRANSPORT_PLAY, TRANSPORT_RECORD = 0, 1, 2
+_TRANSPORT_NAMES = {0: "preview", 1: "play", 2: "RECORDING"}
+
+
+def _cam_values(dtype: int, data: bytes):
+    """Every value in the payload, by the camera's declared type.
+
+    Returns None when the type code is one we do not know, which is itself
+    worth seeing rather than hiding.
+    """
+    if dtype == 0:
+        return []
+    if dtype == 5:
+        return [data.split(b"\x00")[0].decode("utf-8", "replace")]
+    width = _CAM_WIDTH.get(dtype)
+    if width is None:
+        return None
+    out = []
+    for i in range(0, len(data) - width + 1, width):
+        chunk = data[i:i + width]
+        out.append(_un_fixed16(chunk) if dtype == BMD_TYPE_FIXED16
+                   else int.from_bytes(chunk, "little", signed=True))
+    return out
+
+
+def describe_cam_param(payload: bytes) -> str:
+    """One readable line for ANY camera report, understood or not.
+
+    The log used to print "not decoded" for 37 of the 41 parameters this camera
+    sends, which is the same as not logging them: a record tally and the frame
+    rate were both sitting in that silence.  Decoding by declared type means the
+    worst case is now an unnamed parameter with correct values beside it.
+    """
+    if len(payload) < 8:
+        return "runt packet"
+    category, parameter, dtype = payload[4], payload[5], payload[6]
+    vals = _cam_values(dtype, payload[8:])
+    name = _CAM_PARAM_NAMES.get((category, parameter), "?")
+    tname = _CAM_TYPE_NAME.get(dtype, f"type {dtype}")
+    if vals is None:
+        return f"{name} [{tname}] raw {payload[8:].hex()}"
+    if category == 9 and parameter == 1 and vals:
+        return f"{name} = {_TRANSPORT_NAMES.get(vals[0], vals[0])} {vals[1:]}"
+    if category == 1 and parameter == 9 and len(vals) >= 4:
+        return (f"{name} = {vals[2]}x{vals[3]} @ {vals[0]}fps "
+                f"(sensor {vals[1]}fps) flags {vals[4:]}")
+    shown = ", ".join(f"{v}" for v in vals) if vals else "(no data)"
+    return f"{name} [{tname}] = {shown}"
+
+
 def decode_cam_status(payload: bytes) -> dict:
     if len(payload) < 8:
         return {}
     category, parameter = payload[4], payload[5]
     data = payload[8:]
+
+    # ---- the ones worth acting on, beyond what the advanced panel drives ----
+    if category == 9 and parameter == 1 and len(data) >= 1:
+        mode = data[0]
+        return {"transport": mode, "recording": mode == TRANSPORT_RECORD}
+    if category == 1 and parameter == 9 and len(data) >= 8:
+        v = [int.from_bytes(data[i:i + 2], "little", signed=True)
+             for i in range(0, min(len(data), 10), 2)]
+        return {"rec_format": (v[2], v[3], v[0])}      # width, height, fps
+    if category == 0 and parameter == 2 and len(data) >= 2:
+        # Blackmagic sends an APEX aperture value; f-number is sqrt(2^AV).
+        av = _un_fixed16(data[0:2])
+        return {"aperture_av": av, "f_stop": round(math.sqrt(2.0 ** av), 1)}
+    if category == 0 and parameter == 7 and len(data) >= 2:
+        return {"zoom_mm": int.from_bytes(data[0:2], "little", signed=True)}
+    if category == 1 and parameter == 7 and len(data) >= 1:
+        return {"dynamic_range": data[0]}
     if category == 1 and parameter == 14 and len(data) >= 2:      # ISO
         return {"iso": int.from_bytes(data[:4].ljust(4, b"\x00"), "little", signed=True)}
     if category == 1 and parameter == 2 and len(data) >= 4:       # white balance
