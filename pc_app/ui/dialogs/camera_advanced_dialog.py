@@ -402,20 +402,31 @@ class CameraAdvancedDialog(QDialog):
         for val, fmt in self._readouts:
             val.setText(fmt())
 
-    def _iris_text(self) -> str:
-        """f-number where the camera has given one, percentage while dragging.
+    def _stale(self, sent_key: str, heard_key: str) -> bool:
+        """True when we have moved this control since the camera last spoke.
 
-        The reported f-number describes where the iris IS.  During a drag that
-        is where it still was a moment ago, so the percentage — which is what
-        the slider is actually sending — is the honest thing to show until the
-        handle is let go and the camera answers.
+        The camera takes 300-500ms to notice an aperture change and say so —
+        its own Bluetooth cadence, not anything this end can hurry.  During that
+        gap the last reported f-number is simply WRONG, and showing it looks
+        settled and authoritative, which is the worst way to be wrong.  So the
+        readout falls back to the percentage the slider actually sent until the
+        camera confirms, and the f-number that appears is always true.
         """
-        if self._iris.isSliderDown() or self._f_stop is None:
+        st = self._mm.state(self._mount) if hasattr(self._mm, "state") else None
+        if st is None:
+            return False
+        return (getattr(st, "cam_sent_at", {}).get(sent_key, 0.0) >
+                getattr(st, "cam_heard_at", {}).get(heard_key, 0.0))
+
+    def _iris_text(self) -> str:
+        if (self._iris.isSliderDown() or self._f_stop is None
+                or self._stale("iris", "f_stop")):
             return f"{self._iris.value()}%"
         return f"f/{self._f_stop:g}"
 
     def _zoom_text(self) -> str:
-        if self._zoom.isSliderDown() or self._zoom_mm is None:
+        if (self._zoom.isSliderDown() or self._zoom_mm is None
+                or self._stale("zoom", "zoom_mm")):
             return f"{self._zoom.value()}%"
         return f"{self._zoom_mm} mm"
 
