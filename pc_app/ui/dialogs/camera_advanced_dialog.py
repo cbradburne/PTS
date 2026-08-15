@@ -119,10 +119,14 @@ class _Confirmed:
     the iris is quite often the OLD f-number, and displaying it looks exactly
     like confirmation while being nothing of the kind.
 
-    This waits for one of two things after a change: a value that actually
-    differs, or the same value twice, which is how a genuine no-change is told
-    apart from a stale echo.  No arithmetic is done on the number and nothing
-    is inferred — it is the camera's own value or it is not shown.
+    Where the camera also reports the CONTROL we set — normalised iris, which it
+    answers in about 1.2s against 4.8s for the f-number — that is the gate: once
+    it agrees it holds the value asked for, the next number is about the new
+    position.  Where it does not (it never reports normalised zoom), the fallback
+    is waiting for the number itself to change.
+
+    Nothing is computed or inferred anywhere here.  It is the camera's own value
+    or it is not shown.
     """
 
     def __init__(self, gated: bool = False, tol: float = 0.03):
@@ -475,20 +479,25 @@ class CameraAdvancedDialog(QDialog):
             val.setText(fmt())
 
     def _iris_text(self) -> str:
-        """The f-number, or nothing.
+        """The slider's own position, replaced by the f-number when it lands.
 
-        No percentage: the handle's position already says where the slider is,
-        so a percentage beside it only repeated that in a form nobody reads an
-        exposure in.  The f-number is the one thing this readout adds, and while
-        the camera has yet to confirm one there is genuinely nothing to say.
+        The percentage is OURS: where the handle sits in its own travel, live
+        from the first pixel of a drag and never touched by the camera.  That
+        is what tells you a setting is halfway along its range before you
+        commit to it.
+
+        The f-number is the CAMERA'S, and it takes over once the camera has
+        confirmed the aperture for the position now set.  Until then the
+        percentage stays: it is at least true about where the control is, where
+        the previous f-number would be a lie about where the iris is.
         """
         if self._iris.isSliderDown() or not self._f_stop.confirmed:
-            return "—"
+            return f"{self._iris.value()}%"
         return f"f/{self._f_stop.value:g}"
 
     def _zoom_text(self) -> str:
         if self._zoom.isSliderDown() or not self._zoom_mm.confirmed:
-            return "—"
+            return f"{self._zoom.value()}%"
         return f"{self._zoom_mm.value} mm"
 
     def _focus_text(self) -> str:
