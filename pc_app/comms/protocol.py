@@ -1276,6 +1276,13 @@ _CAM_PARAM_NAMES = {
     (12, 15): "slate",
 }
 
+# Parameters that are MEASUREMENTS rather than settings: worth recording once
+# so the value is on file, never worth a line each time they move.  The
+# battery dithers 11.82-11.86V report after report — noise, not charging, as
+# the steady 98% shows — and on this rig the cameras are powered from the
+# mount, so there is no battery to watch in the first place.
+CAM_MEASUREMENTS = {(9, 0)}
+
 # Transport mode, byte 0 of category 9 parameter 1.
 TRANSPORT_PREVIEW, TRANSPORT_PLAY, TRANSPORT_RECORD = 0, 1, 2
 _TRANSPORT_NAMES = {0: "preview", 1: "play", 2: "RECORDING"}

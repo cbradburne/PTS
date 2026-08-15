@@ -35,7 +35,7 @@ from .protocol import (
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
     pkt_cam_focus, pkt_cam_iris, pkt_cam_auto_iris, pkt_cam_zoom_norm,
     pkt_cam_zoom_speed, pkt_cam_shutter_speed, pkt_cam_transport, pkt_cam_tally, pkt_cam_tally_front, pkt_cam_tally_rear,
-    describe_cam_param, TRANSPORT_RECORD, TRANSPORT_PREVIEW,
+    describe_cam_param, TRANSPORT_RECORD, TRANSPORT_PREVIEW, CAM_MEASUREMENTS,
     pkt_cam_shutter_angle, pkt_cam_nd, pkt_cam_auto_wb, pkt_cam_restore_auto_wb,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
@@ -472,6 +472,8 @@ class MountManager(QObject):
         if not first and self._cam_params_seen[key] == value:
             return
         self._cam_params_seen[key] = value
+        if not first and (raw[4], raw[5]) in CAM_MEASUREMENTS:
+            return          # recorded once when first seen; its drift is noise
 
         # Logging on change is right for a setting and useless for a MEASUREMENT.
         # The battery voltage ticks by a millivolt every few seconds, and on its
