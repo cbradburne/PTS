@@ -3109,7 +3109,19 @@ void loop() {
     // still receiving is not excused.  See TXWEDGE_FAILS_PER_S.
     {
         uint32_t nw    = millis();
-        uint32_t fails = _espnow_fail_total;
+        // Failures AND refusals.  This watched _espnow_fail_total alone, which
+        // is incremented from the send callback — and a refusal never reaches
+        // that callback, which is stated three functions up in this same file.
+        // So the detector was blind to the exact fault it exists to catch.
+        //
+        // Measured 2026-08-15: mount 5 isolated twice, both times with the
+        // queue full — 1770 refusals against txfail 680, then 1673 refusals
+        // against txfail 15. The second is unambiguous: the radio was fine and
+        // nothing was failing, the stack simply stopped accepting frames. TX
+        // died a full 59 s before RX did, so there was a minute of exactly the
+        // conditions this was written for, and it saw fifteen failures and did
+        // nothing. Both ran on to a two-minute isolation and a full reboot.
+        uint32_t fails = _espnow_fail_total + _espnow_tx_refused;
         bool rx_alive  = (nw - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
 
         // Track when the failure counter last MOVED.  This is the only honest
