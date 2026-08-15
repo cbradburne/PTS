@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSlider, QWidget, QTabBar, QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
 )
 
@@ -63,6 +63,7 @@ class CameraAdvancedDialog(QDialog):
         # Guard against the feedback loop: showing a camera-reported value moves
         # the control, which would otherwise send that value straight back.
         self._loading = False
+        self._tint = None       # built with the correction panel, not the camera one
         self.setWindowTitle("Camera Control — Advanced")
         self.resize(1180, 720)
         self.setStyleSheet("QDialog{background:#1b1d20;} QLabel{color:#cfd3d8;}")
@@ -140,10 +141,8 @@ class CameraAdvancedDialog(QDialog):
         self._wb.setSuffix(" K"); self._wb.setValue(5600)
         self._wb.valueChanged.connect(self._send_wb)
         _row(lay, "Balance", self._wb)
-
-        self._tint = QSpinBox(); self._tint.setRange(-50, 50)
-        self._tint.valueChanged.connect(self._send_wb)
-        _row(lay, "Tint", self._tint)
+        # Tint lives in the Gain column of the correction panel, as on the
+        # reference.  _send_wb sends both, so it has to be built by then.
 
         wbrow = QHBoxLayout()
         for text, fn in (("Auto WB", "send_cam_auto_wb"),
@@ -206,8 +205,6 @@ class CameraAdvancedDialog(QDialog):
         head.addWidget(rst)
         lay.addLayout(head)
 
-        wheels = QHBoxLayout()
-        wheels.setSpacing(12)
         # span = offset at the rim, centre = the parameter's neutral, lo/hi = its
         # legal range, all from the Blackmagic category-8 table.  Gain's neutral
         # is ONE, not zero: it is a multiplier, and a zero-centred gain wheel
@@ -215,40 +212,68 @@ class CameraAdvancedDialog(QDialog):
         self._w_lift  = LabelledWheel("Lift",  span=0.5, centre=0.0, lo=-2.0, hi=2.0)
         self._w_gamma = LabelledWheel("Gamma", span=1.0, centre=0.0, lo=-4.0, hi=4.0)
         self._w_gain  = LabelledWheel("Gain",  span=1.0, centre=1.0, lo=0.0,  hi=16.0)
-        for w, send in ((self._w_lift,  "send_cam_lift"),
-                        (self._w_gamma, "send_cam_gamma"),
-                        (self._w_gain,  "send_cam_gain_cc")):
-            w.wheel.changed.connect(
-                lambda r, g, b, y, f=send: self._send(getattr(self._mm, f), r, g, b, y))
-            wheels.addWidget(w, 1)
-        lay.addLayout(wheels, 0)
-        lay.addSpacing(4)
 
-        # One equally-spaced row beneath the wheels, each slider carrying its own
-        # number in its top-right corner.  They were previously a 2x3 grid with
-        # the numbers pushed into separate columns off to the right, which left
-        # every value sitting beside the wrong slider.
-        row = QHBoxLayout()
-        row.setSpacing(14)
+        # Three columns, exactly as the reference panel groups them: each wheel
+        # keeps its own two sliders directly underneath it.  The pairing is the
+        # reference's, not a functional one — pivot belongs to contrast, but
+        # saturation and lum mix have nothing to do with gamma.  It is a layout
+        # the operator already reads fluently, which is the whole point.
+        #
+        # Tint sits here under Gain rather than in the Camera panel because that
+        # is where the reference puts it, even though it is a white-balance
+        # parameter and travels in the same command as the temperature.
+        cols = QHBoxLayout()
+        cols.setSpacing(14)
         self._sliders = {}
-        specs = [
-            ("Contrast",   0.0, 2.0, 1.0, self._send_contrast),
-            ("Pivot",      0.0, 1.0, 0.5, self._send_contrast),
-            ("Saturation", 0.0, 2.0, 1.0, self._send_hue_sat),
-            ("Hue",       -1.0, 1.0, 0.0, self._send_hue_sat),
-            ("Lum Mix",    0.0, 1.0, 1.0,
-             lambda: self._send(self._mm.send_cam_luma_mix,
-                                self._sliders["Lum Mix"].value() / 100.0)),
+        # Readouts follow the reference, which shows the slider's POSITION across
+        # its range rather than the raw wire value: contrast reads 49% at
+        # mid-track and hue reads 180° at centre, though on the wire those are
+        # 0.98 and 0.00.  `f` is that fraction, `v` the value actually sent.
+        pct   = lambda v, f: f"{f * 100:.0f}%"
+        two   = lambda v, f: f"{v:.2f}"
+        deg   = lambda v, f: f"{f * 360:.0f}°"
+        whole = lambda v, f: f"{v:.0f}"
+        column_specs = [
+            (self._w_lift, "send_cam_lift", [
+                ("Contrast",   0.0, 2.0, 1.0, 100, pct,   self._send_contrast),
+                ("Pivot",      0.0, 1.0, 0.5, 100, two,   self._send_contrast),
+            ]),
+            (self._w_gamma, "send_cam_gamma", [
+                ("Saturation", 0.0, 2.0, 1.0, 100, pct,   self._send_hue_sat),
+                ("Lum Mix",    0.0, 1.0, 1.0, 100, pct,
+                 lambda: self._send(self._mm.send_cam_luma_mix,
+                                    self._sliders["Lum Mix"].value() / 100.0)),
+            ]),
+            (self._w_gain, "send_cam_gain_cc", [
+                ("Hue",       -1.0, 1.0, 0.0, 100, deg,   self._send_hue_sat),
+                ("Tint",     -50.0, 50.0, 0.0,  1, whole, self._send_wb),
+            ]),
         ]
-        for name, lo, hi, init, cb in specs:
-            row.addWidget(self._slider_cell(name, lo, hi, init, cb), 1)
-        lay.addLayout(row)
-        lay.addStretch(1)          # slack goes here, under the sliders
+        for wheel, send, sliders in column_specs:
+            wheel.wheel.changed.connect(
+                lambda r, g, b, y, f=send: self._send(getattr(self._mm, f), r, g, b, y))
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            col.addWidget(wheel)
+            for spec in sliders:
+                col.addWidget(self._slider_cell(*spec))
+            col.addStretch(1)
+            cols.addLayout(col, 1)
+        lay.addLayout(cols, 1)
+
+        # Tint is a slider now, but the rest of the dialog only ever calls
+        # .value()/.setValue() on it, which a QSlider answers the same way the
+        # spin box did.
+        self._tint = self._sliders["Tint"]
         return box
 
-    def _slider_cell(self, name: str, lo: float, hi: float,
-                     init: float, cb) -> QWidget:
-        """Name top-left, value top-right, slider full width beneath."""
+    def _slider_cell(self, name: str, lo: float, hi: float, init: float,
+                     scale: int, fmt, cb) -> QWidget:
+        """Name top-left, value top-right, slider full width beneath.
+
+        `scale` is slider-steps per unit — 100 for the fractional parameters,
+        1 for tint, which is a whole number on the wire.
+        """
         cell = QWidget()
         v = QVBoxLayout(cell)
         v.setContentsMargins(0, 0, 0, 0)
@@ -256,9 +281,11 @@ class CameraAdvancedDialog(QDialog):
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
+        frac = lambda value: (value - lo) / (hi - lo) if hi > lo else 0.0
+
         lab = QLabel(name)
         lab.setStyleSheet("color:#9aa0a8; font-size:11px;")
-        val = QLabel(f"{init:.2f}")
+        val = QLabel(fmt(init, frac(init)))
         val.setStyleSheet("color:#e6e8ec; font-size:12px; font-weight:600;")
         val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         head.addWidget(lab)
@@ -266,8 +293,9 @@ class CameraAdvancedDialog(QDialog):
         head.addWidget(val)
         v.addLayout(head)
 
-        sl = self._slider(int(lo * 100), int(hi * 100), int(init * 100))
-        sl.valueChanged.connect(lambda x, l=val: l.setText(f"{x / 100.0:.2f}"))
+        sl = self._slider(int(lo * scale), int(hi * scale), int(init * scale))
+        sl.valueChanged.connect(
+            lambda x, l=val, s=scale, f=fmt, q=frac: l.setText(f(x / s, q(x / s))))
         sl.valueChanged.connect(lambda _x, f=cb: f())
         self._sliders[name] = sl
         v.addWidget(sl)
@@ -280,7 +308,9 @@ class CameraAdvancedDialog(QDialog):
         fn(self._mount, *args)
 
     def _send_wb(self) -> None:
-        self._send(self._mm.send_cam_white_balance, self._wb.value(), self._tint.value())
+        """Temperature and tint travel in one command, so both go every time."""
+        tint = self._tint.value() if getattr(self, "_tint", None) is not None else 0
+        self._send(self._mm.send_cam_white_balance, self._wb.value(), tint)
 
     def _send_contrast(self) -> None:
         self._send(self._mm.send_cam_contrast,
