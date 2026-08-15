@@ -144,8 +144,25 @@ class _ListSpin(QSpinBox):
         return self._values[self.value()]
 
     def set_value_of(self, v) -> None:
-        if v in self._values:
-            self.setValue(self._values.index(v))
+        """Show exactly what was reported, learning stops we did not know about.
+
+        The camera's ISO series is finer than the stops offered for stepping —
+        it has reported both 1250 and 1600 — and this used to ignore anything
+        not already in the list, so the panel silently kept showing the old
+        value and looked like it had missed the change.  A reported stop is by
+        definition one the camera has, so it is inserted in order: the display
+        stays honest and stepping finds it next time.
+        """
+        if v not in self._values:
+            cur = self._values[self.value()] if self._values else None
+            self._values.append(v)
+            self._values.sort()
+            was = self.blockSignals(True)
+            self.setRange(0, len(self._values) - 1)
+            if cur is not None:
+                self.setValue(self._values.index(cur))
+            self.blockSignals(was)
+        self.setValue(self._values.index(v))
 
 
 class _SignedSpin(QSpinBox):
@@ -654,7 +671,10 @@ class CameraAdvancedDialog(QDialog):
                 self._set_if_free(self._wb, int(adv["white_balance"]))
             if "tint" in adv:
                 self._set_if_free(self._tint, int(adv["tint"]))
-            if adv.get("iso") in ISO_STEPS and not self._held(self._iso):
+            # No "is it one of our stops?" test — the box learns any stop the
+            # camera reports, and screening them out here was half of why a
+            # reported ISO could vanish without trace.
+            if adv.get("iso") is not None and not self._held(self._iso):
                 self._iso.set_value_of(adv["iso"])
             for key, wheel in (("lift", self._w_lift), ("gamma", self._w_gamma),
                                ("gain_cc", self._w_gain)):

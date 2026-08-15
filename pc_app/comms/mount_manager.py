@@ -235,7 +235,8 @@ class MountManager(QObject):
         self._route_logged = False
         self._asked_for_table = False
         self._sat_names: dict[int, str] = {}
-        self._cam_params_seen: set[tuple[int, int, int]] = set()
+        # (mount, category, parameter) -> the value last logged for it.
+        self._cam_params_seen: dict[tuple[int, int, int], object] = {}
 
         bridge.on_packet(self._on_packet)
         self.destroyed.connect(lambda: bridge.off_packet(self._on_packet))
@@ -439,18 +440,26 @@ class MountManager(QObject):
         parameter, and lands in comms.log where it can actually be read: the
         mount's serial port is inside the enclosure on a rig.
 
-        Once per (mount, category, parameter) so a camera reporting on a 5 s
-        replay does not flood the log.
+        Logged when the VALUE changes, not once per parameter.  It was once per
+        parameter, and that turned this instrument into a third way of being
+        misled: asked "did the camera report ISO while gain was being changed?"
+        the log said nothing, so ISO was diagnosed twice as an app-side fault
+        when the camera had in fact been reporting every step.  A parameter
+        re-reported unchanged still stays quiet, which is all the flood control
+        the 5 s replay needed.
         """
         if len(raw) < 6:
             return
         key = (mount_id, raw[4], raw[5])
-        if key in self._cam_params_seen:
+        value = tuple(sorted(upd.items())) if upd else None
+        first = key not in self._cam_params_seen
+        if not first and self._cam_params_seen[key] == value:
             return
-        self._cam_params_seen.add(key)
+        self._cam_params_seen[key] = value
         known = ", ".join(f"{k}={v}" for k, v in upd.items()) if upd else "not decoded"
-        log.info("CAM PARAM cam%d category=%d parameter=%d len=%d — %s",
-                 mount_id, raw[4], raw[5], len(raw), known)
+        log.info("CAM PARAM cam%d category=%d parameter=%d len=%d — %s%s",
+                 mount_id, raw[4], raw[5], len(raw), known,
+                 "" if first else "   (changed)")
 
     def send_cam_iso(self, mount_id: int, iso: int) -> None:
         self._note_cam(mount_id, "iso", int(iso))

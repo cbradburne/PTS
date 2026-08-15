@@ -1001,7 +1001,10 @@ def pkt_cam_autofocus(mount_id: int) -> bytes:
 #
 # Here rather than in a dialog because both camera dialogs offer this control
 # and neither can import the other: the everyday one opens the advanced one.
-ISO_STEPS = [100, 200, 400, 800, 1250, 3200, 6400, 12800, 25600]
+# 1250 and 1600 are both here because this camera has reported both, at
+# 18:20 and 19:29 on 2026-08-15: its series is finer than whole stops, and a
+# stop missing from the list is one the operator cannot reach.
+ISO_STEPS = [100, 200, 400, 800, 1250, 1600, 3200, 6400, 12800, 25600]
 
 
 def pkt_cam_iso(mount_id: int, iso: int) -> bytes:
