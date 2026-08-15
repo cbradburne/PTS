@@ -23,9 +23,15 @@ implementation:
   before the camera has reported are what this app last sent, not what the
   camera holds — which matters if the camera was changed at the body.
 
-Commands are sent live as a control moves. That is deliberate: with no
-acknowledgement and no read-back, an Apply button would give the operator a
-confidence the system cannot support.
+Commands go out as a control is used rather than on an Apply button: with no
+acknowledgement and no read-back, Apply would give the operator a confidence the
+system cannot support.
+
+SLIDERS ARE THE EXCEPTION, and only in when they transmit. A drag sends once,
+on release, instead of once per pixel — forty packets became one — while the
+handle and the number still track the finger the whole way. Everything else,
+including a tap on a slider's groove or an arrow key, still sends immediately,
+because nothing is coming later to trigger it.
 """
 from __future__ import annotations
 
@@ -329,18 +335,21 @@ class CameraAdvancedDialog(QDialog):
         lay.addWidget(lens)
 
         self._iris = self._slider(0, 100, 50)
-        self._iris.valueChanged.connect(
-            lambda v: self._send(self._mm.send_cam_iris, v / 100.0))
+        self._wire_slider(self._iris,
+                          lambda s=self._iris: self._send(self._mm.send_cam_iris,
+                                                          s.value() / 100.0))
         _row(lay, "Iris", self._iris)
 
         self._zoom = self._slider(0, 100, 0)
-        self._zoom.valueChanged.connect(
-            lambda v: self._send(self._mm.send_cam_zoom_norm, v / 100.0))
+        self._wire_slider(self._zoom,
+                          lambda s=self._zoom: self._send(self._mm.send_cam_zoom_norm,
+                                                          s.value() / 100.0))
         _row(lay, "Zoom", self._zoom)
 
         self._focus = self._slider(0, 100, 50)
-        self._focus.valueChanged.connect(
-            lambda v: self._send(self._mm.send_cam_focus, v / 100.0))
+        self._wire_slider(self._focus,
+                          lambda s=self._focus: self._send(self._mm.send_cam_focus,
+                                                          s.value() / 100.0))
         _row(lay, "Focus", self._focus)
 
         arow = QHBoxLayout()
@@ -363,6 +372,26 @@ class CameraAdvancedDialog(QDialog):
         s.setRange(lo, hi); s.setValue(val)
         s.valueChanged.connect(lambda _v, w=s: self._touch(w))
         return s
+
+    def _wire_slider(self, sl: QSlider, send) -> None:
+        """Transmit when the slider is LET GO, not on every pixel of the drag.
+
+        A drag emits valueChanged for every step it passes through, and each one
+        was a packet: a single gesture put 105 frames into one second, roughly
+        thirty times the whole rig's steady-state traffic, and spent the entire
+        journey arguing with the camera's own reports about where the control
+        was.  Only the transmission waits — the handle still follows the finger
+        and the number still counts as it moves, because the operator needs to
+        see where they are going.
+
+        A change that is NOT a drag — a tap on the groove, an arrow key — sends
+        at once, since no release is coming to trigger it.
+        """
+        def commit(*_a, s=sl, f=send):
+            if not s.isSliderDown():
+                f()
+        sl.valueChanged.connect(commit)
+        sl.sliderReleased.connect(lambda f=send: f())
 
     def _stepper(self, box) -> QWidget:
         """A spin box between two finger-sized buttons.
@@ -522,7 +551,7 @@ class CameraAdvancedDialog(QDialog):
         sl = self._slider(int(lo * scale), int(hi * scale), int(init * scale))
         sl.valueChanged.connect(
             lambda x, l=val, s=scale, f=fmt, q=frac: l.setText(f(x / s, q(x / s))))
-        sl.valueChanged.connect(lambda _x, f=cb: f())
+        self._wire_slider(sl, cb)
         self._sliders[name] = sl
         v.addWidget(sl)
         return cell
