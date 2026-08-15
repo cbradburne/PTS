@@ -46,7 +46,6 @@ from ui.widgets.colour_wheel import LabelledWheel
 from ui.widgets.position_grid import CAM_COLORS
 
 _SHUTTERS = [24, 25, 30, 48, 50, 60, 100, 120, 125, 200, 250, 500, 1000, 2000]
-_GAINS_DB = [-12, -6, 0, 6, 12, 18, 24, 30, 36]
 
 # How long a control stays the operator's after they last moved it.  The camera
 # reports its state continuously and those reports lag what has just been sent,
@@ -90,9 +89,9 @@ class _NoStrayWheel(QObject):
 
     Qt changes a combo box or spin box on a scroll even when it does not have
     focus, and on a touch screen a press with the smallest drag in it arrives
-    as a scroll.  The ISO box sits directly under the Gain row, so pressing
-    Gain -/+ was rolling ISO to the next stop — and TRANSMITTING it, because
-    the change is indistinguishable from the operator making it.
+    as a scroll.  A press aimed at one row was rolling the box below it to the
+    next stop — and TRANSMITTING it, because the change is indistinguishable
+    from the operator making it.
 
     Nothing on this panel is worth scrolling, so the whole class of accident
     goes away by refusing the event rather than by moving controls apart.
@@ -164,35 +163,6 @@ class _ListSpin(QSpinBox):
             self.blockSignals(was)
         self.setValue(self._values.index(v))
 
-
-class _SignedSpin(QSpinBox):
-    """A spin box that writes gain the way gain is written: +12 dB, not 12 dB.
-
-    QSpinBox has no "always show the sign" option, so the three text hooks are
-    overridden together — display, parse, and validate.  Validate has to accept
-    a lone "+" or "-" as Intermediate or the field rejects the first keystroke
-    of a typed negative.
-    """
-
-    def textFromValue(self, v: int) -> str:
-        return f"{v:+d}" if v else "0"      # "+0 dB" reads wrong; unity is just 0
-
-    def valueFromText(self, text: str) -> int:
-        t = text.replace(self.suffix(), "").strip().replace("+", "")
-        try:
-            return int(t)
-        except ValueError:
-            return self.value()
-
-    def validate(self, text: str, pos: int):
-        t = text.replace(self.suffix(), "").strip()
-        if t in ("", "+", "-"):
-            return (QValidator.State.Intermediate, text, pos)
-        try:
-            int(t.replace("+", ""))
-        except ValueError:
-            return (QValidator.State.Invalid, text, pos)
-        return (QValidator.State.Acceptable, text, pos)
 
 
 def _row(parent_lay, label: str, widget) -> QLabel:
@@ -303,26 +273,15 @@ class CameraAdvancedDialog(QDialog):
             lambda v: self._send(self._mm.send_cam_nd, v))
         _row(lay, "Filter (ND)", self._stepper(self._nd))
 
-        # Gain and ISO are two different parameters — category 1 parameter 13
-        # (dB) and parameter 14 (ISO) — so they get a control each.  They differ
-        # in one way that matters here: the camera reports ISO unprompted and
-        # never reports gain, so ISO reads back from the camera itself while
-        # gain can only be shown from what this app last sent.
-        # Stepped rather than a list, because the camera's gain stops are evenly
-        # spaced: -12 to +36 in 6 dB.  So one press of + is one stop, exactly as
-        # the list did, and it gets the same -/+ pair as Filter and Balance.
-        self._gain = _SignedSpin()
-        self._gain.setRange(_GAINS_DB[0], _GAINS_DB[-1])
-        self._gain.setSingleStep(_GAINS_DB[1] - _GAINS_DB[0])
-        self._gain.setSuffix(" dB")
-        self._gain.setValue(0)
-        self._spin(self._gain)
-        self._gain.valueChanged.connect(
-            lambda v: self._send(self._mm.send_cam_gain_db, v))
-        _row(lay, "Gain", self._stepper(self._gain))
-
-        # ISO — the same control the everyday dialog labels "Gain" and steps
-        # through the camera's own values.
+        # ISO, and no separate Gain control.  Category 1 parameter 13 (gain in
+        # dB) and parameter 14 (ISO) are two scales for one sensor
+        # amplification: setting one moves the other, which the camera
+        # demonstrated by stepping ISO down a stop, about 0.8s after every press
+        # of a gain button, and reporting it.  Only ISO is ever reported back,
+        # so gain was the half that could never be confirmed — two controls for
+        # one setting, one of them unverifiable.  Nothing is lost by dropping it
+        # beyond a second way of writing the same number.
+        #
         # Stepped through the camera's own ISO stops, which are not evenly
         # spaced, so the box counts list positions and shows the value.
         self._iso = _ListSpin(ISO_STEPS)
@@ -696,8 +655,6 @@ class CameraAdvancedDialog(QDialog):
                                   ("focus", self._focus, 100)):
                 if key in adv:
                     self._set_if_free(w, int(adv[key] * scale))
-            if "gain_db" in adv:
-                self._set_if_free(self._gain, int(adv["gain_db"]))
             if ("shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS
                     and not self._held(self._shut)):
                 self._shut.setCurrentIndex(_SHUTTERS.index(adv["shutter_speed"]))

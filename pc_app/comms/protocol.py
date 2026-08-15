@@ -1141,6 +1141,12 @@ def pkt_cam_zoom_speed(mount_id: int, speed: float) -> bytes:
 
 
 # ---- Video (category 1) ---------------------------------------------------
+# DELIBERATELY UNUSED by the app: gain in dB and ISO are two scales for one
+# sensor amplification, and only ISO is ever reported back, so a gain control
+# was a second way of setting the same thing that could never be confirmed.
+# Kept because it is real protocol surface, and decode_cam_status still reads
+# parameter 13 in case a camera ever does volunteer it.  Wiring it back to a
+# control would recreate two controls for one setting — see ISO_STEPS above.
 def pkt_cam_gain_db(mount_id: int, db: int) -> bytes:
     """Gain in dB — what the ATEM panel labels GAIN (+12db in the reference)."""
     return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 13, BMD_TYPE_I8,

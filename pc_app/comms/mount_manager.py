@@ -34,7 +34,7 @@ from .protocol import (
     pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
     pkt_cam_focus, pkt_cam_iris, pkt_cam_auto_iris, pkt_cam_zoom_norm,
-    pkt_cam_zoom_speed, pkt_cam_gain_db, pkt_cam_shutter_speed,
+    pkt_cam_zoom_speed, pkt_cam_shutter_speed,
     pkt_cam_shutter_angle, pkt_cam_nd, pkt_cam_auto_wb, pkt_cam_restore_auto_wb,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
@@ -152,7 +152,7 @@ class MountState_:
     cam_adv: dict = dc_field(default_factory=dict)
     # What this app last SENT the camera, by the same names.  Needed because the
     # camera reports only a handful of the parameters the advanced panel drives
-    # — iris and white balance come back, gain, shutter, ND and the whole of
+    # — iris, ISO and white balance come back; shutter, ND and the whole of
     # colour correction never do.  Without this the panel has no way to show a
     # setting it made itself once its dialog has been closed, and every one of
     # those controls reads neutral on reopen however the camera is actually set.
@@ -577,9 +577,6 @@ class MountManager(QObject):
 
     def send_cam_zoom_norm(self, m, norm):
         self._note_cam(m, "zoom", norm);            self._send(pkt_cam_zoom_norm(m, norm))
-
-    def send_cam_gain_db(self, m, db):
-        self._note_cam(m, "gain_db", db);           self._send(pkt_cam_gain_db(m, db))
 
     def send_cam_shutter_speed(self, m, den):
         self._note_cam(m, "shutter_speed", den);    self._send(pkt_cam_shutter_speed(m, den))
