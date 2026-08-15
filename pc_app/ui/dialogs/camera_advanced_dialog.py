@@ -52,12 +52,41 @@ _GAINS_DB = [-12, -6, 0, 6, 12, 18, 24, 30, 36]
 # it as stuck.
 _HOLD_S = 0.8
 
+# This panel is driven by fingertips on a touch screen, not a mouse.  Every
+# number that can be stepped gets the same 46x44 pair the everyday camera dialog
+# uses, sliders get a handle big enough to catch, and rows are spaced far enough
+# apart that reaching for one does not land on its neighbour.
+_TOUCH_H = 44           # control height
+_TOUCH_W = 46           # +/- button width
+_ROW_GAP = 26           # between rows in Lens / Camera
+_COL_GAP = 30           # between a wheel and its sliders, and between them
+
+_STEP_CSS = """
+QPushButton { background:#2A3038; color:#e6e8ec; font-size:22px; font-weight:600;
+              border:none; border-radius:6px; }
+QPushButton:pressed  { background:#1565C0; }
+QPushButton:disabled { background:#23272c; color:#5A6472; }
+"""
+
+# A slider you can actually hit: 28px handle on a 10px groove.
+_SLIDER_CSS = """
+QSlider::groove:horizontal { height:10px; background:#3A3F45; border-radius:5px; }
+QSlider::sub-page:horizontal { background:#1565C0; border-radius:5px; }
+QSlider::add-page:horizontal { background:#3A3F45; border-radius:5px; }
+QSlider::handle:horizontal {
+    width:28px; height:28px; margin:-10px 0; border-radius:14px;
+    background:#E6E8EC; border:1px solid #10131a;
+}
+QSlider::handle:horizontal:pressed { background:#BBDEFB; }
+"""
+
 
 def _row(parent_lay, label: str, widget) -> QLabel:
     h = QHBoxLayout()
+    h.setSpacing(10)
     lab = QLabel(label)
-    lab.setStyleSheet("color:#9aa0a8; font-size:11px;")
-    lab.setMinimumWidth(74)
+    lab.setStyleSheet("color:#9aa0a8; font-size:13px;")
+    lab.setMinimumWidth(96)
     h.addWidget(lab)
     h.addWidget(widget, 1)
     parent_lay.addLayout(h)
@@ -76,11 +105,23 @@ class CameraAdvancedDialog(QDialog):
         self._tint = None       # built with the correction panel, not the camera one
         self._touched: dict = {}    # widget -> monotonic time the operator last moved it
         self.setWindowTitle("Camera Control — Advanced")
-        self.resize(1180, 720)
-        self.setStyleSheet("QDialog{background:#1b1d20;} QLabel{color:#cfd3d8;}")
+        self.resize(1500, 1000)
+        self.setMinimumSize(1240, 860)
+        self.setStyleSheet(
+            "QDialog{background:#1b1d20;} QLabel{color:#cfd3d8;}"
+            # Style the entry widgets explicitly — left to the platform they
+            # come out light-on-light against this panel.
+            "QComboBox,QAbstractSpinBox{font-size:16px; padding:4px 10px;"
+            " background:#2A3038; color:#e6e8ec; border:1px solid #3A3F45;"
+            " border-radius:6px;}"
+            "QComboBox QAbstractItemView{background:#2A3038; color:#e6e8ec;"
+            " selection-background-color:#1565C0;}"
+            "QTabBar::tab{padding:10px 20px; font-size:14px;}"
+            + _SLIDER_CSS)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 8, 10, 10)
+        root.setContentsMargins(14, 12, 14, 14)
+        root.setSpacing(10)
 
         self._tabs = QTabBar()
         self._tabs.setExpanding(False)
@@ -101,6 +142,8 @@ class CameraAdvancedDialog(QDialog):
         root.addLayout(body, 1)
 
         close = QPushButton("Close")
+        close.setFixedHeight(_TOUCH_H)
+        close.setMinimumWidth(140)
         close.clicked.connect(self.accept)
         foot = QHBoxLayout()
         foot.addStretch(1)
@@ -117,10 +160,10 @@ class CameraAdvancedDialog(QDialog):
     def _build_camera_panel(self) -> QWidget:
         box = QFrame()
         box.setStyleSheet("QFrame{background:#232629; border-radius:6px;}")
-        box.setFixedWidth(300)
+        box.setFixedWidth(400)
         lay = QVBoxLayout(box)
-        lay.setContentsMargins(12, 10, 12, 12)
-        lay.setSpacing(8)
+        lay.setContentsMargins(18, 16, 18, 18)
+        lay.setSpacing(_ROW_GAP)
 
         head = QLabel("Camera")
         head.setStyleSheet("color:#e6e8ec; font-size:14px; font-weight:600;")
@@ -131,11 +174,12 @@ class CameraAdvancedDialog(QDialog):
         self._spin(self._nd)
         self._nd.valueChanged.connect(
             lambda v: self._send(self._mm.send_cam_nd, v))
-        _row(lay, "Filter (ND)", self._nd)
+        _row(lay, "Filter (ND)", self._stepper(self._nd))
 
         self._gain = QComboBox()
         for d in _GAINS_DB:
             self._gain.addItem(f"{d:+d} dB", d)
+        self._gain.setFixedHeight(_TOUCH_H)
         self._gain.setCurrentIndex(_GAINS_DB.index(0))
         self._gain.currentIndexChanged.connect(lambda _i: self._touch(self._gain))
         self._gain.currentIndexChanged.connect(
@@ -145,6 +189,7 @@ class CameraAdvancedDialog(QDialog):
         self._shut = QComboBox()
         for s in _SHUTTERS:
             self._shut.addItem(f"1/{s}", s)
+        self._shut.setFixedHeight(_TOUCH_H)
         self._shut.setCurrentIndex(_SHUTTERS.index(50))
         self._shut.currentIndexChanged.connect(lambda _i: self._touch(self._shut))
         self._shut.currentIndexChanged.connect(
@@ -156,10 +201,9 @@ class CameraAdvancedDialog(QDialog):
         self._wb = QSpinBox(); self._wb.setRange(2500, 10000); self._wb.setSingleStep(50)
         self._wb.setSuffix(" K"); self._wb.setValue(5600)
         self._spin(self._wb)
-        self._wb.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
-        self._wb.setToolTip("Type a value and press Enter, or use the arrows")
+        self._wb.setToolTip("Type a value and press Enter, or use − / +")
         self._wb.valueChanged.connect(self._send_wb)
-        _row(lay, "Balance", self._wb)
+        _row(lay, "Balance", self._stepper(self._wb))
         # Tint lives in the Gain column of the correction panel, as on the
         # reference.  _send_wb sends both, so it has to be built by then.
 
@@ -167,11 +211,13 @@ class CameraAdvancedDialog(QDialog):
         for text, fn in (("Auto WB", "send_cam_auto_wb"),
                          ("Restore", "send_cam_restore_auto_wb")):
             b = QPushButton(text)
+            b.setFixedHeight(_TOUCH_H)
+            b.setStyleSheet(_STEP_CSS.replace('font-size:22px', 'font-size:14px'))
             b.clicked.connect(lambda _c, f=fn: self._send(getattr(self._mm, f)))
             wbrow.addWidget(b)
         lay.addLayout(wbrow)
 
-        lay.addSpacing(6)
+        lay.addStretch(1)
         lens = QLabel("Lens")
         lens.setStyleSheet("color:#e6e8ec; font-size:14px; font-weight:600;")
         lay.addWidget(lens)
@@ -195,6 +241,8 @@ class CameraAdvancedDialog(QDialog):
         for text, fn in (("Auto Focus", "send_cam_autofocus"),
                          ("Auto Iris", "send_cam_auto_iris")):
             b = QPushButton(text)
+            b.setFixedHeight(_TOUCH_H)
+            b.setStyleSheet(_STEP_CSS.replace('font-size:22px', 'font-size:14px'))
             b.clicked.connect(lambda _c, f=fn: self._send(getattr(self._mm, f)))
             arow.addWidget(b)
         lay.addLayout(arow)
@@ -204,9 +252,41 @@ class CameraAdvancedDialog(QDialog):
 
     def _slider(self, lo: int, hi: int, val: int) -> QSlider:
         s = QSlider(Qt.Orientation.Horizontal)
+        s.setMinimumHeight(_TOUCH_H)
         s.setRange(lo, hi); s.setValue(val)
         s.valueChanged.connect(lambda _v, w=s: self._touch(w))
         return s
+
+    def _stepper(self, box) -> QWidget:
+        """A spin box between two finger-sized buttons.
+
+        The spin box's own arrows are a few pixels tall and hopeless with a
+        fingertip, so they are switched off and replaced with the same pair the
+        everyday camera dialog uses.  The field stays typeable — the buttons are
+        an addition, not a replacement — and stepping through stepBy() means a
+        press goes down exactly the same path as a typed value or an arrow key.
+        """
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        box.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        box.setFixedHeight(_TOUCH_H)
+        box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        def button(text: str, delta: int) -> QPushButton:
+            b = QPushButton(text)
+            b.setFixedSize(_TOUCH_W, _TOUCH_H)
+            b.setStyleSheet(_STEP_CSS)
+            b.setAutoRepeat(True)          # hold it down and it keeps stepping
+            b.setAutoRepeatDelay(400)
+            b.setAutoRepeatInterval(120)
+            b.clicked.connect(lambda _c, d=delta, s=box: s.stepBy(d))
+            return b
+
+        h.addWidget(button("−", -1))
+        h.addWidget(box, 1)
+        h.addWidget(button("+", 1))
+        return w
 
     def _spin(self, box):
         """Every spin box in the panel: typeable, and it holds off the camera.
@@ -226,7 +306,8 @@ class CameraAdvancedDialog(QDialog):
         box = QFrame()
         box.setStyleSheet("QFrame{background:#232629; border-radius:6px;}")
         lay = QVBoxLayout(box)
-        lay.setContentsMargins(12, 10, 12, 12)
+        lay.setContentsMargins(18, 16, 18, 18)
+        lay.setSpacing(12)
 
         head = QHBoxLayout()
         cap = QLabel("Color Correction")
@@ -234,6 +315,8 @@ class CameraAdvancedDialog(QDialog):
         head.addWidget(cap)
         head.addStretch(1)
         rst = QPushButton("Reset All")
+        rst.setFixedHeight(_TOUCH_H)
+        rst.setMinimumWidth(130)
         rst.clicked.connect(self._reset_all)
         head.addWidget(rst)
         lay.addLayout(head)
@@ -256,7 +339,7 @@ class CameraAdvancedDialog(QDialog):
         # is where the reference puts it, even though it is a white-balance
         # parameter and travels in the same command as the temperature.
         cols = QHBoxLayout()
-        cols.setSpacing(14)
+        cols.setSpacing(22)
         self._sliders = {}
         # Readouts follow the reference, which shows the slider's POSITION across
         # its range rather than the raw wire value: contrast reads 49% at
@@ -288,7 +371,7 @@ class CameraAdvancedDialog(QDialog):
             wheel.wheel.changed.connect(
                 lambda r, g, b, y, f=send: self._send(getattr(self._mm, f), r, g, b, y))
             col = QVBoxLayout()
-            col.setSpacing(6)
+            col.setSpacing(_COL_GAP)
             col.addWidget(wheel)
             for spec in sliders:
                 col.addWidget(self._slider_cell(*spec))
@@ -312,7 +395,7 @@ class CameraAdvancedDialog(QDialog):
         cell = QWidget()
         v = QVBoxLayout(cell)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(2)
+        v.setSpacing(6)
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)

@@ -74,15 +74,24 @@ class ColourWheel(QWidget):
         self._r = self._g = self._b = self._y = centre
         self._drag = False
         self.setMinimumSize(190, 236)
-        # Vertically Preferred, not Expanding: the ring is limited by the
-        # narrower of width and height, so letting the widget swallow spare
-        # height just opens a dead band between the wheels and whatever sits
-        # under them.  The panel puts its stretch below the sliders instead.
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # The ring is limited by the narrower of width and height, so a widget
+        # taller than it is wide just opens a dead band under the numbers.
+        # heightForWidth ties the height to the width instead: the wheel grows
+        # with the window and stops exactly where the ring stops, leaving no gap
+        # for whatever sits beneath it.
+        sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
         self._title = title
 
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        return w + self._FOOT
+
     def sizeHint(self):
-        return QSize(210, 300)
+        return QSize(210, 210 + self._FOOT)
 
     # -- value ------------------------------------------------------------
     def values(self) -> tuple[float, float, float, float]:
@@ -238,6 +247,9 @@ class LabelledWheel(QWidget):
     def __init__(self, title: str, span: float = 1.0, centre: float = 0.0,
                  lo: float = -16.0, hi: float = 16.0, parent=None):
         super().__init__(parent)
+        sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        sp.setHeightForWidth(True)      # pass the wheel's constraint outward
+        self.setSizePolicy(sp)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
