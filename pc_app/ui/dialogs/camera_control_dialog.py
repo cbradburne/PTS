@@ -250,6 +250,14 @@ class CameraControlDialog(QDialog):
         close.setFixedHeight(40)
         close.setMinimumWidth(110)
         close.clicked.connect(self.accept)
+
+        # The everyday controls stay exactly as they are.  Advanced opens the
+        # full Blackmagic surface — the setup panel, not the operating one.
+        adv = QPushButton("Advanced...")
+        adv.setFixedHeight(40)
+        adv.setMinimumWidth(130)
+        adv.clicked.connect(self._open_advanced)
+        btns.addWidget(adv)
         btns.addWidget(close)
         vl.addLayout(btns)
 
@@ -257,11 +265,21 @@ class CameraControlDialog(QDialog):
         # which comes from 10-second health.  Without this a value would take up
         # to two seconds to appear after a change made on the camera body, which
         # looks like the button not working.
+        self._mm = mount_manager     # the Advanced panel needs it too
         mount_manager.cam_status_received.connect(self._on_cam_status)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_all)
         self._timer.start(_POLL_MS)
+
+    def _open_advanced(self) -> None:
+        # Imported here rather than at module scope: the advanced panel pulls in
+        # the colour-wheel widget and a good deal else, and this dialog opens on
+        # a rig where nobody may ever press the button.
+        from ui.dialogs.camera_advanced_dialog import CameraAdvancedDialog
+        start = self._rows[0]._mount_id if self._rows else 1
+        dlg = CameraAdvancedDialog(self._mm, self, mount_id=start)
+        dlg.exec()
 
     def _on_cam_status(self, mount_id: int) -> None:
         for r in self._rows:

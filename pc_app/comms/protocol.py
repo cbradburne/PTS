@@ -1018,6 +1018,143 @@ def pkt_cam_white_balance(mount_id: int, kelvin: int, tint: int = 0) -> bytes:
                         bmd_command(category=1, parameter=2, data_type=2, data=data))
 
 
+# ── The rest of the Blackmagic control surface ─────────────────────────────
+# Everything the ATEM Software Control colour-correction panel exposes, plus the
+# lens and video controls beside it.  The mount relays CMD_CAM_CONTROL verbatim
+# and never inspects it, so adding a parameter is a change to this file alone —
+# no firmware, no protocol version, nothing to flash.
+#
+# Written from the published Blackmagic Camera Control protocol.  It has NO
+# acknowledgement of any kind: the camera never reports whether it acted, so a
+# wrong parameter number fails silently and looks exactly like a camera that is
+# switched off.  Every value below is therefore also decoded on the way back in
+# decode_cam_status(), because the camera's own report is the only confirmation
+# available — if a control moves and nothing comes back, that is the evidence
+# the parameter is wrong.
+#
+# Data types (BMD): 0 void  1 int8  2 int16  3 int32  4 int64  5 string
+#                   128 signed 5.11 fixed point
+BMD_TYPE_VOID, BMD_TYPE_I8, BMD_TYPE_I16, BMD_TYPE_I32 = 0, 1, 2, 3
+BMD_TYPE_FIXED16 = 128
+
+BMD_CAT_LENS, BMD_CAT_VIDEO, BMD_CAT_CC = 0, 1, 8
+
+
+def _fixed16(v: float) -> bytes:
+    """Signed 5.11 fixed point, as the protocol calls it: value * 2048.
+
+    Clamped rather than wrapped.  A slider dragged past a parameter's documented
+    range would otherwise arrive as a large negative number and the camera would
+    do something startling with no way to see why.
+    """
+    n = max(-32768, min(32767, int(round(float(v) * 2048))))
+    return n.to_bytes(2, "little", signed=True)
+
+
+def _un_fixed16(b: bytes) -> float:
+    return int.from_bytes(b, "little", signed=True) / 2048.0
+
+
+def pkt_cam_raw(mount_id: int, category: int, parameter: int,
+                data_type: int, data: bytes = b"") -> bytes:
+    """Any parameter, for controls not worth a named helper."""
+    return build_packet(mount_id, Cmd.CAM_CONTROL,
+                        bmd_command(category=category, parameter=parameter,
+                                    data_type=data_type, data=data))
+
+
+# ---- Colour correction (category 8) ---------------------------------------
+# Each wheel is four 5.11 values in R, G, B, Y order — the same order the ATEM
+# panel shows them left to right with the master (Y) first in its own column.
+def _cc_quad(mount_id: int, parameter: int,
+             r: float, g: float, b: float, y: float) -> bytes:
+    return pkt_cam_raw(mount_id, BMD_CAT_CC, parameter, BMD_TYPE_FIXED16,
+                       _fixed16(r) + _fixed16(g) + _fixed16(b) + _fixed16(y))
+
+
+def pkt_cam_lift(mount_id, r, g, b, y):   return _cc_quad(mount_id, 0, r, g, b, y)
+def pkt_cam_gamma(mount_id, r, g, b, y):  return _cc_quad(mount_id, 1, r, g, b, y)
+def pkt_cam_gain(mount_id, r, g, b, y):   return _cc_quad(mount_id, 2, r, g, b, y)
+def pkt_cam_offset(mount_id, r, g, b, y): return _cc_quad(mount_id, 3, r, g, b, y)
+
+
+def pkt_cam_contrast(mount_id: int, pivot: float, adjust: float) -> bytes:
+    """Pivot and adjustment travel together, as with white balance and tint."""
+    return pkt_cam_raw(mount_id, BMD_CAT_CC, 4, BMD_TYPE_FIXED16,
+                       _fixed16(pivot) + _fixed16(adjust))
+
+
+def pkt_cam_luma_mix(mount_id: int, mix: float) -> bytes:
+    return pkt_cam_raw(mount_id, BMD_CAT_CC, 5, BMD_TYPE_FIXED16, _fixed16(mix))
+
+
+def pkt_cam_hue_sat(mount_id: int, hue: float, sat: float) -> bytes:
+    return pkt_cam_raw(mount_id, BMD_CAT_CC, 6, BMD_TYPE_FIXED16,
+                       _fixed16(hue) + _fixed16(sat))
+
+
+def pkt_cam_cc_reset(mount_id: int) -> bytes:
+    """The circular arrow beside each wheel on the ATEM panel."""
+    return pkt_cam_raw(mount_id, BMD_CAT_CC, 7, BMD_TYPE_VOID)
+
+
+# ---- Lens (category 0) ----------------------------------------------------
+def pkt_cam_focus(mount_id: int, pos: float) -> bytes:
+    """0.0 = nearest, 1.0 = infinity."""
+    return pkt_cam_raw(mount_id, BMD_CAT_LENS, 0, BMD_TYPE_FIXED16, _fixed16(pos))
+
+
+def pkt_cam_iris(mount_id: int, norm: float) -> bytes:
+    """Normalised aperture, 0.0 = closed .. 1.0 = open — the ATEM iris slider."""
+    return pkt_cam_raw(mount_id, BMD_CAT_LENS, 3, BMD_TYPE_FIXED16, _fixed16(norm))
+
+
+def pkt_cam_auto_iris(mount_id: int) -> bytes:
+    return pkt_cam_raw(mount_id, BMD_CAT_LENS, 5, BMD_TYPE_VOID)
+
+
+def pkt_cam_zoom_norm(mount_id: int, norm: float) -> bytes:
+    """Absolute zoom, 0.0 = wide .. 1.0 = tele."""
+    return pkt_cam_raw(mount_id, BMD_CAT_LENS, 8, BMD_TYPE_FIXED16, _fixed16(norm))
+
+
+def pkt_cam_zoom_speed(mount_id: int, speed: float) -> bytes:
+    """Continuous zoom, -1.0 = wide .. +1.0 = tele, 0 = stop."""
+    return pkt_cam_raw(mount_id, BMD_CAT_LENS, 9, BMD_TYPE_FIXED16, _fixed16(speed))
+
+
+# ---- Video (category 1) ---------------------------------------------------
+def pkt_cam_gain_db(mount_id: int, db: int) -> bytes:
+    """Gain in dB — what the ATEM panel labels GAIN (+12db in the reference)."""
+    return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 13, BMD_TYPE_I8,
+                       int(db).to_bytes(1, "little", signed=True))
+
+
+def pkt_cam_shutter_speed(mount_id: int, denominator: int) -> bytes:
+    """Shutter as 1/denominator — 50 for the 1/50 in the reference."""
+    return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 12, BMD_TYPE_I32,
+                       int(denominator).to_bytes(4, "little", signed=True))
+
+
+def pkt_cam_shutter_angle(mount_id: int, degrees: float) -> bytes:
+    """Shutter angle, sent x100 as the protocol specifies."""
+    return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 11, BMD_TYPE_I32,
+                       int(round(degrees * 100)).to_bytes(4, "little", signed=True))
+
+
+def pkt_cam_nd(mount_id: int, stop: float) -> bytes:
+    """ND filter, in stops — the ATEM panel's FILTER."""
+    return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 16, BMD_TYPE_FIXED16, _fixed16(stop))
+
+
+def pkt_cam_auto_wb(mount_id: int) -> bytes:
+    return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 3, BMD_TYPE_VOID)
+
+
+def pkt_cam_restore_auto_wb(mount_id: int) -> bytes:
+    return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 4, BMD_TYPE_VOID)
+
+
 # ── Decoding what the camera reports ────────────────────────────────────────
 # CMD_CAM_STATUS carries a Blackmagic status message verbatim, in the same
 # framing as a command:
@@ -1037,6 +1174,38 @@ def decode_cam_status(payload: bytes) -> dict:
     if category == 1 and parameter == 2 and len(data) >= 4:       # white balance
         return {"white_balance": int.from_bytes(data[0:2], "little", signed=True),
                 "tint":          int.from_bytes(data[2:4], "little", signed=True)}
+
+    # Everything the advanced panel drives, decoded on the way back.  The
+    # protocol acknowledges nothing, so the camera's own report is the only
+    # confirmation a command landed — and the only way a wrong parameter number
+    # is distinguishable from a camera that is switched off.
+    if category == 1:
+        if parameter == 13 and len(data) >= 1:
+            return {"gain_db": int.from_bytes(data[:1], "little", signed=True)}
+        if parameter == 12 and len(data) >= 4:
+            return {"shutter_speed": int.from_bytes(data[:4], "little", signed=True)}
+        if parameter == 11 and len(data) >= 4:
+            return {"shutter_angle": int.from_bytes(data[:4], "little", signed=True) / 100.0}
+        if parameter == 16 and len(data) >= 2:
+            return {"nd": _un_fixed16(data[0:2])}
+    if category == 0:
+        if parameter == 0 and len(data) >= 2:
+            return {"focus": _un_fixed16(data[0:2])}
+        if parameter == 3 and len(data) >= 2:
+            return {"iris": _un_fixed16(data[0:2])}
+        if parameter == 8 and len(data) >= 2:
+            return {"zoom": _un_fixed16(data[0:2])}
+    if category == 8:
+        names = {0: "lift", 1: "gamma", 2: "gain_cc", 3: "offset"}
+        if parameter in names and len(data) >= 8:
+            return {names[parameter]: tuple(_un_fixed16(data[i:i+2])
+                                            for i in (0, 2, 4, 6))}
+        if parameter == 4 and len(data) >= 4:
+            return {"contrast": (_un_fixed16(data[0:2]), _un_fixed16(data[2:4]))}
+        if parameter == 5 and len(data) >= 2:
+            return {"luma_mix": _un_fixed16(data[0:2])}
+        if parameter == 6 and len(data) >= 4:
+            return {"hue_sat": (_un_fixed16(data[0:2]), _un_fixed16(data[2:4]))}
     return {}
 
 

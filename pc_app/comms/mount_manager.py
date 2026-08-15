@@ -31,6 +31,11 @@ from .protocol import (
     pkt_set_active_preset, pkt_save_speeds, pkt_goto_slot, pkt_move_rel,
     pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus,
     pkt_cam_iso, pkt_cam_white_balance, decode_cam_status,
+    pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
+    pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
+    pkt_cam_focus, pkt_cam_iris, pkt_cam_auto_iris, pkt_cam_zoom_norm,
+    pkt_cam_zoom_speed, pkt_cam_gain_db, pkt_cam_shutter_speed,
+    pkt_cam_shutter_angle, pkt_cam_nd, pkt_cam_auto_wb, pkt_cam_restore_auto_wb,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
     decode_subject_list, decode_look_at_status, decode_ref_confirmed,
@@ -140,6 +145,11 @@ class MountState_:
     cam_iso:  Optional[int] = None
     cam_wb:   Optional[int] = None
     cam_tint: Optional[int] = None
+    # Everything else the camera reports, by name, for the advanced panel.  A
+    # dict rather than named fields because the camera volunteers whatever it
+    # feels like and the set grows: a parameter this app does not yet drive
+    # still arrives, and is still worth having when someone comes looking.
+    cam_adv: dict = dc_field(default_factory=dict)
 
     active_pt_preset: int = 2
     active_sl_preset: int = 2
@@ -488,6 +498,40 @@ class MountManager(QObject):
         """Define the slider traversal for the next look-at move (stored in EEPROM)."""
         self._send(pkt_set_slider_move(mount_id, start_mm, end_mm, speed_preset))
 
+    # ── Blackmagic camera control, full surface ──────────────────────────
+    # Fire-and-forget, every one of them.  The protocol has no acknowledgement,
+    # so there is nothing to await and nothing to retry against — see the note
+    # at the top of camera_advanced_dialog.py.
+    def send_cam_lift(self, m, r, g, b, y):     self._send(pkt_cam_lift(m, r, g, b, y))
+    def send_cam_gamma(self, m, r, g, b, y):    self._send(pkt_cam_gamma(m, r, g, b, y))
+    def send_cam_gain_cc(self, m, r, g, b, y):  self._send(pkt_cam_gain(m, r, g, b, y))
+    def send_cam_offset(self, m, r, g, b, y):   self._send(pkt_cam_offset(m, r, g, b, y))
+    def send_cam_contrast(self, m, pivot, adj): self._send(pkt_cam_contrast(m, pivot, adj))
+    def send_cam_luma_mix(self, m, mix):        self._send(pkt_cam_luma_mix(m, mix))
+    def send_cam_hue_sat(self, m, hue, sat):    self._send(pkt_cam_hue_sat(m, hue, sat))
+    def send_cam_cc_reset(self, m):             self._send(pkt_cam_cc_reset(m))
+    def send_cam_focus(self, m, pos):           self._send(pkt_cam_focus(m, pos))
+    def send_cam_iris(self, m, norm):           self._send(pkt_cam_iris(m, norm))
+    def send_cam_auto_iris(self, m):            self._send(pkt_cam_auto_iris(m))
+    def send_cam_zoom_norm(self, m, norm):      self._send(pkt_cam_zoom_norm(m, norm))
+    def send_cam_zoom_speed(self, m, spd):      self._send(pkt_cam_zoom_speed(m, spd))
+    def send_cam_gain_db(self, m, db):          self._send(pkt_cam_gain_db(m, db))
+    def send_cam_shutter_speed(self, m, den):   self._send(pkt_cam_shutter_speed(m, den))
+    def send_cam_shutter_angle(self, m, deg):   self._send(pkt_cam_shutter_angle(m, deg))
+    def send_cam_nd(self, m, stop):             self._send(pkt_cam_nd(m, stop))
+    def send_cam_auto_wb(self, m):              self._send(pkt_cam_auto_wb(m))
+    def send_cam_restore_auto_wb(self, m):      self._send(pkt_cam_restore_auto_wb(m))
+
+    def cam_ble_state(self, mount_id: int):
+        """None = no camera support, "unpaired", False = link down, True = ready.
+
+        Same source the ordinary camera dialog reads, so the two cannot disagree
+        about whether a camera is there — which they would if this asked a
+        different question of a different object.
+        """
+        b = getattr(self, "_bridge", None)
+        return b.cam_ble_link(mount_id) if b is not None else None
+
     def send_start_look_at_move(self, mount_id: int, subject_id: int,
                                  direction: int, speed_preset: int = 2,
                                  repeat: bool = False) -> None:
@@ -770,6 +814,19 @@ class MountManager(QObject):
                     if "white_balance" in upd: st.cam_wb   = upd["white_balance"]
 
                     if "tint" in upd:          st.cam_tint = upd["tint"]
+
+                    # Everything else the camera volunteers, kept by name for
+                    # the advanced panel.  Stored even when nothing is currently
+                    # displaying it: the camera reports what it likes, and a
+                    # parameter nobody reads today is still the only evidence
+                    # that a command landed, because the protocol acknowledges
+                    # nothing.
+
+                    for k, v in upd.items():
+
+                        if k not in ("iso", "white_balance", "tint"):
+
+                            st.cam_adv[k] = v
 
                     self.cam_status_received.emit(pkt.mount_id)
 
