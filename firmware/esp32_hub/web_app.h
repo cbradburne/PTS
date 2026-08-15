@@ -301,6 +301,7 @@ canvas.hsl-c{display:block;touch-action:none;}
 .ext-pcell.stored{border-color:var(--red-lit);color:var(--text);}
 .ext-pcell.at-pos{background:rgba(102,187,106,.15);border-color:var(--green-lit);color:var(--text);}
 .ext-pcell.moving{border-color:var(--yellow);}
+.ext-pcell.moving.flash-off{border-color:var(--surf2);}
 .ext-pcell.la-arrow{font-size:26px;color:var(--text);}
 /* Per-row speed dials on positions page */
 .ext-pos-dials{display:flex;gap:6px;padding-left:8px;flex-shrink:0;align-items:center;align-self:center;}
@@ -2497,7 +2498,18 @@ function refreshExtPositions() {
             const at  = la ? (s === cs.activeLaSubject) : !!(cs.slotAt & (1 << s));
             const tgt = (cs.targetSlot !== 0xFF && cs.targetSlot === s);
             let cls = 'ext-pcell';
-            if (tgt && _flashOn)    cls += ' moving';
+            // Structured exactly as the portrait grid: stay in the `moving`
+            // branch for the whole flash and mark the off-beat with `flash-off`.
+            //
+            // Testing `tgt && _flashOn` instead dropped OUT of the branch on the
+            // off-beat and fell through to `stored`, so a saved slot being moved
+            // to flashed yellow-to-RED — the colour that means "occupied" —
+            // rather than yellow-to-grey.  The cell was telling the truth twice
+            // a second and contradicting itself.
+            if (tgt) {
+                cls += ' moving';
+                if (!_flashOn) cls += ' flash-off';
+            }
             else if (occ && at)     cls += ' at-pos';
             else if (occ)           cls += ' stored';
             if (uiMode === 'edit')  cls += ' edit-mode';
