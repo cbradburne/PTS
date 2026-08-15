@@ -156,8 +156,16 @@ class MountState_:
     # colour correction never do.  Without this the panel has no way to show a
     # setting it made itself once its dialog has been closed, and every one of
     # those controls reads neutral on reopen however the camera is actually set.
-    # Camera-reported values always win over these; see cam_known().
+    # The more RECENT of the two accounts wins; see cam_known().
     cam_sent: dict = dc_field(default_factory=dict)
+    # When each parameter was last sent, and last heard from the camera.  Needed
+    # because "the camera always wins" is wrong once the camera has gone quiet:
+    # a report from an hour ago would otherwise override a setting made a second
+    # ago, for ever, and the control would spring back every time the panel
+    # refreshed.  A camera that has genuinely changed since reports again, and
+    # then it is the newer of the two and wins on its own merit.
+    cam_sent_at:  dict = dc_field(default_factory=dict)
+    cam_heard_at: dict = dc_field(default_factory=dict)
 
     active_pt_preset: int = 2
     active_sl_preset: int = 2
@@ -529,6 +537,7 @@ class MountManager(QObject):
         st = self._states.get(m)
         if st is not None:
             st.cam_sent[key] = value
+            st.cam_sent_at[key] = time.monotonic()
 
     def send_cam_lift(self, m, r, g, b, y):
         self._note_cam(m, "lift", (r, g, b, y));    self._send(pkt_cam_lift(m, r, g, b, y))
@@ -590,25 +599,32 @@ class MountManager(QObject):
     def send_cam_restore_auto_wb(self, m):      self._send(pkt_cam_restore_auto_wb(m))
 
     def cam_known(self, mount_id: int) -> dict:
-        """Everything known about this camera's settings, best source first.
+        """Everything known about this camera's settings, most recent account wins.
 
-        The camera's own reports are ground truth and override what we sent.
-        For the many parameters it never reports — gain, shutter, ND, all of
-        colour correction — what we sent is the only record there is.
+        Per parameter, whichever is newer: what the camera last reported, or
+        what this app last sent.  Not "the camera always wins" — the camera
+        reports only a few of these parameters and then falls silent, so an old
+        report would override a new setting for ever and the control would
+        spring back to it every time the panel refreshed.  A camera that really
+        has moved since reports again, and wins by being newer.
         """
         st = self._states.get(mount_id)
         if st is None:
             return {}
-        known = dict(st.cam_sent)
-        known.update(st.cam_adv)
+        heard = dict(st.cam_adv)
         # These three live in named fields rather than cam_adv, because the
         # everyday dialog reads them; fold them in so a caller has one dict.
         if st.cam_wb is not None:
-            known["white_balance"] = st.cam_wb
+            heard["white_balance"] = st.cam_wb
         if st.cam_tint is not None:
-            known["tint"] = st.cam_tint
+            heard["tint"] = st.cam_tint
         if st.cam_iso is not None:
-            known["iso"] = st.cam_iso
+            heard["iso"] = st.cam_iso
+
+        known = dict(st.cam_sent)
+        for k, v in heard.items():
+            if k not in known or st.cam_heard_at.get(k, 0.0) >= st.cam_sent_at.get(k, 0.0):
+                known[k] = v
         return known
 
     def cam_ble_state(self, mount_id: int):
@@ -916,6 +932,16 @@ class MountManager(QObject):
                         if k not in ("iso", "white_balance", "tint"):
 
                             st.cam_adv[k] = v
+
+                    # When the camera said it, for every key including the three
+                    # above.  cam_known() compares this against cam_sent_at to
+                    # decide which is the more recent account of a parameter.
+
+                    now = time.monotonic()
+
+                    for k in upd:
+
+                        st.cam_heard_at[k] = now
 
                     self.cam_status_received.emit(pkt.mount_id)
 

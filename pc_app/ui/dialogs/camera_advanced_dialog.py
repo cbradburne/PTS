@@ -519,7 +519,6 @@ class CameraAdvancedDialog(QDialog):
         self._refresh_link()
         self._touched.clear()   # a hold belongs to the camera it was made on
         self._show_known()
-        self._show_known()
 
     def _paint_cam_btns(self) -> None:
         """Selected camera wears its accent; the rest wear the same grey the
