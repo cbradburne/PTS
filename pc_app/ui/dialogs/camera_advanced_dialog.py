@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from comms.mount_manager import MountManager
-from comms.protocol import NUM_MOUNTS
+from comms.protocol import NUM_MOUNTS, ISO_STEPS
 from ui.widgets.colour_wheel import LabelledWheel
 # The one palette both this dialog and the main window read, so the picker
 # cannot drift out of step with the buttons behind it.
@@ -169,6 +169,7 @@ class CameraAdvancedDialog(QDialog):
         self._poll.start(1000)
         self._paint_cam_btns()
         self._refresh_link()
+        self._show_known()
 
     # ── left: camera settings ────────────────────────────────────────────
     def _build_camera_panel(self) -> QWidget:
@@ -190,6 +191,11 @@ class CameraAdvancedDialog(QDialog):
             lambda v: self._send(self._mm.send_cam_nd, v))
         _row(lay, "Filter (ND)", self._stepper(self._nd))
 
+        # Gain and ISO are two different parameters — category 1 parameter 13
+        # (dB) and parameter 14 (ISO) — so they get a control each.  They differ
+        # in one way that matters here: the camera reports ISO unprompted and
+        # never reports gain, so ISO reads back from the camera itself while
+        # gain can only be shown from what this app last sent.
         self._gain = QComboBox()
         for d in _GAINS_DB:
             self._gain.addItem(f"{d:+d} dB", d)
@@ -199,6 +205,18 @@ class CameraAdvancedDialog(QDialog):
         self._gain.currentIndexChanged.connect(
             lambda _i: self._send(self._mm.send_cam_gain_db, self._gain.currentData()))
         _row(lay, "Gain", self._gain)
+
+        # ISO — the same control the everyday dialog labels "Gain" and steps
+        # through the camera's own values.
+        self._iso = QComboBox()
+        for iso in ISO_STEPS:
+            self._iso.addItem(f"{iso}", iso)
+        self._iso.setFixedHeight(_TOUCH_H)
+        self._iso.setCurrentIndex(ISO_STEPS.index(400))
+        self._iso.currentIndexChanged.connect(lambda _i: self._touch(self._iso))
+        self._iso.currentIndexChanged.connect(
+            lambda _i: self._send(self._mm.send_cam_iso, self._iso.currentData()))
+        _row(lay, "ISO", self._iso)
 
         self._shut = QComboBox()
         for s in _SHUTTERS:
@@ -465,6 +483,9 @@ class CameraAdvancedDialog(QDialog):
         self._mount = mount_id
         self._paint_cam_btns()
         self._refresh_link()
+        self._touched.clear()   # a hold belongs to the camera it was made on
+        self._show_known()
+        self._show_known()
 
     def _paint_cam_btns(self) -> None:
         """Selected camera wears its accent; the rest wear the same grey the
@@ -504,25 +525,38 @@ class CameraAdvancedDialog(QDialog):
             w.setValue(value)
 
     def _on_cam_status(self, mount_id: int) -> None:
-        """Follow what the camera reports — the only confirmation there is.
+        """A fresh report arrived for this camera."""
+        if mount_id == self._mount:
+            self._show_known()
 
-        Except on a control the operator has a hand on.  The camera reports its
-        own state continuously, so applying every report unconditionally means
-        a running fight: each click of an arrow is answered by the camera's
-        previous value a moment later, and the number jumps backwards under the
-        cursor.  A control is left alone while it has focus and for _HOLD_S
-        after the last user change, then resumes following the camera.
+    def _show_known(self) -> None:
+        """Put everything known about this camera onto the controls.
+
+        Called when a report arrives, when the dialog opens, and when the
+        camera is switched.  The last two matter: without them the panel was
+        built neutral and stayed neutral until the camera next volunteered
+        something — which for gain, shutter, ND and the whole of colour
+        correction is never, because the camera does not report those at all.
+
+        The source is mount_manager.cam_known(), which merges what the camera
+        has said over what this app has sent, so a reported value always wins
+        and an unreported one still shows what it was set to.
+
+        A control the operator has a hand on is left alone — see _held().  The
+        camera reports continuously and its reports lag what has just been
+        sent, so applying them unconditionally means each click of an arrow is
+        answered by the previous value a moment later.
         """
-        if mount_id != self._mount:
-            return
-        st = self._mm.state(mount_id)
+        adv = (self._mm.cam_known(self._mount)
+               if hasattr(self._mm, "cam_known") else {})
         self._loading = True
         try:
-            if st.cam_wb is not None:
-                self._set_if_free(self._wb, int(st.cam_wb))
-            if st.cam_tint is not None:
-                self._set_if_free(self._tint, int(st.cam_tint))
-            adv = getattr(st, "cam_adv", None) or {}
+            if "white_balance" in adv:
+                self._set_if_free(self._wb, int(adv["white_balance"]))
+            if "tint" in adv:
+                self._set_if_free(self._tint, int(adv["tint"]))
+            if adv.get("iso") in ISO_STEPS and not self._held(self._iso):
+                self._iso.setCurrentIndex(ISO_STEPS.index(adv["iso"]))
             for key, wheel in (("lift", self._w_lift), ("gamma", self._w_gamma),
                                ("gain_cc", self._w_gain)):
                 v = adv.get(key)
@@ -543,7 +577,7 @@ class CameraAdvancedDialog(QDialog):
                                   ("focus", self._focus, 100)):
                 if key in adv:
                     self._set_if_free(w, int(adv[key] * scale))
-            if "gain_db" in adv and adv["gain_db"] in _GAINS_DB and not self._held(self._gain):
+            if adv.get("gain_db") in _GAINS_DB and not self._held(self._gain):
                 self._gain.setCurrentIndex(_GAINS_DB.index(adv["gain_db"]))
             if ("shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS
                     and not self._held(self._shut)):

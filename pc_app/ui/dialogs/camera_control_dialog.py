@@ -38,15 +38,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTimer, Qt
 
 from comms.mount_manager import MountManager
+from comms.protocol import ISO_STEPS
 
 _POLL_MS = 2000          # health arrives every 10 s; this is just the redraw
 _FLASH_MS = 400          # how long a button shows it fired
 
-# ISO steps the camera actually has.  Stepping through its own values rather
-# than adding a fixed amount means every press lands on a setting the camera
-# will accept, and the number that comes back matches the one that was asked
-# for — which is how you can tell a command was applied at all.
-_ISO_STEPS = [100, 200, 400, 800, 1250, 3200, 6400, 12800, 25600]
+# Shared with the advanced panel — see protocol.ISO_STEPS.
+_ISO_STEPS = ISO_STEPS
 
 # Kelvin.  Blackmagic's own presets, for the same reason.
 _WB_STEPS = [2500, 2800, 3000, 3200, 3400, 3600, 4000, 4500, 4800, 5000,
@@ -121,7 +119,7 @@ class _CamRow(QWidget):
         # CAMERA last reported, never what we last sent.  It stays "—" until
         # the camera says something, and the buttons stay disabled until then,
         # because stepping from a value we invented would fight the camera.
-        self._iso_lbl = self._add_stepper(hl, "Gain", self._iso_down, self._iso_up)
+        self._iso_lbl = self._add_stepper(hl, "ISO", self._iso_down, self._iso_up)
         self._wb_lbl  = self._add_stepper(hl, "WB",   self._wb_down,  self._wb_up)
 
         self.refresh()

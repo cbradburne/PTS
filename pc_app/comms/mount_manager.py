@@ -150,6 +150,14 @@ class MountState_:
     # feels like and the set grows: a parameter this app does not yet drive
     # still arrives, and is still worth having when someone comes looking.
     cam_adv: dict = dc_field(default_factory=dict)
+    # What this app last SENT the camera, by the same names.  Needed because the
+    # camera reports only a handful of the parameters the advanced panel drives
+    # — iris and white balance come back, gain, shutter, ND and the whole of
+    # colour correction never do.  Without this the panel has no way to show a
+    # setting it made itself once its dialog has been closed, and every one of
+    # those controls reads neutral on reopen however the camera is actually set.
+    # Camera-reported values always win over these; see cam_known().
+    cam_sent: dict = dc_field(default_factory=dict)
 
     active_pt_preset: int = 2
     active_sl_preset: int = 2
@@ -437,6 +445,7 @@ class MountManager(QObject):
                  mount_id, raw[4], raw[5], len(raw), known)
 
     def send_cam_iso(self, mount_id: int, iso: int) -> None:
+        self._note_cam(mount_id, "iso", int(iso))
         self._send(pkt_cam_iso(mount_id, iso))
 
     def send_cam_white_balance(self, mount_id: int, kelvin: int,
@@ -451,6 +460,8 @@ class MountManager(QObject):
         if tint is None:
             st = self._states.get(mount_id)
             tint = st.cam_tint if st and st.cam_tint is not None else 0
+        self._note_cam(mount_id, "white_balance", int(kelvin))
+        self._note_cam(mount_id, "tint", int(tint))
         self._send(pkt_cam_white_balance(mount_id, kelvin, int(tint)))
 
     def send_set_stall_threshold(self, mount_id: int, axis: Axis,
@@ -509,25 +520,96 @@ class MountManager(QObject):
     # Fire-and-forget, every one of them.  The protocol has no acknowledgement,
     # so there is nothing to await and nothing to retry against — see the note
     # at the top of camera_advanced_dialog.py.
-    def send_cam_lift(self, m, r, g, b, y):     self._send(pkt_cam_lift(m, r, g, b, y))
-    def send_cam_gamma(self, m, r, g, b, y):    self._send(pkt_cam_gamma(m, r, g, b, y))
-    def send_cam_gain_cc(self, m, r, g, b, y):  self._send(pkt_cam_gain(m, r, g, b, y))
-    def send_cam_offset(self, m, r, g, b, y):   self._send(pkt_cam_offset(m, r, g, b, y))
-    def send_cam_contrast(self, m, pivot, adj): self._send(pkt_cam_contrast(m, pivot, adj))
-    def send_cam_luma_mix(self, m, mix):        self._send(pkt_cam_luma_mix(m, mix))
-    def send_cam_hue_sat(self, m, hue, sat):    self._send(pkt_cam_hue_sat(m, hue, sat))
-    def send_cam_cc_reset(self, m):             self._send(pkt_cam_cc_reset(m))
-    def send_cam_focus(self, m, pos):           self._send(pkt_cam_focus(m, pos))
-    def send_cam_iris(self, m, norm):           self._send(pkt_cam_iris(m, norm))
-    def send_cam_auto_iris(self, m):            self._send(pkt_cam_auto_iris(m))
-    def send_cam_zoom_norm(self, m, norm):      self._send(pkt_cam_zoom_norm(m, norm))
+    def _note_cam(self, m: int, key: str, value) -> None:
+        """Remember a value we sent, under the name the camera would report it by.
+
+        Same names as decode_cam_status produces, so cam_known() can merge the
+        two dicts and let anything the camera actually said win.
+        """
+        st = self._states.get(m)
+        if st is not None:
+            st.cam_sent[key] = value
+
+    def send_cam_lift(self, m, r, g, b, y):
+        self._note_cam(m, "lift", (r, g, b, y));    self._send(pkt_cam_lift(m, r, g, b, y))
+
+    def send_cam_gamma(self, m, r, g, b, y):
+        self._note_cam(m, "gamma", (r, g, b, y));   self._send(pkt_cam_gamma(m, r, g, b, y))
+
+    def send_cam_gain_cc(self, m, r, g, b, y):
+        self._note_cam(m, "gain_cc", (r, g, b, y)); self._send(pkt_cam_gain(m, r, g, b, y))
+
+    def send_cam_offset(self, m, r, g, b, y):
+        self._note_cam(m, "offset", (r, g, b, y));  self._send(pkt_cam_offset(m, r, g, b, y))
+
+    def send_cam_contrast(self, m, pivot, adj):
+        self._note_cam(m, "contrast", (pivot, adj)); self._send(pkt_cam_contrast(m, pivot, adj))
+
+    def send_cam_luma_mix(self, m, mix):
+        self._note_cam(m, "luma_mix", mix);         self._send(pkt_cam_luma_mix(m, mix))
+
+    def send_cam_hue_sat(self, m, hue, sat):
+        self._note_cam(m, "hue_sat", (hue, sat));   self._send(pkt_cam_hue_sat(m, hue, sat))
+
+    def send_cam_focus(self, m, pos):
+        self._note_cam(m, "focus", pos);            self._send(pkt_cam_focus(m, pos))
+
+    def send_cam_iris(self, m, norm):
+        self._note_cam(m, "iris", norm);            self._send(pkt_cam_iris(m, norm))
+
+    def send_cam_zoom_norm(self, m, norm):
+        self._note_cam(m, "zoom", norm);            self._send(pkt_cam_zoom_norm(m, norm))
+
+    def send_cam_gain_db(self, m, db):
+        self._note_cam(m, "gain_db", db);           self._send(pkt_cam_gain_db(m, db))
+
+    def send_cam_shutter_speed(self, m, den):
+        self._note_cam(m, "shutter_speed", den);    self._send(pkt_cam_shutter_speed(m, den))
+
+    def send_cam_shutter_angle(self, m, deg):
+        self._note_cam(m, "shutter_angle", deg);    self._send(pkt_cam_shutter_angle(m, deg))
+
+    def send_cam_nd(self, m, stop):
+        self._note_cam(m, "nd", stop);              self._send(pkt_cam_nd(m, stop))
+
+    def send_cam_cc_reset(self, m):
+        # The camera returns every correction parameter to its neutral, so the
+        # remembered values have to go too, or the panel would show the old
+        # grade next time it opened.
+        st = self._states.get(m)
+        if st is not None:
+            for k in ("lift", "gamma", "gain_cc", "offset", "contrast",
+                      "luma_mix", "hue_sat"):
+                st.cam_sent.pop(k, None)
+                st.cam_adv.pop(k, None)
+        self._send(pkt_cam_cc_reset(m))
+
     def send_cam_zoom_speed(self, m, spd):      self._send(pkt_cam_zoom_speed(m, spd))
-    def send_cam_gain_db(self, m, db):          self._send(pkt_cam_gain_db(m, db))
-    def send_cam_shutter_speed(self, m, den):   self._send(pkt_cam_shutter_speed(m, den))
-    def send_cam_shutter_angle(self, m, deg):   self._send(pkt_cam_shutter_angle(m, deg))
-    def send_cam_nd(self, m, stop):             self._send(pkt_cam_nd(m, stop))
+    def send_cam_auto_iris(self, m):            self._send(pkt_cam_auto_iris(m))
     def send_cam_auto_wb(self, m):              self._send(pkt_cam_auto_wb(m))
     def send_cam_restore_auto_wb(self, m):      self._send(pkt_cam_restore_auto_wb(m))
+
+    def cam_known(self, mount_id: int) -> dict:
+        """Everything known about this camera's settings, best source first.
+
+        The camera's own reports are ground truth and override what we sent.
+        For the many parameters it never reports — gain, shutter, ND, all of
+        colour correction — what we sent is the only record there is.
+        """
+        st = self._states.get(mount_id)
+        if st is None:
+            return {}
+        known = dict(st.cam_sent)
+        known.update(st.cam_adv)
+        # These three live in named fields rather than cam_adv, because the
+        # everyday dialog reads them; fold them in so a caller has one dict.
+        if st.cam_wb is not None:
+            known["white_balance"] = st.cam_wb
+        if st.cam_tint is not None:
+            known["tint"] = st.cam_tint
+        if st.cam_iso is not None:
+            known["iso"] = st.cam_iso
+        return known
 
     def cam_ble_state(self, mount_id: int):
         """None = no camera support, "unpaired", False = link down, True = ready.

@@ -994,11 +994,25 @@ def pkt_cam_autofocus(mount_id: int) -> bytes:
     return build_packet(mount_id, Cmd.CAM_CONTROL, cmd)
 
 
+# ISO steps the camera actually has.  Stepping through its own values rather
+# than adding a fixed amount means every press lands on a setting the camera
+# will accept, and the number that comes back matches the one that was asked
+# for — which is how you can tell a command was applied at all.
+#
+# Here rather than in a dialog because both camera dialogs offer this control
+# and neither can import the other: the everyday one opens the advanced one.
+ISO_STEPS = [100, 200, 400, 800, 1250, 3200, 6400, 12800, 25600]
+
+
 def pkt_cam_iso(mount_id: int, iso: int) -> bytes:
     """Sensor ISO — video category, parameter 14, int32.
 
     Blackmagic calls this ISO and the camera displays it as ISO; the operator
     calls it gain.  The wire value is the ISO number itself (400, 1250, ...).
+
+    This is the parameter to drive for gain, NOT category 1 parameter 13 (gain
+    in dB).  The camera reports 14 unprompted and never reports 13, so 14 is
+    the only one of the two that can be read back and confirmed.
     """
     data = int(iso).to_bytes(4, "little", signed=True)
     return build_packet(mount_id, Cmd.CAM_CONTROL,
