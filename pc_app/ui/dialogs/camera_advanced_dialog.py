@@ -34,12 +34,15 @@ import time
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAbstractSpinBox,
-    QSlider, QWidget, QTabBar, QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
+    QSlider, QWidget, QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
 )
 
 from comms.mount_manager import MountManager
 from comms.protocol import NUM_MOUNTS
 from ui.widgets.colour_wheel import LabelledWheel
+# The one palette both this dialog and the main window read, so the picker
+# cannot drift out of step with the buttons behind it.
+from ui.widgets.position_grid import CAM_COLORS
 
 _SHUTTERS = [24, 25, 30, 48, 50, 60, 100, 120, 125, 200, 250, 500, 1000, 2000]
 _GAINS_DB = [-12, -6, 0, 6, 12, 18, 24, 30, 36]
@@ -116,23 +119,33 @@ class CameraAdvancedDialog(QDialog):
             " border-radius:6px;}"
             "QComboBox QAbstractItemView{background:#2A3038; color:#e6e8ec;"
             " selection-background-color:#1565C0;}"
-            "QTabBar::tab{padding:10px 20px; font-size:14px;}"
             + _SLIDER_CSS)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 14)
         root.setSpacing(10)
 
-        self._tabs = QTabBar()
-        self._tabs.setExpanding(False)
+        # Camera picker, centred, in the same colours as the Cam 1-5 buttons on
+        # the main window directly behind this dialog.  A QTabBar cannot carry
+        # a per-tab background — stylesheets have no way to address one tab —
+        # so these are buttons wearing the main window's own palette.
+        self._cam_btns: dict[int, QPushButton] = {}
+        picker = QHBoxLayout()
+        picker.setSpacing(12)
+        picker.addStretch(1)
         for i in range(1, NUM_MOUNTS + 1):
-            self._tabs.addTab(f"CAM{i}")
-        self._tabs.setCurrentIndex(mount_id - 1)
-        self._tabs.currentChanged.connect(self._on_tab)
-        root.addWidget(self._tabs)
+            b = QPushButton(f"Cam {i}")
+            b.setFixedHeight(58)
+            b.setMinimumWidth(150)
+            b.clicked.connect(lambda _c, m=i: self._select_cam(m))
+            self._cam_btns[i] = b
+            picker.addWidget(b)
+        picker.addStretch(1)
+        root.addLayout(picker)
 
         self._link = QLabel("")
-        self._link.setStyleSheet("color:#e0a030; font-size:12px;")
+        self._link.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._link.setStyleSheet("color:#e0a030; font-size:13px;")
         root.addWidget(self._link)
 
         body = QHBoxLayout()
@@ -154,6 +167,7 @@ class CameraAdvancedDialog(QDialog):
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._refresh_link)
         self._poll.start(1000)
+        self._paint_cam_btns()
         self._refresh_link()
 
     # ── left: camera settings ────────────────────────────────────────────
@@ -447,9 +461,25 @@ class CameraAdvancedDialog(QDialog):
         self._mm.send_cam_cc_reset(self._mount)
 
     # ── receiving ────────────────────────────────────────────────────────
-    def _on_tab(self, idx: int) -> None:
-        self._mount = idx + 1
+    def _select_cam(self, mount_id: int) -> None:
+        self._mount = mount_id
+        self._paint_cam_btns()
         self._refresh_link()
+
+    def _paint_cam_btns(self) -> None:
+        """Selected camera wears its accent; the rest wear the same grey the
+        main window uses, so the two rows read as one control."""
+        for mid, b in self._cam_btns.items():
+            col = CAM_COLORS[mid]
+            border = col["accent"].name() if mid == self._mount else "#333333"
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: {col['btn_bg']}; color: {col['btn_text']};
+                    border: 5px solid {border};
+                    border-radius: 20px; font-size: 24px; font-weight: bold;
+                    padding: 4px 12px;
+                }}
+            """)
 
     # ── hands off while the operator is working ──────────────────────────
     def _touch(self, w) -> None:
@@ -534,7 +564,7 @@ class CameraAdvancedDialog(QDialog):
                "unpaired": "no camera paired to this mount",
                False: "camera off, asleep, or out of range",
                True:  "camera ready"}.get(ble, "camera state unknown")
-        self._link.setText(f"CAM{self._mount}: {txt}")
+        self._link.setText(f"Cam {self._mount}: {txt}")
         self._link.setStyleSheet("color:%s; font-size:12px;" %
                                  ("#7dc47d" if ble is True else "#e0a030"))
 
