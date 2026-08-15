@@ -208,48 +208,70 @@ class CameraAdvancedDialog(QDialog):
 
         wheels = QHBoxLayout()
         wheels.setSpacing(12)
-        # Spans are each parameter's useful range, so the puck's travel means
-        # something comparable on all three.
-        self._w_lift  = LabelledWheel("Lift",  span=0.5)
-        self._w_gamma = LabelledWheel("Gamma", span=1.0)
-        self._w_gain  = LabelledWheel("Gain",  span=2.0)
+        # span = offset at the rim, centre = the parameter's neutral, lo/hi = its
+        # legal range, all from the Blackmagic category-8 table.  Gain's neutral
+        # is ONE, not zero: it is a multiplier, and a zero-centred gain wheel
+        # sends a black picture in every direction including at rest.
+        self._w_lift  = LabelledWheel("Lift",  span=0.5, centre=0.0, lo=-2.0, hi=2.0)
+        self._w_gamma = LabelledWheel("Gamma", span=1.0, centre=0.0, lo=-4.0, hi=4.0)
+        self._w_gain  = LabelledWheel("Gain",  span=1.0, centre=1.0, lo=0.0,  hi=16.0)
         for w, send in ((self._w_lift,  "send_cam_lift"),
                         (self._w_gamma, "send_cam_gamma"),
                         (self._w_gain,  "send_cam_gain_cc")):
             w.wheel.changed.connect(
                 lambda r, g, b, y, f=send: self._send(getattr(self._mm, f), r, g, b, y))
             wheels.addWidget(w, 1)
-        lay.addLayout(wheels, 1)
+        lay.addLayout(wheels, 0)
+        lay.addSpacing(4)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
+        # One equally-spaced row beneath the wheels, each slider carrying its own
+        # number in its top-right corner.  They were previously a 2x3 grid with
+        # the numbers pushed into separate columns off to the right, which left
+        # every value sitting beside the wrong slider.
+        row = QHBoxLayout()
+        row.setSpacing(14)
         self._sliders = {}
         specs = [
-            ("Contrast",   0, 0, 0.0, 2.0, 1.0, self._send_contrast),
-            ("Pivot",      1, 0, 0.0, 1.0, 0.5, self._send_contrast),
-            ("Saturation", 0, 1, 0.0, 2.0, 1.0, self._send_hue_sat),
-            ("Lum Mix",    1, 1, 0.0, 1.0, 1.0,
+            ("Contrast",   0.0, 2.0, 1.0, self._send_contrast),
+            ("Pivot",      0.0, 1.0, 0.5, self._send_contrast),
+            ("Saturation", 0.0, 2.0, 1.0, self._send_hue_sat),
+            ("Hue",       -1.0, 1.0, 0.0, self._send_hue_sat),
+            ("Lum Mix",    0.0, 1.0, 1.0,
              lambda: self._send(self._mm.send_cam_luma_mix,
                                 self._sliders["Lum Mix"].value() / 100.0)),
-            ("Hue",        0, 2, -1.0, 1.0, 0.0, self._send_hue_sat),
         ]
-        for name, r, c, lo, hi, init, cb in specs:
-            sl = self._slider(int(lo * 100), int(hi * 100), int(init * 100))
-            val = QLabel(f"{init:.2f}")
-            val.setStyleSheet("color:#e6e8ec; font-size:12px;")
-            val.setMinimumWidth(44)
-            val.setAlignment(Qt.AlignmentFlag.AlignRight)
-            sl.valueChanged.connect(
-                lambda v, l=val: l.setText(f"{v / 100.0:.2f}"))
-            sl.valueChanged.connect(lambda _v, f=cb: f())
-            self._sliders[name] = sl
-            lab = QLabel(name)
-            lab.setStyleSheet("color:#9aa0a8; font-size:11px;")
-            grid.addWidget(lab, r * 2,     c)
-            grid.addWidget(sl,  r * 2 + 1, c)
-            grid.addWidget(val, r * 2 + 1, c + 3)
-        lay.addLayout(grid)
+        for name, lo, hi, init, cb in specs:
+            row.addWidget(self._slider_cell(name, lo, hi, init, cb), 1)
+        lay.addLayout(row)
+        lay.addStretch(1)          # slack goes here, under the sliders
         return box
+
+    def _slider_cell(self, name: str, lo: float, hi: float,
+                     init: float, cb) -> QWidget:
+        """Name top-left, value top-right, slider full width beneath."""
+        cell = QWidget()
+        v = QVBoxLayout(cell)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        lab = QLabel(name)
+        lab.setStyleSheet("color:#9aa0a8; font-size:11px;")
+        val = QLabel(f"{init:.2f}")
+        val.setStyleSheet("color:#e6e8ec; font-size:12px; font-weight:600;")
+        val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        head.addWidget(lab)
+        head.addStretch(1)
+        head.addWidget(val)
+        v.addLayout(head)
+
+        sl = self._slider(int(lo * 100), int(hi * 100), int(init * 100))
+        sl.valueChanged.connect(lambda x, l=val: l.setText(f"{x / 100.0:.2f}"))
+        sl.valueChanged.connect(lambda _x, f=cb: f())
+        self._sliders[name] = sl
+        v.addWidget(sl)
+        return cell
 
     # ── sending ──────────────────────────────────────────────────────────
     def _send(self, fn, *args) -> None:
@@ -272,7 +294,8 @@ class CameraAdvancedDialog(QDialog):
 
     def _reset_all(self) -> None:
         for w in (self._w_lift, self._w_gamma, self._w_gain):
-            w.wheel.set_values(0.0, 0.0, 0.0, 0.0)
+            c = w.wheel.centre()          # gain's neutral is 1.0, not 0.0
+            w.wheel.set_values(c, c, c, c)
         self._mm.send_cam_cc_reset(self._mount)
 
     # ── receiving ────────────────────────────────────────────────────────

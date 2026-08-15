@@ -439,12 +439,19 @@ class MountManager(QObject):
     def send_cam_iso(self, mount_id: int, iso: int) -> None:
         self._send(pkt_cam_iso(mount_id, iso))
 
-    def send_cam_white_balance(self, mount_id: int, kelvin: int) -> None:
-        """Temperature only — tint is carried in the same command, so the
-        camera's last reported tint is resent unchanged rather than zeroed."""
-        st = self._states.get(mount_id)
-        tint = st.cam_tint if st and st.cam_tint is not None else 0
-        self._send(pkt_cam_white_balance(mount_id, kelvin, tint))
+    def send_cam_white_balance(self, mount_id: int, kelvin: int,
+                               tint: int | None = None) -> None:
+        """Temperature, and tint if the caller has one.
+
+        Tint is carried in the same command as the temperature, so it has to be
+        sent either way. Callers with no tint control (the everyday dialog) omit
+        it and the camera's last reported tint is resent unchanged rather than
+        zeroed; the Advanced panel owns a tint box and passes it explicitly.
+        """
+        if tint is None:
+            st = self._states.get(mount_id)
+            tint = st.cam_tint if st and st.cam_tint is not None else 0
+        self._send(pkt_cam_white_balance(mount_id, kelvin, int(tint)))
 
     def send_set_stall_threshold(self, mount_id: int, axis: Axis,
                                   threshold: int) -> None:
