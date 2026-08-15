@@ -171,7 +171,7 @@ class _ListSpin(QSpinBox):
 
 
 
-def _row(parent_lay, label: str, widget) -> QLabel:
+def _row(parent_lay, label: str, widget, value: QLabel = None) -> QLabel:
     h = QHBoxLayout()
     h.setSpacing(10)
     lab = QLabel(label)
@@ -179,6 +179,8 @@ def _row(parent_lay, label: str, widget) -> QLabel:
     lab.setMinimumWidth(96)
     h.addWidget(lab)
     h.addWidget(widget, 1)
+    if value is not None:
+        h.addWidget(value)
     parent_lay.addLayout(h)
     return lab
 
@@ -195,6 +197,11 @@ class CameraAdvancedDialog(QDialog):
         self._tint = None       # built with the correction panel, not the camera one
         self._touched: dict = {}    # widget -> monotonic time the operator last moved it
         self._nowheel = _NoStrayWheel(self)
+        # Lens facts the camera reports separately from the controls that set
+        # them: the f-number behind Iris, the focal length behind Zoom.
+        self._f_stop = None
+        self._zoom_mm = None
+        self._readouts: list = []
         self.setWindowTitle("Camera Control — Advanced")
         self.resize(1500, 1000)
         self.setMinimumSize(1240, 860)
@@ -334,23 +341,29 @@ class CameraAdvancedDialog(QDialog):
         lens.setStyleSheet("color:#e6e8ec; font-size:14px; font-weight:600;")
         lay.addWidget(lens)
 
+        # Iris drives the NORMALISED aperture (lens parameter 3), which is the
+        # one this camera is known to accept and report.  The readout shows the
+        # F-NUMBER, which is the same control expressed the way an operator
+        # actually thinks about it — the camera sends that separately, as an
+        # APEX value on parameter 2, and it is the only form worth reading:
+        # "45%" tells nobody anything about depth of field.
         self._iris = self._slider(0, 100, 50)
         self._wire_slider(self._iris,
                           lambda s=self._iris: self._send(self._mm.send_cam_iris,
                                                           s.value() / 100.0))
-        _row(lay, "Iris", self._iris)
+        _row(lay, "Iris", self._iris, self._readout(self._iris, self._iris_text))
 
         self._zoom = self._slider(0, 100, 0)
         self._wire_slider(self._zoom,
                           lambda s=self._zoom: self._send(self._mm.send_cam_zoom_norm,
                                                           s.value() / 100.0))
-        _row(lay, "Zoom", self._zoom)
+        _row(lay, "Zoom", self._zoom, self._readout(self._zoom, self._zoom_text))
 
         self._focus = self._slider(0, 100, 50)
         self._wire_slider(self._focus,
                           lambda s=self._focus: self._send(self._mm.send_cam_focus,
-                                                          s.value() / 100.0))
-        _row(lay, "Focus", self._focus)
+                                                           s.value() / 100.0))
+        _row(lay, "Focus", self._focus, self._readout(self._focus, self._focus_text))
 
         arow = QHBoxLayout()
         for text, fn in (("Auto Focus", "send_cam_autofocus"),
@@ -372,6 +385,42 @@ class CameraAdvancedDialog(QDialog):
         s.setRange(lo, hi); s.setValue(val)
         s.valueChanged.connect(lambda _v, w=s: self._touch(w))
         return s
+
+    # ── lens readouts ────────────────────────────────────────────────────
+    def _readout(self, sl: QSlider, fmt) -> QLabel:
+        """A number beside a lens slider, refreshed by the slider and by the camera."""
+        val = QLabel()
+        val.setMinimumWidth(76)
+        val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        val.setStyleSheet("color:#e6e8ec; font-size:14px; font-weight:600;")
+        sl.valueChanged.connect(lambda _v: val.setText(fmt()))
+        self._readouts.append((val, fmt))
+        val.setText(fmt())
+        return val
+
+    def _refresh_readouts(self) -> None:
+        for val, fmt in self._readouts:
+            val.setText(fmt())
+
+    def _iris_text(self) -> str:
+        """f-number where the camera has given one, percentage while dragging.
+
+        The reported f-number describes where the iris IS.  During a drag that
+        is where it still was a moment ago, so the percentage — which is what
+        the slider is actually sending — is the honest thing to show until the
+        handle is let go and the camera answers.
+        """
+        if self._iris.isSliderDown() or self._f_stop is None:
+            return f"{self._iris.value()}%"
+        return f"f/{self._f_stop:g}"
+
+    def _zoom_text(self) -> str:
+        if self._zoom.isSliderDown() or self._zoom_mm is None:
+            return f"{self._zoom.value()}%"
+        return f"{self._zoom_mm} mm"
+
+    def _focus_text(self) -> str:
+        return f"{self._focus.value()}%"      # the camera offers nothing better
 
     def _wire_slider(self, sl: QSlider, send) -> None:
         """Transmit when the slider is LET GO, not on every pixel of the drag.
@@ -662,6 +711,10 @@ class CameraAdvancedDialog(QDialog):
             # No "is it one of our stops?" test — the box learns any stop the
             # camera reports, and screening them out here was half of why a
             # reported ISO could vanish without trace.
+            if adv.get("f_stop") is not None:
+                self._f_stop = adv["f_stop"]
+            if adv.get("zoom_mm") is not None:
+                self._zoom_mm = adv["zoom_mm"]
             if adv.get("iso") is not None and not self._held(self._iso):
                 self._iso.set_value_of(adv["iso"])
             for key, wheel in (("lift", self._w_lift), ("gamma", self._w_gamma),
@@ -691,6 +744,7 @@ class CameraAdvancedDialog(QDialog):
                 self._set_if_free(self._nd, float(adv["nd"]))
         finally:
             self._loading = False
+        self._refresh_readouts()
 
     def _refresh_link(self) -> None:
         """Say plainly which of the four states this camera is in.
