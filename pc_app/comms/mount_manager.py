@@ -657,7 +657,9 @@ class MountManager(QObject):
             sig = [int.from_bytes(b[i:i+1], "big", signed=True) for i in range(6)]
             rmin, rmean, rmax, nmin, nmean, nmax = sig
             n    = (b[6] << 8) | b[7]
-            drop = (b[8] << 8) | b[9] if len(b) >= 10 else 0
+            drop = (b[8] << 8) | b[9]  if len(b) >= 10 else 0
+            txa  = (b[10] << 8) | b[11] if len(b) >= 14 else 0
+            txf  = (b[12] << 8) | b[13] if len(b) >= 14 else 0
             if drop:
                 # Heard, MAC-acknowledged, then thrown away because the
                 # application queue was full.  The sender sees a successful send
@@ -690,9 +692,18 @@ class MountManager(QObject):
             # failing 4 sends in 160 s.  802.11b at 1 Mbps needs roughly 4-10 dB,
             # so below 10 is genuinely thin and above it is not worth a colour.
             fn = log.warning if worst < 10 else log.info
+            # TX as a RATE.  Only failures were counted before, which cannot be
+            # read on a mount that transmits more than its neighbours — and the
+            # one with a camera does, by roughly three times.  A percentage
+            # compares across mounts; a raw count only compares across time on
+            # the same mount.
+            tx = ""
+            if txa:
+                tx = "  | TX %d sent, %d did not go out (%.2f%%)" % (
+                    txa, txf, 100.0 * txf / txa)
             fn("RF cam%d: rssi %d/%d/%d  noise %d/%d/%d  (min/mean/max, dBm) "
-               "| SNR %d dB, worst %d dB over %d frames | %s",
-               mid, rmin, rmean, rmax, nmin, nmean, nmax, snr, worst, n, verdict)
+               "| SNR %d dB, worst %d dB over %d frames | %s%s",
+               mid, rmin, rmean, rmax, nmin, nmean, nmax, snr, worst, n, verdict, tx)
             return
 
         if pkt.cmd == Cmd.STATUS:

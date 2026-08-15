@@ -579,6 +579,11 @@ static volatile uint16_t _rf_frames   = 0;
 // is exactly what mount 1 looks like: 19% of its commands unanswered for twelve
 // hours with every counter on both sides reading clean.
 static volatile uint16_t _rf_rx_dropped = 0;
+// Sends ATTEMPTED this window, against those that did not go out.  Only the
+// failures were ever counted, which makes the number unreadable on a mount that
+// transmits more than its neighbours — and the mount with the camera does.
+static volatile uint16_t _rf_tx_attempts = 0;
+static volatile uint16_t _rf_tx_failed   = 0;
 static uint32_t          _rf_last_ms  = 0;
 static portMUX_TYPE      _rf_mux      = portMUX_INITIALIZER_UNLOCKED;
 
@@ -822,8 +827,12 @@ static void espnow_peer_long_range(const uint8_t *mac) {
 // none of them can do anything useful about a refusal in the moment — the point
 // is that the refusal is now visible afterwards instead of invisible always.
 static void espnow_tx(const uint8_t *buf, uint16_t n) {
+    if (_rf_tx_attempts < 0xFFFF) _rf_tx_attempts = _rf_tx_attempts + 1;
     esp_err_t e = esp_now_send(_hub_mac, buf, n);
     if (e != ESP_OK) {
+        // Refused outright: it did not go out, and it never reaches the send
+        // callback, so it must be counted as a failure HERE or not at all.
+        if (_rf_tx_failed < 0xFFFF) _rf_tx_failed = _rf_tx_failed + 1;
         // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
         _espnow_tx_refused  = _espnow_tx_refused + 1;
         _espnow_last_tx_err = (uint16_t)e;
@@ -855,9 +864,11 @@ static void send_rf_report() {
     // the mount being off.
     int8_t rmean = n ? (int8_t)(rsum / (int32_t)n) : 0;
     int8_t nmean = n ? (int8_t)(nsum / (int32_t)n) : 0;
-    uint16_t drop;
+    uint16_t drop, txa, txf;
     portENTER_CRITICAL(&_rf_mux);
-    drop = _rf_rx_dropped; _rf_rx_dropped = 0;
+    drop = _rf_rx_dropped;  _rf_rx_dropped  = 0;
+    txa  = _rf_tx_attempts; _rf_tx_attempts = 0;
+    txf  = _rf_tx_failed;   _rf_tx_failed   = 0;
     portEXIT_CRITICAL(&_rf_mux);
     // Beside "frames heard", because "frames heard and thrown away" is the same
     // question asked one layer up.
@@ -865,7 +876,9 @@ static void send_rf_report() {
         (uint8_t)rmin, (uint8_t)rmean, (uint8_t)rmax,
         (uint8_t)nmin, (uint8_t)nmean, (uint8_t)nmax,
         (uint8_t)(n >> 8), (uint8_t)n,
-        (uint8_t)(drop >> 8), (uint8_t)drop };
+        (uint8_t)(drop >> 8), (uint8_t)drop,
+        (uint8_t)(txa >> 8),  (uint8_t)txa,
+        (uint8_t)(txf >> 8),  (uint8_t)txf };
     send_to_hub(CMD_RF_REPORT, p, sizeof(p));
 }
 
@@ -1028,6 +1041,7 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
     } else {
         // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
         _espnow_fail_total = _espnow_fail_total + 1;   // health telemetry (cumulative)
+        if (_rf_tx_failed < 0xFFFF) _rf_tx_failed = _rf_tx_failed + 1;
         Serial.printf("ESP-NOW send failed (%d)\n", (int)s);
         // After several consecutive failures the ESP-NOW stack internally marks
         // the hub peer as stale.  Refresh it so that when the hub powers back on

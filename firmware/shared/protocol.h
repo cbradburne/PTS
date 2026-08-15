@@ -111,7 +111,14 @@
 // frame can be heard perfectly, acknowledged at the MAC layer, and then dropped
 // because the application queue was full — leaving both ends reporting success
 // for a command that never happened.
-#define RF_REPORT_PAYLOAD_LEN       10
+// ...then tx_attempts(2) + tx_failed(2) for the same window.
+//
+// Failures were counted and attempts were not, so a raw failure count could not
+// be read: mount 5 shows ~10x the failures of the mounts beside it, and it also
+// TRANSMITS about three times as much, because it is the one with a camera.
+// Whether its radio is worse or merely busier is a division nobody could do.
+// tx_failed here is failures AND refusals — the two halves of "did not go out".
+#define RF_REPORT_PAYLOAD_LEN       14
 // ── Mount presence: one number, shared, because two ends must agree ────────
 // How often a mount re-sends STATUS when nothing has changed, and how long a
 // hub waits before calling it gone.  These are two halves of one contract and
