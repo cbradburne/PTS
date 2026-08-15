@@ -17,11 +17,17 @@ implementation:
   volunteers a value (it reports most of them unprompted) the display follows
   it, and that is the only real confirmation available.
 
-  It cannot read the camera's current state on open. There is no "get" in the
-  protocol, only "set" and the camera's own unsolicited reports. So the panel
-  opens showing neutral values and fills in as the camera talks. Values shown
-  before the camera has reported are what this app last sent, not what the
-  camera holds — which matters if the camera was changed at the body.
+  It cannot ASK the camera anything. There is no "get" in the protocol, only
+  "set" and the camera's own unsolicited reports. What the app has heard since
+  it started is therefore all it knows, and a control the camera never mentions
+  — shutter, ND, the whole of colour correction — can only show what this app
+  last sent, which is not the same as what the camera holds if someone changed
+  it at the body.
+
+  Where the camera DOES report a control, the panel opens on its value rather
+  than on a default: the iris seeds from the camera's own position once, on open
+  and on each camera change, and is the operator's alone after that. It used to
+  open at its construction default of 50% against a lens that was shut.
 
 Commands go out as a control is used rather than on an Apply button: with no
 acknowledgement and no read-back, Apply would give the operator a confidence the
@@ -282,6 +288,9 @@ class CameraAdvancedDialog(QDialog):
         self._f_stop = _Confirmed(gated=True)   # camera reports normalised iris
         self._zoom_mm = _Confirmed()            # it never reports normalised zoom
         self._readouts: list = []
+        # The iris slider takes the camera's position once, on open and on
+        # each camera change, and is the operator's alone after that.
+        self._iris_seeded = False
         self.setWindowTitle("Camera Control — Advanced")
         self.resize(1500, 1000)
         self.setMinimumSize(1240, 860)
@@ -729,6 +738,7 @@ class CameraAdvancedDialog(QDialog):
         self._paint_cam_btns()
         self._refresh_link()
         self._touched.clear()   # a hold belongs to the camera it was made on
+        self._iris_seeded = False   # seed again from the camera now selected
         self._show_known()
 
     def _paint_cam_btns(self) -> None:
@@ -836,16 +846,24 @@ class CameraAdvancedDialog(QDialog):
                                   ("focus", self._focus, 100)):
                 if key in adv:
                     self._set_if_free(w, int(adv[key] * scale))
-            # Iris deliberately NOT in that loop.  The camera's normalised iris
-            # is still decoded, still logged, and still used to know when the
-            # f-number can be trusted — it just does not move the handle.  It
-            # reports 0.798 for a slider set to 80, so letting it write back
-            # nudged the control by a percent every time the camera spoke, and
-            # the operator would then drag from somewhere they had not left it.
-            # The slider restores from what WE sent, so reopening still works.
-            sent_iris = (getattr(st, "cam_sent", {}) or {}).get("iris") if st else None
-            if sent_iris is not None:
-                self._set_if_free(self._iris, int(round(sent_iris * 100)))
+            # Iris deliberately NOT in that loop.  The camera reports 0.798 for a
+            # slider set to 80, so letting it write back nudged the control by a
+            # percent every time it spoke, and the operator would then drag from
+            # somewhere they had not left it.
+            #
+            # But ONCE, when the panel opens or changes camera, taking the
+            # camera's position is the whole point: there is nothing to protect
+            # yet, and the alternative is the slider's construction default —
+            # which is how it opened reading 50% at an iris that was shut.  The
+            # camera's own report wins over what we last sent, because the iris
+            # may have been moved at the lens since.
+            if not self._iris_seeded:
+                seed = (said.get("iris") if said.get("iris") is not None
+                        else (getattr(st, "cam_sent", {}) or {}).get("iris") if st
+                        else None)
+                if seed is not None:
+                    self._iris_seeded = True
+                    self._iris.setValue(int(round(seed * 100)))
             if ("shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS
                     and not self._held(self._shut)):
                 self._shut.setCurrentIndex(_SHUTTERS.index(adv["shutter_speed"]))
