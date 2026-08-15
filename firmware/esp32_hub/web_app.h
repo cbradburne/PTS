@@ -671,6 +671,14 @@ const ORI_LANC_ZOOM  = 0x10;
 const ORI_TILT_INV   = 0x20;
 const ORI_LOOK_AT    = 0x40;
 const NUM_MOUNTS = 5;
+// How long without a STATUS before this app calls a mount disconnected.
+// Mirrors MOUNT_PRESENCE_TIMEOUT_MS in shared/protocol.h — see the note there.
+// Was a bare 3000, written when a mount sent STATUS at 10 Hz.  It now sends on
+// change plus a 5 s refresh, so EVERY ordinary gap exceeded that timeout: the
+// mount flapped disconnected between each pair of packets and the extended
+// page's speed dials, which draw blank for a disconnected mount, blinked in
+// time with it.  Third place the same 10 Hz assumption was buried.
+const MOUNT_PRESENCE_TIMEOUT_MS = 16000;
 const NUM_SLOTS  = 10;
 
 // ---- CRC-16/CCITT-FALSE ----
@@ -1260,7 +1268,8 @@ setInterval(() => {
     let changed = false;
     for (let i = 1; i <= NUM_MOUNTS; i++) {
         const was = camSt[i].connected;
-        camSt[i].connected = !!_stTime[i] && (now - _stTime[i] < 3000);
+        camSt[i].connected = !!_stTime[i] &&
+                             (now - _stTime[i] < MOUNT_PRESENCE_TIMEOUT_MS);
         if (was !== camSt[i].connected) {
             camSt[i].targetSlot = 0xFF;
             if (!camSt[i].connected) {
