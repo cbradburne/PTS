@@ -110,6 +110,55 @@ class _NoStrayWheel(QObject):
         return False
 
 
+class _Confirmed:
+    """A camera-reported number, shown only once it is known to be a NEW one.
+
+    The camera reports on a rotation of its own — the aperture's turn comes
+    round every 5.5s or so — and a report can carry a value it captured before
+    our command reached it.  So the first aperture that arrives after moving
+    the iris is quite often the OLD f-number, and displaying it looks exactly
+    like confirmation while being nothing of the kind.
+
+    This waits for one of two things after a change: a value that actually
+    differs, or the same value twice, which is how a genuine no-change is told
+    apart from a stale echo.  No arithmetic is done on the number and nothing
+    is inferred — it is the camera's own value or it is not shown.
+    """
+
+    def __init__(self):
+        self.value = None
+        self._seen_at = 0.0        # timestamp of the last report we acted on
+        self._pending = False
+        self._before = None
+        self._repeats = 0
+
+    def mark_sent(self) -> None:
+        """The operator has changed the control this number describes."""
+        if not self._pending:
+            self._before = self.value
+            self._repeats = 0
+        self._pending = True
+
+    def offer(self, value, heard_at: float) -> None:
+        if heard_at <= self._seen_at:
+            return                 # the stored value again, not a fresh report
+        self._seen_at = heard_at
+        if not self._pending:
+            self.value = value
+            return
+        if value != self._before:
+            self.value = value     # the camera has moved — this is the new one
+            self._pending = False
+        else:
+            self._repeats += 1
+            if self._repeats >= 2:
+                self._pending = False   # said twice, so it really did not change
+
+    @property
+    def confirmed(self) -> bool:
+        return self.value is not None and not self._pending
+
+
 class _ListSpin(QSpinBox):
     """A spin box that steps through an arbitrary list rather than by a fixed
     increment.
@@ -198,9 +247,12 @@ class CameraAdvancedDialog(QDialog):
         self._touched: dict = {}    # widget -> monotonic time the operator last moved it
         self._nowheel = _NoStrayWheel(self)
         # Lens facts the camera reports separately from the controls that set
-        # them: the f-number behind Iris, the focal length behind Zoom.
-        self._f_stop = None
-        self._zoom_mm = None
+        # them: the f-number behind Iris, the focal length behind Zoom.  Each
+        # is held back until the camera has confirmed a NEW value — see
+        # _Confirmed for why the first report after a change cannot be
+        # trusted.
+        self._f_stop = _Confirmed()
+        self._zoom_mm = _Confirmed()
         self._readouts: list = []
         self.setWindowTitle("Camera Control — Advanced")
         self.resize(1500, 1000)
@@ -348,15 +400,11 @@ class CameraAdvancedDialog(QDialog):
         # APEX value on parameter 2, and it is the only form worth reading:
         # "45%" tells nobody anything about depth of field.
         self._iris = self._slider(0, 100, 50)
-        self._wire_slider(self._iris,
-                          lambda s=self._iris: self._send(self._mm.send_cam_iris,
-                                                          s.value() / 100.0))
+        self._wire_slider(self._iris, self._send_iris)
         _row(lay, "Iris", self._iris, self._readout(self._iris, self._iris_text))
 
         self._zoom = self._slider(0, 100, 0)
-        self._wire_slider(self._zoom,
-                          lambda s=self._zoom: self._send(self._mm.send_cam_zoom_norm,
-                                                          s.value() / 100.0))
+        self._wire_slider(self._zoom, self._send_zoom)
         _row(lay, "Zoom", self._zoom, self._readout(self._zoom, self._zoom_text))
 
         self._focus = self._slider(0, 100, 50)
@@ -402,33 +450,16 @@ class CameraAdvancedDialog(QDialog):
         for val, fmt in self._readouts:
             val.setText(fmt())
 
-    def _stale(self, sent_key: str, heard_key: str) -> bool:
-        """True when we have moved this control since the camera last spoke.
-
-        The camera takes 300-500ms to notice an aperture change and say so —
-        its own Bluetooth cadence, not anything this end can hurry.  During that
-        gap the last reported f-number is simply WRONG, and showing it looks
-        settled and authoritative, which is the worst way to be wrong.  So the
-        readout falls back to the percentage the slider actually sent until the
-        camera confirms, and the f-number that appears is always true.
-        """
-        st = self._mm.state(self._mount) if hasattr(self._mm, "state") else None
-        if st is None:
-            return False
-        return (getattr(st, "cam_sent_at", {}).get(sent_key, 0.0) >
-                getattr(st, "cam_heard_at", {}).get(heard_key, 0.0))
-
     def _iris_text(self) -> str:
-        if (self._iris.isSliderDown() or self._f_stop is None
-                or self._stale("iris", "f_stop")):
+        """The percentage we sent until the camera confirms a new f-number."""
+        if self._iris.isSliderDown() or not self._f_stop.confirmed:
             return f"{self._iris.value()}%"
-        return f"f/{self._f_stop:g}"
+        return f"f/{self._f_stop.value:g}"
 
     def _zoom_text(self) -> str:
-        if (self._zoom.isSliderDown() or self._zoom_mm is None
-                or self._stale("zoom", "zoom_mm")):
+        if self._zoom.isSliderDown() or not self._zoom_mm.confirmed:
             return f"{self._zoom.value()}%"
-        return f"{self._zoom_mm} mm"
+        return f"{self._zoom_mm.value} mm"
 
     def _focus_text(self) -> str:
         return f"{self._focus.value()}%"      # the camera offers nothing better
@@ -622,6 +653,16 @@ class CameraAdvancedDialog(QDialog):
             return          # this value came FROM the camera; do not echo it back
         fn(self._mount, *args)
 
+    def _send_iris(self) -> None:
+        if not self._loading:
+            self._f_stop.mark_sent()
+        self._send(self._mm.send_cam_iris, self._iris.value() / 100.0)
+
+    def _send_zoom(self) -> None:
+        if not self._loading:
+            self._zoom_mm.mark_sent()
+        self._send(self._mm.send_cam_zoom_norm, self._zoom.value() / 100.0)
+
     def _send_wb(self) -> None:
         """Temperature and tint travel in one command, so both go every time."""
         tint = self._tint.value() if getattr(self, "_tint", None) is not None else 0
@@ -722,10 +763,12 @@ class CameraAdvancedDialog(QDialog):
             # No "is it one of our stops?" test — the box learns any stop the
             # camera reports, and screening them out here was half of why a
             # reported ISO could vanish without trace.
+            st = self._mm.state(self._mount) if hasattr(self._mm, "state") else None
+            heard = getattr(st, "cam_heard_at", {}) if st else {}
             if adv.get("f_stop") is not None:
-                self._f_stop = adv["f_stop"]
+                self._f_stop.offer(adv["f_stop"], heard.get("f_stop", 0.0))
             if adv.get("zoom_mm") is not None:
-                self._zoom_mm = adv["zoom_mm"]
+                self._zoom_mm.offer(adv["zoom_mm"], heard.get("zoom_mm", 0.0))
             if adv.get("iso") is not None and not self._held(self._iso):
                 self._iso.set_value_of(adv["iso"])
             for key, wheel in (("lift", self._w_lift), ("gamma", self._w_gamma),
