@@ -32,6 +32,7 @@ from __future__ import annotations
 import time
 
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QValidator
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAbstractSpinBox,
     QSlider, QWidget, QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
@@ -82,6 +83,36 @@ QSlider::handle:horizontal {
 }
 QSlider::handle:horizontal:pressed { background:#BBDEFB; }
 """
+
+
+class _SignedSpin(QSpinBox):
+    """A spin box that writes gain the way gain is written: +12 dB, not 12 dB.
+
+    QSpinBox has no "always show the sign" option, so the three text hooks are
+    overridden together — display, parse, and validate.  Validate has to accept
+    a lone "+" or "-" as Intermediate or the field rejects the first keystroke
+    of a typed negative.
+    """
+
+    def textFromValue(self, v: int) -> str:
+        return f"{v:+d}" if v else "0"      # "+0 dB" reads wrong; unity is just 0
+
+    def valueFromText(self, text: str) -> int:
+        t = text.replace(self.suffix(), "").strip().replace("+", "")
+        try:
+            return int(t)
+        except ValueError:
+            return self.value()
+
+    def validate(self, text: str, pos: int):
+        t = text.replace(self.suffix(), "").strip()
+        if t in ("", "+", "-"):
+            return (QValidator.State.Intermediate, text, pos)
+        try:
+            int(t.replace("+", ""))
+        except ValueError:
+            return (QValidator.State.Invalid, text, pos)
+        return (QValidator.State.Acceptable, text, pos)
 
 
 def _row(parent_lay, label: str, widget) -> QLabel:
@@ -196,15 +227,18 @@ class CameraAdvancedDialog(QDialog):
         # in one way that matters here: the camera reports ISO unprompted and
         # never reports gain, so ISO reads back from the camera itself while
         # gain can only be shown from what this app last sent.
-        self._gain = QComboBox()
-        for d in _GAINS_DB:
-            self._gain.addItem(f"{d:+d} dB", d)
-        self._gain.setFixedHeight(_TOUCH_H)
-        self._gain.setCurrentIndex(_GAINS_DB.index(0))
-        self._gain.currentIndexChanged.connect(lambda _i: self._touch(self._gain))
-        self._gain.currentIndexChanged.connect(
-            lambda _i: self._send(self._mm.send_cam_gain_db, self._gain.currentData()))
-        _row(lay, "Gain", self._gain)
+        # Stepped rather than a list, because the camera's gain stops are evenly
+        # spaced: -12 to +36 in 6 dB.  So one press of + is one stop, exactly as
+        # the list did, and it gets the same -/+ pair as Filter and Balance.
+        self._gain = _SignedSpin()
+        self._gain.setRange(_GAINS_DB[0], _GAINS_DB[-1])
+        self._gain.setSingleStep(_GAINS_DB[1] - _GAINS_DB[0])
+        self._gain.setSuffix(" dB")
+        self._gain.setValue(0)
+        self._spin(self._gain)
+        self._gain.valueChanged.connect(
+            lambda v: self._send(self._mm.send_cam_gain_db, v))
+        _row(lay, "Gain", self._stepper(self._gain))
 
         # ISO — the same control the everyday dialog labels "Gain" and steps
         # through the camera's own values.
@@ -577,8 +611,8 @@ class CameraAdvancedDialog(QDialog):
                                   ("focus", self._focus, 100)):
                 if key in adv:
                     self._set_if_free(w, int(adv[key] * scale))
-            if adv.get("gain_db") in _GAINS_DB and not self._held(self._gain):
-                self._gain.setCurrentIndex(_GAINS_DB.index(adv["gain_db"]))
+            if "gain_db" in adv:
+                self._set_if_free(self._gain, int(adv["gain_db"]))
             if ("shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS
                     and not self._held(self._shut)):
                 self._shut.setCurrentIndex(_SHUTTERS.index(adv["shutter_speed"]))
