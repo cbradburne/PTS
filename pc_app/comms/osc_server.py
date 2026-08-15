@@ -26,6 +26,14 @@ ADDRESS SPACE  (cam N = 1-5; slots are 1-based here, matching every UI)
                                         slider preset
     /pts/cam/N/record   <0|1>           stop / start recording on that camera
     /pts/cam/N/record/toggle            start if stopped, stop if rolling
+    /pts/cam/N/tally    <0..1>          tally LAMP brightness: int 0/1 for
+                                        off/full, float for anything between.
+                                        Brightness only — the red/green
+                                        program state comes over SDI on a
+                                        Blackmagic body and this rig has no
+                                        SDI path to it.
+    /pts/cam/N/tally/front <0..1>       front lamp only (facing talent)
+    /pts/cam/N/tally/rear  <0..1>       rear lamp only (facing operator)
 
 FEEDBACK (out)
     /pts/cam/N/recording <0|1>          sent whenever the CAMERA reports its
@@ -308,7 +316,17 @@ class OscServer:
         verb = parts[3]
         st = self._mgr.state(mid)
 
-        if verb == "record":
+        if verb == "tally":
+            # /pts/cam/N/tally <0..1>, or .../tally/front | .../tally/rear.
+            # An int 0/1 from a Companion button means off/full; a float is
+            # taken as the brightness it is.
+            lamp = parts[4] if len(parts) > 4 and parts[4] in ("front", "rear") else "both"
+            raw = args[0] if args else 0
+            level = float(raw) if isinstance(raw, float) else float(bool(_as_int(args, 0, 0)))
+            log.info("OSC: cam%d tally %s = %.2f", mid, lamp, level)
+            self._mgr.send_cam_tally(mid, level, lamp)
+
+        elif verb == "record":
             # /pts/cam/N/record 1|0, or .../record/toggle
             if len(parts) > 4 and parts[4] == "toggle":
                 on = not bool(getattr(st, "cam_recording", False))

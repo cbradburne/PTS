@@ -34,7 +34,7 @@ from .protocol import (
     pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
     pkt_cam_focus, pkt_cam_iris, pkt_cam_auto_iris, pkt_cam_zoom_norm,
-    pkt_cam_zoom_speed, pkt_cam_shutter_speed, pkt_cam_transport,
+    pkt_cam_zoom_speed, pkt_cam_shutter_speed, pkt_cam_transport, pkt_cam_tally, pkt_cam_tally_front, pkt_cam_tally_rear,
     describe_cam_param, TRANSPORT_RECORD, TRANSPORT_PREVIEW,
     pkt_cam_shutter_angle, pkt_cam_nd, pkt_cam_auto_wb, pkt_cam_restore_auto_wb,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
@@ -615,6 +615,18 @@ class MountManager(QObject):
         so a Record button that lights up is a camera that IS rolling, not one
         that was asked to."""
         self._send(pkt_cam_transport(m, TRANSPORT_RECORD if on else TRANSPORT_PREVIEW))
+
+    def send_cam_tally(self, m, brightness: float, lamp: str = "both") -> None:
+        """Tally lamp brightness, 0.0 off to 1.0 full.
+
+        BRIGHTNESS, not a program/preview colour: the red/green state on a
+        Blackmagic camera arrives over SDI and this rig has no SDI path to
+        it.  Turning the lamp up and down is what the Bluetooth link offers.
+        """
+        fn = {"front": pkt_cam_tally_front,
+              "rear":  pkt_cam_tally_rear}.get(lamp, pkt_cam_tally)
+        self._note_cam(m, f"tally_{lamp}", float(brightness))
+        self._send(fn(m, brightness))
 
     def send_cam_auto_wb(self, m):              self._send(pkt_cam_auto_wb(m))
     def send_cam_restore_auto_wb(self, m):      self._send(pkt_cam_restore_auto_wb(m))

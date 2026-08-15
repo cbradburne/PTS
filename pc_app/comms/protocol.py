@@ -1180,6 +1180,36 @@ def pkt_cam_restore_auto_wb(mount_id: int) -> bytes:
 
 
 BMD_CAT_MEDIA = 9
+BMD_CAT_TALLY = 5
+
+
+def pkt_cam_tally(mount_id: int, brightness: float) -> bytes:
+    """Tally lamp brightness, both lamps — tally category, parameter 0.
+
+    0.0 is off and 1.0 is full.  This protocol carries BRIGHTNESS, not a
+    red/green program/preview state: on a Blackmagic camera that state comes
+    over SDI, and nothing on this rig's Bluetooth link can set it.  So this
+    turns the lamp up and down, which is what an OSC cue can usefully drive.
+
+    Unconfirmed against this camera: it has never REPORTED category 5, so
+    the parameter numbers here come from the published spec and nothing
+    else.  Watch comms.log after sending one — a camera that accepts it
+    generally reports it back, and silence means the number is wrong.
+    """
+    return pkt_cam_raw(mount_id, BMD_CAT_TALLY, 0, BMD_TYPE_FIXED16,
+                       _fixed16(max(0.0, min(1.0, brightness))))
+
+
+def pkt_cam_tally_front(mount_id: int, brightness: float) -> bytes:
+    """Front lamp only — the one facing the talent."""
+    return pkt_cam_raw(mount_id, BMD_CAT_TALLY, 1, BMD_TYPE_FIXED16,
+                       _fixed16(max(0.0, min(1.0, brightness))))
+
+
+def pkt_cam_tally_rear(mount_id: int, brightness: float) -> bytes:
+    """Rear lamp only — the one facing the operator."""
+    return pkt_cam_raw(mount_id, BMD_CAT_TALLY, 2, BMD_TYPE_FIXED16,
+                       _fixed16(max(0.0, min(1.0, brightness))))
 
 
 def pkt_cam_transport(mount_id: int, mode: int) -> bytes:
@@ -1225,6 +1255,7 @@ _CAM_PARAM_NAMES = {
     (1, 12): "shutter speed",   (1, 13): "gain (dB)",    (1, 14): "ISO",
     (1, 15): "display LUT",     (1, 16): "ND filter",
     (3, 0): "overlay enables",  (3, 3): "overlays",
+    (5, 0): "tally brightness", (5, 1): "tally front", (5, 2): "tally rear",
     (4, 7): "display setting",
     (8, 0): "lift", (8, 1): "gamma", (8, 2): "gain", (8, 3): "offset",
     (8, 4): "contrast", (8, 5): "luma mix", (8, 6): "hue/saturation",
