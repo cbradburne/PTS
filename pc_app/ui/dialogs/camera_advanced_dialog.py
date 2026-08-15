@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QObject, QEvent
 from PyQt6.QtGui import QValidator
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAbstractSpinBox,
@@ -83,6 +83,69 @@ QSlider::handle:horizontal {
 }
 QSlider::handle:horizontal:pressed { background:#BBDEFB; }
 """
+
+
+class _NoStrayWheel(QObject):
+    """Swallow scroll events on every camera control in this panel.
+
+    Qt changes a combo box or spin box on a scroll even when it does not have
+    focus, and on a touch screen a press with the smallest drag in it arrives
+    as a scroll.  The ISO box sits directly under the Gain row, so pressing
+    Gain -/+ was rolling ISO to the next stop — and TRANSMITTING it, because
+    the change is indistinguishable from the operator making it.
+
+    Nothing on this panel is worth scrolling, so the whole class of accident
+    goes away by refusing the event rather than by moving controls apart.
+    """
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Wheel:
+            ev.ignore()
+            return True
+        return False
+
+
+class _ListSpin(QSpinBox):
+    """A spin box that steps through an arbitrary list rather than by a fixed
+    increment.
+
+    Blackmagic's ISO stops are not evenly spaced — 800, 1250, 3200 — so a plain
+    spin box cannot walk them.  Qt's own value here is the INDEX into the list;
+    value_of() and set_value_of() convert at the edges, so callers deal in ISO
+    numbers and never in indices.
+    """
+
+    def __init__(self, values, parent=None):
+        super().__init__(parent)
+        self._values = list(values)
+        self.setRange(0, len(self._values) - 1)
+
+    def textFromValue(self, i: int) -> str:
+        return f"{self._values[i]}"
+
+    def valueFromText(self, text: str) -> int:
+        t = text.replace(self.suffix(), "").strip()
+        try:
+            n = int(t)
+        except ValueError:
+            return self.value()
+        # A typed value between stops goes to the nearest one the camera has,
+        # rather than being rejected.
+        return min(range(len(self._values)), key=lambda i: abs(self._values[i] - n))
+
+    def validate(self, text: str, pos: int):
+        t = text.replace(self.suffix(), "").strip()
+        if t == "":
+            return (QValidator.State.Intermediate, text, pos)
+        return ((QValidator.State.Acceptable if t.isdigit()
+                 else QValidator.State.Invalid), text, pos)
+
+    def value_of(self):
+        return self._values[self.value()]
+
+    def set_value_of(self, v) -> None:
+        if v in self._values:
+            self.setValue(self._values.index(v))
 
 
 class _SignedSpin(QSpinBox):
@@ -138,6 +201,7 @@ class CameraAdvancedDialog(QDialog):
         self._loading = False
         self._tint = None       # built with the correction panel, not the camera one
         self._touched: dict = {}    # widget -> monotonic time the operator last moved it
+        self._nowheel = _NoStrayWheel(self)
         self.setWindowTitle("Camera Control — Advanced")
         self.resize(1500, 1000)
         self.setMinimumSize(1240, 860)
@@ -242,20 +306,20 @@ class CameraAdvancedDialog(QDialog):
 
         # ISO — the same control the everyday dialog labels "Gain" and steps
         # through the camera's own values.
-        self._iso = QComboBox()
-        for iso in ISO_STEPS:
-            self._iso.addItem(f"{iso}", iso)
-        self._iso.setFixedHeight(_TOUCH_H)
-        self._iso.setCurrentIndex(ISO_STEPS.index(400))
-        self._iso.currentIndexChanged.connect(lambda _i: self._touch(self._iso))
-        self._iso.currentIndexChanged.connect(
-            lambda _i: self._send(self._mm.send_cam_iso, self._iso.currentData()))
-        _row(lay, "ISO", self._iso)
+        # Stepped through the camera's own ISO stops, which are not evenly
+        # spaced, so the box counts list positions and shows the value.
+        self._iso = _ListSpin(ISO_STEPS)
+        self._iso.set_value_of(400)
+        self._spin(self._iso)
+        self._iso.valueChanged.connect(
+            lambda _i: self._send(self._mm.send_cam_iso, self._iso.value_of()))
+        _row(lay, "ISO", self._stepper(self._iso))
 
         self._shut = QComboBox()
         for s in _SHUTTERS:
             self._shut.addItem(f"1/{s}", s)
         self._shut.setFixedHeight(_TOUCH_H)
+        self._shut.installEventFilter(self._nowheel)
         self._shut.setCurrentIndex(_SHUTTERS.index(50))
         self._shut.currentIndexChanged.connect(lambda _i: self._touch(self._shut))
         self._shut.currentIndexChanged.connect(
@@ -319,6 +383,7 @@ class CameraAdvancedDialog(QDialog):
     def _slider(self, lo: int, hi: int, val: int) -> QSlider:
         s = QSlider(Qt.Orientation.Horizontal)
         s.setMinimumHeight(_TOUCH_H)
+        s.installEventFilter(self._nowheel)
         s.setRange(lo, hi); s.setValue(val)
         s.valueChanged.connect(lambda _v, w=s: self._touch(w))
         return s
@@ -364,6 +429,7 @@ class CameraAdvancedDialog(QDialog):
         """
         box.setKeyboardTracking(False)
         box.setAccelerated(True)        # hold the arrow down and it ramps
+        box.installEventFilter(self._nowheel)
         box.valueChanged.connect(lambda _v, w=box: self._touch(w))
         return box
 
@@ -589,7 +655,7 @@ class CameraAdvancedDialog(QDialog):
             if "tint" in adv:
                 self._set_if_free(self._tint, int(adv["tint"]))
             if adv.get("iso") in ISO_STEPS and not self._held(self._iso):
-                self._iso.setCurrentIndex(ISO_STEPS.index(adv["iso"]))
+                self._iso.set_value_of(adv["iso"])
             for key, wheel in (("lift", self._w_lift), ("gamma", self._w_gamma),
                                ("gain_cc", self._w_gain)):
                 v = adv.get(key)
