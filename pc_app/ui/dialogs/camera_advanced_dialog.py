@@ -29,9 +29,11 @@ confidence the system cannot support.
 """
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAbstractSpinBox,
     QSlider, QWidget, QTabBar, QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
 )
 
@@ -41,6 +43,14 @@ from ui.widgets.colour_wheel import LabelledWheel
 
 _SHUTTERS = [24, 25, 30, 48, 50, 60, 100, 120, 125, 200, 250, 500, 1000, 2000]
 _GAINS_DB = [-12, -6, 0, 6, 12, 18, 24, 30, 36]
+
+# How long a control stays the operator's after they last moved it.  The camera
+# reports its state continuously and those reports lag what has just been sent,
+# so applying them while someone is clicking an arrow drags the value backwards
+# under the cursor.  Long enough to cover repeated clicks and a slider drag,
+# short enough that the panel is following the camera again before anyone reads
+# it as stuck.
+_HOLD_S = 0.8
 
 
 def _row(parent_lay, label: str, widget) -> QLabel:
@@ -64,6 +74,7 @@ class CameraAdvancedDialog(QDialog):
         # the control, which would otherwise send that value straight back.
         self._loading = False
         self._tint = None       # built with the correction panel, not the camera one
+        self._touched: dict = {}    # widget -> monotonic time the operator last moved it
         self.setWindowTitle("Camera Control — Advanced")
         self.resize(1180, 720)
         self.setStyleSheet("QDialog{background:#1b1d20;} QLabel{color:#cfd3d8;}")
@@ -117,6 +128,7 @@ class CameraAdvancedDialog(QDialog):
 
         self._nd = QDoubleSpinBox(); self._nd.setRange(0, 12); self._nd.setSingleStep(0.5)
         self._nd.setSuffix(" stop")
+        self._spin(self._nd)
         self._nd.valueChanged.connect(
             lambda v: self._send(self._mm.send_cam_nd, v))
         _row(lay, "Filter (ND)", self._nd)
@@ -125,6 +137,7 @@ class CameraAdvancedDialog(QDialog):
         for d in _GAINS_DB:
             self._gain.addItem(f"{d:+d} dB", d)
         self._gain.setCurrentIndex(_GAINS_DB.index(0))
+        self._gain.currentIndexChanged.connect(lambda _i: self._touch(self._gain))
         self._gain.currentIndexChanged.connect(
             lambda _i: self._send(self._mm.send_cam_gain_db, self._gain.currentData()))
         _row(lay, "Gain", self._gain)
@@ -133,12 +146,18 @@ class CameraAdvancedDialog(QDialog):
         for s in _SHUTTERS:
             self._shut.addItem(f"1/{s}", s)
         self._shut.setCurrentIndex(_SHUTTERS.index(50))
+        self._shut.currentIndexChanged.connect(lambda _i: self._touch(self._shut))
         self._shut.currentIndexChanged.connect(
             lambda _i: self._send(self._mm.send_cam_shutter_speed, self._shut.currentData()))
         _row(lay, "Shutter", self._shut)
 
+        # Type a temperature straight in, or step it with the arrows.  Step 50
+        # so the arrows move a useful amount; typed values are taken as typed.
         self._wb = QSpinBox(); self._wb.setRange(2500, 10000); self._wb.setSingleStep(50)
         self._wb.setSuffix(" K"); self._wb.setValue(5600)
+        self._spin(self._wb)
+        self._wb.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self._wb.setToolTip("Type a value and press Enter, or use the arrows")
         self._wb.valueChanged.connect(self._send_wb)
         _row(lay, "Balance", self._wb)
         # Tint lives in the Gain column of the correction panel, as on the
@@ -186,7 +205,21 @@ class CameraAdvancedDialog(QDialog):
     def _slider(self, lo: int, hi: int, val: int) -> QSlider:
         s = QSlider(Qt.Orientation.Horizontal)
         s.setRange(lo, hi); s.setValue(val)
+        s.valueChanged.connect(lambda _v, w=s: self._touch(w))
         return s
+
+    def _spin(self, box):
+        """Every spin box in the panel: typeable, and it holds off the camera.
+
+        keyboardTracking off matters more than it looks — with it on, a QSpinBox
+        emits on every keystroke, so typing 6500 sends 6, 65, 650 and 6500 as
+        four separate commands, the first three of them clamped to the minimum.
+        Off, it commits once on Enter or when focus leaves.
+        """
+        box.setKeyboardTracking(False)
+        box.setAccelerated(True)        # hold the arrow down and it ramps
+        box.valueChanged.connect(lambda _v, w=box: self._touch(w))
+        return box
 
     # ── right: colour correction ─────────────────────────────────────────
     def _build_correction_panel(self) -> QWidget:
@@ -250,6 +283,8 @@ class CameraAdvancedDialog(QDialog):
             ]),
         ]
         for wheel, send, sliders in column_specs:
+            wheel.wheel.changed.connect(
+                lambda *_a, w=wheel.wheel: self._touch(w))
             wheel.wheel.changed.connect(
                 lambda r, g, b, y, f=send: self._send(getattr(self._mm, f), r, g, b, y))
             col = QVBoxLayout()
@@ -333,43 +368,75 @@ class CameraAdvancedDialog(QDialog):
         self._mount = idx + 1
         self._refresh_link()
 
+    # ── hands off while the operator is working ──────────────────────────
+    def _touch(self, w) -> None:
+        """Note that the OPERATOR just moved this control.
+
+        Only user-driven changes count: _loading marks the ones this dialog
+        made itself while showing a camera report, and those must not extend
+        the hold or the panel would lock itself out of its own updates.
+        """
+        if not self._loading:
+            self._touched[w] = time.monotonic()
+
+    def _held(self, w) -> bool:
+        """True while a camera report must keep its hands off this control."""
+        if isinstance(w, QAbstractSpinBox) and w.hasFocus():
+            return True         # they are typing in it; do not rewrite the text
+        t = self._touched.get(w)
+        return t is not None and (time.monotonic() - t) < _HOLD_S
+
+    def _set_if_free(self, w, value) -> None:
+        if not self._held(w):
+            w.setValue(value)
+
     def _on_cam_status(self, mount_id: int) -> None:
-        """Follow what the camera reports — the only confirmation there is."""
+        """Follow what the camera reports — the only confirmation there is.
+
+        Except on a control the operator has a hand on.  The camera reports its
+        own state continuously, so applying every report unconditionally means
+        a running fight: each click of an arrow is answered by the camera's
+        previous value a moment later, and the number jumps backwards under the
+        cursor.  A control is left alone while it has focus and for _HOLD_S
+        after the last user change, then resumes following the camera.
+        """
         if mount_id != self._mount:
             return
         st = self._mm.state(mount_id)
         self._loading = True
         try:
             if st.cam_wb is not None:
-                self._wb.setValue(int(st.cam_wb))
+                self._set_if_free(self._wb, int(st.cam_wb))
             if st.cam_tint is not None:
-                self._tint.setValue(int(st.cam_tint))
+                self._set_if_free(self._tint, int(st.cam_tint))
             adv = getattr(st, "cam_adv", None) or {}
             for key, wheel in (("lift", self._w_lift), ("gamma", self._w_gamma),
                                ("gain_cc", self._w_gain)):
                 v = adv.get(key)
-                if v and len(v) == 4:
+                if v and len(v) == 4 and not self._held(wheel.wheel):
                     wheel.wheel.set_values(*v)
             if "contrast" in adv:
                 pv, adj = adv["contrast"]
-                self._sliders["Pivot"].setValue(int(pv * 100))
-                self._sliders["Contrast"].setValue(int(adj * 100))
+                self._set_if_free(self._sliders["Pivot"], int(pv * 100))
+                self._set_if_free(self._sliders["Contrast"], int(adj * 100))
             if "hue_sat" in adv:
                 hu, sa = adv["hue_sat"]
-                self._sliders["Hue"].setValue(int(hu * 100))
-                self._sliders["Saturation"].setValue(int(sa * 100))
+                self._set_if_free(self._sliders["Hue"], int(hu * 100))
+                self._set_if_free(self._sliders["Saturation"], int(sa * 100))
             if "luma_mix" in adv:
-                self._sliders["Lum Mix"].setValue(int(adv["luma_mix"] * 100))
+                self._set_if_free(self._sliders["Lum Mix"],
+                                  int(adv["luma_mix"] * 100))
             for key, w, scale in (("iris", self._iris, 100), ("zoom", self._zoom, 100),
                                   ("focus", self._focus, 100)):
                 if key in adv:
-                    w.setValue(int(adv[key] * scale))
-            if "gain_db" in adv and adv["gain_db"] in _GAINS_DB:
+                    self._set_if_free(w, int(adv[key] * scale))
+            if "gain_db" in adv and adv["gain_db"] in _GAINS_DB and not self._held(self._gain):
                 self._gain.setCurrentIndex(_GAINS_DB.index(adv["gain_db"]))
-            if "shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS:
+            if ("shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS
+                    and not self._held(self._shut)):
                 self._shut.setCurrentIndex(_SHUTTERS.index(adv["shutter_speed"]))
             if "nd" in adv:
-                self._nd.setValue(float(adv["nd"]))
+                self._set_if_free(self._nd, float(adv["nd"]))
         finally:
             self._loading = False
 
