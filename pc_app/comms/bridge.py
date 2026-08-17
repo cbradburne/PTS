@@ -719,6 +719,17 @@ class Bridge:
         except Exception as e:
             log.debug("node_state save skipped: %s", e)
 
+    # Satellite loop sections, matching the SSEC_* enum in esp32_satellite.ino.
+    # A satellite reporting a slow pass says which of these it was inside; the
+    # order here IS the wire encoding, so it must not be reordered.
+    _SAT_SECTION_NAMES = {
+        0: "top",      1: "uplink",   2: "espnow_up", 3: "espnow_dn",
+        4: "peers",    5: "dnpump",   6: "clink",     7: "ws_up",
+        8: "ws_dn",    9: "ws_flush", 10: "reports",
+    }
+    # Below this a "worst section" is noise — see where it is used.
+    _SAT_LOOP_NOTE_MS = 100
+
     # esp_reset_reason() codes (ESP-IDF) → name, for the hub reboot log.
     _RESET_REASON_NAMES = {
         0: "UNKNOWN", 1: "POWERON", 2: "EXT", 3: "SW(esp_restart)",
@@ -851,10 +862,20 @@ class Bridge:
             # itself, and that is the state that left two mounts unreachable
             # with every other counter reading zero.
             nomem  = (n32 >> 16) & 0xFFFF
-            streak = n32 & 0xFFFF
+            sect   = (n32 >> 8) & 0xFF
+            streak = n32 & 0xFF
             n32txt = "nomem %d" % nomem
             if streak:
                 n32txt += " | SELF-RESTARTS %d" % streak
+            # Which part of the satellite's loop owned the worst pass this
+            # window.  Only worth printing when the pass was slow enough to
+            # mean something: on an idle loop the winning section is whichever
+            # one happened to take 3ms instead of 2, which is noise dressed as
+            # a finding.  The satellite windows loop_max_ms now, so this
+            # section always belongs to the number beside it.
+            if h.loop_max_ms >= self._SAT_LOOP_NOTE_MS:
+                n32txt += " | worst section '%s'" % self._SAT_SECTION_NAMES.get(
+                    sect, str(sect))
         else:
             n32txt = "n32 %d" % n32
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "

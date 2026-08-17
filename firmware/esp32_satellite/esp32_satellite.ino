@@ -586,7 +586,37 @@ static uint32_t _sat_dn_sent_total = 0;   // ...of which returned ESP_OK
 // what it is, and guessing at it from the hub's source was wrong twice.
 static uint16_t _sat_dn_by_cmd[256] = {};
 static uint32_t _sat_unacked_total = 0;   // downlink sends no mount acked, since boot
-static uint32_t _sat_loopmax_ms    = 0;   // worst single pass since boot
+// Worst single pass SINCE THE LAST HEALTH REPORT, which is what the shared
+// PayloadHealth says this field is: "worst loop/task iteration since the last
+// report".  It used to be since boot and was never cleared, and that quietly
+// broke the number: Foyer read 16238ms at five minutes uptime and 16570ms four
+// hours later, and there was no way to tell a fresh 16-second stall from a
+// stuck high-water mark.  Every other node windows it — the hub's varies pass
+// to pass, a bridge's went 224ms then 10ms — so the satellite was the odd one
+// out and the only one whose number could not be read.
+//
+// Windowed, a stall lands in exactly one 10-second report and the log says
+// when to the second.
+static uint32_t _sat_loopmax_ms    = 0;   // worst single pass since the last report
+
+// Which part of the loop the worst pass was in.  Mirrors the hub's MARK()
+// scheme: each mark charges everything since the previous one to that section,
+// so the whole pass is accounted for and nothing hides between them.  Knowing a
+// pass took 16 seconds is not actionable; knowing WHICH call it was inside is.
+enum { SSEC_TOP, SSEC_UPLINK, SSEC_ESPNOW_UP, SSEC_ESPNOW_DN, SSEC_PEERS,
+       SSEC_DNPUMP, SSEC_CLINK, SSEC_WS_UP, SSEC_WS_DN, SSEC_WS_FLUSH,
+       SSEC_REPORTS, SSEC_N };
+static const char *const SSEC_NAME[SSEC_N] = {
+    "top", "uplink", "espnow_up", "espnow_dn", "peers",
+    "dnpump", "clink", "ws_up", "ws_dn", "ws_flush", "reports" };
+static uint32_t _ssec_max[SSEC_N] = {};
+
+// A pass this slow is not jitter, it is a stall.  Every satellite section
+// measured here runs in tens of milliseconds — Basement's worst is 58ms — so
+// half a second is far above the noise and far below the 16 SECONDS actually
+// seen.  Crossing it raises the health line to a WARNING, because a stall that
+// only appears as one INFO line among four hundred is a stall nobody sees.
+#define SAT_LOOP_STALL_MS  500
 static uint32_t _up_writes    = 0;   // actual send() calls (batches, not frames)
 static uint32_t _up_frames    = 0;   // envelopes queued — comparable to the old count
 static uint32_t _up_dropped   = 0;   // uplink frames the hub would not take
@@ -1124,6 +1154,12 @@ static void sat_send_health(uint32_t now) {
     h.free_heap     = (uint32_t)esp_get_free_heap_size();
     h.min_free_heap = (uint32_t)esp_get_minimum_free_heap_size();
     h.loop_max_ms   = (uint16_t)(_sat_loopmax_ms > 0xFFFF ? 0xFFFF : _sat_loopmax_ms);
+    // Which section owned the worst pass this window.  Picked before the maxima
+    // are cleared below, and cleared with them, so the section reported always
+    // belongs to the loopmax reported and the two cannot drift apart.
+    uint8_t worst_sec = 0;
+    for (int i = 1; i < SSEC_N; i++)
+        if (_ssec_max[i] > _ssec_max[worst_sec]) worst_sec = (uint8_t)i;
     // Downlink sends the mount never acked — the same thing tx_fail means on a
     // mount, so the column compares straight across.
     h.tx_fail       = (uint16_t)(_sat_unacked_total > 0xFFFF ? 0xFFFF
@@ -1132,14 +1168,33 @@ static void sat_send_health(uint32_t now) {
     // its own uplink is wired.  0, as the hub does, rather than a number that
     // would invite comparison with a mount's.
     h.rssi          = 0;
-    h.flags         = (first || _sat_rst_streak) ? HEALTH_FLAG_ANOMALY : 0;
+    // A stalled pass is an anomaly in its own right.  Foyer sat at 16.5 SECONDS
+    // in an INFO line among four hundred and went unnoticed for a day; at
+    // WARNING it cannot.  This is the same reason the restart streak is here.
+    h.flags         = (first || _sat_rst_streak ||
+                       _sat_loopmax_ms >= SAT_LOOP_STALL_MS) ? HEALTH_FLAG_ANOMALY : 0;
     // Packed as the mount's is: refusals high, self-restart streak low.  These
     // are the two numbers that explain this box — NO_MEM is how its transmit
     // path wedges, and the streak is how close it is to giving up on fixing
     // itself.  A streak stuck at its cap is the state that left two mounts
     // unreachable with every windowed counter reading zero.
+    // nomem high, worst loop section next, self-restart streak low.  The streak
+    // caps at SAT_RESTART_MAX_STREAK (3) so it never needed sixteen bits, and
+    // the eight freed here carry the section that owned the worst pass — the
+    // one thing that makes a slow loop actionable rather than merely alarming.
     h.node_u32      = ((_sat_nomem_total & 0xFFFFUL) << 16) |
-                      (_sat_rst_streak   & 0xFFFFUL);
+                      ((uint32_t)(worst_sec & 0xFF)  <<  8) |
+                      (_sat_rst_streak   & 0xFFUL);
+
+    if (_sat_loopmax_ms >= SAT_LOOP_STALL_MS)
+        Serial.printf("[LOOP] STALL %lums in '%s'\n",
+                      (unsigned long)_sat_loopmax_ms, SSEC_NAME[worst_sec]);
+
+    // The window closes here, not at the top: everything above is built from
+    // this window's numbers, and clearing earlier would report one window's
+    // loopmax beside another window's section.
+    _sat_loopmax_ms = 0;
+    for (int i = 0; i < SSEC_N; i++) _ssec_max[i] = 0;
 
     uint8_t  frame[PKT_BUF_SIZE + 4];
     uint16_t fn = build_health(frame, 0, ++_sat_health_seq, &h);
@@ -1376,19 +1431,33 @@ void setup() {
 
 void loop() {
     uint32_t _t0 = micros();
+    // SMARK(x) charges everything since the previous mark to section x, exactly
+    // as the hub's MARK() does, so the whole pass is accounted for.
+    uint32_t _mark = _t0;
+    #define SMARK(sec) do { uint32_t n_ = micros(); uint32_t d_ = n_ - _mark; \
+                            if (d_ > _ssec_max[sec]) _ssec_max[sec] = d_; _mark = n_; } while (0)
     uint32_t now = millis();
     eth_report_once_if_down(now, 8000);
+    SMARK(SSEC_TOP);
     uplink_service(now);
+    SMARK(SSEC_UPLINK);
     drain_espnow_to_uplink(now);
+    SMARK(SSEC_ESPNOW_UP);
     if (_uplink.connected()) drain_uplink_to_espnow();
+    SMARK(SSEC_ESPNOW_DN);
     peer_forget_stale(now);
+    SMARK(SSEC_PEERS);
     dn_pump(now);
+    SMARK(SSEC_DNPUMP);
 
     // Web app bridge.  After the relay work, never before it: a phone refreshing
     // a page must not delay a mount's commands.
     client_link_service(now);
+    SMARK(SSEC_CLINK);
     drain_ws_to_hub();
+    SMARK(SSEC_WS_UP);
     if (_client_link.connected()) drain_hub_to_ws();
+    SMARK(SSEC_WS_DN);
 
     // Flush a partial batch once it has waited long enough.  Without this, the
     // last packets before a lull would sit in the buffer until the next one
@@ -1400,11 +1469,14 @@ void loop() {
     // the moment it opens.  A phone shows "reconnecting" on a loop while the
     // client IDs climb — which is precisely what it did.
     _ws.cleanupClients();
+    SMARK(SSEC_WS_FLUSH);
 
     downlink_report(now);
     sat_restart_streak_poll(now);
     sat_send_health(now);
     sat_send_downlink(now);
+    SMARK(SSEC_REPORTS);
+    #undef SMARK
 
     _loop_count++;
     uint32_t _dt = micros() - _t0;
