@@ -115,4 +115,45 @@ lvl, _ = render(sat_health(14976, thresh, 0, 0, 0))
 assert lvl == "WARNING", "at the threshold should warn"
 print(f"   threshold {thresh}ms: below INFO, at/above WARNING  OK")
 
+# ---- 5. the uplink writes must be bounded, and must not silence the log ----
+# Foyer stalled 895ms inside sat_send_health()/sat_send_downlink() because they
+# used NetworkClient::write(), which waits in select() for 1s at a time up to
+# ten retries.  The relay path had been converted to a raw fd years earlier;
+# these three were missed.
+print("\n5. uplink writes:")
+assert "_uplink.write(" not in INO, \
+    "a blocking NetworkClient::write() is back on the uplink"
+print("   no NetworkClient::write() on the uplink            OK")
+assert "::send(fd, d, n, MSG_DONTWAIT)" in INO, "uplink_send_record is not bounded"
+assert "MSG_DONTWAIT" in INO
+print("   records go out on the raw fd, non-blocking         OK")
+
+# The measurement window must close ONLY on a successful send.  Clearing it
+# regardless would throw away the very stall that made the send fail — an
+# instrument silenced by its own fault, whose silence reads as good news.
+import re as _re
+m = _re.search(r"if \(uplink_send_record\(env, en\)\) \{(.*?)\n    \}",
+               INO, _re.S)
+assert m, "health does not gate its window on the send succeeding"
+assert "_sat_loopmax_ms = 0;" in m.group(1), \
+    "loopmax is cleared outside the success branch"
+assert "_ssec_max[i] = 0;" in m.group(1), \
+    "section maxima are cleared outside the success branch"
+print("   loopmax/sections cleared only on a successful send OK")
+
+# Same rule for the downlink ledger's windowed breakdown, and the slots taken
+# while building it must be handed back when the record does not go.
+assert _re.search(r"if \(uplink_send_record\(env, en\)\) \{\s*\n\s*memset\(_sat_dn_by_cmd",
+                  INO), "downlink clears its window regardless of the send"
+assert "_sat_dn_by_cmd[c] += n;" in INO, \
+    "top-command slots are not restored when the record is dropped"
+print("   downlink breakdown likewise, slots restored        OK")
+
+# The introduction is the one record worth retrying: without it every client
+# shows "via SAT n" until the next reconnect.
+assert "_hello_pending" in INO, "no retry for a dropped introduction"
+assert _re.search(r"if \(_hello_pending && _uplink\.connected\(\)\) uplink_send_hello\(\);",
+                  INO), "the hello retry is not driven from the loop"
+print("   dropped introduction is retried from the loop      OK")
+
 print("\nALL CHECKS PASSED")

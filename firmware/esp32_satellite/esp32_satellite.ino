@@ -705,6 +705,31 @@ static void uplink_flush(uint32_t now) {
     _up_agg_since = now;
 }
 
+// Bounded send of one of THIS satellite's own records — hello, health, the
+// downlink ledger.  Same reasoning as uplink_flush() above and the hub's
+// broadcast_to_all(): NetworkClient::write() waits in select() for 1 s at a
+// time, up to ten retries, and a PARTIAL write resets that count, so a hub
+// draining slowly can hold this loop for a minute.  It cannot be bounded with
+// SO_SNDTIMEO because its send() already passes MSG_DONTWAIT.
+//
+// The relay path was converted to a raw fd long ago and the note by the connect
+// call says "the uplink is bounded" — but it was bounded on that path only.
+// These three writes were left, and on 2026-08-17 Foyer stalled 895 ms inside
+// them: loopmax 895ms, worst section 'reports', with commands to both mounts
+// behind it delayed up to 2.1 s.  The same mechanism explains the 16.5 s pass
+// seen earlier that morning, which is ten retries rather than one.
+//
+// Returns false when the record did not go out whole.  Callers then keep their
+// measurement window OPEN rather than clearing it, so a dropped report does not
+// take the stall reading with it.  An instrument the fault can silence is worse
+// than no instrument, because its silence reads as good news.
+static bool uplink_send_record(const uint8_t *d, uint16_t n) {
+    if (!n || !_uplink.connected()) return false;
+    int fd = _uplink.fd();
+    if (fd < 0) return false;
+    return ::send(fd, d, n, MSG_DONTWAIT) == (int)n;
+}
+
 static void drain_espnow_to_uplink(uint32_t now) {
     RxItem it;
     while (xQueueReceive(_rx_q, &it, 0) == pdTRUE) {
@@ -1110,6 +1135,7 @@ static void drain_uplink_to_espnow() {
 // The envelope's MAC field is this satellite's own.  It has to be something,
 // and its own address is the honest answer — the hub recognises the frame by
 // its command and never looks the MAC up.
+static bool _hello_pending = false;   // set when the introduction did not go out
 static void uplink_send_hello() {
     uint8_t name[SAT_HELLO_PAYLOAD_LEN] = {};
     snprintf((char *)name, sizeof(name), "%s", _hub_name);
@@ -1121,8 +1147,14 @@ static void uplink_send_hello() {
     WiFi.softAPmacAddress(mac);
     uint8_t  env[SAT_ENV_MAX];
     uint16_t en = sat_env_build(env, mac, 0, frame, fn);
-    if (en) _uplink.write(env, en);
-    Serial.printf("[UPLINK] introduced myself as \"%s\"\n", _hub_name);
+    // Retried from the loop until it lands.  Dropping this one is not like
+    // dropping a health record: without it the hub never learns the name and
+    // every client shows "via SAT 2" until the next reconnect, which may be
+    // hours.  On a socket that has just connected it will almost always go
+    // first time; the retry is for the case that it does not.
+    _hello_pending = !uplink_send_record(env, en);
+    Serial.printf("[UPLINK] introduced myself as \"%s\"%s\n", _hub_name,
+                  _hello_pending ? " (send deferred — will retry)" : "");
 }
 
 // The satellite's own health, on the same 10 s cadence and in the same record
@@ -1190,12 +1222,6 @@ static void sat_send_health(uint32_t now) {
         Serial.printf("[LOOP] STALL %lums in '%s'\n",
                       (unsigned long)_sat_loopmax_ms, SSEC_NAME[worst_sec]);
 
-    // The window closes here, not at the top: everything above is built from
-    // this window's numbers, and clearing earlier would report one window's
-    // loopmax beside another window's section.
-    _sat_loopmax_ms = 0;
-    for (int i = 0; i < SSEC_N; i++) _ssec_max[i] = 0;
-
     uint8_t  frame[PKT_BUF_SIZE + 4];
     uint16_t fn = build_health(frame, 0, ++_sat_health_seq, &h);
 
@@ -1203,7 +1229,16 @@ static void sat_send_health(uint32_t now) {
     WiFi.softAPmacAddress(mac);
     uint8_t  env[SAT_ENV_MAX];
     uint16_t en = sat_env_build(env, mac, 0, frame, fn);
-    if (en) _uplink.write(env, en);
+
+    // The window closes only once the record is actually OUT, and not at the
+    // top: everything above is built from this window's numbers, so clearing
+    // early would report one window's loopmax beside another window's section
+    // — and clearing on a dropped send would throw away the stall that made
+    // the send fail.  Held open, the next successful report still carries it.
+    if (uplink_send_record(env, en)) {
+        _sat_loopmax_ms = 0;
+        for (int i = 0; i < SSEC_N; i++) _ssec_max[i] = 0;
+    }
 }
 
 // The downlink ledger, on the same clock as health.  Cumulative since boot, so
@@ -1239,7 +1274,6 @@ static void sat_send_downlink(uint32_t now) {
         p[16 + slot*3 + 2] = (uint8_t)(_sat_dn_by_cmd[best]);
         _sat_dn_by_cmd[best] = 0;          // taken; find the next
     }
-    memset(_sat_dn_by_cmd, 0, sizeof(_sat_dn_by_cmd));
     uint8_t  frame[PKT_BUF_SIZE + 4];
     uint16_t fn = build_packet(frame, 0, ++_sat_health_seq,
                                CMD_SAT_DOWNLINK, p, sizeof(p));
@@ -1247,7 +1281,19 @@ static void sat_send_downlink(uint32_t now) {
     WiFi.softAPmacAddress(mac);
     uint8_t  env[SAT_ENV_MAX];
     uint16_t en = sat_env_build(env, mac, 0, frame, fn);
-    if (en) _uplink.write(env, en);
+    // The four cumulative totals survive a dropped record — they are differenced
+    // across any two lines — but the top-command breakdown is windowed and would
+    // be gone.  So the window is only reset once the record is out, exactly as
+    // the health one is.  The slots taken above are put back if it is not.
+    if (uplink_send_record(env, en)) {
+        memset(_sat_dn_by_cmd, 0, sizeof(_sat_dn_by_cmd));
+    } else {
+        for (int slot = 0; slot < SAT_DOWNLINK_TOP_CMDS; slot++) {
+            uint8_t  c = p[16 + slot*3 + 0];
+            uint16_t n = (uint16_t)((p[16 + slot*3 + 1] << 8) | p[16 + slot*3 + 2]);
+            if (n) _sat_dn_by_cmd[c] += n;      // taken for a record that never went
+        }
+    }
 }
 
 static void uplink_service(uint32_t now) {
@@ -1278,7 +1324,10 @@ static void uplink_service(uint32_t now) {
         // NOTE: setting SO_SNDTIMEO here would do nothing.  NetworkClient's
         // send() passes MSG_DONTWAIT, so the option is never consulted — the
         // uplink is bounded by sending on the raw fd instead, in
-        // drain_espnow_to_uplink().
+        // uplink_flush() for relayed traffic and uplink_send_record() for this
+        // satellite's own records.  It said only the former for a while, and
+        // was accurate about the path that had already bitten us while three
+        // report writes went on blocking; Foyer stalled 895 ms in one.
         _uplink_backoff_ms = 1000;
         _up_agg_len = _up_agg_frames = 0;   // no half-batch from the dead socket
         Serial.printf("[UPLINK] connected to %s:%d (connect blocked %lu ms)\n",
@@ -1473,6 +1522,7 @@ void loop() {
 
     downlink_report(now);
     sat_restart_streak_poll(now);
+    if (_hello_pending && _uplink.connected()) uplink_send_hello();
     sat_send_health(now);
     sat_send_downlink(now);
     SMARK(SSEC_REPORTS);
