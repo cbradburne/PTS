@@ -2568,7 +2568,11 @@ static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
         // Tally category 5, parameter 0/1/2, fixed16 — byte-for-byte what the
         // PC app sends, and like autofocus the hub does not build it from parts
         // beyond the one value: CMD_CAM_CONTROL is a verbatim pipe.
-        uint8_t T[12] = { 0xFF, 0x08, 0x00, 0x00,
+        // Length byte 6 is the body BEFORE padding — four header bytes plus the
+        // two of fixed16.  It said 8 (the padded length), which declared the
+        // padding as data.  jeppo7745's Magic Button 4k sends 6 for the same
+        // shape of command and the camera's own reports are unpadded too.
+        uint8_t T[12] = { 0xFF, 0x06, 0x00, 0x00,
                           0x05, param, 0x80, 0x00,
                           (uint8_t)(fx & 0xFF), (uint8_t)((fx >> 8) & 0xFF),
                           0x00, 0x00 };
@@ -2588,12 +2592,28 @@ static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
         if (nt >= 5 && strcmp(tok[4], "toggle") == 0) mode = _cam_recording[idx] ? 0 : 2;
         else if (argc >= 1)                           mode = a[0] ? 2 : 0;
         else                                          return;
-        // Media category 9, parameter 1, int8: 0 preview, 1 play, 2 record.
-        // Three data bytes rather than the five the spec lists, because three
-        // is what this camera REPORTS for the same parameter.
-        uint8_t R[12] = { 0xFF, 0x08, 0x00, 0x00,
-                          0x09, 0x01, 0x01, 0x00,
-                          mode, 0x00, 0x00, 0x00 };
+        // MEDIA CATEGORY 10, parameter 1, int8: 0 preview, 1 play, 2 record.
+        //
+        // Category 10, not 9.  As 9 this was accepted and did nothing, because
+        // 9/1 is not the transport.  Two independent sources agree:
+        //
+        //   The rig, 2026-08-17.  Recording was started and stopped by hand on
+        //   the camera with the log running.  Category 10 parameter 1 went
+        //   0 -> 2 at 13:42:53 and 2 -> 0 at 13:43:00 — the exact seven-second
+        //   take.  Category 9 parameter 1 never left 0 throughout.
+        //
+        //   jeppo7745's "Magic Button 4k" BMPCC4k remote, driving the same
+        //   camera over the same BLE characteristic:
+        //     uint8_t record[] = {255, 9, 0, 0, 10, 1, 1, 0, 0, ...}; // [8] 0/2
+        //
+        // Five data bytes, from that project's length byte of 9, trailing four
+        // left at zero.  The camera reports MORE than it needs to be told —
+        // its notification carries 2, 0, 64, 0, ... and that 64 is in our log
+        // too — but the working implementation sends zeros and this matches it.
+        uint8_t R[16] = { 0xFF, 0x09, 0x00, 0x00,
+                          0x0A, 0x01, 0x01, 0x00,
+                          mode, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00 };
         Serial.printf("[OSC] CAM %d record %s\n", mid, mode == 2 ? "START" : "STOP");
         send_osc_cam_event((uint8_t)mid, 4, mode);
         ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, R, sizeof(R));
@@ -3582,10 +3602,15 @@ void loop() {
                     //   [0] 0xFF  [1] len  [2..3] pad
                     //   [4] category  [5] parameter  [6] type  [7] operation
                     //   [8+] data
-                    // Media category 9 parameter 1 is transport; 2 = recording.
+                    // Media category 10 parameter 1 is transport; 2 = recording.
+                    // This read category 9 and never fired: the camera sat at 0
+                    // there through a recording proven on 10/1.  The Magic
+                    // Button 4k remote tests the same two bytes on its
+                    // notifications — pData[4]==10 && pData[5]==1, pData[8] the
+                    // mode — which is exactly this.
                     if (pkt.cmd == CMD_CAM_STATUS
                             && pkt.payload_len >= 9
-                            && pkt.payload[4] == 9 && pkt.payload[5] == 1
+                            && pkt.payload[4] == 10 && pkt.payload[5] == 1
                             && msg.src_idx < NUM_MOUNTS) {
                         bool rec = (pkt.payload[8] == 2);
                         if (rec != _cam_recording[msg.src_idx]) {

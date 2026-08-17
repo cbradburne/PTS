@@ -979,10 +979,29 @@ def pkt_get_config(mount_id: int) -> bytes:
 #   [8+] data, padded to a 4-byte boundary
 def bmd_command(category: int, parameter: int, data_type: int = 0,
                 operation: int = 0, data: bytes = b"") -> bytes:
+    """Frame one Blackmagic command.
+
+    The length byte is the body length BEFORE padding.  It used to be measured
+    after, which declared the padding as real data — a fixed16 iris says six
+    bytes of body, and we were telling the camera eight.
+
+    Two things say unpadded is right.  The camera's own notifications are not
+    padded at all: a transport report is 13 bytes carrying a length of 9, so
+    the byte is plainly the real body length.  And jeppo7745's Magic Button 4k
+    remote, which drives this camera successfully over the same BLE
+    characteristic, sends 6 for a two-byte fixed16 focus or aperture and 9 for
+    a five-byte transport — unpadded in both cases, in a buffer that is padded.
+
+    The padding stays: the reference pads its buffers too, and this camera has
+    been accepting our over-declared lengths on iris and focus all along, so
+    the trailing bytes are evidently ignored either way.  Declaring the honest
+    length simply stops relying on that.
+    """
     body = bytes([category, parameter, data_type, operation]) + data
+    declared = len(body)                 # before padding — see above
     while len(body) % 4:
         body += b"\x00"
-    return bytes([0xFF, len(body), 0x00, 0x00]) + body
+    return bytes([0xFF, declared, 0x00, 0x00]) + body
 
 
 def pkt_cam_autofocus(mount_id: int) -> bytes:
@@ -1179,7 +1198,11 @@ def pkt_cam_restore_auto_wb(mount_id: int) -> bytes:
     return pkt_cam_raw(mount_id, BMD_CAT_VIDEO, 4, BMD_TYPE_VOID)
 
 
-BMD_CAT_MEDIA = 9
+# Media is category 10, not 9 — see pkt_cam_transport() for how that was
+# established.  Category 9 is a separate group this camera also reports; its
+# battery parameter decodes sensibly and is kept, but nothing else in 9 has
+# been verified and the names that were guessed there have been withdrawn.
+BMD_CAT_MEDIA = 10
 BMD_CAT_TALLY = 5
 
 
@@ -1213,17 +1236,34 @@ def pkt_cam_tally_rear(mount_id: int, brightness: float) -> bytes:
 
 
 def pkt_cam_transport(mount_id: int, mode: int) -> bytes:
-    """Start or stop recording — media category, parameter 1, int8.
+    """Start or stop recording — MEDIA CATEGORY 10, parameter 1, int8.
 
-    Three bytes, not the five the spec lists, because three is what this
-    camera REPORTS for the same parameter (len 11, an 8-byte header and 3
-    bytes of data).  Matching what it says about itself beats matching the
-    document, which is the lesson gain taught.
+    Category 10, not 9.  This was 9 and it silently did nothing: the camera
+    accepted the packet and had no reason to act, because 9/1 is not the
+    transport.  Two independent sources agree on 10:
 
-    mode: 0 preview, 1 play, 2 record.  Speed and flags follow as zero.
+      The rig, 2026-08-17.  Recording was started and stopped by hand at the
+      camera while the log ran.  Category 10 parameter 1 went 0 -> 2 at
+      13:42:53 and 2 -> 0 at 13:43:00, seven seconds apart, exactly the take
+      that was performed.  Category 9 parameter 1 — what this file used to
+      call TRANSPORT — never left 0 through the whole of it.
+
+      jeppo7745's "Magic Button 4k" BMPCC4k remote, which drives the same
+      camera over the same BLE characteristic and is known to work:
+          uint8_t record[] = {255, 9, 0, 0, 10, 1, 1, 0, 0, ...};  // [8] 0=off 2=on
+      and reads the camera's notification back with the same test,
+          pData[4] == 10 && pData[5] == 1  ->  pData[8] is the mode.
+
+    FIVE data bytes, from that project's length byte of 9 (four header bytes
+    plus five of data), with the trailing four left at zero.  The camera
+    REPORTS more than it needs to be told — its own notification carries
+    `2, 0, 64, 0, ...`, and that 64 appears in our log too — but the working
+    implementation sends zeros there and this now matches it byte for byte.
+
+    mode: 0 preview, 1 play, 2 record.
     """
     return pkt_cam_raw(mount_id, BMD_CAT_MEDIA, 1, BMD_TYPE_I8,
-                       bytes([mode & 0xFF, 0, 0]))
+                       bytes([mode & 0xFF, 0, 0, 0, 0]))
 
 
 # ── Decoding what the camera reports ────────────────────────────────────────
@@ -1267,7 +1307,12 @@ _CAM_PARAM_NAMES = {
     # length.  Where the data does not settle what a parameter is, it gets no
     # name at all — describe_cam_param prints "?" and the values, which is more
     # use than a confident wrong label.
-    (9, 0): "battery",          (9, 1): "TRANSPORT",     (9, 2): "playback",
+    # Category 9: only the battery is confirmed — it decodes as a plausible
+    # voltage and percentage and tracks use.  (9,1) was called TRANSPORT and was
+    # not: the camera sat at 0 there through a recording proven on (10,1).  The
+    # rest of 9 stays unnamed rather than confidently mislabelled.
+    (9, 0): "battery",
+    (10, 0): "codec",           (10, 1): "TRANSPORT",
     (12, 0): "reel",            (12, 1): "scene tag",    (12, 2): "take",
     (12, 3): "good take",       (12, 5): "operator",
     (12, 6): "director",        (12, 7): "project",
@@ -1343,7 +1388,7 @@ def decode_cam_status(payload: bytes) -> dict:
     data = payload[8:]
 
     # ---- the ones worth acting on, beyond what the advanced panel drives ----
-    if category == 9 and parameter == 1 and len(data) >= 1:
+    if category == BMD_CAT_MEDIA and parameter == 1 and len(data) >= 1:
         mode = data[0]
         return {"transport": mode, "recording": mode == TRANSPORT_RECORD}
     if category == 1 and parameter == 9 and len(data) >= 8:
