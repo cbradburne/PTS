@@ -639,6 +639,9 @@ const CMD_PAIR_CONFLICT      = 0x9D;  // hub→: 13B = cam(1)+new_mac(6)+old_mac
 const CMD_PAIR_DECIDE        = 0x9E;  // →hub: 8B = cam(1)+decision(1: 1=replace, 0=ignore)+new_mac(6)
 const CMD_PAIR_FORGET        = 0x9F;  // →hub: 1B = cam — clear (unbind) that slot
 const CMD_MOUNT_ROUTE        = 0xA0;  // hub→: 5B = per-cam 0 = direct, N = via satellite N
+const CMD_SAT_NAMES          = 0xA4;  // hub→: SAT_SLOTS × SAT_NAME_LEN, in slot order
+const SAT_SLOTS              = 6;     // mirrors protocol.h
+const SAT_NAME_LEN           = 13;    // SAT_NAME_MAX + NUL
 // CalibPrompt sub-states (mirrors protocol.h CalibPrompt enum)
 const CP_MOVING_TO_A = 0x01;  // slider moving to home — wait
 const CP_WAIT_SET_A  = 0x02;  // at home: aim then Set A
@@ -789,6 +792,12 @@ function mkGetConfig(id)  { return buildPkt(id, CMD_GET_CONFIG, null); }
 // ---- Pairing management (reads/writes the hub's mount table; nothing local) ----
 let mountTable   = [];      // 5 × [6 MAC bytes]; empty until the first MOUNT_TABLE
 let mountRoute = [];      // per-cam: 0 = direct, N = relayed by satellite N
+// Satellite slot -> location name, so a relayed mount reads "via Foyer" rather
+// than "via SAT 2".  The hub has broadcast these all along -- CMD_SAT_NAMES,
+// _ws.binaryAll -- and this page was the one client ignoring them, which is why
+// it disagreed with the PC app about the same rig.  A slot that never named
+// itself stays absent so the number shows through rather than a blank.
+let satNames = {};
 let pairConflict = null;    // {cam, newMac[6], oldMac[6]} while a conflict is live
 
 function macStr(m) {
@@ -815,8 +824,10 @@ function refreshMounts() {
            +   '<span class="mnt-cam">CAM ' + i + '</span>'
            +   '<span class="mnt-mac' + (mac ? '' : ' un') + '">'
            +     (mac || '— unpaired —') + '</span>'
-           +   (mountRoute[i - 1] ? '<span class="mnt-via">via SAT '
-                                        + mountRoute[i - 1] + '</span>' : '')
+           +   (mountRoute[i - 1] ? '<span class="mnt-via">via '
+                                        + (satNames[mountRoute[i - 1]]
+                                           || ('SAT ' + mountRoute[i - 1]))
+                                        + '</span>' : '')
            +   (mac ? '<button class="mnt-forget" data-cam="' + i + '">Forget</button>'
                     : '<span class="mnt-forget-sp"></span>')
            + '</div>';
@@ -1241,6 +1252,22 @@ function _onOnePkt(buf, off) {
     if (cmd === CMD_MOUNT_ROUTE && plen >= 5) {
         const base = off + 7;
         mountRoute = Array.from(buf.subarray(base, base + NUM_MOUNTS));
+        if (_extActive && _extPage === 'mounts') refreshMounts();
+    }
+
+    if (cmd === CMD_SAT_NAMES && plen >= SAT_SLOTS * SAT_NAME_LEN) {
+        // Same layout the PC app decodes: fixed-width NUL-padded slots, slot i
+        // reported as i+1 to match what CMD_MOUNT_ROUTE puts in mountRoute.
+        const base = off + 7;
+        satNames = {};
+        for (let i = 0; i < SAT_SLOTS; i++) {
+            const raw = buf.subarray(base + i * SAT_NAME_LEN,
+                                     base + (i + 1) * SAT_NAME_LEN);
+            let end = raw.indexOf(0);
+            if (end < 0) end = raw.length;
+            const name = new TextDecoder().decode(raw.subarray(0, end)).trim();
+            if (name) satNames[i + 1] = name;
+        }
         if (_extActive && _extPage === 'mounts') refreshMounts();
     }
 
