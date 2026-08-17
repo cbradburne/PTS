@@ -41,6 +41,21 @@
     <p>The practical gain: the hub is always on and a laptop is not, so a tally
     lamp or a record cue no longer depends on anyone's PC app being open.</p>
 
+    <h2>Tally on a Pocket Cinema Camera 4K</h2>
+    <p>The <code>/pts/cam/N/tally</code> addresses do nothing on a Pocket 4K.
+    Tested on the rig on 2026-08-17: three tally commands reached a paired,
+    actively reporting camera and it neither answered nor changed. On connect
+    that camera volunteers ISO, white balance, shutter angle, battery, transport,
+    lens type, reel, take and operator unprompted — and has never once mentioned
+    the tally category. A body that describes itself that thoroughly would report
+    tally if it had it.</p>
+    <p>The addresses are kept because they are correct by Blackmagic's published
+    spec, and a studio or URSA body — which is what the tally group is aimed at —
+    should accept them. <strong>On a Pocket, the thing that lights the front
+    indicator is the camera recording.</strong> So the tally you can actually
+    drive is <code>/pts/cam/N/record</code>, with <code>/pts/cam/N/recording</code>
+    coming back as the camera's own confirmation that it is rolling.</p>
+
     <h2>Connecting Companion</h2>
     <ol class="steps">
       <li>Companion → <strong>Connections</strong> → add <strong>Generic:
@@ -75,7 +90,7 @@
       <tr><td><code>/pts/cam/N/subject</code></td><td>0–7</td><td>Select look-at subject — switches live during a move</td></tr>
       <tr><td><code>/pts/cam/N/lookat</code></td><td>0 | 1</td><td>Look-at slider move to min (0) or max (1) with the selected subject</td></tr>
       <tr><td><code>/pts/cam/N/autofocus</code></td><td>—</td><td>Instantaneous autofocus on that mount's Blackmagic camera</td></tr>
-      <tr><td><code>/pts/cam/N/tally</code></td><td><code>0</code>/<code>1</code>, or <code>0.0-1.0</code></td><td>Tally lamp <strong>brightness</strong>, both lamps</td></tr>
+      <tr><td><code>/pts/cam/N/tally</code></td><td><code>0</code>/<code>1</code>, or <code>0.0-1.0</code></td><td>Tally lamp <strong>brightness</strong>, both lamps — <strong>the Pocket 4K ignores this</strong>, see below</td></tr>
       <tr><td><code>/pts/cam/N/tally/front</code></td><td><code>0</code>/<code>1</code>, or <code>0.0-1.0</code></td><td>Front lamp only (facing talent)</td></tr>
       <tr><td><code>/pts/cam/N/tally/rear</code></td><td><code>0</code>/<code>1</code>, or <code>0.0-1.0</code></td><td>Rear lamp only (facing operator)</td></tr>
       <tr><td><code>/pts/cam/N/record</code></td><td><code>0</code> stop / <code>1</code> start</td><td>Start or stop recording on that camera</td></tr>

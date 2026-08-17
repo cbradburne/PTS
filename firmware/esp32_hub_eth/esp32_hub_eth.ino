@@ -1158,6 +1158,31 @@ static void send_pair_event(uint8_t slot, uint8_t action, const uint8_t *mac) {
     send_hub_event_raw(e);
 }
 
+// An OSC camera command, named, sent where the PC log can see it.
+//   kind 13: [1] mount  [2] verb  [3..4] value, big-endian
+//
+// Every camera command — autofocus, tally, record, iris — travels as one
+// CMD_CAM_CONTROL, so the satellite's per-command-type counter buckets them all
+// together and cannot tell a tally from a focus.  That counter is also printed
+// as a top-3-per-window summary, so a handful of camera commands vanish behind
+// PING and JOG entirely.  Asked which commands had actually gone out, the rig
+// could not say.
+//
+// The hub knew all along and was saying so on USB serial — a port the log
+// itself reports as "not being read (all frames dropped)", because the PC app
+// reaches the hub over TCP.  An instrument writing into a disconnected port is
+// not an instrument.  This says the same thing down the link that is actually
+// connected.
+//
+// Value is the raw wire value, not a rounded one: for tally that is the 5.11
+// fixed-point number the camera receives, so the log shows exactly what was
+// sent rather than what was meant.
+static void send_osc_cam_event(uint8_t mount_id, uint8_t verb, uint16_t value) {
+    uint8_t e[9] = { 13, mount_id, verb,
+                     (uint8_t)(value >> 8), (uint8_t)value, 0, 0, 0, 0 };
+    send_hub_event_raw(e);
+}
+
 static void broadcast_to_mounts_routed(const uint8_t *raw, uint16_t len,
                                        bool require_valid_mac) {
     uint8_t sat_done = 0;   // bit per satellite slot already sent this frame
@@ -2504,6 +2529,7 @@ static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
                                         0x00, 0x01, 0x01, 0x00,
                                         0x00, 0x00, 0x00, 0x00 };
         Serial.printf("[OSC] CAM %d autofocus\n", mid);
+        send_osc_cam_event((uint8_t)mid, 0, 0);
         ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, AF, sizeof(AF));
 
     } else if (strcmp(verb, "tally") == 0 && argc >= 1) {
@@ -2514,14 +2540,24 @@ static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
         // Companion button means off/full; a cue sending 0.5 gets a half-lit
         // lamp, which is why the parser keeps the float.
         //
-        // NOT YET CONFIRMED AGAINST THE CAMERA.  Category 5 is what the
-        // published spec gives for tally and this camera has never REPORTED
-        // it, so the parameter numbers are the document's word and nothing
-        // else.  These bytes are byte-for-byte what the PC app sent, so this
-        // change moves the command to where Companion can reach it — it does
-        // not make an unverified parameter number correct.  A camera that
-        // accepts a parameter generally reports it back: send one and watch
-        // for a category 5 status, because silence means the number is wrong.
+        // THE POCKET CINEMA CAMERA 4K IGNORES THIS.  Tested on the rig
+        // 2026-08-17: three of these reached a paired, reporting camera and it
+        // did not answer or change.  On connect that same camera volunteered
+        // categories 0, 1, 3, 4, 9, 10, 12 and a raw 255 — ISO, white balance,
+        // shutter angle, battery, transport, lens type, reel, take, operator —
+        // and has never once mentioned category 5.  A body that describes
+        // itself that exhaustively would report tally if it had it.
+        //
+        // Kept anyway, because the command is right by the published spec and
+        // costs nothing: a studio or URSA body, which is what the tally group
+        // is really aimed at, should take it.  On a Pocket the only thing that
+        // lights the front indicator is the camera recording, so /record is
+        // the verb that actually works there — see docs/companion.md.
+        //
+        // If it is ever worth chasing on a Pocket: put a card in, record, and
+        // watch which category the camera reports as its own indicator comes
+        // on.  That finds the parameter by measurement instead of by reading
+        // numbers out of a document, which is what failed here.
         uint8_t param = 0;                                  // 0 both, 1 front, 2 rear
         if      (nt >= 5 && strcmp(tok[4], "front") == 0) param = 1;
         else if (nt >= 5 && strcmp(tok[4], "rear")  == 0) param = 2;
@@ -2538,6 +2574,7 @@ static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
                           0x00, 0x00 };
         Serial.printf("[OSC] CAM %d tally %s = %.2f\n", mid,
                       param == 1 ? "front" : param == 2 ? "rear" : "both", b);
+        send_osc_cam_event((uint8_t)mid, (uint8_t)(param + 1), (uint16_t)fx);
         ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, T, sizeof(T));
 
     } else if (strcmp(verb, "record") == 0) {
@@ -2558,6 +2595,7 @@ static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
                           0x09, 0x01, 0x01, 0x00,
                           mode, 0x00, 0x00, 0x00 };
         Serial.printf("[OSC] CAM %d record %s\n", mid, mode == 2 ? "START" : "STOP");
+        send_osc_cam_event((uint8_t)mid, 4, mode);
         ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, R, sizeof(R));
 
     } else if (strcmp(verb, "refresh") == 0) {

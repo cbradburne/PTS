@@ -1028,6 +1028,30 @@ class Bridge:
             log.warning("HUB PAIRING: cam%d %s — %s | this resets the hub's "
                         "last-seen, so the next STATUS looks like a new connect",
                         pkt.payload[1], acts.get(pkt.payload[2], f"action {pkt.payload[2]}"), mac)
+        elif kind == 13:
+            # An OSC camera command, by name.
+            #
+            # Every camera command travels as one CMD_CAM_CONTROL, so the
+            # satellite's per-type counter cannot tell a tally from a focus, and
+            # that counter is printed as a top-3-per-window summary — so a few
+            # camera commands disappear behind PING and JOG completely.  Asked
+            # which commands had gone out, the log could only say "at least 3,
+            # some of them CAM_CONTROL".  This is the hub naming each one.
+            #
+            # Tally arrives as the raw 5.11 fixed-point value that goes to the
+            # camera, so what is logged is what was sent, not what was meant.
+            verb  = pkt.payload[2]
+            value = (pkt.payload[3] << 8) | pkt.payload[4]
+            if verb == 0:
+                what = "autofocus"
+            elif verb in (1, 2, 3):
+                lamp = {1: "both", 2: "front", 3: "rear"}[verb]
+                what = f"tally {lamp} = {value / 2048.0:.2f}"
+            elif verb == 4:
+                what = "record START" if value == 2 else "record STOP"
+            else:
+                what = f"verb {verb} = {value}"
+            log.info("OSC CMD: cam%d %s", mount, what)
         else:
             sname = self._STATE_NAMES.get(state, f"0x{state:02X}")
             log.info("HUB EVENT: mount %d ONLINE — rssi=%d dBm state=%s flags=0x%02X "

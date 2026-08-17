@@ -90,9 +90,21 @@ press that did not take — no card in the camera, Bluetooth dropped — leaves 
 dark rather than lying about it.
 
 **Tally lamp** — `/pts/cam/N/tally` with int `1` for full and `0` for off, or a
-float for anything between. **Unconfirmed on this camera:** the tally category
-comes from Blackmagic's published spec and this camera has never reported it
-back, so if the lamp does not move, the parameter number is the first suspect.
+float for anything between.
+
+> **The Pocket Cinema Camera 4K ignores this.** Tested on the rig on
+> 2026-08-17: three tally commands reached a paired, actively reporting camera
+> and it neither answered nor changed. On connect that camera volunteers
+> categories 0, 1, 3, 4, 9, 10 and 12 — ISO, white balance, shutter angle,
+> battery, transport, lens type, reel, take, operator — and has never once
+> mentioned the tally category. A body that describes itself that thoroughly
+> would report tally if it had it.
+>
+> The address is kept because it is correct by the published spec and a studio
+> or URSA body — which is what the tally group is aimed at — should accept it.
+> **On a Pocket, the thing that lights the front indicator is the camera
+> recording.** So the tally you can actually drive is `/pts/cam/N/record`, and
+> `/pts/cam/N/recording` coming back is the camera confirming it.
 
 ### Direction buttons
 
