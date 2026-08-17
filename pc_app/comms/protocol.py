@@ -1370,7 +1370,7 @@ def describe_cam_param(payload: bytes) -> str:
     tname = _CAM_TYPE_NAME.get(dtype, f"type {dtype}")
     if vals is None:
         return f"{name} [{tname}] raw {payload[8:].hex()}"
-    if category == 9 and parameter == 1 and vals:
+    if category == BMD_CAT_MEDIA and parameter == 1 and vals:
         return f"{name} = {_TRANSPORT_NAMES.get(vals[0], vals[0])} {vals[1:]}"
     if category == 9 and parameter == 0 and len(vals) >= 2:
         return f"{name} = {vals[0] / 1000.0:.2f}V  {vals[1]}%  {vals[2:]}"
