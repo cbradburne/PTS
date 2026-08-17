@@ -137,8 +137,16 @@ PC app machine — same `/pts/...` addresses on both, full reference in
 - **Mount simulator** — develop the PC app with zero hardware:
   `python3 tools/mount_sim.py`, point the app at `127.0.0.1`. Includes a
   fault-injection console (link wedges, NACKs, packet loss) and `--selftest`.
-- **End-to-end OSC test** — `python3 tools/test_companion_osc.py` drives the
-  real manager + OSC server against the simulator.
+- **Host test suites** — `tools/run_tests.sh` (or `tools/run_tests.sh cam` for a
+  subset). No rig needed. Several of these read the FIRMWARE SOURCE and check
+  the PC app against it — the command byte literals in `esp32_hub_eth.ino`, the
+  loop-section enum in `esp32_satellite.ino` whose *order* is the wire
+  encoding. That is deliberate: both halves of this rig have been wrong at the
+  same time and agreed with each other, which is exactly what comparing one
+  copy against another copy cannot catch.
+
+  The end-to-end OSC test that lived here is gone with the PC app's OSC server —
+  the OSC surface is the hub's now, so there is no host-side path to drive.
 
 ## Repository layout
 
