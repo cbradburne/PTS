@@ -118,19 +118,16 @@ def main() -> None:
     joystick = JoystickHandler(deadzone=config.joystick_deadzone)
     joystick.init()
 
-    # OSC control surface (Bitfocus Companion / QLab) — see docs/companion.md
-    osc = None
-    if config.osc_enabled:
-        from comms.osc_server import OscServer
-        osc = OscServer(mm, port=config.osc_port,
-                        feedback_host=config.osc_feedback_host,
-                        feedback_port=config.osc_feedback_port)
-        osc.start()   # logs + returns False on bind failure; app runs regardless
-        # Tally out.  Driven by the CAMERA's reported transport mode, so a lit
-        # tally downstream means a camera that is rolling, not one that was
-        # asked to roll — the command itself is never acknowledged.
-        mm.cam_recording_changed.connect(osc.publish_recording)
-        app.aboutToQuit.connect(osc.stop)
+    # No OSC server here.  It lives in the hub — see docs/companion.md.
+    #
+    # There were two, both on port 9700 and both answering /pts/cam/N/..., and
+    # they had drifted: tally and record existed only in this one, autofocus and
+    # zoom only in the hub's.  Companion talks to the hub, so a tally button
+    # sent a perfectly good message to a server that had never heard of tally
+    # and dropped it without a word.  Two address spaces that can disagree is
+    # the fault; one that cannot is the fix.
+    #
+    # The hub is also the right survivor: it is always on, and this app is not.
 
     window = MainWindow(config, bridge, mm, store, joystick)
     window.show()

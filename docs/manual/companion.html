@@ -25,29 +25,28 @@
     function — recall a shot, hold-to-jog, look-at moves, E-STOP — becomes a button
     or a cue, in time with light and sound.</p>
 
-    <h2>Two servers, one address space</h2>
-    <p>Two OSC servers accept commands; use whichever fits the rig. Both take the
-    same command addresses, so your Companion pages and QLab cues fire unchanged
-    against either. <strong>Feedback comes from the hub only</strong> — if you want
-    buttons that light up to show what the rig is doing, point Companion at the
-    hub.</p>
-    <table>
-      <tr><th style="width:38%">Target</th><th>When to use</th></tr>
-      <tr><td><strong>The hub</strong> — <code>192.168.4.1:9700</code></td>
-      <td>No PC needed. Hub + console + mounts + Stream Deck is a complete rig.
-      Reach it from any machine joined to the <code>CamMount</code> WiFi, or via a
-      WiFi→LAN bridge.</td></tr>
-      <tr><td><strong>The PC app</strong> — its machine, port <code>9700</code></td>
-      <td>When the PC app is running anyway. Its server is toggleable
-      (<code>osc_enabled</code> / <code>osc_port</code>) in the app config.</td></tr>
-    </table>
+    <h2>One server: the hub</h2>
+    <p>The hub is the OSC server — <code>192.168.4.1:9700</code> on the
+    <code>CamMount</code> WiFi, or through a WiFi→LAN bridge joined to it. No PC
+    needed: hub + console + mounts + Stream Deck is a complete rig, and both
+    commands and feedback come from the same place.</p>
+    <p>There used to be a second server inside the PC app, on the same port and
+    the same <code>/pts/...</code> namespace, and the two had drifted apart:
+    <code>tally</code> and <code>record</code> existed only in the PC app,
+    <code>autofocus</code> and <code>zoom</code> only in the hub. A tally button
+    aimed at the hub was a well-formed message arriving at a server that had never
+    heard of tally — and an unknown address is dropped in silence, which is the
+    worst way for a control surface to fail. That server is gone and its two verbs
+    moved to the hub.</p>
+    <p>The practical gain: the hub is always on and a laptop is not, so a tally
+    lamp or a record cue no longer depends on anyone's PC app being open.</p>
 
     <h2>Connecting Companion</h2>
     <ol class="steps">
       <li>Companion → <strong>Connections</strong> → add <strong>Generic:
       OSC</strong>.</li>
-      <li>Set <strong>Target IP</strong> to <code>192.168.4.1</code> (the hub) or
-      the PC app machine's IP, and <strong>Target port</strong> to
+      <li>Set <strong>Target IP</strong> to <code>192.168.4.1</code> (the hub),
+      and <strong>Target port</strong> to
       <code>9700</code>.</li>
       <li>Use the connection's <strong>"Send message"</strong> actions on buttons,
       as below. Use <strong>integer</strong> arguments (floats are also accepted).</li>
@@ -76,6 +75,11 @@
       <tr><td><code>/pts/cam/N/subject</code></td><td>0–7</td><td>Select look-at subject — switches live during a move</td></tr>
       <tr><td><code>/pts/cam/N/lookat</code></td><td>0 | 1</td><td>Look-at slider move to min (0) or max (1) with the selected subject</td></tr>
       <tr><td><code>/pts/cam/N/autofocus</code></td><td>—</td><td>Instantaneous autofocus on that mount's Blackmagic camera</td></tr>
+      <tr><td><code>/pts/cam/N/tally</code></td><td><code>0</code>/<code>1</code>, or <code>0.0-1.0</code></td><td>Tally lamp <strong>brightness</strong>, both lamps</td></tr>
+      <tr><td><code>/pts/cam/N/tally/front</code></td><td><code>0</code>/<code>1</code>, or <code>0.0-1.0</code></td><td>Front lamp only (facing talent)</td></tr>
+      <tr><td><code>/pts/cam/N/tally/rear</code></td><td><code>0</code>/<code>1</code>, or <code>0.0-1.0</code></td><td>Rear lamp only (facing operator)</td></tr>
+      <tr><td><code>/pts/cam/N/record</code></td><td><code>0</code> stop / <code>1</code> start</td><td>Start or stop recording on that camera</td></tr>
+      <tr><td><code>/pts/cam/N/record/toggle</code></td><td>—</td><td>Start if stopped, stop if rolling — reads the camera's reported transport, not the last command</td></tr>
       <tr><td><code>/pts/refresh</code></td><td>—</td><td>Resend all feedback for every mount</td></tr>
       <tr><td><code>/pts/cam/N/refresh</code></td><td>—</td><td>Resend all feedback for mount N</td></tr>
     </table>
@@ -127,6 +131,7 @@
       <tr><td><code>/pts/cam/N/speed/pt</code></td><td>1–4</td><td>Active pan/tilt preset</td></tr>
       <tr><td><code>/pts/cam/N/speed/sl</code></td><td>0–4</td><td>Active slider preset — <strong>0 means this mount has no rail</strong></td></tr>
       <tr><td><code>/pts/cam/N/slot/M/state</code></td><td>0–3</td><td>Slot M — see below</td></tr>
+      <tr><td><code>/pts/cam/N/recording</code></td><td>0/1</td><td>That camera is <strong>rolling</strong> — the camera's own report, not an echo of the command</td></tr>
     </table>
     <p>Slot state is one address per slot carrying one value, so a shot button can
     colour itself from a single feedback with nothing to combine:</p>

@@ -1,20 +1,24 @@
 # Bitfocus Companion (and QLab) control
 
-Two OSC control servers speak the same `/pts/...` address space on UDP port
-**9700** — point Companion at whichever fits the rig:
+**The hub is the OSC server.** One server, on the hub, UDP port **9700** —
+`192.168.4.1` on the CamMount AP, reachable from the LAN through a WiFi→LAN
+bridge joined to that AP, or from any machine joined to CamMount directly. No
+PC needed: hub + display + mounts + Stream Deck is a complete rig.
 
-| Target | When to use |
-|---|---|
-| **The hub itself** (`192.168.4.1`) | No PC needed — hub + display + mounts + Stream Deck is a complete rig.  Reachable from the LAN via a WiFi→LAN bridge joined to the CamMount AP, or from any machine joined to CamMount directly. |
-| **The PC app's machine** | When the PC app is running anyway (its server is configurable via `osc_enabled` / `osc_port` in the app config). |
+There used to be a second server inside the PC app on the same port and the
+same `/pts/...` namespace, and the two had drifted apart — `tally` and `record`
+existed only in the PC app, `autofocus` and `zoom` only in the hub. A tally
+button aimed at the hub was a perfectly good message arriving at a server that
+had never heard of tally, and unknown addresses are dropped in silence. The PC
+app's server is gone; every address below is the hub's.
 
-Both accept the identical addresses below, so Companion pages work unchanged
-against either.  QLab network cues likewise.
+The practical consequence: the hub is always on and a laptop is not, so a tally
+lamp or a record cue no longer depends on anyone's PC app being open.
 
 ## Companion connection
 
 1. Companion → **Connections** → add **Generic: OSC**
-2. **Target IP** = `192.168.4.1` (hub) or the PC app machine's IP ·
+2. **Target IP** = the hub (`192.168.4.1` on the CamMount AP) ·
    **Target port** = `9700`
 3. Use the connection's **"Send message"** actions on buttons as below.
    Argument type matters: use **integer** arguments (floats also accepted).
@@ -49,6 +53,11 @@ against either.  QLab network cues likewise.
 | `/pts/cam/N/subject`     | `0-7`               | Select look-at subject (switches live mid-move) |
 | `/pts/cam/N/lookat`      | `0` (◀ min) / `1` (▶ max) | Look-at slider move with the selected subject |
 | `/pts/cam/N/autofocus`   | –                   | Instantaneous autofocus on that mount's Blackmagic camera |
+| `/pts/cam/N/tally`       | `0`/`1`, or `0.0-1.0` | Tally lamp **brightness**, both lamps |
+| `/pts/cam/N/tally/front` | `0`/`1`, or `0.0-1.0` | Front lamp only (facing talent) |
+| `/pts/cam/N/tally/rear`  | `0`/`1`, or `0.0-1.0` | Rear lamp only (facing operator) |
+| `/pts/cam/N/record`      | `0` stop / `1` start | Start or stop recording on that camera |
+| `/pts/cam/N/record/toggle` | –                 | Start if stopped, stop if rolling — reads the camera's reported transport, not the last command |
 | `/pts/refresh`           | –                   | Resend all feedback for every mount |
 | `/pts/cam/N/refresh`     | –                   | Resend all feedback for mount N |
 
@@ -71,6 +80,19 @@ action lists):
   (pressing Button A during the move switches the tracked subject live)
 
 **Speed page** — four buttons per camera: `/pts/cam/N/speed/pt` with `1..4`.
+
+**Record with a tally that tells the truth** — two halves of one button:
+- Press action: `Send message` → `/pts/cam/5/record/toggle`
+- Feedback: OSC value of `/pts/cam/5/recording` → `1` lights the button
+
+The button lights from the camera's transport report, not from the press, so a
+press that did not take — no card in the camera, Bluetooth dropped — leaves it
+dark rather than lying about it.
+
+**Tally lamp** — `/pts/cam/N/tally` with int `1` for full and `0` for off, or a
+float for anything between. **Unconfirmed on this camera:** the tally category
+comes from Blackmagic's published spec and this camera has never reported it
+back, so if the lamp does not move, the parameter number is the first suspect.
 
 ### Direction buttons
 
@@ -124,6 +146,16 @@ All arguments are a single int.
 | `/pts/cam/N/speed/pt`            | 1-4   | Active pan/tilt speed preset |
 | `/pts/cam/N/speed/sl`            | 0-4   | Active slider speed preset — **0 = this mount has no rail** |
 | `/pts/cam/N/slot/M/state`        | 0-3   | Slot M — see below |
+| `/pts/cam/N/recording`           | 0/1   | That camera is **rolling** — see below |
+
+`/pts/cam/N/recording` is the camera's own account of its transport mode, not
+an echo of the record command. Blackmagic never acknowledges a command, so a
+record cue that failed — no media in the camera, Bluetooth dropped — produces
+nothing here and the button stays dark. A lit button is a camera that is
+actually recording.
+
+It reads 0 until the camera reports otherwise, which is also what it reads when
+no camera is paired to that mount.
 
 Slot state is one address per slot carrying one value:
 

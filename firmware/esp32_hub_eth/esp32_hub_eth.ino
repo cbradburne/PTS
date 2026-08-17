@@ -2044,10 +2044,19 @@ static void hub_wifi_full_reinit() {
 // ---------------------------------------------------------------------------
 // OSC control server — Bitfocus Companion / QLab, direct to the hub
 // ---------------------------------------------------------------------------
-// Same /pts/... address space as the PC app's OSC server (docs/companion.md):
-// Companion or QLab reaches the hub over the CamMount AP or the WiFi→LAN
-// bridge and drives mounts with NO PC in the rig.  Parses the OSC 1.0 subset
-// we use (messages, #bundle, i/f/s/T/F args; numerics coerced to int32).
+// THE OSC server for the rig (docs/companion.md).  Companion or QLab reaches
+// the hub over the CamMount AP or the WiFi→LAN bridge and drives mounts with
+// NO PC involved.  Parses the OSC 1.0 subset we use (messages, #bundle,
+// i/f/s/T/F args; kept as both int32 and float, see osc_handle_message).
+//
+// The PC app used to run a second server on this same port with this same
+// address space, and they had drifted: tally and record were only in the PC
+// app's, autofocus and zoom only in this one.  Companion talks to the hub, so
+// a tally button was a well-formed message arriving at a server that had never
+// heard of tally — and an unknown address is dropped without a word, which is
+// the worst way for a control surface to fail.  That server is gone and its
+// two verbs moved here.  One address space cannot disagree with itself, and
+// the hub is the right survivor because it is always on and a laptop is not.
 //
 // Jogs are re-streamed at 20 Hz (the mount dead-man needs a live stream) with
 // a 15 s TTL bounding a lost UDP release.  OSC jogs stamp _ws_last_jog_ms so
@@ -2140,7 +2149,15 @@ static uint8_t  _fb_target[NUM_MOUNTS]   = {};
 static uint8_t  _fb_slot[NUM_MOUNTS][NUM_POSITIONS] = {};
 static uint8_t  _fb_pt[NUM_MOUNTS]       = {};
 static uint8_t  _fb_sl[NUM_MOUNTS]       = {};
+static uint8_t  _fb_recording[NUM_MOUNTS] = {};
 static bool     _fb_valid[NUM_MOUNTS]    = {};
+
+// The camera's OWN account of whether it is rolling, lifted out of
+// CMD_CAM_STATUS as it passes through the relay.  Never set from a record
+// command: a lit tally has to mean a camera that IS recording, not one that
+// was asked to and might have no media in it.  False until the camera says
+// otherwise, which is also what it reads as when no camera is paired.
+static bool     _cam_recording[NUM_MOUNTS] = {};
 static uint32_t _fb_last_full_ms = 0;
 #define OSC_FB_FULL_MS  5000UL       // resend everything this often
 
@@ -2197,8 +2214,17 @@ static void osc_feedback_mount(int i, bool force) {
             _fb_slot[i][sN] = ss;
         }
     }
+    // Tally out.  The camera's own transport report, so a lit lamp on the desk
+    // is a camera that is rolling — a record command that never took effect
+    // produces nothing here.  This used to come from the PC app, which is not
+    // always running; the hub is.
+    uint8_t rec = _cam_recording[i] ? 1 : 0;
+    if (all || rec != _fb_recording[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/recording", i + 1); osc_send_int(a, rec);
+    }
+
     _fb_state[i] = st; _fb_active[i] = act; _fb_target[i] = tgt;
-    _fb_pt[i] = pt; _fb_sl[i] = sl;
+    _fb_pt[i] = pt; _fb_sl[i] = sl; _fb_recording[i] = rec;
     _fb_valid[i] = true;
 }
 
@@ -2272,7 +2298,8 @@ static void osc_stop_jog(uint8_t mid) {
     if (was_active) Serial.printf("[OSC] CAM %d jog stop\n", mid);
 }
 
-static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
+static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
+                         int argc) {
     char buf[72];
     strncpy(buf, addr, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = 0;
@@ -2479,6 +2506,60 @@ static void osc_dispatch(const char *addr, const int32_t *a, int argc) {
         Serial.printf("[OSC] CAM %d autofocus\n", mid);
         ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, AF, sizeof(AF));
 
+    } else if (strcmp(verb, "tally") == 0 && argc >= 1) {
+        // /pts/cam/N/tally <0..1>, or .../tally/front | .../tally/rear.
+        //
+        // BRIGHTNESS, not a red/green program state: on a Blackmagic body that
+        // comes over SDI and this rig has no SDI path to it.  An int 0/1 from a
+        // Companion button means off/full; a cue sending 0.5 gets a half-lit
+        // lamp, which is why the parser keeps the float.
+        //
+        // NOT YET CONFIRMED AGAINST THE CAMERA.  Category 5 is what the
+        // published spec gives for tally and this camera has never REPORTED
+        // it, so the parameter numbers are the document's word and nothing
+        // else.  These bytes are byte-for-byte what the PC app sent, so this
+        // change moves the command to where Companion can reach it — it does
+        // not make an unverified parameter number correct.  A camera that
+        // accepts a parameter generally reports it back: send one and watch
+        // for a category 5 status, because silence means the number is wrong.
+        uint8_t param = 0;                                  // 0 both, 1 front, 2 rear
+        if      (nt >= 5 && strcmp(tok[4], "front") == 0) param = 1;
+        else if (nt >= 5 && strcmp(tok[4], "rear")  == 0) param = 2;
+        float b = af[0];
+        if (b < 0.0f) b = 0.0f;
+        if (b > 1.0f) b = 1.0f;
+        int16_t fx = (int16_t)lroundf(b * 2048.0f);         // signed 5.11 fixed point
+        // Tally category 5, parameter 0/1/2, fixed16 — byte-for-byte what the
+        // PC app sends, and like autofocus the hub does not build it from parts
+        // beyond the one value: CMD_CAM_CONTROL is a verbatim pipe.
+        uint8_t T[12] = { 0xFF, 0x08, 0x00, 0x00,
+                          0x05, param, 0x80, 0x00,
+                          (uint8_t)(fx & 0xFF), (uint8_t)((fx >> 8) & 0xFF),
+                          0x00, 0x00 };
+        Serial.printf("[OSC] CAM %d tally %s = %.2f\n", mid,
+                      param == 1 ? "front" : param == 2 ? "rear" : "both", b);
+        ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, T, sizeof(T));
+
+    } else if (strcmp(verb, "record") == 0) {
+        // /pts/cam/N/record 0|1, or .../record/toggle.
+        //
+        // Toggle reads the CAMERA's reported transport rather than what was
+        // last asked for, so a camera stopped at the body toggles to START and
+        // not to a STOP that would do nothing.  Before the camera has ever
+        // reported — no media, no BLE — that reads false and toggle starts.
+        uint8_t mode;
+        if (nt >= 5 && strcmp(tok[4], "toggle") == 0) mode = _cam_recording[idx] ? 0 : 2;
+        else if (argc >= 1)                           mode = a[0] ? 2 : 0;
+        else                                          return;
+        // Media category 9, parameter 1, int8: 0 preview, 1 play, 2 record.
+        // Three data bytes rather than the five the spec lists, because three
+        // is what this camera REPORTS for the same parameter.
+        uint8_t R[12] = { 0xFF, 0x08, 0x00, 0x00,
+                          0x09, 0x01, 0x01, 0x00,
+                          mode, 0x00, 0x00, 0x00 };
+        Serial.printf("[OSC] CAM %d record %s\n", mid, mode == 2 ? "START" : "STOP");
+        ui_send_to_mount((uint8_t)mid, CMD_CAM_CONTROL, R, sizeof(R));
+
     } else if (strcmp(verb, "refresh") == 0) {
         _fb_valid[idx] = false;                 // this mount only
     } else if (strcmp(verb, "lookat") == 0 && argc >= 1) {
@@ -2501,7 +2582,12 @@ static void osc_handle_message(const uint8_t *d, int len) {
     const char *addr = osc_str(d, len, 0, &next);
     if (!addr || addr[0] != '/') return;
     int ofs = next;
-    int32_t args[8]; int argc = 0;
+    // Every argument is kept BOTH ways.  Rounding a float to an int is right
+    // for a slot number or a preset, and wrong for tally brightness: 0.5 is a
+    // half-lit lamp, and lroundf() would make it full.  So the int form stays
+    // exactly as it was for every verb that had it, and the verbs that need
+    // the real number read argf instead.
+    int32_t args[8]; float argf[8]; int argc = 0;
     if (ofs < len && d[ofs] == ',') {
         const char *tags = osc_str(d, len, ofs, &next);
         if (!tags) return;
@@ -2509,17 +2595,19 @@ static void osc_handle_message(const uint8_t *d, int len) {
         for (int ti = 1; tags[ti] != 0 && argc < 8; ti++) {
             char t = tags[ti];
             if (t == 'i' && ofs + 4 <= len) {
-                args[argc++] = (int32_t)be32(d + ofs); ofs += 4;
+                int32_t v = (int32_t)be32(d + ofs); ofs += 4;
+                argf[argc] = (float)v; args[argc++] = v;
             } else if (t == 'f' && ofs + 4 <= len) {
-                args[argc++] = (int32_t)lroundf(be_float(d + ofs)); ofs += 4;
-            } else if (t == 'T') { args[argc++] = 1;
-            } else if (t == 'F') { args[argc++] = 0;
+                float f = be_float(d + ofs); ofs += 4;
+                argf[argc] = f; args[argc++] = (int32_t)lroundf(f);
+            } else if (t == 'T') { argf[argc] = 1.0f; args[argc++] = 1;
+            } else if (t == 'F') { argf[argc] = 0.0f; args[argc++] = 0;
             } else if (t == 's') {
                 osc_str(d, len, ofs, &next); ofs = next;   // skip strings
             } else break;                                   // unsupported tag
         }
     }
-    osc_dispatch(addr, args, argc);
+    osc_dispatch(addr, args, argf, argc);
 }
 
 // Messages or #bundle (recursive) — QLab wraps cues in bundles.
@@ -3444,6 +3532,29 @@ void loop() {
                             && pkt.payload_len >= CONFIG_REPORT_PAYLOAD_LEN
                             && msg.src_idx < NUM_MOUNTS) {
                         disp_config_report(msg.src_idx + 1, pkt.payload);
+                    }
+                    // Lift the transport mode out of the camera's status, for
+                    // the OSC tally-out.  The hub does not otherwise interpret
+                    // CMD_CAM_STATUS — it is a verbatim pipe in both directions
+                    // — but whether a camera is rolling is the one thing a
+                    // lighting desk needs, and the PC app that used to publish
+                    // it is not always running.  The hub is.
+                    //
+                    // BMD framing inside the payload:
+                    //   [0] 0xFF  [1] len  [2..3] pad
+                    //   [4] category  [5] parameter  [6] type  [7] operation
+                    //   [8+] data
+                    // Media category 9 parameter 1 is transport; 2 = recording.
+                    if (pkt.cmd == CMD_CAM_STATUS
+                            && pkt.payload_len >= 9
+                            && pkt.payload[4] == 9 && pkt.payload[5] == 1
+                            && msg.src_idx < NUM_MOUNTS) {
+                        bool rec = (pkt.payload[8] == 2);
+                        if (rec != _cam_recording[msg.src_idx]) {
+                            _cam_recording[msg.src_idx] = rec;
+                            Serial.printf("[CAM] mount %d %s\n", msg.src_idx + 1,
+                                          rec ? "RECORDING" : "stopped recording");
+                        }
                     }
                     // Forward limits-found notification to display
                     if (pkt.cmd == CMD_LIMITS_FOUND
