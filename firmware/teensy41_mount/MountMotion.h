@@ -50,11 +50,56 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 // ramp at LOOK_AT_SLEW_ACCEL_FACTOR=0.10 with margin.
 #define LOOK_AT_SLEW_DURATION_MS  2000
 
+// ---------------------------------------------------------------------------
+// DRIVE GEOMETRY — change these when the hardware changes, nothing else
+// ---------------------------------------------------------------------------
+// Every ratio in the firmware derives from the numbers in this block.
+//
+// They used to be written out as FINISHED ratios in two files: the slider's
+// 40 mm/rev lived in MountMotion.cpp and again inside the nominal step size
+// below, and pan/tilt's 7.5:1 the same way.  Fitting a different pulley meant
+// finding both, and missing one gave a mount that MOVES at one scale and
+// REPORTS ITS POSITION at another — a fault that looks like a mechanical
+// problem and is not.  The tooth counts were only ever in a comment.
+//
+// SLIDER — GT2 belt.  The GT2 profile is 2 mm between teeth by definition, so
+// one motor revolution advances the carriage by teeth x 2 mm.
+#define SLIDER_PULLEY_TEETH    20    // GT2 pulley on the slider motor shaft
+
+// PAN / TILT — toothed belt reductions, driven (axis) over driver (motor).
+// Both work out at 7.5:1, which is why one constant served both; they are
+// separate here because they are separate pulleys and only look alike.
+#define PAN_DRIVEN_TEETH      270
+#define PAN_DRIVER_TEETH       36
+#define TILT_DRIVEN_TEETH     120
+#define TILT_DRIVER_TEETH      16
+
+// Motors and driver settings that pair with the above.
+#define MOTOR_DEG_PER_STEP_PT  0.9f  // PAN/TILT motors: 0.9 deg/full step
+#define MOTOR_DEG_PER_STEP_SZ  1.8f  // SLIDER/ZOOM motors: 1.8 deg/full step
+#define MICROSTEPS_PAN         256
+#define MICROSTEPS_TILT        256
+#define MICROSTEPS_SLIDER       32   // lower: more torque for the heavy carriage
+#define MICROSTEPS_ZOOM         32
+#define GEAR_RATIO_ZOOM        1.0f  // direct drive
+
+// GT2 is a belt PROFILE, not a choice — 2 mm pitch is what makes it GT2.
+constexpr float GT2_BELT_PITCH_MM = 2.0f;
+
+// ---- derived: nothing below is edited by hand -----------------------------
+constexpr float SLIDER_MM_PER_REV = SLIDER_PULLEY_TEETH * GT2_BELT_PITCH_MM;
+constexpr float GEAR_RATIO_PAN    = (float)PAN_DRIVEN_TEETH  / (float)PAN_DRIVER_TEETH;
+constexpr float GEAR_RATIO_TILT   = (float)TILT_DRIVEN_TEETH / (float)TILT_DRIVER_TEETH;
+constexpr float SLIDER_FULL_STEPS_PER_REV = 360.0f / MOTOR_DEG_PER_STEP_SZ;
+
 // Nominal hardware deg/µstep values — used before the first subject calibration
-// refines them.  Derived from the motor + gear specs in MountMotion.cpp.
-constexpr float NOMINAL_PAN_DEG_PER_STEP   = 0.9f  / (256.0f * 7.5f);    // ≈ 0.000468750  (270t / 36t = 7.5:1)
-constexpr float NOMINAL_TILT_DEG_PER_STEP  = 0.9f  / (256.0f * 7.5f);    // ≈ 0.000468750  (120t / 16t = 7.5:1)
-constexpr float NOMINAL_SLIDER_MM_PER_STEP = 40.0f / (32.0f  * 200.0f);  // ≈ 0.00625
+// refines them.
+constexpr float NOMINAL_PAN_DEG_PER_STEP =
+        MOTOR_DEG_PER_STEP_PT / (MICROSTEPS_PAN  * GEAR_RATIO_PAN);     // ≈ 0.000468750
+constexpr float NOMINAL_TILT_DEG_PER_STEP =
+        MOTOR_DEG_PER_STEP_PT / (MICROSTEPS_TILT * GEAR_RATIO_TILT);    // ≈ 0.000468750
+constexpr float NOMINAL_SLIDER_MM_PER_STEP =
+        SLIDER_MM_PER_REV / (MICROSTEPS_SLIDER * SLIDER_FULL_STEPS_PER_REV);  // ≈ 0.00625
 
 // ---------------------------------------------------------------------------
 // Speed preset (per axis group, 4 presets each)

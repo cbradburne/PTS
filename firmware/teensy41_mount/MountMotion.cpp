@@ -26,12 +26,19 @@
  *
  * Microstep settings (configured over UART by TMCStepper — MS1/MS2 set address only):
  *
- *   Axis    | Motor  | Gear / belt         | Microsteps | Resolution
- *   --------|--------|---------------------|------------|-----------------------------
- *   PAN     | 0.9°   | 9:1 gear            |    256     | ≈ 1.39 arcsec / step
- *   TILT    | 0.9°   | 8:1 gear            |    256     | ≈ 1.56 arcsec / step
- *   SLIDER  | 1.8°   | GT2 20T (40 mm/rev) |     32     | 6.25 µm / step
- *   ZOOM    | 1.8°   | —                   |    256     | zoom
+ *   Axis    | Motor  | Gear / belt          | Microsteps | Resolution
+ *   --------|--------|----------------------|------------|----------------------------
+ *   PAN     | 0.9°   | 270t / 36t  = 7.5:1  |    256     | ≈ 1.69 arcsec / step
+ *   TILT    | 0.9°   | 120t / 16t  = 7.5:1  |    256     | ≈ 1.69 arcsec / step
+ *   SLIDER  | 1.8°   | GT2 20t = 40 mm/rev  |     32     | 6.25 µm / step
+ *   ZOOM    | 1.8°   | direct               |     32     | zoom
+ *
+ *   This table is DESCRIPTION, not definition — the numbers live in the DRIVE
+ *   GEOMETRY block at the top of MountMotion.h and everything derives from the
+ *   tooth counts there.  It had drifted: it claimed 9:1 on PAN and 8:1 on TILT
+ *   where the code used 7.5:1 for both (which the tooth counts confirm), and
+ *   256 microsteps on ZOOM where the code used 32.  Three wrong numbers in a
+ *   table nobody could act on, because none of them was what ran.
  *
  *   Note: TMC2209 has hardware 256-step MicroPlyer interpolation.  At 256 commanded
  *   microsteps the step/dir interface aligns with the internal interpolation, giving
@@ -70,7 +77,10 @@ static HardwareSerial* const TMC_SERIAL[4] = { &Serial5, &Serial4, &Serial3, &Se
 static constexpr uint32_t TMC_BAUD = 115200;
 
 // Microstep resolution per axis  { PAN, TILT, SLIDER, ZOOM }
-static constexpr uint16_t MICROSTEPS[4] = { 256, 256, 32, 32 };
+// From the header, so the microstep counts and the step sizes derived from
+// them cannot drift apart.
+static constexpr uint16_t MICROSTEPS[4] = { MICROSTEPS_PAN, MICROSTEPS_TILT,
+                                           MICROSTEPS_SLIDER, MICROSTEPS_ZOOM };
 
 // Default run current (mA)
 static constexpr uint16_t DEFAULT_CURRENT_MA[4] = { 800, 800, 2000, 1000 };
@@ -154,12 +164,11 @@ static constexpr float JOG_EXPO_STRENGTH = 0.7f;
 //   SLIDER    presets stored as mm/sec   and mm/sec²
 //   ZOOM      presets stored as deg/sec  and deg/sec²  (direct-drive assumption)
 // ---------------------------------------------------------------------------
-static constexpr float MOTOR_DEG_PER_STEP_PT = 0.9f;    // PAN/TILT motors: 0.9°/full step
-static constexpr float MOTOR_DEG_PER_STEP_SZ = 1.8f;    // SLIDER/ZOOM motors: 1.8°/full step
-static constexpr float GEAR_RATIO_PAN        = 7.5f;    // 7.5:1 gearbox on PAN
-static constexpr float GEAR_RATIO_TILT       = 7.5f;    // 7.5:1 gearbox on TILT
-static constexpr float SLIDER_MM_PER_REV     = 40.0f;   // GT2 20T belt: 40 mm/rev
-static constexpr float GEAR_RATIO_ZOOM       = 1.0f;    // ZOOM: direct drive (adjust as needed)
+// All of these now come from the DRIVE GEOMETRY block at the top of
+// MountMotion.h, derived from the tooth counts.  They were second copies of the
+// same finished ratios that block also computes, so a pulley change had to be
+// made twice and a mount could end up moving at one scale while reporting its
+// position at another.  Change the teeth in the header; this file follows.
 
 // Convert physical speed to µsteps/sec (or µsteps/sec² for acceleration).
 // axis  0=PAN, 1=TILT → speed in deg/sec
@@ -172,8 +181,7 @@ static float physToUSteps(int axis, float speed) {
         case AXIS_TILT:
             return speed * MICROSTEPS[AXIS_TILT] * GEAR_RATIO_TILT / MOTOR_DEG_PER_STEP_PT;
         case AXIS_SLIDER:
-            // full steps/rev = 360 / MOTOR_DEG_PER_STEP_SZ = 200
-            return speed * MICROSTEPS[axis] * (360.0f / MOTOR_DEG_PER_STEP_SZ) / SLIDER_MM_PER_REV;
+            return speed * MICROSTEPS[axis] * SLIDER_FULL_STEPS_PER_REV / SLIDER_MM_PER_REV;
         case AXIS_ZOOM:
             return speed * MICROSTEPS[axis] * GEAR_RATIO_ZOOM / MOTOR_DEG_PER_STEP_SZ;
         default:
