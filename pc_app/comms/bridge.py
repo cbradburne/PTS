@@ -614,6 +614,7 @@ class Bridge:
     # unchanged line into the log forever.  A mount that is DOWN is exempt: its
     # running total climbs, and that is worth a line each time.
     _outage_last: dict[int, tuple] = {}
+    _outage_seen = False
 
     def _note_mount_outage(self, pkt: Packet) -> None:
         """How long each mount has been uncontrollable, since the hub booted.
@@ -633,6 +634,15 @@ class Bridge:
         except ParseError as e:
             log.warning("MOUNT OUTAGE payload rejected: %s", e)
             return
+        # Say once that the chain is alive.  Everything below is silent while
+        # every mount is behaving, which is right — but a silent instrument and
+        # a dead one read identically in a log, and the whole point of this one
+        # is that its silence means something.  One line on first receipt makes
+        # the difference legible: after it, no news IS good news.
+        if not self._outage_seen:
+            self._outage_seen = True
+            log.info("MOUNT OUTAGE accounting live — hub is reporting; from here "
+                     "silence means no mount has been out, not a dead counter")
         for mid, st in sorted(stats.items()):
             key = (st["count"], st["total_s"], st["min_s"], st["max_s"], st["now"])
             if not st["now"] and self._outage_last.get(mid) == key:

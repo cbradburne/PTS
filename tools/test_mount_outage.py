@@ -148,5 +148,38 @@ down = {1: (1, 30, 30, 30, True)}
 assert render(down) and render(down), "a mount still down should keep reporting"
 print("   a mount still down keeps reporting                  OK")
 
+# ---- 5. the instrument must prove it is alive ------------------------------
+# Everything above is silent while every mount behaves, which is right — but a
+# silent instrument and a dead one read identically in a log, and this one's
+# silence is supposed to carry meaning.  One line on first receipt is what makes
+# the difference legible.
+print("\n5. liveness:")
+_b2 = Bridge.__new__(Bridge)
+_b2._outage_last = {}
+_b2._outage_seen = False
+clean = bytes(NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT)      # nobody has ever been out
+
+
+def render2(payload):
+    _buf.truncate(0); _buf.seek(0)
+    _b2._note_mount_outage(_P(payload))
+    return _buf.getvalue().strip()
+
+
+first = render2(clean)
+assert "accounting live" in first, f"a healthy rig says nothing at all: {first!r}"
+assert not render2(clean), "the liveness line repeats on every packet"
+print("   healthy rig confirms once, then stays quiet         OK")
+
+# And it must not swallow a real outage arriving in that same first packet.
+_b3 = Bridge.__new__(Bridge)
+_b3._outage_last = {}
+_b3._outage_seen = False
+_buf.truncate(0); _buf.seek(0)
+_b3._note_mount_outage(_P(hub_encode({4: (2, 46, 14, 32, False)})))
+both = _buf.getvalue()
+assert "accounting live" in both and "cam4" in both, both
+print("   an outage in the first packet is still reported     OK")
+
 _lg.handlers, _lg.level, _lg.propagate = _saved
 print("\nALL CHECKS PASSED")
