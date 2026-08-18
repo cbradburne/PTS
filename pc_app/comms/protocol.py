@@ -140,6 +140,7 @@ class Cmd(IntEnum):
     MOUNT_EVENT       = 0xA6   # mount→clients, 14B: why it restarted/recovered
     RF_REPORT         = 0xA7   # mount→clients, 14B: rssi + noise + rx drops + tx attempts/failed
     SAT_DOWNLINK      = 0xA8   # satellite→clients, 25B: offered/attempts/sent/refused + top cmds
+    MOUNT_OUTAGE      = 0xA9   # hub→clients, 5×12B: how long each mount was uncontrollable
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
     CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
 
@@ -1677,6 +1678,12 @@ HUB_SENTINEL              = 0xFE
 MOUNT_TABLE_PAYLOAD_LEN   = 30   # 5 × MAC(6)
 PAIR_CONFLICT_PAYLOAD_LEN = 13   # cam(1) + new_mac(6) + old_mac(6)
 MOUNT_ROUTE_PAYLOAD_LEN   = 5    # one byte per cam
+
+# CMD_MOUNT_OUTAGE, 12 bytes per mount: count u16, total_s u32, min_s u16,
+# max_s u16, flags u8, reserved u8.
+MOUNT_OUTAGE_PER_MOUNT    = 12
+MOUNT_OUTAGE_PAYLOAD_LEN  = NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT
+MOUNT_OUTAGE_FLAG_NOW     = 0x01
 SAT_NAME_LEN              = 13   # 12 characters + NUL, as in the AP SSID
 SAT_SLOTS                 = 6
 SAT_NAMES_PAYLOAD_LEN     = SAT_SLOTS * SAT_NAME_LEN
@@ -1690,6 +1697,10 @@ RF_REPORT_PAYLOAD_LEN     = 14
 # drift apart again (a 3 s hub timeout against a 5 s mount refresh declared
 # every healthy mount disconnected between packets).
 MOUNT_STATUS_REFRESH_MS   = 5000
+# The floor on what can be measured, set by the mount's STATUS cadence rather
+# than by choice — a gap shorter than one missed status is invisible to the hub
+# however it is counted.  Stated here so a reader knows what "0 outages" means.
+MOUNT_OUTAGE_MIN_MS       = MOUNT_STATUS_REFRESH_MS + MOUNT_STATUS_REFRESH_MS // 2
 MOUNT_PRESENCE_TIMEOUT_MS = 3 * MOUNT_STATUS_REFRESH_MS + 1000
 # Base presence — how often a hub/satellite beats, and how long a mount waits
 # in silence before scanning for another base.  Three missed heartbeats.
@@ -1738,6 +1749,41 @@ def decode_mount_route(payload: bytes) -> list[int]:
     if len(payload) < MOUNT_ROUTE_PAYLOAD_LEN:
         raise ParseError(f"MOUNT_ROUTE payload too short: {len(payload)}")
     return [int(payload[i]) for i in range(NUM_MOUNTS)]
+
+
+def decode_mount_outage(payload: bytes) -> dict[int, dict]:
+    """CMD_MOUNT_OUTAGE → {mount_id: {count, total_s, min_s, max_s, now}}.
+
+    How long each mount was UNCONTROLLABLE, which is the figure an operator
+    actually asks for and the one thing none of the other counters could give.
+    Uptimes and reinit counts say an interruption happened; only this says for
+    how long, and a count multiplied by an assumed duration is a fiction.
+
+    Measured by the hub as the gap in a mount's own traffic, so it covers a
+    bridge reboot, an ESP-NOW reinit, a radio wedge and a pulled plug without
+    distinguishing them — from the operator's chair they are the same event.
+
+    Resolution is bounded by the mount's STATUS cadence: gaps shorter than
+    MOUNT_OUTAGE_MIN_MS are invisible however they are measured.  A three-second
+    dropout is real and will not appear here.
+    """
+    if len(payload) < MOUNT_OUTAGE_PAYLOAD_LEN:
+        raise ParseError(f"MOUNT_OUTAGE payload too short: {len(payload)}")
+    out: dict[int, dict] = {}
+    for i in range(NUM_MOUNTS):
+        e = payload[i * MOUNT_OUTAGE_PER_MOUNT:(i + 1) * MOUNT_OUTAGE_PER_MOUNT]
+        count = int.from_bytes(e[0:2], "big")
+        now_down = bool(e[10] & MOUNT_OUTAGE_FLAG_NOW)
+        if not count and not now_down:
+            continue                      # this mount has never been out
+        out[i + 1] = {
+            "count":   count,
+            "total_s": int.from_bytes(e[2:6], "big"),
+            "min_s":   int.from_bytes(e[6:8], "big"),
+            "max_s":   int.from_bytes(e[8:10], "big"),
+            "now":     now_down,
+        }
+    return out
 
 
 def decode_sat_names(payload: bytes) -> dict[int, str]:

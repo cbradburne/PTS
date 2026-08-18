@@ -88,6 +88,18 @@
 // send callback at all — esp_now_send() was refusing them synchronously.  The
 // count says how often, and the esp_err_t says which refusal.
 #define MOUNT_EVENT_PAYLOAD_LEN     14
+
+// CMD_MOUNT_OUTAGE: 12 bytes per mount, in mount order.
+//   [0..1]  count      u16  outages since hub boot
+//   [2..5]  total_s    u32  seconds uncontrollable, summed
+//   [6..7]  min_s      u16  shortest outage
+//   [8..9]  max_s      u16  longest outage
+//   [10]    flags      bit0 = this mount is uncontrollable RIGHT NOW
+//   [11]    reserved
+#define MOUNT_OUTAGE_PER_MOUNT      12
+#define MOUNT_OUTAGE_PAYLOAD_LEN    (NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT)
+#define MOUNT_OUTAGE_FLAG_NOW       0x01
+
 #define MOUNT_EVENT_ISOLATED        1   // restarted itself: no RX and no TX
 // Transmit wedged one-way — sends failing fast while RX stayed healthy, so the
 // isolation restart could never fire.  Recovered with a WiFi-level restart
@@ -137,6 +149,19 @@
 // enough to notice a real one well inside any show cue.
 #define MOUNT_STATUS_REFRESH_MS    5000UL
 #define MOUNT_PRESENCE_TIMEOUT_MS  (3UL * MOUNT_STATUS_REFRESH_MS + 1000UL)
+
+// A gap this long in a mount's traffic counts as an outage.
+//
+// The floor is set by the mount's own STATUS cadence, not by choice: a mount
+// speaks every MOUNT_STATUS_REFRESH_MS, so the hub cannot resolve a gap shorter
+// than one missed status however it is measured.  1.5x that is one status
+// definitely missed plus margin for jitter — an interruption the operator would
+// have felt, rather than a late packet.
+//
+// This is worth stating plainly because it bounds what the numbers can mean: a
+// three-second dropout is real and this will not see it.  Reporting such an
+// outage as "none" would be worse than reporting the limit.
+#define MOUNT_OUTAGE_MIN_MS  (MOUNT_STATUS_REFRESH_MS + MOUNT_STATUS_REFRESH_MS / 2)
 // ── Base presence: the same contract, pointing the other way ───────────────
 // How often a base (hub or satellite) sends its heartbeat, and how long a mount
 // waits in silence before deciding that base has gone and scanning for another.
@@ -404,6 +429,22 @@ typedef enum : uint8_t {
     // refusal count indefinitely.  offered vs sent says whether traffic is
     // getting through; attempts vs nomem says whether the refusals are many
     // frames or one frame hammered.
+    // Hub → clients, MOUNT_OUTAGE_PAYLOAD_LEN: how long each mount was
+    // UNCONTROLLABLE, which is the only figure the operator actually cares
+    // about.
+    //
+    // Everything else here measures the rig's health — uptimes, reset reasons,
+    // reinit counts, tx failures.  Asked "how long could I not drive mount 4",
+    // none of it could answer: the log recorded that a bridge restarted and
+    // never how long the mount was deaf.  Counting events and multiplying by a
+    // guessed duration would have produced a confident number that was fiction.
+    //
+    // Measured as the gap in a mount's own traffic, from the last packet before
+    // it went quiet to the first one after — so it covers every cause at once
+    // (bridge reboot, ESP-NOW reinit, radio wedge, someone unplugging it)
+    // without needing to know which. The hub is the right place because it is
+    // the node that survives all of them.
+    CMD_MOUNT_OUTAGE      = 0xA9,
     CMD_SAT_DOWNLINK      = 0xA8,
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
     // Camera → mount → hub → clients: the camera's own status notifications,

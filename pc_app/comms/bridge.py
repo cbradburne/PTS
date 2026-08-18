@@ -37,7 +37,8 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_RX,
                        HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL,
                        HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names,
-                       SAT_DOWNLINK_PAYLOAD_LEN)
+                       SAT_DOWNLINK_PAYLOAD_LEN, MOUNT_OUTAGE_PAYLOAD_LEN,
+                       decode_mount_outage)
 
 log = logging.getLogger(__name__)
 
@@ -601,12 +602,51 @@ class Bridge:
         self._note_hub_event(pkt)
         self._note_sat_names(pkt)
         self._note_sat_downlink(pkt)
+        self._note_mount_outage(pkt)
         self._note_node_health(pkt)
         for cb in self._callbacks:
             try:
                 cb(pkt)
             except Exception as e:
                 log.error(f"Packet callback error: {e}")
+
+    # Last summary logged per mount, so the 60 s resend does not repeat an
+    # unchanged line into the log forever.  A mount that is DOWN is exempt: its
+    # running total climbs, and that is worth a line each time.
+    _outage_last: dict[int, tuple] = {}
+
+    def _note_mount_outage(self, pkt: Packet) -> None:
+        """How long each mount has been uncontrollable, since the hub booted.
+
+        The one number an operator asks for, and the one nothing else here could
+        answer.  Uptimes and reinit counts say an interruption happened; this
+        says for how long.
+
+        Silent about a mount that has never been out — the interesting line is
+        the one with a number in it, and five "0 outages" lines a minute would
+        bury it.
+        """
+        if pkt.cmd != Cmd.MOUNT_OUTAGE or len(pkt.payload) < MOUNT_OUTAGE_PAYLOAD_LEN:
+            return
+        try:
+            stats = decode_mount_outage(pkt.payload)
+        except ParseError as e:
+            log.warning("MOUNT OUTAGE payload rejected: %s", e)
+            return
+        for mid, st in sorted(stats.items()):
+            key = (st["count"], st["total_s"], st["min_s"], st["max_s"], st["now"])
+            if not st["now"] and self._outage_last.get(mid) == key:
+                continue
+            self._outage_last[mid] = key
+            total = st["total_s"]
+            human = (f"{total // 60}m {total % 60}s" if total >= 60 else f"{total}s")
+            line = ("MOUNT OUTAGE cam%d: uncontrollable %s total over %d event(s)"
+                    % (mid, human, st["count"]))
+            if st["count"]:
+                line += ", min %ds, max %ds" % (st["min_s"], st["max_s"])
+            if st["now"]:
+                line += "  — DOWN RIGHT NOW"
+            (log.warning if st["now"] else log.info)(line)
 
     def _note_sat_downlink(self, pkt: Packet) -> None:
         """What the relay was asked to do, against what its radio took.
@@ -1049,6 +1089,14 @@ class Bridge:
             log.warning("HUB PAIRING: cam%d %s — %s | this resets the hub's "
                         "last-seen, so the next STATUS looks like a new connect",
                         pkt.payload[1], acts.get(pkt.payload[2], f"action {pkt.payload[2]}"), mac)
+        elif kind == 14:
+            # One outage, as it ends.  The duration is the gap in that mount's
+            # own traffic — last packet before it went quiet to first packet
+            # after — so it counts a bridge reboot, an ESP-NOW reinit, a radio
+            # wedge and a pulled plug alike.  From the operator's chair those
+            # are the same event: the mount did not answer.
+            secs = (pkt.payload[3] << 8) | pkt.payload[4]
+            log.warning("MOUNT OUTAGE: cam%d was uncontrollable for %ds", mount, secs)
         elif kind == 13:
             # An OSC camera command, by name.
             #

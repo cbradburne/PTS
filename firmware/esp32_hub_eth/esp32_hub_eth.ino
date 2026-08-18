@@ -1267,6 +1267,90 @@ static void send_sat_names() {
     _ws.binaryAll(raw, (size_t)n);
 }
 
+// ---------------------------------------------------------------------------
+// Mount outage accounting — how long each mount was UNCONTROLLABLE
+// ---------------------------------------------------------------------------
+// Every other counter on this rig measures the rig's health: uptimes, reset
+// reasons, ESP-NOW reinits, tx failures.  Asked "how long could I not drive
+// mount 4", none of them could answer.  The log said a bridge had restarted and
+// never how long the mount was deaf, and counting events and multiplying by an
+// assumed duration would have produced a confident figure that was invented.
+//
+// Measured here as the gap in the mount's own traffic — last packet before it
+// went quiet to first packet after — which covers every cause at once (bridge
+// reboot, ESP-NOW reinit, radio wedge, someone pulling the plug) without the
+// hub needing to know which.  The hub is the right place to measure it: it is
+// the one node that survives all of them.
+//
+// Resolution is bounded by the mount's STATUS cadence, not by the method — see
+// MOUNT_OUTAGE_MIN_MS in shared/protocol.h.  A three-second dropout is real and
+// this will not see it.
+static uint32_t _out_gap_start[NUM_MOUNTS] = {};   // last_seen when it went quiet; 0 = present
+static uint16_t _out_count[NUM_MOUNTS]     = {};
+static uint32_t _out_total_ms[NUM_MOUNTS]  = {};
+static uint32_t _out_min_ms[NUM_MOUNTS]    = {};
+static uint32_t _out_max_ms[NUM_MOUNTS]    = {};
+
+static void send_mount_outage() {
+    uint8_t buf[MOUNT_OUTAGE_PAYLOAD_LEN] = {};
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        uint8_t *e = buf + i * MOUNT_OUTAGE_PER_MOUNT;
+        uint32_t tot = _out_total_ms[i] / 1000UL;
+        uint32_t mn  = _out_min_ms[i]   / 1000UL;
+        uint32_t mx  = _out_max_ms[i]   / 1000UL;
+        // A mount that is out RIGHT NOW has its running gap included, so the
+        // total does not stall at the last recovery while it is still down.
+        if (_out_gap_start[i]) {
+            uint32_t live = (millis() - _out_gap_start[i]) / 1000UL;
+            tot += live;
+            if (live > mx) mx = live;
+            e[10] |= MOUNT_OUTAGE_FLAG_NOW;
+        }
+        e[0] = (uint8_t)(_out_count[i] >> 8);  e[1] = (uint8_t)_out_count[i];
+        e[2] = (uint8_t)(tot >> 24); e[3] = (uint8_t)(tot >> 16);
+        e[4] = (uint8_t)(tot >> 8);  e[5] = (uint8_t)tot;
+        if (mn > 0xFFFF) mn = 0xFFFF;
+        if (mx > 0xFFFF) mx = 0xFFFF;
+        e[6] = (uint8_t)(mn >> 8);   e[7] = (uint8_t)mn;
+        e[8] = (uint8_t)(mx >> 8);   e[9] = (uint8_t)mx;
+    }
+    uint8_t raw[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_MOUNT_OUTAGE, buf, sizeof(buf));
+    broadcast_to_all(raw, n);
+    _ws.binaryAll(raw, (size_t)n);
+}
+
+// Called every loop.  Cheap: five compares.
+static void mount_outage_poll(uint32_t now) {
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        uint32_t seen = _mount_last_seen[i];
+        if (!seen) continue;                 // never heard from: not an outage, an absence
+        bool present = (now - seen) < MOUNT_PRESENCE_TIMEOUT_MS;
+        if (!present) {
+            // Record where the gap STARTED, not where we noticed it.  The
+            // operator lost control at the last packet, not one timeout later,
+            // and reporting the moment of detection would understate every
+            // outage by MOUNT_PRESENCE_TIMEOUT_MS.
+            if (!_out_gap_start[i]) _out_gap_start[i] = seen;
+        } else if (_out_gap_start[i]) {
+            uint32_t dur = seen - _out_gap_start[i];   // to the first packet back
+            _out_gap_start[i] = 0;
+            if (dur >= MOUNT_OUTAGE_MIN_MS) {
+                _out_count[i]++;
+                _out_total_ms[i] += dur;
+                if (dur > _out_max_ms[i]) _out_max_ms[i] = dur;
+                if (!_out_min_ms[i] || dur < _out_min_ms[i]) _out_min_ms[i] = dur;
+                Serial.printf("[OUTAGE] CAM %d uncontrollable %lu.%lus\n",
+                              i + 1, (unsigned long)(dur / 1000),
+                              (unsigned long)((dur % 1000) / 100));
+                send_hub_event(14, (uint8_t)(i + 1), 0,
+                               (uint8_t)((dur / 1000) >> 8), (uint8_t)(dur / 1000));
+                send_mount_outage();          // totals moved; tell clients now
+            }
+        }
+    }
+}
+
 static void send_mount_route() {
     uint8_t buf[MOUNT_ROUTE_PAYLOAD_LEN];
     for (int i = 0; i < NUM_MOUNTS; i++)
@@ -1298,6 +1382,7 @@ static bool handle_pairing_cmd(const ParsedPacket &pkt) {
         bcast_mount_table();                       // refresh every client's view
         send_mount_route();                        // ...and how each is reached
         send_sat_names();                          // ...and what to call it
+        send_mount_outage();                       // ...and what it has cost so far
         return true;
     case CMD_PAIR_DECIDE:                           // set: replace (1) / ignore (0)
         if (pkt.payload_len >= PAIR_DECIDE_PAYLOAD_LEN)
@@ -3422,6 +3507,18 @@ void loop() {
     }
 
     MARK(SEC_SAT);
+
+    // ---- Mount outage accounting ----
+    // Every loop: five compares, and the transition is what carries the number.
+    mount_outage_poll(now);
+    // Resent slowly as well, so an app that connected mid-session converges,
+    // and so a mount that is STILL down keeps a live total rather than a stale
+    // one frozen at its last recovery.
+    static uint32_t _outage_report_ms = 0;
+    if (now - _outage_report_ms >= 60000UL) {
+        _outage_report_ms = now;
+        send_mount_outage();
+    }
 
     // ---- OSC control (Companion / QLab) → mounts ----
     osc_poll();
