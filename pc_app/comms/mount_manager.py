@@ -29,7 +29,7 @@ from .protocol import (
     pkt_e_stop, pkt_get_status, pkt_ping,
     pkt_get_state, pkt_store_pos, pkt_clear_pos,
     pkt_set_active_preset, pkt_save_speeds, pkt_goto_slot, pkt_move_rel,
-    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus,
+    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus, pkt_get_position,
     pkt_cam_iso, pkt_cam_white_balance, decode_cam_status,
     pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
@@ -61,6 +61,23 @@ from .protocol import (
 from .bridge import Bridge
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# TEMPORARY — zoom creep diagnostic (2026-08-19).  REMOVE WHEN DONE.
+# ---------------------------------------------------------------------------
+# Set False, or revert the commit that added this, to take it all out.  Nothing
+# in the product needs position telemetry: the mounts' bridges stopped
+# forwarding the 5 Hz CMD_POSITION stream precisely because it had no consumer,
+# and that remains the right default.  This exists only to catch cam5's zoom
+# creeping away from a recalled position, and should not outlive that.
+#
+# What it switches on, both of which are inert without it:
+#   * _poll_positions() — one CMD_GET_POSITION per moving mount per heartbeat,
+#     which is what reopens the bridge's 2 s forwarding window.  Without a
+#     request the stream never flows, which is why the first two attempts at
+#     this logged nothing at all.
+#   * _note_zoom_travel() — the ZOOM / POSITION lines themselves.
+ZOOM_DIAGNOSTIC = True
 
 HEARTBEAT_INTERVAL_MS  = 1000
 HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
@@ -254,6 +271,10 @@ class MountManager(QObject):
         self._sat_names: dict[int, str] = {}
         # Per-mount zoom-travel logging state — see _note_zoom_travel().
         self._zoom_travel: dict[int, dict] = {}
+        # Per-mount: when we last asked for a position, and until when to keep
+        # asking after motion ends — see _poll_positions().
+        self._pos_asked: dict[int, float] = {}
+        self._pos_until: dict[int, float] = {}
         # (mount, category, parameter) -> the value last logged for it.
         self._cam_params_seen: dict[tuple[int, int, int], object] = {}
         # key -> (window start, changes this window, gone quiet)
@@ -604,7 +625,7 @@ class MountManager(QObject):
         running past it, or oscillating — which consecutive deltas answer and a
         single number never can.
         """
-        if pos is None:
+        if pos is None or not ZOOM_DIAGNOSTIC:   # TEMPORARY — see ZOOM_DIAGNOSTIC
             return
         state = self._zoom_travel.setdefault(
             mid, {"alone_since": None, "last": 0.0, "seen": False, "creep": 0.0})
@@ -1255,6 +1276,53 @@ class MountManager(QObject):
     # Heartbeat
     # ------------------------------------------------------------------
 
+    # Motion states — any of these means the mount is going somewhere.
+    _MOVING_STATES = (MountState.JOGGING, MountState.MOVING_TO_POS,
+                      MountState.FINDING_LIMITS, MountState.LOOK_AT_MOVE,
+                      MountState.LOOK_AT_PRE_AIM)
+
+    # The mount's bridge forwards CMD_POSITION only for POS_ON_DEMAND_MS (2 s)
+    # after a CMD_GET_POSITION reaches it, so the window has to be reopened
+    # before it lapses.
+    #
+    # This runs off the 1 s heartbeat, so the interval must be UNDER one second
+    # or it lands on every second beat: 1.2 s would ask at t=2, 4, 6 — a 2 s
+    # cadence against a 2 s window, with no margin for a late or lost packet and
+    # a gap in the stream every time one slipped.  0.9 s means every beat.
+    _POS_ASK_EVERY_S = 0.9
+    # Keep asking this long after motion is reported finished.  The whole point
+    # is an axis that is STILL moving once the mount believes it has arrived —
+    # stopping the moment the state goes IDLE would blind us at exactly the
+    # moment of interest.
+    _POS_TAIL_S = 6.0
+
+    def _poll_positions(self, now: float) -> None:
+        """Ask moving mounts for their positions.
+
+        The mounts stopped broadcasting CMD_POSITION unsolicited: the bridge
+        forwards it only on demand, because at the time nothing consumed the
+        5 Hz stream.  Something does now — PositionLogger, and the zoom-travel
+        logging — and neither had any way to work, because nothing in the app
+        had ever sent a CMD_GET_POSITION.  A consumer and a producer, both
+        present, with no request between them.
+
+        One small packet per moving mount per heartbeat reopens the window, and
+        the 5 Hz stream behind it flows for as long as it is held open.
+        """
+        if not ZOOM_DIAGNOSTIC:      # TEMPORARY — guarded here as well as at the
+            return                   # call site, so the flag cannot half-apply
+        for mid, st in self._states.items():
+            if not st.connected:
+                continue
+            if st.state in self._MOVING_STATES:
+                self._pos_until[mid] = now + self._POS_TAIL_S
+            elif now > self._pos_until.get(mid, 0.0):
+                continue
+            if now - self._pos_asked.get(mid, 0.0) < self._POS_ASK_EVERY_S:
+                continue
+            self._pos_asked[mid] = now
+            self._send(pkt_get_position(mid))
+
     def _heartbeat(self) -> None:
         if not self._bridge.connected:
             # Ask again on the next connection, and say the route again with
@@ -1273,6 +1341,11 @@ class MountManager(QObject):
         if not self._asked_for_table:
             self._asked_for_table = True
             self.request_mount_table()
+
+        # TEMPORARY (see ZOOM_DIAGNOSTIC) — keep the position window open on
+        # anything that is moving.
+        if ZOOM_DIAGNOSTIC:
+            self._poll_positions(time.monotonic())
 
         self._send(pkt_ping(MOUNT_BROADCAST))
 
