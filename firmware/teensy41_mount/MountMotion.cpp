@@ -83,7 +83,7 @@ static constexpr uint16_t MICROSTEPS[4] = { MICROSTEPS_PAN, MICROSTEPS_TILT,
                                            MICROSTEPS_SLIDER, MICROSTEPS_ZOOM };
 
 // Default run current (mA)
-static constexpr uint16_t DEFAULT_CURRENT_MA[4] = { 800, 800, 2000, 1000 };
+static constexpr uint16_t DEFAULT_CURRENT_MA[4] = { 800, 800, 2600, 1300 };
 
 
 // Limit find speed (steps/sec) and back-off after stall (steps)
