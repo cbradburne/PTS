@@ -275,6 +275,8 @@ class MountManager(QObject):
         # asking after motion ends — see _poll_positions().
         self._pos_asked: dict[int, float] = {}
         self._pos_until: dict[int, float] = {}
+        # TEMPORARY — last time a non-zero jog was logged, per mount.
+        self._jog_seen: dict[int, float] = {}
         # (mount, category, parameter) -> the value last logged for it.
         self._cam_params_seen: dict[tuple[int, int, int], object] = {}
         # key -> (window start, changes this window, gone quiet)
@@ -313,6 +315,26 @@ class MountManager(QObject):
         """
         self._send(pkt_jog(mount_id, pan, tilt, slider, zoom,
                            pt_preset, sz_preset, axis_mask))
+
+        # TEMPORARY (see ZOOM_DIAGNOSTIC) — make a sustained jog visible.
+        #
+        # Cmd.JOG is in the bridge's _TX_QUIET_CMDS, deliberately: it streams at
+        # 20 Hz and would drown the log.  The cost is that a jog nobody meant to
+        # send is invisible, and that is exactly the open question here — cam5's
+        # zoom travelled at a near-constant velocity for 14 s with no command in
+        # the log, which is what a jog looks like and also what the log looks
+        # like when jogs are hidden.  A stick resting just outside its deadzone
+        # streams one continuously with nobody touching it.
+        #
+        # Prints only while a jog is NON-ZERO, once a second, per mount.  Silence
+        # here now means no jog is being sent, which is the thing that could not
+        # be established before.
+        if ZOOM_DIAGNOSTIC and (pan or tilt or slider or zoom):
+            now = time.monotonic()
+            if now - self._jog_seen.get(mount_id, 0.0) >= 1.0:
+                self._jog_seen[mount_id] = now
+                log.warning("JOG cam%d: pan=%d tilt=%d slider=%d zoom=%d "
+                            "— a jog IS being streamed", mount_id, pan, tilt, slider, zoom)
 
         # In look-at mode, any physical axis movement deselects the active
         # subject immediately so the UI doesn't wait for a Teensy round-trip.
