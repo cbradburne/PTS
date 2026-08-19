@@ -1246,31 +1246,54 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(int, int)
     def _on_slider_jog_start(self, mount_id: int, direction: int) -> None:
-        """Arrow button pressed.  If a look-at subject is active, start a look-at
-        move toward that slider limit; otherwise fall back to raw slider jog."""
+        """Arrow button pressed.  Starts a look-at move toward that slider limit
+        IF a look-at subject is active; otherwise does nothing, because slots 9
+        and 10 are the same buttons as these arrows and must recall and only
+        recall when look-at is off."""
         # Arrow state comes from the mount's target_slot in _on_status()
         # back to all clients (including this one), so all devices stay in sync.
         # No local optimistic update needed — the round-trip is <10 ms over loopback.
 
         subj = self._active_la_subject.get(mount_id, -1)
-        if subj >= 0:
-            # direction: -1 = left = min limit (0), +1 = right = max limit (1)
-            la_dir = 0 if direction < 0 else 1
-            preset = self._grid.get_sl_preset(mount_id)
-            self._mm.send_start_look_at_move(mount_id, subj, la_dir, preset)
-        else:
-            vel = 1000 * direction
-            self._mm.send_jog(mount_id, 0, 0, vel, 0,
-                              pt_preset=2, sz_preset=self._grid.get_sl_preset(mount_id),
-                              axis_mask=0x04)
+        if subj < 0:
+            # Look-at is not engaged, so these are ordinary recall slots and
+            # nothing else.  There used to be a raw-jog fallback here, and it
+            # made slots 9 and 10 do TWO things on one press.
+            #
+            # They are the same QPushButton as the slot buttons: pressed fires
+            # this handler, released+clicked fires the recall.  So every recall
+            # of slot 9 or 10 on a slider mount also sent a full-deflection
+            # slider jog — vel = 1000 * direction, because a button has no
+            # analogue value to send.  On the rig (2026-08-19) the slider set
+            # off at full speed for as long as the button was held, then the
+            # recall dragged it back: 0.5 -> 4.4 -> 0.5 mm inside one press,
+            # with no joystick anywhere near it.
+            #
+            # Worse than the movement, it left the mount in a different state
+            # each time the recall landed — jogging or not, depending on how
+            # long the button was held — and the firmware picks moveTo() or
+            # retargetTo() on exactly that state.  Two presses of the same slot
+            # could take different code paths and behave differently, which is
+            # what made the zoom fault look impossible.
+            return
+        # direction: -1 = left = min limit (0), +1 = right = max limit (1)
+        la_dir = 0 if direction < 0 else 1
+        preset = self._grid.get_sl_preset(mount_id)
+        self._mm.send_start_look_at_move(mount_id, subj, la_dir, preset)
 
     @pyqtSlot(int)
     def _on_slider_jog_stop(self, mount_id: int) -> None:
-        """Arrow button released.  Only stop if we were raw-jogging
-        (look-at moves run to their natural end, not held like a jog)."""
+        """Arrow button released.  Nothing to stop: look-at moves run to their
+        natural end rather than being held like a jog, and with look-at off the
+        press started nothing in the first place."""
         subj = self._active_la_subject.get(mount_id, -1)
         if subj < 0:
-            self._mm.send_jog(mount_id, 0, 0, 0, 0, axis_mask=0x04)
+            # Nothing was started, so there is nothing to stop.  This used to
+            # send a zero jog to halt the raw-jog fallback above; with that gone
+            # it would be one pointless packet on every slot 9/10 recall.  Any
+            # stray jog from elsewhere is stopped by the mount's own 500 ms jog
+            # watchdog regardless.
+            return
 
     @pyqtSlot(int, int)
     def _on_look_at_subject_selected(self, mount_id: int, slot: int) -> None:
