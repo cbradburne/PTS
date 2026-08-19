@@ -226,6 +226,30 @@ static void cfg_load() {
 #define HUB_TIMEOUT_MS         5000
 #define HW_WDT_TIMEOUT_MS     30000          // hardware watchdog — reset if loop stalls
 #define ESPNOW_RESTART_MS     (2UL*60UL*1000UL) // restart after 2 min with no hub contact
+// ...unless nothing is being attempted, in which case there is nothing to wait
+// for and 2 min is 2 min of a dead mount.
+//
+// The two minutes above exist to let the cheaper remedy work first: 4 consecutive
+// send failures refresh the peer, 3 refreshes rebuild the stack, and at a 15 s
+// minimum gap that is ~8 rebuild attempts inside the window.  Every one of those
+// rungs is driven by the ESP-NOW SEND CALLBACK.
+//
+// On 2026-08-18 cam1 wedged with "the stack's TX queue was full".  esp_now_send()
+// is refused at the call in that state, so the callback never fires — and the
+// counters preserved through the restart prove what followed: txfail still 248,
+// reinits still 9, exactly where they had been before it went quiet.  In 137
+// seconds of isolation the ladder did not run once.  The mount waited two
+// minutes for a remedy that cannot start, then rebooted and came back fine.
+//
+// So the window is chosen by whether the ladder is actually running.  If send
+// failures or reinits are still accruing, something is being tried and it gets
+// the full two minutes.  If neither has moved since the silence began, nothing
+// is being tried and waiting only extends the outage.
+//
+// This is also what keeps a hub reboot on the long window: with the hub off, the
+// mount's sends FAIL and the callback fires, so the counters move and the full
+// two minutes applies — which is the case the long window was written for.
+#define ESPNOW_RESTART_STALLED_MS  (20UL*1000UL)
 // ...but only a few times.  Restarting does not fix a one-way link — a
 // fresh-booted mount still could not receive (confirmed 2026-06-16) — so past
 // this count the restarts are pure cost: they blink the camera, throw away the
@@ -3279,13 +3303,36 @@ void loop() {
     // not fix (confirmed 2026-06-16 — a fresh-booted mount still couldn't
     // receive).  Restarting then only reboot-loops and blinks the camera, so we
     // hold off and let the hub be recovered from the PC (CMD_HUB_RESTART).
-    bool rx_stale = (millis() - _last_hub_rx_ms       > ESPNOW_RESTART_MS);
-    bool tx_stale = (millis() - _last_espnow_tx_ok_ms > ESPNOW_RESTART_MS);
+    uint32_t rx_age = millis() - _last_hub_rx_ms;
+    uint32_t tx_age = millis() - _last_espnow_tx_ok_ms;
+
+    // Mark when the silence began, and what the recovery ladder's counters read
+    // at that moment.  See ESPNOW_RESTART_STALLED_MS: if neither has moved since,
+    // no rung of the ladder is running and the long window buys nothing.
+    static uint32_t _iso_since_ms = 0, _iso_fail_mark = 0, _iso_reinit_mark = 0;
+    if (rx_age <= HUB_TIMEOUT_MS || tx_age <= HUB_TIMEOUT_MS) {
+        _iso_since_ms = 0;                       // still in contact one way or another
+    } else if (!_iso_since_ms) {
+        _iso_since_ms    = millis() ? millis() : 1;
+        _iso_fail_mark   = _espnow_fail_total;
+        _iso_reinit_mark = _reinit_count;
+    }
+    bool ladder_running = _iso_since_ms &&
+                          (_espnow_fail_total != _iso_fail_mark ||
+                           _reinit_count      != _iso_reinit_mark);
+    uint32_t iso_window = ladder_running ? ESPNOW_RESTART_MS
+                                         : ESPNOW_RESTART_STALLED_MS;
+
+    bool rx_stale = (rx_age > iso_window);
+    bool tx_stale = (tx_age > iso_window);
     if (_cfg_valid && !_setup_active && !hub_ok && rx_stale && tx_stale) {
         if (_iso_restarts < ESPNOW_RESTART_MAX) {
             _iso_restarts++;
-            Serial.printf("[ESPNOW] Mount isolated (no RX or TX) — restarting chip to "
-                          "recover stack (attempt %lu of %d)\n",
+            Serial.printf("[ESPNOW] Mount isolated (no RX or TX) after %lus — %s — "
+                          "restarting chip to recover stack (attempt %lu of %d)\n",
+                          (unsigned long)(iso_window / 1000UL),
+                          ladder_running ? "recovery was running and did not help"
+                                         : "nothing was being attempted (TX queue wedged)",
                           (unsigned long)_iso_restarts, ESPNOW_RESTART_MAX);
             // Leave a note for after the reboot — this is the only chance.
             _evt_magic   = MOUNT_EVT_MAGIC;
