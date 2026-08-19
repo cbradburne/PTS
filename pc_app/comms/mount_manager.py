@@ -604,11 +604,51 @@ class MountManager(QObject):
         running past it, or oscillating — which consecutive deltas answer and a
         single number never can.
         """
-        if prev is None or pos is None:
+        if pos is None:
             return
+        state = self._zoom_travel.setdefault(
+            mid, {"alone_since": None, "last": 0.0, "seen": False, "creep": 0.0})
+
+        # Say once, per mount, that position telemetry is arriving.
+        #
+        # The first version of this logged nothing at all on a rig where the
+        # fault was reproducing every time, and there was no way to tell "zoom
+        # is behaving" from "these packets never reach me".  Everything below is
+        # conditional; this line is not.
+        if not state["seen"]:
+            state["seen"] = True
+            log.info("POSITION cam%d: telemetry arriving — zoom %d steps, "
+                     "moving_mask 0x%02X", mid, pos.zoom_steps, pos.moving_mask)
+        if prev is None:
+            return
+
         zoom_moving = bool(pos.moving_mask & self._AX_ZOOM)
+        moved = pos.zoom_steps - prev.zoom_steps
+
+        # Zoom that MOVES while the mount says it is not moving.
+        #
+        # The mask comes from _stepper[i]->isMoving, and the whole of the zoom
+        # logging below hangs off it — so if the axis can travel without that
+        # flag being set, keying on it makes the instrument blind to exactly the
+        # fault it was added for.  A changing step count is the ground truth and
+        # cannot be argued with: if these disagree, that disagreement IS the
+        # finding, and it is worth more than anything else on this line.
+        # Only once zoom was ALREADY reported stopped on the previous sample.
+        # The last sample of any normal move has the mask cleared and a position
+        # that still changed — the final steps — so firing on that would report
+        # every ordinary arrival as a fault.  Two consecutive stopped samples
+        # with the count still climbing is travel the mount is genuinely not
+        # admitting to.
+        prev_zoom_moving = bool(prev.moving_mask & self._AX_ZOOM)
+        if moved and not zoom_moving and not prev_zoom_moving:
+            now = time.monotonic()
+            if now - state["creep"] >= 0.5:
+                state["creep"] = now
+                log.warning("ZOOM cam%d: %d steps (%+d) but moving_mask 0x%02X says "
+                            "zoom is STOPPED — moving without reporting it",
+                            mid, pos.zoom_steps, moved, pos.moving_mask)
+            return
         others = pos.moving_mask & ~self._AX_ZOOM
-        state = self._zoom_travel.setdefault(mid, {"alone_since": None, "last": 0.0})
 
         if not zoom_moving:
             if state["alone_since"] is not None:
@@ -629,7 +669,7 @@ class MountManager(QObject):
             return
         state["last"] = now
 
-        delta = pos.zoom_steps - prev.zoom_steps
+        delta = moved
         moving = [n for b, n in ((self._AX_PAN, "pan"), (self._AX_TILT, "tilt"),
                                  (self._AX_SLIDER, "slider")) if pos.moving_mask & b]
         if alone:

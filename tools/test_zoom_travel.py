@@ -110,8 +110,54 @@ assert loud, "a sample 600 ms later should print"
 print("   2 Hz: 50 ms sample suppressed, 600 ms printed      OK")
 
 # A mount at rest must say nothing at all — CMD_POSITION still arrives at 1 Hz.
+# Primed with one packet first, because the liveness line legitimately fires on
+# the very first sample from each mount.
 mm5 = fresh()
+mm5._note_zoom_travel(5, None, pos(900, 0))
 assert feed(mm5, pos(900, 0), pos(900, 0)) == "", "a stationary mount must be silent"
 print("   a stationary mount is silent                       OK")
+
+# ---- 5. it must prove telemetry is arriving --------------------------------
+# The first version of this logged nothing on a rig where the fault reproduced
+# every time, and there was no way to tell "zoom is behaving" from "these
+# packets never reach me".  Everything else here is conditional; this is not.
+print("\n5. liveness:")
+mm6 = fresh()
+_buf.truncate(0); _buf.seek(0)
+mm6._note_zoom_travel(5, None, pos(12000, 0))
+first = _buf.getvalue().strip()
+assert "telemetry arriving" in first and "moving_mask" in first, first
+print(f"   {first.split('|', 1)[1]}")
+_buf.truncate(0); _buf.seek(0)
+mm6._note_zoom_travel(5, pos(12000, 0), pos(12000, 0))
+assert "telemetry arriving" not in _buf.getvalue(), "the liveness line repeats"
+print("   said once per mount, then quiet                    OK")
+
+# ---- 6. movement the mount does not admit to -------------------------------
+# The mask comes from _stepper[i]->isMoving, and keying the whole instrument on
+# it makes it blind if an axis can travel without that flag.  A changing step
+# count is ground truth; a disagreement between the two IS the finding.
+print("\n6. zoom moving while the mask says stopped:")
+mm7 = fresh()
+mm7._note_zoom_travel(5, None, pos(12600, 0))
+out = feed(mm7, pos(12600, 0), pos(12615, 0))   # stopped -> stopped, still moving
+assert out.startswith("WARNING"), out
+assert "+15" in out and "STOPPED" in out and "0x00" in out, out
+print(f"   {out.split('|', 1)[1]}")
+print("   a creeping zoom is caught even if unreported       OK")
+
+# The tail of an ordinary move must NOT be reported as unadmitted travel: the
+# last sample always has the mask cleared and a position that still changed.
+mm9 = fresh()
+mm9._note_zoom_travel(5, None, pos(500, ZOOM))
+out = feed(mm9, pos(520, ZOOM), pos(400, 0))
+assert "without reporting" not in out, f"a normal arrival was flagged as a fault: {out}"
+print("   a normal arrival is not flagged                    OK")
+
+# ...but a stationary axis must still say nothing.
+mm8 = fresh()
+mm8._note_zoom_travel(5, None, pos(900, 0))
+assert feed(mm8, pos(900, 0), pos(900, 0)) == "", "no movement must stay silent"
+print("   a genuinely stopped zoom stays silent              OK")
 
 print("\nALL CHECKS PASSED")
