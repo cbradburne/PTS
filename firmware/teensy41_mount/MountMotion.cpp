@@ -91,7 +91,18 @@ static constexpr uint16_t DEFAULT_CURRENT_MA[4] = { 800, 800, 2600, 1300 };
 // Both SLIDER and ZOOM are now 32 µsteps:
 //   6000 steps/s ÷ (32 µstep × 200 steps/rev) × 60 ≈ 56 RPM  ✓
 static constexpr uint32_t LIMIT_FIND_SPEED       = 6000;   // steps/s — both axes (32 µstep)
-static constexpr uint32_t LIMIT_FIND_ACCEL       = 150000; // steps/s² — ramp = 6000/150000 = 0.04 s
+// 6400 steps/s² = 40 mm/s² at 160 steps/mm, which is exactly the fastest SLIDER
+// speed preset (1, 10, 20, 40 mm/s²).  It was 150000 — 938 mm/s², TWENTY-THREE
+// TIMES the most aggressive acceleration the axis is ever asked for in normal
+// use — and homing does it from a dead stop with the current scaled to 75%.
+// The slider buzzed and did not move: a genuine torque stall at the start of the
+// ramp, not a StallGuard misread.
+//
+// 40 mm/s² is not a guess.  It is the one figure the hardware has demonstrated
+// it can do under this load, every day, on preset 4.  The whole cost is ramp
+// distance: 0.75 mm becomes about 17 mm, on a rail hundreds of mm long, and the
+// 0.94 s ramp is lost inside a traverse that takes ~20 s.
+static constexpr uint32_t LIMIT_FIND_ACCEL       = 6400;   // steps/s² — ramp = 6000/6400 = 0.94 s
 static constexpr int32_t  LIMIT_BACK_OFF[4]      = { 0, 0, 300, 300 };
 // Minimum ramp time (seconds) enforced for all moveTo() GOTO moves.
 // Caps the acceleration to  speed / GOTO_MIN_RAMP_S  so that even at fast
@@ -104,15 +115,37 @@ static constexpr float GOTO_MIN_RAMP_S = 1.0f;  //0.8f;
 // Zoom:   tune independently — set 0 if the zoom has no physical runout concern.
 static constexpr int32_t  LIMIT_SAFETY_MARGIN[4] = { 0, 0, 100, 100 };
 static constexpr uint32_t LIMIT_FIND_TIMEOUT_MS  = 2000000;
-// Ignore stall for this many ms after a new move starts (must exceed the ramp time).
-// Ramp time = 6000/150000 = 0.04 s — 300 ms gives plenty of margin.
-static constexpr uint32_t LIMIT_STALL_SETTLE_MS  = 300;
+// Ignore stall for this many ms after a new move starts (MUST exceed the ramp
+// time).  These two are one setting in two numbers: StallGuard cannot be trusted
+// while the axis is still accelerating, so the guard has to outlast the ramp.
+//
+// It was 300 ms against a 0.04 s ramp.  Lowering the acceleration to something
+// the motor can actually deliver stretches that ramp to 0.94 s, so 300 ms would
+// have expired mid-ramp and traded a real stall for a false one — a worse fault,
+// because it looks like a working home that stops in the wrong place.
+static constexpr uint32_t LIMIT_STALL_SETTLE_MS  = 1600;
 
 // Zoom now uses 32 µsteps (same as slider) — no separate speed/accel needed.
 // These are kept as aliases so the axis-specific code paths still compile.
 static constexpr uint32_t LIMIT_FIND_SPEED_ZOOM      = 1600;
 static constexpr uint32_t LIMIT_FIND_ACCEL_ZOOM      = 50000;
 static constexpr uint32_t LIMIT_STALL_SETTLE_ZOOM_MS = 600;
+
+// The settle guard must outlast the acceleration ramp, on BOTH axes.  That was
+// written in a comment and held by hand, and a comment does not fail the build:
+// lower the acceleration without raising the settle and StallGuard starts
+// watching while the axis is still accelerating, where its reading means
+// nothing.  The result is a home that stops early and looks like it worked.
+//
+//   settle_s > speed / accel   rearranged to stay in integers:
+static_assert(LIMIT_STALL_SETTLE_MS * (uint64_t)LIMIT_FIND_ACCEL
+                  > 1000ULL * LIMIT_FIND_SPEED,
+              "LIMIT_STALL_SETTLE_MS must exceed the slider ramp time "
+              "(LIMIT_FIND_SPEED / LIMIT_FIND_ACCEL)");
+static_assert(LIMIT_STALL_SETTLE_ZOOM_MS * (uint64_t)LIMIT_FIND_ACCEL_ZOOM
+                  > 1000ULL * LIMIT_FIND_SPEED_ZOOM,
+              "LIMIT_STALL_SETTLE_ZOOM_MS must exceed the zoom ramp time "
+              "(LIMIT_FIND_SPEED_ZOOM / LIMIT_FIND_ACCEL_ZOOM)");
 
 // ── Per-axis limit-find tuning ───────────────────────────────────────────────
 //
