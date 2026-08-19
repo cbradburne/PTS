@@ -1237,13 +1237,25 @@ class MountManager(QObject):
         elif pkt.cmd == Cmd.REF_CONFIRMED:
             try:
                 rc = decode_ref_confirmed(pkt.payload)
-                self.ref_confirmed.emit(mid, rc.pan_ref_deg, rc.tilt_ref_deg)
+                # Fields are pan_deg/tilt_deg — this read pan_ref_deg and threw
+                # every single time, since the initial commit.  The signal's own
+                # comment names them correctly; only these two reads were wrong.
+                log.info("REF CONFIRMED cam%d: pan=%.2fdeg tilt=%.2fdeg",
+                         mid, rc.pan_deg, rc.tilt_deg)
+                self.ref_confirmed.emit(mid, rc.pan_deg, rc.tilt_deg)
             except Exception as e:
                 log.warning(f"Bad REF_CONFIRMED from mount {mid}: {e}")
 
         elif pkt.cmd == Cmd.CALIB_PROMPT:
             try:
                 prompt = decode_calib_prompt(pkt.payload)
+                # Subject calibration is a handshake — the mount prompts, the
+                # operator acts, the app answers — and only the app's half was
+                # ever recorded.  A setup that stalls therefore shows SET_B with
+                # no SET_A before it and nothing to say why, which is exactly
+                # what the 2026-08-19 attempt left behind.
+                log.info("CALIB PROMPT cam%d: %s", mid,
+                         getattr(prompt, "name", None) or f"value {int(prompt)}")
                 self.calib_prompt_received.emit(mid, int(prompt))
             except Exception as e:
                 log.warning(f"Bad CALIB_PROMPT from mount {mid}: {e}")
