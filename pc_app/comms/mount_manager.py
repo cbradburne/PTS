@@ -252,6 +252,8 @@ class MountManager(QObject):
         self._route_logged = False
         self._asked_for_table = False
         self._sat_names: dict[int, str] = {}
+        # Per-mount zoom-travel logging state — see _note_zoom_travel().
+        self._zoom_travel: dict[int, dict] = {}
         # (mount, category, parameter) -> the value last logged for it.
         self._cam_params_seen: dict[tuple[int, int, int], object] = {}
         # key -> (window start, changes this window, gone quiet)
@@ -577,6 +579,68 @@ class MountManager(QObject):
     # Fire-and-forget, every one of them.  The protocol has no acknowledgement,
     # so there is nothing to await and nothing to retry against — see the note
     # at the top of camera_advanced_dialog.py.
+    # Axis bits in PositionPayload.moving_mask.
+    _AX_PAN, _AX_TILT, _AX_SLIDER, _AX_ZOOM = 1, 2, 4, 8
+
+    def _note_zoom_travel(self, mid: int, prev, pos) -> None:
+        """Log what the ZOOM axis is doing while a move is in progress.
+
+        The mount has been sending CMD_POSITION all along — 5 Hz while moving,
+        1 Hz at rest — carrying zoom_steps and a per-axis moving_mask.  Nothing
+        logged it, so a zoom that crept away from its stored position after the
+        other three axes had arrived left no trace at all: the symptom was
+        visible on the rig and invisible in the log.
+
+        Deliberately not a firehose.  At 5 Hz across five mounts this would be
+        25 lines a second and would bury everything else, so it prints only
+        while zoom is actually moving, at 2 Hz, and says which other axes are
+        still going.  The line that matters is the one where zoom is the ONLY
+        axis left — that is the reported fault, and it is called out by name
+        along with how long it has been alone, because "still moving" and
+        "moving for nine seconds" are different findings.
+
+        The step DELTA is what makes it readable.  Position alone cannot show
+        direction, and the question is whether zoom is approaching its target,
+        running past it, or oscillating — which consecutive deltas answer and a
+        single number never can.
+        """
+        if prev is None or pos is None:
+            return
+        zoom_moving = bool(pos.moving_mask & self._AX_ZOOM)
+        others = pos.moving_mask & ~self._AX_ZOOM
+        state = self._zoom_travel.setdefault(mid, {"alone_since": None, "last": 0.0})
+
+        if not zoom_moving:
+            if state["alone_since"] is not None:
+                # Report the end, or a creep that stopped is never accounted for.
+                log.info("ZOOM cam%d: stopped at %d steps after %.1fs alone",
+                         mid, pos.zoom_steps, time.monotonic() - state["alone_since"])
+            state["alone_since"] = None
+            return
+
+        alone = zoom_moving and not others
+        if alone and state["alone_since"] is None:
+            state["alone_since"] = time.monotonic()
+        elif not alone:
+            state["alone_since"] = None
+
+        now = time.monotonic()
+        if now - state["last"] < 0.5:          # 2 Hz is enough to see a trend
+            return
+        state["last"] = now
+
+        delta = pos.zoom_steps - prev.zoom_steps
+        moving = [n for b, n in ((self._AX_PAN, "pan"), (self._AX_TILT, "tilt"),
+                                 (self._AX_SLIDER, "slider")) if pos.moving_mask & b]
+        if alone:
+            held = now - (state["alone_since"] or now)
+            log.warning("ZOOM cam%d: %d steps (%+d) — ZOOM ALONE for %.1fs, "
+                        "every other axis has arrived",
+                        mid, pos.zoom_steps, delta, held)
+        else:
+            log.info("ZOOM cam%d: %d steps (%+d) — also moving: %s",
+                     mid, pos.zoom_steps, delta, ", ".join(moving) or "none")
+
     def _note_cam(self, m: int, key: str, value) -> None:
         """Remember a value we sent, under the name the camera would report it by.
 
@@ -1109,7 +1173,9 @@ class MountManager(QObject):
         elif pkt.cmd == Cmd.POSITION:
             try:
                 pos = decode_position(pkt.payload)
+                prev = st.position
                 st.position = pos
+                self._note_zoom_travel(mid, prev, pos)
                 self.position_updated.emit(mid, pos)
             except Exception as e:
                 log.warning(f"Bad POSITION from mount {mid}: {e}")
