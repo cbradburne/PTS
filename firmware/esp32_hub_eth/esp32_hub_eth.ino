@@ -2386,6 +2386,8 @@ static const char *osc_str(const uint8_t *d, int len, int ofs, int *next) {
     return (const char *)(d + ofs);
 }
 
+static void osc_note_jog(uint8_t mid);   // TEMPORARY — see below
+
 static void osc_send_jog_pkt(uint8_t mid) {
     uint8_t i = (uint8_t)(mid - 1);
     uint8_t p[10];
@@ -2397,6 +2399,39 @@ static void osc_send_jog_pkt(uint8_t mid) {
     p[9] = _mount_sl_preset[i];
     ui_send_to_mount(mid, CMD_JOG, p, 10);
     _ws_last_jog_ms = millis();
+    osc_note_jog(mid);   // TEMPORARY — log on change only
+}
+
+// TEMPORARY — name OSC jogs into the PC log.  REMOVE WITH THE ZOOM DIAGNOSTIC.
+//
+// OSC commands reach the mounts through this hub and never touch the PC app, so
+// nothing a surface does appears in comms.log.  That cost a day on the tally and
+// then cost it again here: cam5's zoom ran 2900 steps at full preset speed after
+// a goto had finished, and the goto's own plan shows it was given a ceiling of
+// 109 steps/s — so it could not have been the goto.  A full-deflection OSC zoom
+// jog is exactly what it was, and it was invisible.
+//
+// Logged on CHANGE only.  Jogs re-stream at 20 Hz to feed the mount's dead-man,
+// and logging every packet would bury the log in the traffic it exists to
+// explain.
+static int16_t _osc_jog_logged[NUM_MOUNTS][4] = {};
+
+static void osc_note_jog(uint8_t mid) {
+    uint8_t i = (uint8_t)(mid - 1);
+    if (i >= NUM_MOUNTS) return;
+    if (memcmp(_osc_jog_logged[i], _osc_jog[i], sizeof(_osc_jog[i])) == 0) return;
+    memcpy(_osc_jog_logged[i], _osc_jog[i], sizeof(_osc_jog[i]));
+    uint16_t mask = 0, neg = 0;
+    for (int k = 0; k < 4; k++) {
+        if (_osc_jog[i][k]) {
+            mask |= (uint16_t)(1u << k);
+            if (_osc_jog[i][k] < 0) neg |= (uint16_t)(1u << k);
+        }
+    }
+    // verb 5 = jog; value = negative-direction mask in the high byte, moving
+    // axes in the low byte.  Mask 0 is a stop, which is worth a line too: it is
+    // how you tell a jog that ended from one still running when the log stops.
+    send_osc_cam_event(mid, 5, (uint16_t)((neg << 8) | mask));
 }
 
 static void osc_stop_jog(uint8_t mid) {

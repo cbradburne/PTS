@@ -1128,6 +1128,19 @@ class Bridge:
                 what = f"tally {lamp} = {value / 2048.0:.2f}"
             elif verb == 4:
                 what = "record START" if value == 2 else "record STOP"
+            elif verb == 5:
+                # TEMPORARY — an OSC jog, which the PC app cannot otherwise see:
+                # these reach the mounts through the hub and never pass through
+                # this app at all.
+                mask, neg = value & 0x0F, (value >> 8) & 0x0F
+                if not mask:
+                    what = "jog STOP"
+                else:
+                    ax = [n for b, n in ((1, "pan"), (2, "tilt"),
+                                         (4, "slider"), (8, "zoom")) if mask & b]
+                    sign = ["-" if neg & b else "+"
+                            for b, _ in ((1, 0), (2, 0), (4, 0), (8, 0)) if mask & b]
+                    what = "jog " + ", ".join(f"{n}{s}" for n, s in zip(ax, sign))
             else:
                 what = f"verb {verb} = {value}"
             log.info("OSC CMD: cam%d %s", mount, what)
