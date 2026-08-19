@@ -1674,13 +1674,19 @@ static void disp_home_complete(uint8_t mount_id, uint8_t axis) {
 }
 
 // Forward CMD_CONFIG_REPORT from a mount to the display board via DISP_UART.
-// payload: 75-byte config report from the mount (1 orientation + 72 speeds + 2 stall thresholds).
-static void disp_config_report(uint8_t mount_id, const uint8_t *payload75) {
-    uint8_t buf[76];
+// payload: CONFIG_REPORT_PAYLOAD_LEN bytes (orientation + speeds + stall
+// thresholds + slider tilt).
+//
+// Sized from the shared constant, not from a literal.  It was 75 and 76 written
+// out by hand in three places, so growing the report by two bytes for the rail
+// tilt would have silently truncated it here — the display would have shown a
+// level rail for a sloped one, and nothing would have looked wrong.
+static void disp_config_report(uint8_t mount_id, const uint8_t *payload) {
+    uint8_t buf[1 + CONFIG_REPORT_PAYLOAD_LEN];
     buf[0] = mount_id;
-    memcpy(buf + 1, payload75, 75);
+    memcpy(buf + 1, payload, CONFIG_REPORT_PAYLOAD_LEN);
     disp_lock();
-    disp_uart_send(Serial1, DISP_MSG_CONFIG_REPORT, buf, 76);
+    disp_uart_send(Serial1, DISP_MSG_CONFIG_REPORT, buf, sizeof(buf));
     disp_unlock();
 }
 

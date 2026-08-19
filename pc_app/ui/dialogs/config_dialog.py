@@ -304,6 +304,10 @@ class ConfigDialog(QWidget):
         if look_at_mode_cb is not None:
             look_at_mode_cb.setChecked(cr.look_at_mode)
             look_at_mode_cb.setEnabled(cr.has_slider)
+        tilt_spin = getattr(self, f"_{key}_slider_tilt", None)
+        if tilt_spin is not None:
+            # From the MOUNT, so the box shows what is actually in force.
+            tilt_spin.setValue(getattr(cr, "slider_tilt_deg", 0.0))
         # PT speed presets
         pt_rows = getattr(self, f"_{key}_pt_rows", None)
         if pt_rows is not None:
@@ -798,6 +802,38 @@ class ConfigDialog(QWidget):
         ol.addWidget(zoom_inv_cb)
         ol.addWidget(lanc_zoom_cb)
         ol.addWidget(look_at_mode_cb)
+
+        # ── Slider tilt ──────────────────────────────────────────────────
+        # The look-at solver used to place both calibration viewpoints on one
+        # horizontal line at equal height.  A rail on a slope breaks that: at
+        # 21 degrees the camera climbs 358 mm for every metre it travels, so a
+        # 2 m calibration baseline separates the two viewpoints by 717 mm
+        # VERTICALLY.  Two rays anchored at the wrong heights do not cross at
+        # the subject, so no lock is possible — and even a good subject would
+        # drift several degrees as the slider ran.
+        tilt_row = QWidget()
+        tilt_hl  = QHBoxLayout(tilt_row)
+        tilt_hl.setContentsMargins(0, 0, 0, 0)
+        slider_tilt_spin = QDoubleSpinBox()
+        slider_tilt_spin.setRange(-90.0, 90.0)
+        slider_tilt_spin.setDecimals(1)
+        slider_tilt_spin.setSingleStep(0.5)
+        slider_tilt_spin.setSuffix(" °")
+        slider_tilt_spin.setValue(getattr(mc, "slider_tilt_deg", 0.0))
+        slider_tilt_spin.setToolTip(
+            "Inclination of the slider rail. 0 is level.\n"
+            "Positive = the rail rises as the slider position increases.\n"
+            "Used by look-at triangulation; a wrong value here puts the\n"
+            "subject in the wrong place.")
+        tilt_hl.addWidget(QLabel("Slider tilt:"))
+        tilt_hl.addWidget(slider_tilt_spin)
+        tilt_hl.addStretch()
+        ol.addWidget(tilt_row)
+        # Only meaningful with a slider — same rule as look-at mode, and shown
+        # rather than merely disabled so a mount without a rail is not asked a
+        # question that has no answer.
+        tilt_row.setVisible(has_slider_cb.isChecked())
+        has_slider_cb.toggled.connect(tilt_row.setVisible)
         layout.addWidget(orientation_box)
 
         # Speed presets — Pan/Tilt
@@ -918,6 +954,7 @@ class ConfigDialog(QWidget):
         setattr(self, f"_{key}_zoom_inv",     zoom_inv_cb)
         setattr(self, f"_{key}_lanc_zoom",    lanc_zoom_cb)
         setattr(self, f"_{key}_look_at_mode", look_at_mode_cb)
+        setattr(self, f"_{key}_slider_tilt", slider_tilt_spin)
         setattr(self, f"_{key}_pt_rows",    pt_rows)
         setattr(self, f"_{key}_sl_rows",    sl_rows)
         setattr(self, f"_{key}_zm_spd",     zm_spd)
@@ -1012,9 +1049,11 @@ class ConfigDialog(QWidget):
             # revert the PC-app grid immediately after the dialog closes.  Sending
             # orientation first means every subsequent echo already carries the new
             # orientation, so no intermediate revert occurs.
+            slider_tilt = getattr(self, f"_{key}_slider_tilt").value()
+            mc.slider_tilt_deg = slider_tilt
             self._mm.send_set_orientation(mount_id, pan_inv, slider_inv,
                                           has_slider, zoom_inv, lanc_zoom,
-                                          tilt_inv, look_at_mode)
+                                          tilt_inv, look_at_mode, slider_tilt)
 
             # Speed presets — its CONFIG_REPORT echo (carrying the new PT/SL
             # values) will arrive at any subsequently-opened config dialog before

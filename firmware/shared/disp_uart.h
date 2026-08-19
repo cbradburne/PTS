@@ -27,7 +27,7 @@
 #define DISP_MSG_UPDATE_PRESET     0x03
 #define DISP_MSG_UPDATE_CLIENTS    0x04
 #define DISP_MSG_UPDATE_SLOTS      0x05
-#define DISP_MSG_CONFIG_REPORT     0x06   // 76 bytes: mount_id(1) + 75-byte CONFIG_REPORT payload
+#define DISP_MSG_CONFIG_REPORT     0x06   // mount_id(1) + CONFIG_REPORT_PAYLOAD_LEN bytes
 #define DISP_MSG_LIMITS_FOUND      0x07   // 10 bytes: mount_id, axis, min(4 BE), max(4 BE)
 #define DISP_MSG_HOME_COMPLETE     0x08   //  2 bytes: mount_id, axis
 // v2 — look-at / triangulation support

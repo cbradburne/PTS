@@ -64,7 +64,9 @@
 // CMD_SAVE_SPEEDS payload size (4 PT + 4 SL + 1 ZM) × 8 bytes = 72
 #define SAVE_SPEEDS_PAYLOAD_LEN    72
 // CMD_CONFIG_REPORT payload size: 1 orientation byte + 72 speed bytes + 2 stall thresholds = 75
-#define CONFIG_REPORT_PAYLOAD_LEN  75
+// 77 since the slider tilt was added at [75..76]; the decoder accepts 73 and 75
+// from older firmware and reads a level rail in that case.
+#define CONFIG_REPORT_PAYLOAD_LEN  77
 
 // Pairing management payload sizes (mirror the disp_uart.h DISP_MSG_* messages)
 #define MOUNT_TABLE_PAYLOAD_LEN    30   // 5 × MAC(6); an all-zero slot = unbound
@@ -236,6 +238,19 @@ typedef enum : uint8_t {
     CMD_SET_SPEED_PRESET = 0x04,
     CMD_SET_LIMITS       = 0x05,
     CMD_FIND_LIMITS      = 0x06,
+    // 1 byte of flags, optionally followed by int16 slider tilt in TENTHS of a
+    // degree, signed, positive = rail rises with increasing slider position.
+    //
+    // The look-at solver models both camera positions as lying on the X axis at
+    // equal height — "w = origin_A - origin_B = (xa - xb, 0, 0)".  On a rail
+    // that is not level that is simply untrue: at 21 degrees the camera climbs
+    // 358 mm for every metre travelled, and over a 2 m calibration baseline the
+    // two viewpoints differ by 717 mm VERTICALLY, which the maths places at the
+    // same height.  Triangulation from two rays anchored in the wrong places
+    // does not converge on the subject, and tracking then drifts by degrees.
+    //
+    // A mount sending only the flags byte is read as 0 (level), so old senders
+    // keep working and a level rig is unaffected.
     CMD_SET_ORIENTATION  = 0x07,
     CMD_E_STOP           = 0x08,
     CMD_GET_STATUS       = 0x09,

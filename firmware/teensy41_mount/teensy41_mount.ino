@@ -48,7 +48,12 @@
 #define STATUS_INTERVAL_MS  100   // send status to PC every 100ms
 
 // EEPROM layout (bytes)
-#define EEPROM_MAGIC        0xCB0A   // v8: subjects[] and slider_moves[] removed (volatile RAM only)
+// v9: slider_tilt_deg added to MountCfg.  The magic MUST move with the layout —
+// reading old bytes into the new shape would hand every field after the change
+// a value from the wrong offset.  Speeds and orientation flags fall back to
+// defaults once on first boot; limits and stall thresholds are untouched, since
+// they live in their own blocks whose magics never change for exactly this.
+#define EEPROM_MAGIC        0xCB0B
 #define EEPROM_ADDR_MAGIC   0
 #define EEPROM_ADDR_CONFIG  4
 
@@ -124,6 +129,15 @@ struct EepromConfig {
     float            tilt_deg_per_step;
     float            slider_mm_per_step;   // set when slider limits are found
     bool             look_at_mode;         // v2: slider uses 3D triangulation mode
+    // Rail inclination in degrees, signed; 0 is level, positive means the rail
+    // RISES as the slider position increases.
+    //
+    // The look-at solver had both calibration viewpoints on the X axis at equal
+    // height.  On a tilted rail they are not: at 21 degrees the camera climbs
+    // 358 mm per metre, so a 2 m baseline puts them 717 mm apart vertically.
+    // Two rays anchored at the wrong heights do not meet at the subject, and
+    // tracking then drifts by degrees as the slider runs.
+    float            slider_tilt_deg;
 };
 
 // ---------------------------------------------------------------------------
@@ -538,6 +552,7 @@ static void send_status() {
 //   [65..72]  1 × ZM preset: uint32 max_speed, uint32 accel
 //   [73]      stall_threshold[AXIS_SLIDER]
 //   [74]      stall_threshold[AXIS_ZOOM]
+//   [75..76]  slider tilt, int16, tenths of a degree, signed
 static void send_config_report() {
     uint8_t payload[CONFIG_REPORT_PAYLOAD_LEN];
     payload[0] = (_cfg.pan_invert    ? 0x01 : 0) |
@@ -561,6 +576,13 @@ static void send_config_report() {
     write_be32(payload + 69, _cfg.zm_preset.acceleration);
     payload[73] = _cfg.stall_threshold[AXIS_SLIDER];
     payload[74] = _cfg.stall_threshold[AXIS_ZOOM];
+    // [75..76] rail inclination, tenths of a degree, signed.  Reported so the
+    // config dialog shows what the MOUNT holds rather than what was last typed.
+    {
+        int16_t t10 = (int16_t)lroundf(_cfg.slider_tilt_deg * 10.0f);
+        payload[75] = (uint8_t)((uint16_t)t10 >> 8);
+        payload[76] = (uint8_t)((uint16_t)t10 & 0xFF);
+    }
     send_packet(CMD_CONFIG_REPORT, payload, CONFIG_REPORT_PAYLOAD_LEN);
 }
 
@@ -710,6 +732,19 @@ static void send_look_at_status() {
 // Returns false if rays are nearly parallel (sin² < 1e-6).
 // ---------------------------------------------------------------------------
 
+// Camera position for a slider coordinate, in world millimetres.
+//
+// The rail is not necessarily level.  x is the distance ALONG it, so the
+// world position is that distance resolved into horizontal and vertical
+// components — which is the whole of the fix: everything below used to treat
+// the slider coordinate as a horizontal displacement with the camera at a
+// constant height.
+static void slider_world_pos(float x_along, float *wx, float *wy) {
+    float t = _cfg.slider_tilt_deg * (float)DEG_TO_RAD;
+    *wx = x_along * cosf(t);
+    *wy = x_along * sinf(t);
+}
+
 static bool solve_subject_3d(float xa, float xb,
                                float pan_A_deg,  float tilt_A_deg,
                                float pan_B_deg,  float tilt_B_deg,
@@ -734,14 +769,20 @@ static bool solve_subject_3d(float xa, float xb,
     Serial.printf("[Solve] vA=(%.4f, %.4f, %.4f)\n", vAx, vAy, vAz);
     Serial.printf("[Solve] vB=(%.4f, %.4f, %.4f)\n", vBx, vBy, vBz);
 
-    // w = origin_A - origin_B  = (xa - xb, 0, 0)
-    float wx = xa - xb;
+    // Origins resolved onto the real rail, which may climb.  This was
+    // (xa - xb, 0, 0) — both viewpoints at the same height — and on a tilted
+    // rail that is simply not where the camera was.
+    float oax, oay, obx, oby;
+    slider_world_pos(xa, &oax, &oay);
+    slider_world_pos(xb, &obx, &oby);
+    float wx = oax - obx;
+    float wy = oay - oby;
 
     float a = 1.0f;                            // dot(vA, vA) = 1
     float b = vAx*vBx + vAy*vBy + vAz*vBz;   // dot(vA, vB)
     float c = 1.0f;                            // dot(vB, vB) = 1
-    float d = vAx * wx;                        // dot(vA, w) — wy=wz=0
-    float e = vBx * wx;                        // dot(vB, w)
+    float d = vAx * wx + vAy * wy;             // dot(vA, w) — wz still 0
+    float e = vBx * wx + vBy * wy;             // dot(vB, w)
 
     float denom = a * c - b * b;              // 1 - b²
     Serial.printf("[Solve] b(dot)=%.6f  denom=%.6f\n", b, denom);
@@ -755,8 +796,8 @@ static bool solve_subject_3d(float xa, float xb,
     Serial.printf("[Solve] t=%.2f  s=%.2f\n", t, s);
 
     // Points on each ray closest to the other
-    float pAx = xa + t * vAx;  float pAy = t * vAy;  float pAz = t * vAz;
-    float pBx = xb + s * vBx;  float pBy = s * vBy;  float pBz = s * vBz;
+    float pAx = oax + t * vAx;  float pAy = oay + t * vAy;  float pAz = t * vAz;
+    float pBx = obx + s * vBx;  float pBy = oby + s * vBy;  float pBz = s * vBz;
 
     Serial.printf("[Solve] pA=(%.1f, %.1f, %.1f)\n", pAx, pAy, pAz);
     Serial.printf("[Solve] pB=(%.1f, %.1f, %.1f)\n", pBx, pBy, pBz);
@@ -772,12 +813,19 @@ static bool solve_subject_3d(float xa, float xb,
 
 // Compute pan angle (deg) from camera position cx (mm) to subject
 static float look_at_pan_deg(float cx, float sx, float sz) {
-    return atan2f(sx - cx, sz) * (float)RAD_TO_DEG;
+    float wx, wy;
+    slider_world_pos(cx, &wx, &wy);
+    return atan2f(sx - wx, sz) * (float)RAD_TO_DEG;
 }
-// Compute tilt angle (deg) from camera position cx (mm) to subject
+// Compute tilt angle (deg) from camera position cx (mm) to subject.
+// The camera's HEIGHT matters and was previously taken as zero: on a tilted
+// rail it climbs as the slider runs, so a subject held in frame at one end
+// drifts vertically by the whole rise unless this is subtracted.
 static float look_at_tilt_deg(float cx, float sx, float sy, float sz) {
-    float dx = sx - cx;
-    return atan2f(sy, sqrtf(dx * dx + sz * sz)) * (float)RAD_TO_DEG;
+    float wx, wy;
+    slider_world_pos(cx, &wx, &wy);
+    float dx = sx - wx;
+    return atan2f(sy - wy, sqrtf(dx * dx + sz * sz)) * (float)RAD_TO_DEG;
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,6 +1049,14 @@ static void dispatch(const ParsedPacket &pkt) {
             bool lanc_zoom    = p[0] & 0x10;
             bool tilt_inv     = p[0] & 0x20;
             bool look_at_mode     = p[0] & 0x40;
+            // Optional int16 in tenths of a degree.  A sender that omits it
+            // leaves the stored tilt ALONE rather than levelling the rail: the
+            // hub display sends this packet with the flags byte only, and an
+            // Apply from the display must not silently undo the rail geometry.
+            if (len >= 3) {
+                int16_t t10 = (int16_t)((p[1] << 8) | p[2]);
+                _cfg.slider_tilt_deg = (float)t10 / 10.0f;
+            }
             bool look_at_changed  = (look_at_mode != _cfg.look_at_mode);
             bool old_zoom_inv     = _cfg.zoom_invert;
             mount.setOrientation(pan_inv, tilt_inv, slider_inv, zoom_inv);

@@ -318,6 +318,7 @@ static lv_obj_t *_cfg_sw_zminv    = nullptr;
 static lv_obj_t *_cfg_sw_lanczm   = nullptr;
 static lv_obj_t *_cfg_sw_hassl    = nullptr;
 static lv_obj_t *_cfg_sw_lookAt   = nullptr;   // "Look-at Mode" toggle
+static lv_obj_t *_cfg_lbl_tilt    = nullptr;   // rail inclination, read-only
 static lv_obj_t *_cfg_btn_findsl  = nullptr;  // "Find: Slider" button
 static lv_obj_t *_cfg_btn_findzm  = nullptr;  // "Find: Zoom" button
 static lv_obj_t *_cfg_find_lbl    = nullptr;  // status label (e.g. "Slider: 4800 steps")
@@ -1070,6 +1071,7 @@ static void destroy_config_screen() {
     _cfg_sw_lanczm   = nullptr;
     _cfg_sw_hassl    = nullptr;
     _cfg_sw_lookAt   = nullptr;
+    _cfg_lbl_tilt    = nullptr;
     _cfg_btn_findsl  = nullptr;
     _cfg_btn_findzm  = nullptr;
     _cfg_find_lbl    = nullptr;
@@ -1147,6 +1149,7 @@ static void ev_cfg_cam_select(lv_event_t *e) {
     else                 lv_obj_clear_state(_cfg_sw_hassl, LV_STATE_CHECKED);
     if ((_cam[idx].flags & FLAG_LOOK_AT_MODE)) lv_obj_add_state(_cfg_sw_lookAt, LV_STATE_CHECKED);
     else lv_obj_clear_state(_cfg_sw_lookAt, LV_STATE_CHECKED);
+    if (_cfg_lbl_tilt) lv_label_set_text(_cfg_lbl_tilt, "--");  // filled by CONFIG_REPORT
     if (_cfg_find_lbl) lv_label_set_text(_cfg_find_lbl, "");  // clear previous status
     _cfg_update_find_btns();
     if (_cfg_ref_lbl) lv_label_set_text(_cfg_ref_lbl, "");
@@ -2157,6 +2160,22 @@ static void build_config_screen() {
     _cfg_sw_hassl  = make_toggle_row(right, "Has Slider");
     lv_obj_add_state(_cfg_sw_hassl, LV_STATE_CHECKED);
     _cfg_sw_lookAt = make_toggle_row(right, "Look-at Mode");
+
+    // Rail inclination, reported by the mount.  Read-only: it describes how the
+    // rig is physically rigged, is set once in the PC app, and is shown here so
+    // it can be checked at the rig without the PC app to hand.  Note that this
+    // screen's Apply sends the flags byte alone, which the mount treats as
+    // "tilt unchanged" — so viewing it here can never overwrite it.
+    {
+        lv_obj_t *row = lv_obj_create(right);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+        make_label(row, "Slider Tilt", &lv_font_montserrat_12, C_TEXT);
+        _cfg_lbl_tilt = make_label(row, "--", &lv_font_montserrat_12, C_TEXT);
+    }
 
     lv_obj_t *div2 = lv_obj_create(right);
     lv_obj_set_size(div2, LV_PCT(100), 1);
@@ -3577,6 +3596,19 @@ void hub_ui_update_config(uint8_t mount_id, const uint8_t *payload, uint8_t payl
         if (_cfg_sw_lookAt) {
             if (look_at_mode) lv_obj_add_state(_cfg_sw_lookAt, LV_STATE_CHECKED);
             else              lv_obj_clear_state(_cfg_sw_lookAt, LV_STATE_CHECKED);
+        }
+        // Rail inclination — int16, tenths of a degree, signed.  Older mount
+        // firmware sends a 75-byte report with no tilt in it; show "--" rather
+        // than a made-up 0.0, so an un-updated mount cannot read as a level rail.
+        if (_cfg_lbl_tilt) {
+            if (payload_len >= 77) {
+                int16_t t10 = (int16_t)(((uint16_t)payload[75] << 8) | payload[76]);
+                lv_label_set_text_fmt(_cfg_lbl_tilt, "%s%d.%d\u00B0",
+                                      t10 < 0 ? "-" : "",
+                                      abs(t10) / 10, abs(t10) % 10);
+            } else {
+                lv_label_set_text(_cfg_lbl_tilt, "--");
+            }
         }
         // Sync Find Home button states with updated has_slider / lanc_zoom
         _cfg_update_find_btns();

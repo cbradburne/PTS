@@ -491,7 +491,8 @@ def encode_set_orientation(pan_invert: bool, slider_invert: bool,
                            zoom_invert: bool = False,
                            lanc_zoom: bool = False,
                            tilt_invert: bool = False,
-                           look_at_mode: bool = False) -> bytes:
+                           look_at_mode: bool = False,
+                           slider_tilt_deg: float = 0.0) -> bytes:
     flags = ((0x01 if pan_invert    else 0) |
              (0x02 if slider_invert  else 0) |
              (0x04 if has_slider     else 0) |
@@ -499,7 +500,10 @@ def encode_set_orientation(pan_invert: bool, slider_invert: bool,
              (0x10 if lanc_zoom      else 0) |
              (0x20 if tilt_invert    else 0) |
              (0x40 if look_at_mode   else 0))
-    return struct.pack(">B", flags)
+    # Tenths of a degree, signed: 0.1 deg is far finer than a rail can be
+    # shimmed, and int16 covers the full +/-90 with room to spare.
+    tilt10 = int(round(max(-90.0, min(90.0, slider_tilt_deg)) * 10.0))
+    return struct.pack(">Bh", flags, tilt10)
 
 
 def encode_ping(timestamp_ms: int) -> bytes:
@@ -682,6 +686,7 @@ class ConfigReportPayload:
     stall_threshold_slider: int = 0
     stall_threshold_zoom:   int = 0
     look_at_mode:           bool = False
+    slider_tilt_deg: float = 0.0   # rail inclination, deg; 0 = level
 
 
 def decode_config_report(payload: bytes) -> ConfigReportPayload:
@@ -694,6 +699,10 @@ def decode_config_report(payload: bytes) -> ConfigReportPayload:
       [65..72]  1 × ZM preset: uint32 max_speed + uint32 accel
       [73]      stall_threshold[AXIS_SLIDER]
       [74]      stall_threshold[AXIS_ZOOM]
+      [75..76]  slider tilt, int16, TENTHS of a degree, signed (0 = level)
+
+    Older firmware sends 73 or 75 bytes; the tilt then reads 0, which is a level
+    rail and the behaviour those versions already had.
     """
     if len(payload) < 73:
         raise ParseError(f"CONFIG_REPORT payload too short: {len(payload)}")
@@ -718,7 +727,12 @@ def decode_config_report(payload: bytes) -> ConfigReportPayload:
     zm_spd, zm_acc = struct.unpack(">II", payload[65:73])
     sg_slider = payload[73] if len(payload) >= 75 else 0
     sg_zoom   = payload[74] if len(payload) >= 75 else 0
+    # Tenths of a degree, signed.  Absent on older firmware — a level rail.
+    slider_tilt_deg = (struct.unpack(">h", payload[75:77])[0] / 10.0
+                       if len(payload) >= 77 else 0.0)
+
     return ConfigReportPayload(
+        slider_tilt_deg=slider_tilt_deg,
         pan_invert=pan_invert,
         tilt_invert=tilt_invert,
         slider_invert=slider_invert,
@@ -876,11 +890,13 @@ def pkt_set_orientation(mount_id: int, pan_invert: bool, slider_invert: bool,
                         zoom_invert: bool = False,
                         lanc_zoom: bool = False,
                         tilt_invert: bool = False,
-                        look_at_mode: bool = False) -> bytes:
+                        look_at_mode: bool = False,
+                        slider_tilt_deg: float = 0.0) -> bytes:
     return build_packet(mount_id, Cmd.SET_ORIENTATION,
                         encode_set_orientation(pan_invert, slider_invert,
                                                has_slider, zoom_invert, lanc_zoom,
-                                               tilt_invert, look_at_mode))
+                                               tilt_invert, look_at_mode,
+                                               slider_tilt_deg))
 
 def pkt_e_stop(mount_id: int = MOUNT_BROADCAST) -> bytes:
     return build_packet(mount_id, Cmd.E_STOP)

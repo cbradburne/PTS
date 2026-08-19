@@ -66,6 +66,12 @@ class MountConfig:
     zoom_invert:    bool = False
     lanc_zoom:      bool = False
     look_at_mode:   bool = False
+    # Rail inclination in degrees, signed; 0 is level, positive = the rail rises
+    # as the slider position increases.  The look-at solver placed both
+    # calibration viewpoints on one horizontal line at equal height; on a slope
+    # they are not, and two rays anchored at the wrong heights never meet at the
+    # subject.
+    slider_tilt_deg: float = 0.0
     pan_tilt_presets: AxisGroupPresets = field(default_factory=_DEFAULT_PT_PRESETS)
     slider_presets:   AxisGroupPresets = field(default_factory=_DEFAULT_SL_PRESETS)
     zoom_preset:      SpeedPreset      = field(default_factory=_DEFAULT_ZM_PRESET)
@@ -140,6 +146,7 @@ def _mount_from_dict(d: dict) -> MountConfig:
     mc.zoom_invert   = d.get("zoom_invert",   False)
     mc.lanc_zoom     = d.get("lanc_zoom",     False)
     mc.look_at_mode  = d.get("look_at_mode",  False)
+    mc.slider_tilt_deg = float(d.get("slider_tilt_deg", 0.0))
     if "pan_tilt_presets" in d:
         mc.pan_tilt_presets = _agp_from_dict(d["pan_tilt_presets"])
     # New format: separate slider_presets + zoom_preset

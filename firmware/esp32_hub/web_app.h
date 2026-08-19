@@ -625,7 +625,7 @@ const CMD_START_LOOK_AT_MOVE = 0x27;  // 3B: subject_id, direction(0=left/1=righ
 const CMD_SWITCH_SUBJECT     = 0x28;  // 1B: subject_id
 const CMD_LOOK_AT_STATUS     = 0x91;  // 14B: slider_mm(4f)+pan_deg(4f)+tilt_deg(4f)+subj_id(1)+flags(1)
 const CMD_STATUS             = 0x80;
-const CMD_CONFIG_REPORT      = 0x86;  // 75B: ori_byte(1) + speeds(72) + stall(2)
+const CMD_CONFIG_REPORT      = 0x86;  // 77B: ori(1)+speeds(72)+stall(2)+tilt(2)
 const CMD_CALIB_PROMPT       = 0x93;  // 1B sub-state
 const CMD_LA_MOVE_DIR        = 0x94;  // hub-injected: direction(1) — 0=min/◀, 1=max/▶, 0xFF=stopped
 // STATUS target_slot: 8/9 mean the look-at arrows, and ONLY in look-at mode —
@@ -937,6 +937,10 @@ function makeCamState() {
         ptPresets:        null,    // [{spd,acc}×4] from CONFIG_REPORT, null until received
         slPresets:        null,    // [{spd,acc}×4] from CONFIG_REPORT, null until received
         zmPreset:         null,    // {spd,acc} from CONFIG_REPORT, null until received
+        sliderTilt:       null,    // rail inclination in degrees from CONFIG_REPORT
+                                   // (null until received).  Read-only here — set
+                                   // in the PC app; shown so the value in force is
+                                   // visible from the phone.
         slThresh:         null,    // slider StallGuard threshold (0–255) from CONFIG_REPORT
         zmThresh:         null,    // zoom   StallGuard threshold (0–255) from CONFIG_REPORT
     };
@@ -1245,6 +1249,11 @@ function _onOnePkt(buf, off) {
         if (plen >= 75) {       // stall thresholds: slider at byte 73, zoom at byte 74
             cs.slThresh = buf[base + 73];
             cs.zmThresh = buf[base + 74];
+        }
+        if (plen >= 77) {       // rail inclination, int16 tenths of a degree
+            let t = (buf[base + 75] << 8) | buf[base + 76];
+            if (t & 0x8000) t -= 0x10000;          // sign-extend
+            cs.sliderTilt = t / 10;
         }
         if (_extActive && _extPage === 'config') refreshExtConfig();
     }
@@ -2700,6 +2709,37 @@ function buildExtConfig() {
         });
         card.appendChild(stallSec);
 
+        // ---- Rail geometry (reported by the mount, set in the PC app) ----
+        // Read-only here on purpose: the tilt is a physical property of how the
+        // rig is rigged, not a per-show setting, so it is set once in the PC app
+        // and mirrored everywhere else.  Shown so that a wrong value can be spotted
+        // from the phone at the rig, where the PC app may not be to hand.
+        const geoSec = document.createElement('div');
+        geoSec.className = 'ext-spd-section';
+        geoSec.id = 'ext-cfg-geo-sec-' + i;
+        geoSec.innerHTML = '<div class="ext-spd-hdr">Rail Geometry</div>';
+        {
+            const row = document.createElement('div');
+            row.className = 'ext-spd-row';
+            const lblEl = document.createElement('span');
+            lblEl.className = 'ext-spd-unit';
+            lblEl.style.cssText = 'width:64px;flex-shrink:0;color:var(--text);';
+            lblEl.textContent = 'Tilt';
+            row.appendChild(lblEl);
+            const val = document.createElement('span');
+            val.className = 'ext-spd-unit';
+            val.id = 'ext-tilt-' + i;
+            val.style.cssText = 'color:var(--text);font-variant-numeric:tabular-nums;';
+            val.textContent = '--';
+            row.appendChild(val);
+            const hint = document.createElement('span');
+            hint.className = 'ext-spd-unit';
+            hint.textContent = '0 = horizontal';
+            row.appendChild(hint);
+            geoSec.appendChild(row);
+        }
+        card.appendChild(geoSec);
+
         // ---- Orientation flags (one per line) ----
         const oriSec = document.createElement('div');
         oriSec.className = 'ext-ori-section';
@@ -2818,6 +2858,13 @@ function refreshExtConfig() {
         // Stall threshold inputs
         _setInp('ext-thresh-sl-'+i, cs.slThresh !== null ? cs.slThresh : undefined);
         _setInp('ext-thresh-zm-'+i, cs.zmThresh !== null ? cs.zmThresh : undefined);
+
+        // Rail geometry — only meaningful on a mount that has a slider
+        const geo = document.getElementById('ext-cfg-geo-sec-' + i);
+        if (geo) geo.style.display = (oriKnown && (cs.oriByte & 0x04)) ? '' : 'none';
+        const tiltEl = document.getElementById('ext-tilt-' + i);
+        if (tiltEl) tiltEl.textContent =
+            (cs.sliderTilt === null) ? '--' : (cs.sliderTilt.toFixed(1) + '\u00B0');
 
         // Orientation toggles — disabled until CONFIG_REPORT received
         document.querySelectorAll('#ext-cfg-ori-sec-' + i + ' .ext-ori-btn').forEach(btn => {
