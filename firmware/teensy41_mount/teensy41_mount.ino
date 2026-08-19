@@ -1847,6 +1847,25 @@ void loop() {
     }
 
     // Live position broadcast — 5 Hz while anything moves, 1 Hz at rest
+    // TEMPORARY — ship the goto plan the moment one is made.  See
+    // CMD_GOTO_DEBUG in protocol.h; remove with the rest of the diagnostic.
+    {
+        MountMotion::GotoPlan gp;
+        if (mount.takeGotoPlan(gp)) {
+            uint8_t p[GOTO_DEBUG_PAYLOAD_LEN] = {};
+            write_be16(p + 0, gp.t_move_ms);
+            p[2] = gp.path;
+            p[3] = gp.sync ? 1 : 0;
+            for (int i = 0; i < 4; i++) {
+                uint8_t *e = p + 4 + i * GOTO_DEBUG_PER_AXIS;
+                write_be32(e + 0, (uint32_t)gp.target[i]);
+                write_be32(e + 4, (uint32_t)gp.pos[i]);
+                write_be16(e + 8, gp.spd[i]);
+            }
+            send_packet(CMD_GOTO_DEBUG, p, sizeof(p));
+        }
+    }
+
     {
         static uint32_t _last_pos_ms = 0;
         uint32_t iv = (mount.movingMask() != 0 ||

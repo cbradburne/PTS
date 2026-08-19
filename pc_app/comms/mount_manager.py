@@ -40,7 +40,7 @@ from .protocol import (
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
     decode_subject_list, decode_look_at_status, decode_ref_confirmed,
-    decode_calib_prompt, decode_position,
+    decode_calib_prompt, decode_position, decode_goto_debug,
     SubjectRecord, LookAtStatusPayload, RefConfirmedPayload, CalibPrompt,
     pkt_get_subjects, pkt_add_subject_start, pkt_add_subject_set_a,
     pkt_add_subject_set_b, pkt_add_subject_abort, pkt_delete_subject,
@@ -1252,6 +1252,26 @@ class MountManager(QObject):
             # Hub-injected packet: direction byte 0=◀(min), 1=▶(max), 0xFF=stopped
             if pkt.payload:
                 self.la_move_dir_received.emit(mid, pkt.payload[0])
+
+        elif pkt.cmd == Cmd.GOTO_DEBUG:
+            # TEMPORARY — see ZOOM_DIAGNOSTIC.  What the mount's planner
+            # actually decided, rather than what it can be inferred to have
+            # decided from position samples.
+            if ZOOM_DIAGNOSTIC:
+                try:
+                    d = decode_goto_debug(pkt.payload)
+                except Exception as e:
+                    log.warning("Bad GOTO_DEBUG from mount %d: %s", mid, e)
+                else:
+                    names = ("pan", "tilt", "slider", "zoom")
+                    log.warning("GOTO PLAN cam%d via %s — t_move=%dms sync=%s",
+                                mid, d["path"], d["t_move_ms"], d["sync"])
+                    for n, a in zip(names, d["axes"]):
+                        dist = a["target"] - a["pos"]
+                        secs = (abs(dist) / a["spd"]) if a["spd"] else 0.0
+                        log.warning("    %-6s pos=%-9d target=%-9d dist=%-9d "
+                                    "spd=%-6d => %.1fs",
+                                    n, a["pos"], a["target"], dist, a["spd"], secs)
 
         elif pkt.cmd == Cmd.POSITION:
             try:

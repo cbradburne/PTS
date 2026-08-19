@@ -170,6 +170,20 @@ public:
     // Synchronised move to absolute step positions.
     // pt_preset (1-4): speed preset for PAN/TILT axes.
     // sl_preset (1-4): speed preset for SLIDER/ZOOM axes (defaults to pt_preset).
+    // TEMPORARY — goto planning diagnostic (2026-08-19).  REMOVE WITH IT.
+    // MountMotion cannot send packets, so it records what it decided and the
+    // sketch ships it on the next loop.  See CMD_GOTO_DEBUG in protocol.h.
+    struct GotoPlan {
+        bool     pending;
+        uint8_t  path;          // 0 = moveTo, 1 = retargetTo
+        bool     sync;
+        uint16_t t_move_ms;
+        int32_t  target[4];
+        int32_t  pos[4];
+        uint16_t spd[4];
+    };
+    bool takeGotoPlan(GotoPlan &out);
+
     void moveTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom,
                 uint8_t pt_preset, uint8_t sl_preset = 0, bool sync = true);
 
@@ -438,6 +452,7 @@ private:
     // -----------------------------------------------------------------------
 
     void     _applyPreset(uint8_t pt_preset, uint8_t sl_preset);
+    GotoPlan _goto_plan{};      // TEMPORARY — see takeGotoPlan()
     int16_t  _applyOrientation(Axis axis, int16_t velocity) const;
     int32_t  _applyOrientationPos(Axis axis, int32_t target) const;
     bool     _checkStall(Axis axis);

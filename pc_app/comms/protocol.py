@@ -141,6 +141,7 @@ class Cmd(IntEnum):
     RF_REPORT         = 0xA7   # mount→clients, 14B: rssi + noise + rx drops + tx attempts/failed
     SAT_DOWNLINK      = 0xA8   # satellite→clients, 25B: offered/attempts/sent/refused + top cmds
     MOUNT_OUTAGE      = 0xA9   # hub→clients, 5×12B: how long each mount was uncontrollable
+    GOTO_DEBUG        = 0xAA   # TEMPORARY: mount→clients, what moveTo() decided per axis
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
     CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
 
@@ -1681,6 +1682,10 @@ MOUNT_ROUTE_PAYLOAD_LEN   = 5    # one byte per cam
 
 # CMD_MOUNT_OUTAGE, 12 bytes per mount: count u16, total_s u32, min_s u16,
 # max_s u16, flags u8, reserved u8.
+# TEMPORARY — see Cmd.GOTO_DEBUG.
+GOTO_DEBUG_PER_AXIS       = 10
+GOTO_DEBUG_PAYLOAD_LEN    = 4 + 4 * GOTO_DEBUG_PER_AXIS
+
 MOUNT_OUTAGE_PER_MOUNT    = 12
 MOUNT_OUTAGE_PAYLOAD_LEN  = NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT
 MOUNT_OUTAGE_FLAG_NOW     = 0x01
@@ -1749,6 +1754,32 @@ def decode_mount_route(payload: bytes) -> list[int]:
     if len(payload) < MOUNT_ROUTE_PAYLOAD_LEN:
         raise ParseError(f"MOUNT_ROUTE payload too short: {len(payload)}")
     return [int(payload[i]) for i in range(NUM_MOUNTS)]
+
+
+def decode_goto_debug(payload: bytes) -> dict:
+    """TEMPORARY — CMD_GOTO_DEBUG: what the mount's goto planner decided.
+
+    Every account of cam5's zoom so far has been reconstructed from position
+    samples and has come apart on the next log.  These are the numbers the
+    mount computes and never reports: the per-axis target it resolved, where
+    the axis was, and the speed ceiling it handed that axis after any
+    synchronisation.  With them, "which axis inflates t_move" stops being an
+    inference.
+    """
+    if len(payload) < GOTO_DEBUG_PAYLOAD_LEN:
+        raise ParseError(f"GOTO_DEBUG payload too short: {len(payload)}")
+    t_move_ms = int.from_bytes(payload[0:2], "big")
+    path      = "retargetTo" if payload[2] else "moveTo"
+    sync      = bool(payload[3])
+    axes = []
+    for i in range(4):
+        e = 4 + i * GOTO_DEBUG_PER_AXIS
+        axes.append({
+            "target": int.from_bytes(payload[e:e + 4], "big", signed=True),
+            "pos":    int.from_bytes(payload[e + 4:e + 8], "big", signed=True),
+            "spd":    int.from_bytes(payload[e + 8:e + 10], "big"),
+        })
+    return {"t_move_ms": t_move_ms, "path": path, "sync": sync, "axes": axes}
 
 
 def decode_mount_outage(payload: bytes) -> dict[int, dict]:

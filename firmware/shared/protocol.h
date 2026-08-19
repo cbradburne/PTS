@@ -96,6 +96,10 @@
 //   [8..9]  max_s      u16  longest outage
 //   [10]    flags      bit0 = this mount is uncontrollable RIGHT NOW
 //   [11]    reserved
+// TEMPORARY — see CMD_GOTO_DEBUG.
+#define GOTO_DEBUG_PER_AXIS      10
+#define GOTO_DEBUG_PAYLOAD_LEN   (4 + 4 * GOTO_DEBUG_PER_AXIS)
+
 #define MOUNT_OUTAGE_PER_MOUNT      12
 #define MOUNT_OUTAGE_PAYLOAD_LEN    (NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT)
 #define MOUNT_OUTAGE_FLAG_NOW       0x01
@@ -444,6 +448,18 @@ typedef enum : uint8_t {
     // (bridge reboot, ESP-NOW reinit, radio wedge, someone unplugging it)
     // without needing to know which. The hub is the right place because it is
     // the node that survives all of them.
+    // TEMPORARY — goto planning diagnostic (2026-08-19).  REMOVE WITH IT.
+    //
+    // Mount -> clients, GOTO_DEBUG_PAYLOAD_LEN: what moveTo()/retargetTo()
+    // actually decided, per axis.  Every explanation of cam5's zoom so far has
+    // been reconstructed from position samples and has come apart on contact
+    // with the next log; these are the numbers the mount computes and has never
+    // said out loud.
+    //
+    //   [0..1] t_move ms   [2] path (0=moveTo 1=retargetTo)  [3] sync flag
+    //   then per axis PAN,TILT,SLIDER,ZOOM:
+    //     target i32, pos i32, spd u16   (10 bytes each)
+    CMD_GOTO_DEBUG        = 0xAA,
     CMD_MOUNT_OUTAGE      = 0xA9,
     CMD_SAT_DOWNLINK      = 0xA8,
     CMD_CAM_CONTROL       = 0xA1,  // client→hub→mount, 1-40B: BMD command, sent as-is
