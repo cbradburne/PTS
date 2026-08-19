@@ -2273,24 +2273,93 @@ void MountMotion::retargetTo(int32_t pan, int32_t tilt, int32_t slider, int32_t 
     _clampToLimits(targets[AXIS_SLIDER], AXIS_SLIDER);
     _clampToLimits(targets[AXIS_ZOOM],   AXIS_ZOOM);
 
-    // Update speed ceilings for the new preset
+    // Re-plan from where every axis IS, exactly as moveTo() does.
+    //
+    // This used to hand each axis its full preset speed and nothing else, so a
+    // mid-move recall silently became a different kind of move from a fresh
+    // one: moveTo() synchronises the axes to land together, retargetTo() let
+    // them finish whenever they liked.  Pressing the same slot twice therefore
+    // produced two different behaviours depending only on whether the mount
+    // happened to still be moving — which is precisely how the zoom fault
+    // managed to look impossible for a week.
+    //
+    // A retarget is still smooth: nothing stops, _updateGoto() picks the new
+    // ceilings up on its next tick.  Only the numbers change.
+    //
+    // Look-at is never running here — the guard above returns to moveTo() for
+    // any state other than STATE_MOVING_TO_POS — so this is the "look-at
+    // disabled" case by construction, where all four axes arrive together.
+    float dist_st[4];
+    float t_move = 0.f;
+    for (int i = 0; i < 4; i++) {
+        dist_st[i] = fabsf((float)(targets[i] - _stepper[i]->getPosition()));
+        if (dist_st[i] > (float)GOTO_ARRIVE_STEPS) {
+            const SpeedPreset &sp = (i < 2) ? _pt_presets[pt_preset]
+                                            : (i == 2) ? _sl_presets[sl_preset]
+                                            : _zoom_preset;
+            float spd = max(1.0f, physToUSteps(i, sp.max_speed));
+            float t   = dist_st[i] / spd;
+            if (t > t_move) t_move = t;
+        }
+    }
+
     for (int i = 0; i < 4; i++) {
         const SpeedPreset &sp = (i < 2) ? _pt_presets[pt_preset]
                                         : (i == 2) ? _sl_presets[sl_preset]
                                         : _zoom_preset;
-        _goto_max_spd_st[i] = (uint32_t)max(1.0f, physToUSteps(i, sp.max_speed));
-        _goto_accel_st[i]   = (uint32_t)max(1.0f, physToUSteps(i, sp.acceleration));
+        float preset_spd = max(1.0f, physToUSteps(i, sp.max_speed));
+        float preset_acc = max(1.0f, physToUSteps(i, sp.acceleration));
+
+        float actual_spd, actual_acc;
+        if (t_move > 0.f && dist_st[i] > (float)GOTO_ARRIVE_STEPS) {
+            float k    = (dist_st[i] / preset_spd) / t_move;
+            actual_spd = max(1.0f, preset_spd * k);
+            actual_acc = max(1.0f, preset_acc * k);
+        } else {
+            actual_spd = preset_spd;
+            actual_acc = preset_acc;
+        }
+
         _goto_target[i]     = targets[i];
-        // TEMPORARY — see GotoPlan.  retargetTo applies NO synchronisation, so
-        // t_move is reported as 0: that difference from moveTo() is itself the
-        // thing worth seeing.
+        _goto_max_spd_st[i] = (uint32_t)actual_spd;
+        _goto_accel_st[i]   = (uint32_t)actual_acc;
+
+        // The decel window MUST be recomputed with the speed just set.  It was
+        // left untouched here, carrying whatever the previous moveTo() had
+        // worked out — for a different distance, at a different speed.  Since
+        // decel_dist = v²/2a, an axis retargeted from a sync-scaled 109 steps/s
+        // up to its full 711 kept a window sized for a seventh of the speed:
+        // roughly forty times too small, so it ran at full speed until far
+        // inside the point it should have begun slowing, and overshot.  That is
+        // the "press it again and it shoots past" behaviour.
+        {
+            float decel_dist_full = (actual_acc > 0.f)
+                                    ? (actual_spd * actual_spd) / (2.f * actual_acc)
+                                    : actual_spd;
+            float move_dist = dist_st[i];
+            _goto_decel_dist[i] = (move_dist > (float)GOTO_ARRIVE_STEPS && move_dist < decel_dist_full)
+                                  ? fmaxf(move_dist, (float)(GOTO_ARRIVE_STEPS * 2))
+                                  : decel_dist_full;
+        }
+
+        // An axis that _updateGoto() had already parked needs waking, or it
+        // sits at its old target while the others move to the new one.
+        if (_goto_dir[i] == 0 && dist_st[i] > (float)GOTO_ARRIVE_STEPS) {
+            noInterrupts();
+            _stepper[i]->setMaxSpeed((int32_t)actual_spd);
+            _stepper[i]->setAcceleration((int32_t)actual_acc);
+            _stepper[i]->rotateAsync();
+            interrupts();
+            _goto_dir[i] = 1;
+        }
+
         _goto_plan.target[i] = targets[i];
         _goto_plan.pos[i]    = _stepper[i]->getPosition();
-        _goto_plan.spd[i]    = (uint16_t)min<uint32_t>(65535u, _goto_max_spd_st[i]);
+        _goto_plan.spd[i]    = (uint16_t)(actual_spd > 65535.f ? 65535 : actual_spd);
     }
     _goto_plan.path      = 1;
-    _goto_plan.sync      = false;
-    _goto_plan.t_move_ms = 0;
+    _goto_plan.sync      = true;
+    _goto_plan.t_move_ms = (uint16_t)(t_move * 1000.0f > 65535.f ? 65535 : t_move * 1000.0f);
     _goto_plan.pending   = true;
     // _updateGoto() running in update() steers toward the new targets on its
     // next tick — no motor command needed here.
