@@ -413,6 +413,11 @@ private:
     int32_t         _goto_target[4];
     bool            _has_goto_target;
     int8_t          _goto_dir[4];         // current rotateAsync direction per axis (0=stopped)
+    // An axis the operator has taken over by jogging while a goto is running.
+    // _updateGoto() skips it entirely — without this it would fight the jog,
+    // because its restart branch relaunches any axis whose _goto_dir is 0 while
+    // the target error is large, which is exactly what a jog creates.
+    bool            _goto_axis_released[4] = { false, false, false, false };
     uint32_t        _goto_max_spd_st[4];  // ceiling speed set for each axis (µsteps/s)
     uint32_t        _goto_accel_st[4];    // acceleration for each axis (µsteps/s²)
     float           _goto_decel_dist[4];  // effective P-controller decel window (µsteps),

@@ -453,7 +453,26 @@ void MountMotion::jog(int16_t pan, int16_t tilt, int16_t slider, int16_t zoom,
     // controller.  Drive zoom only and return WITHOUT changing _state — if we
     // set _state = STATE_JOGGING the update() loop stops calling _updateLookAt()
     // and pan/tilt tracking freezes mid-move.
-    if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
+    //
+    // A goto needs exactly the same protection, and for a worse reason.
+    // _updateGoto() runs ONLY in STATE_MOVING_TO_POS, and it is the only thing
+    // that ever parks a goto axis: moveTo() starts each axis with an unbounded
+    // rotateAsync() and relies on the P-loop to stop it at the target.  Taking
+    // _state away for a zoom nudge orphans every other axis mid-flight — it
+    // keeps turning, and releasing the zoom does not stop it, because both jog
+    // paths only stop axes with _jog_dir[] set and a goto axis has _goto_dir[].
+    // Seen on the rig on 2026-08-19: a 10 deg pan nudge ran 59 deg and was still
+    // going 4.5 s later, stopped only because the next MOVE_REL re-planned it.
+    bool goto_zoom_only = (_state == STATE_MOVING_TO_POS &&
+                           pan == 0 && tilt == 0 && slider == 0);
+    if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM ||
+            goto_zoom_only) {
+        // Hand the zoom axis to the operator for the rest of this move.  The
+        // goto may have been steering zoom too; if it keeps its claim the two
+        // fight — the jog drives zoom away, _updateGoto() sees a large error and
+        // relaunches it back.  Released axes are skipped there and the flag is
+        // cleared by the next moveTo()/retargetTo()/stopAll().
+        if (goto_zoom_only && zoom != 0) _goto_axis_released[AXIS_ZOOM] = true;
         sz_preset = constrain(sz_preset, 1, 4);
         int16_t vel = _applyOrientation(AXIS_ZOOM, zoom);
         _jog_vel[AXIS_ZOOM] = vel;
@@ -500,7 +519,8 @@ void MountMotion::jog(int16_t pan, int16_t tilt, int16_t slider, int16_t zoom,
                 _stepper[AXIS_ZOOM]->overrideSpeed(spd_factor);
             }
         }
-        return;   // _state stays STATE_LOOK_AT_MOVE/PRE_AIM — look-at controller keeps running
+        return;   // _state unchanged — the look-at controller or _updateGoto()
+                  // keeps running and finishes the move it was already making
     }
 
     pt_preset = constrain(pt_preset, 1, 4);
@@ -513,6 +533,24 @@ void MountMotion::jog(int16_t pan, int16_t tilt, int16_t slider, int16_t zoom,
     // Update watchdog on EVERY call (including all-zero) so it does not fire
     // while the joystick is intentionally centred during a soft deceleration.
     _jog_last_ms = millis();
+
+    // Reaching here with a goto running means the operator has grabbed a
+    // pan/tilt/slider control, which abandons the move.  Cancel it EXPLICITLY:
+    // _state is about to leave STATE_MOVING_TO_POS, so _updateGoto() — the only
+    // code that parks a goto axis — stops being called.  Any axis it left
+    // turning that the operator is not now jogging would keep its unbounded
+    // rotateAsync() forever, unreachable by the jog watchdog, which only knows
+    // about _jog_dir[].  Axes that ARE being jogged need no stop here; the loop
+    // below calls rotateAsync() on them, which overrides the goto's rotation.
+    if (_state == STATE_MOVING_TO_POS) {
+        noInterrupts();
+        for (int i = 0; i < 4; i++)
+            if (_goto_dir[i] != 0 && _jog_vel[i] == 0) _stepper[i]->stopAsync();
+        interrupts();
+        for (int i = 0; i < 4; i++) _goto_dir[i] = 0;
+        _has_goto_target = false;
+    }
+
     _state       = STATE_JOGGING;
 
     bool any_nonzero = false;
@@ -1009,6 +1047,11 @@ void MountMotion::moveTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom
     _goto_plan.sync      = sync;
     _goto_plan.t_move_ms = (uint16_t)(t_move * 1000.0f > 65535.f ? 65535 : t_move * 1000.0f);
     _goto_plan.pending   = true;
+    // A new move re-claims the axes — except one the operator is still jogging.
+    // Re-claiming that would restart the fight this flag exists to prevent, and
+    // the stick is a live input: it outranks a move the operator just queued.
+    for (int i = 0; i < 4; i++)
+        if (_jog_dir[i] == 0) _goto_axis_released[i] = false;
     _has_goto_target = true;
 
     _jogging = false;
@@ -1061,6 +1104,7 @@ void MountMotion::stopAll() {
     interrupts();
     _jogging         = false;
     _has_goto_target = false;
+    for (int i = 0; i < 4; i++) _goto_axis_released[i] = false;
     _la_pt_dir[0]    = 0;
     _la_pt_dir[1]    = 0;
     if (_state != STATE_FINDING_LIMITS)
@@ -1079,6 +1123,7 @@ void MountMotion::emergencyStop() {
     interrupts();
     _jogging         = false;
     _has_goto_target = false;
+    for (int i = 0; i < 4; i++) _goto_axis_released[i] = false;
     _la_pt_dir[0]    = 0;
     _la_pt_dir[1]    = 0;
     if (_lf_state != LimitFindState::IDLE) {
@@ -1235,6 +1280,13 @@ void MountMotion::_updateGoto() {
     bool any_active = false;
 
     for (int i = 0; i < 4; i++) {
+        // An axis the operator took over by jogging is not ours any more, and
+        // must not count as active — otherwise the move never completes.  The
+        // restart branch below would otherwise relaunch it on the very next
+        // tick: a jogged axis has _goto_dir == 0 and a growing target error,
+        // which is precisely the condition it fires on.
+        if (_goto_axis_released[i]) continue;
+
         // If this axis already stopped and arrived, check whether retargetTo()
         // moved the target again — if so, restart rotateAsync for this axis.
         if (_goto_dir[i] == 0) {
@@ -2390,6 +2442,11 @@ void MountMotion::retargetTo(int32_t pan, int32_t tilt, int32_t slider, int32_t 
     _goto_plan.pending   = true;
     // _updateGoto() running in update() steers toward the new targets on its
     // next tick — no motor command needed here.
+    // A new move re-claims the axes — except one the operator is still jogging.
+    // Re-claiming that would restart the fight this flag exists to prevent, and
+    // the stick is a live input: it outranks a move the operator just queued.
+    for (int i = 0; i < 4; i++)
+        if (_jog_dir[i] == 0) _goto_axis_released[i] = false;
     _has_goto_target = true;
 }
 
