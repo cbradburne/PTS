@@ -55,11 +55,37 @@ for frag in ("(dist_st[i] / preset_spd) / t_move",
     assert frag in MOVE and frag in RETARGET, f"paths disagree on: {frag}"
 print("   both paths share the same arithmetic               OK")
 
-# A retarget must wake an axis _updateGoto() had already parked, or it sits at
-# the old target while the rest move to the new one.
-assert "_goto_dir[i] == 0" in RETARGET and "rotateAsync()" in RETARGET, \
-    "a parked axis is never restarted on retarget"
-print("   restarts an axis that had already arrived          OK")
+
+# ---- 1b. the motor ceiling is the PRESET; sync lives in the factor ---------
+# Setting a new max on a turning motor only takes effect via rotateAsync(), and
+# rotateAsync() here takes a POSITIVE max because direction is carried by
+# overrideSpeed's sign — so calling it on an axis travelling negative would
+# fling it the other way for a tick.  Keeping the ceiling at the preset and
+# scaling the factor means a retarget never touches a moving motor at all.
+UPDATE = func("_updateGoto")
+print("\n1b. where the synchronisation is applied:")
+assert "_goto_spd_scale[i]" in UPDATE, "the sync ratio is not applied in the P-loop"
+assert re.search(r"constrain\(factor, -1\.0f, 1\.0f\) \* _goto_spd_scale\[i\]", UPDATE), \
+    "the factor is not scaled by the axis's share of the move"
+print("   overrideSpeed factor carries the sync ratio         OK")
+
+for fn, name in ((MOVE, "moveTo"), (RETARGET, "retargetTo")):
+    assert "_goto_spd_scale[i]" in fn, f"{name} does not record the sync ratio"
+    assert "_goto_max_spd_st[i]  = (uint32_t)preset_spd;" in fn, \
+        f"{name} still puts a scaled speed in the motor ceiling"
+print("   both paths set the ceiling to the preset            OK")
+
+# retargetTo must not restart an axis that is already turning.
+assert "_goto_dir[i] == 0 && dist_st[i]" in RETARGET, \
+    "retargetTo restarts axes unconditionally — it must only start PARKED ones"
+print("   a turning axis is never re-launched mid-move        OK")
+
+# Any decel window must be sized from the speed actually travelled, everywhere
+# it is computed — including _updateGoto's restart branch, which reads the
+# ceiling and would otherwise size for a speed the axis never reaches.
+assert "_goto_max_spd_st[i] * _goto_spd_scale[i]" in UPDATE, \
+    "the restart branch sizes its decel window from the unscaled ceiling"
+print("   restart branch sizes its window from actual speed   OK")
 
 # ---- 2. the arithmetic itself ----------------------------------------------
 if not shutil.which("c++"):

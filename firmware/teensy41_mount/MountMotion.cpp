@@ -964,7 +964,10 @@ void MountMotion::moveTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom
         }
 
         _goto_target[i]     = targets[i];
-        _goto_max_spd_st[i] = (uint32_t)actual_spd;
+        // The motor's ceiling is the PRESET; the synchronisation ratio is kept
+        // apart and applied through overrideSpeed().  See _goto_spd_scale.
+        _goto_max_spd_st[i]  = (uint32_t)preset_spd;
+        _goto_spd_scale[i]   = (preset_spd > 0.f) ? (actual_spd / preset_spd) : 1.f;
         _goto_accel_st[i]   = (uint32_t)actual_acc;
 
         // TEMPORARY — see GotoPlan.  Captured here because this is where the
@@ -996,7 +999,7 @@ void MountMotion::moveTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom
         // This is the same pattern as teensy_follower: one rotateAsync() at the
         // start, then signed overrideSpeed() drives everything from there.
         noInterrupts();
-        _stepper[i]->setMaxSpeed((int32_t)actual_spd);
+        _stepper[i]->setMaxSpeed((int32_t)preset_spd);
         _stepper[i]->setAcceleration((int32_t)actual_acc);
         _stepper[i]->rotateAsync();
         interrupts();
@@ -1244,7 +1247,13 @@ void MountMotion::_updateGoto() {
                 interrupts();
                 _goto_dir[i] = 1;
                 // Recompute decel window for the new distance (retarget changed target)
-                float spd = (float)_goto_max_spd_st[i];
+                // The ACTUAL travel speed, not the motor ceiling: since
+                // _goto_max_spd_st became the preset and the synchronisation
+                // ratio moved into _goto_spd_scale, using the ceiling here
+                // would size the window for a speed this axis never reaches —
+                // by 1/scale², which for a zoom at 0.14 is fifty times too
+                // wide, and the axis would creep in from far outside it.
+                float spd = (float)_goto_max_spd_st[i] * _goto_spd_scale[i];
                 float acc = (float)_goto_accel_st[i];
                 float decel_full = (acc > 0.f) ? (spd * spd) / (2.f * acc) : spd;
                 float new_dist   = fabsf((float)err);
@@ -1272,8 +1281,13 @@ void MountMotion::_updateGoto() {
 
         // Signed P-controller factor using the pre-computed (distance-capped)
         // decel window.  overrideSpeed() accepts negative values for reverse.
+        // Scaled by this axis's share of the synchronised move.  The motor's
+        // max is its preset, so the P-loop's -1..1 is multiplied by the ratio
+        // that makes every axis arrive together.  Doing it here rather than in
+        // setMaxSpeed is what lets a retarget change speed without touching a
+        // turning motor.
         float factor = (float)err / _goto_decel_dist[i];
-        factor = constrain(factor, -1.0f, 1.0f);
+        factor = constrain(factor, -1.0f, 1.0f) * _goto_spd_scale[i];
 
         _stepper[i]->overrideSpeed(factor);
     }
@@ -2320,9 +2334,10 @@ void MountMotion::retargetTo(int32_t pan, int32_t tilt, int32_t slider, int32_t 
             actual_acc = preset_acc;
         }
 
-        _goto_target[i]     = targets[i];
-        _goto_max_spd_st[i] = (uint32_t)actual_spd;
-        _goto_accel_st[i]   = (uint32_t)actual_acc;
+        _goto_target[i]      = targets[i];
+        _goto_max_spd_st[i]  = (uint32_t)preset_spd;
+        _goto_spd_scale[i]   = (preset_spd > 0.f) ? (actual_spd / preset_spd) : 1.f;
+        _goto_accel_st[i]    = (uint32_t)actual_acc;
 
         // The decel window MUST be recomputed with the speed just set.  It was
         // left untouched here, carrying whatever the previous moveTo() had
@@ -2342,12 +2357,24 @@ void MountMotion::retargetTo(int32_t pan, int32_t tilt, int32_t slider, int32_t 
                                   : decel_dist_full;
         }
 
-        // An axis that _updateGoto() had already parked needs waking, or it
-        // sits at its old target while the others move to the new one.
+        // Nothing is pushed to a turning motor.  The ceiling it already has is
+        // its preset, which does not change; the synchronisation ratio and the
+        // decel window are what this move alters, and _updateGoto() reads both
+        // on its next tick.  That is what makes a retarget smooth — and it
+        // avoids rotateAsync(), which would have to be given a positive max and
+        // would fling an axis travelling negative the wrong way for a tick.
+        //
+        // Acceleration is safe to set on a moving axis on its own — the jog
+        // soft-stop does exactly that — so the ramp follows the new plan too.
+        noInterrupts();
+        _stepper[i]->setAcceleration((int32_t)actual_acc);
+        interrupts();
+
+        // Only an axis _updateGoto() had actually PARKED needs starting, and
+        // then it is stationary, so rotateAsync() is safe.
         if (_goto_dir[i] == 0 && dist_st[i] > (float)GOTO_ARRIVE_STEPS) {
             noInterrupts();
-            _stepper[i]->setMaxSpeed((int32_t)actual_spd);
-            _stepper[i]->setAcceleration((int32_t)actual_acc);
+            _stepper[i]->setMaxSpeed((int32_t)preset_spd);
             _stepper[i]->rotateAsync();
             interrupts();
             _goto_dir[i] = 1;

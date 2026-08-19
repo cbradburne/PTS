@@ -452,6 +452,17 @@ private:
     // -----------------------------------------------------------------------
 
     void     _applyPreset(uint8_t pt_preset, uint8_t sl_preset);
+    // Sync scale per axis: the fraction of its PRESET speed this move wants.
+    //
+    // The motor's max speed is always the preset.  Synchronisation lives here
+    // and is folded into overrideSpeed()'s factor instead, so a retarget never
+    // has to touch a turning motor — it changes numbers and _updateGoto()
+    // applies them on its next tick, which is what retargetTo() always claimed
+    // to do.  Setting a new max mid-move needs rotateAsync() to take effect,
+    // and rotateAsync() takes a POSITIVE max here (direction is carried by
+    // overrideSpeed's sign), so calling it on an axis travelling negative would
+    // fling it the other way until the next tick corrected it.
+    float    _goto_spd_scale[4] = { 1.f, 1.f, 1.f, 1.f };
     GotoPlan _goto_plan{};      // TEMPORARY — see takeGotoPlan()
     int16_t  _applyOrientation(Axis axis, int16_t velocity) const;
     int32_t  _applyOrientationPos(Axis axis, int32_t target) const;
