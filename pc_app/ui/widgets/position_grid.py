@@ -190,6 +190,16 @@ class PositionGrid(QWidget):
         # Slot state from mount (bitmasks, bits 0-9)
         self._slot_occupied: dict[int, int] = {mid: 0 for mid in range(1, 6)}
         self._slot_at:       dict[int, int] = {mid: 0 for mid in range(1, 6)}
+        # Every mount starts offline, so a freshly-opened app looks exactly like
+        # a disconnect rather than a third, half-lit state of its own.
+        self._connected:     dict[int, bool] = {mid: False for mid in range(1, 6)}
+        # The presets the mount actually has active.  Held separately from the
+        # dials because an offline row shows 0 while these keep the real value:
+        # main_window compares get_*_preset() against the mount's reported
+        # preset to decide whether to send a change, and a blanked DISPLAY must
+        # not be mistaken for the mount having changed speed.
+        self._pt_preset:     dict[int, int]  = {mid: 0 for mid in range(1, 6)}
+        self._sl_preset:     dict[int, int]  = {mid: 0 for mid in range(1, 6)}
 
         # Which slot each mount is moving toward (None = not moving)
         self._target_slot: dict[int, int | None] = {mid: None for mid in range(1, 6)}
@@ -304,8 +314,16 @@ class PositionGrid(QWidget):
         self._refresh_all_borders()
 
     def set_mount_connected(self, mount_id: int, connected: bool) -> None:
-        """Show/hide the inactive overlay and zero dials when a mount disconnects."""
-        if not connected:
+        """Show/hide the inactive overlay, and blank the row while it is offline."""
+        self._connected[mount_id] = connected
+        # Repaint either way: coming online reveals the masks that arrived while
+        # offline, going offline blanks whatever was on screen.
+        self._refresh_row_borders(mount_id)
+        if connected:
+            # Reveal the speeds that arrived while the row was blanked.
+            self._pt_dials[mount_id].preset = self._pt_preset[mount_id]
+            self._sl_dials[mount_id].preset = self._sl_preset[mount_id]
+        else:
             self._pt_dials[mount_id].preset = 0
             self._sl_dials[mount_id].preset = 0
             # Clear arrow flash state so stale yellow/green doesn't persist after
@@ -316,16 +334,20 @@ class PositionGrid(QWidget):
             container.overlay.setVisible(not connected)
 
     def set_pt_preset(self, mount_id: int, preset: int) -> None:
-        self._pt_dials[mount_id].preset = preset
+        self._pt_preset[mount_id] = preset
+        if self._connected.get(mount_id, False):
+            self._pt_dials[mount_id].preset = preset
 
     def set_sl_preset(self, mount_id: int, preset: int) -> None:
-        self._sl_dials[mount_id].preset = preset
+        self._sl_preset[mount_id] = preset
+        if self._connected.get(mount_id, False):
+            self._sl_dials[mount_id].preset = preset
 
     def get_pt_preset(self, mount_id: int) -> int:
-        return self._pt_dials[mount_id].preset
+        return self._pt_preset[mount_id]
 
     def get_sl_preset(self, mount_id: int) -> int:
-        return self._sl_dials[mount_id].preset
+        return self._sl_preset[mount_id]
 
     # v2 — slider / subject awareness --------------------------------
 
@@ -466,6 +488,20 @@ class PositionGrid(QWidget):
 
     def _apply_border(self, btn: QPushButton, mount_id: int, slot: int) -> None:
         col = CAM_COLORS[mount_id]
+
+        # An offline mount shows nothing.  The overlay is only ~59% opaque, so
+        # anything painted underneath stays legible through it, and STATUS is
+        # relayed by the hub whether or not this app considers the mount
+        # connected — so a row could sit dimmed while displaying real stored
+        # positions and a real speed.  Half-lit is the one state the operator
+        # cannot read: it looks like a mount they can drive.
+        #
+        # The masks are still stored by update_slot_masks(); only the drawing
+        # waits.  set_mount_connected(True) repaints from them immediately.
+        if not self._connected.get(mount_id, False):
+            btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"],
+                                              BORDER_EMPTY))
+            return
 
         # Arrow buttons (slots 8-9 on look-at mounts) — state-driven border
         if self._look_at_mode[mount_id] and slot >= 8:

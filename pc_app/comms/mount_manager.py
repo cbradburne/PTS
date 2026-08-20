@@ -468,18 +468,53 @@ class MountManager(QObject):
     # short enough to notice before an operator reaches for the joystick.
     UNACKED_LIMIT = 3
 
+    def _set_mount_online(self, mount_id: int, *,
+                          connected: bool | None = None,
+                          unresponsive: bool | None = None) -> bool:
+        """Update presence, emitting only when the EFFECTIVE state changes.
+
+        A mount is online to the operator when it is both heard (connected) and
+        acting on what it is told (not unresponsive).  Those two flags were
+        written at six separate sites, each deciding for itself whether to
+        signal — and one of them set connected = True while skipping the signal
+        whenever unresponsive happened to be set.  From that point the mount was
+        online internally and greyed on screen, and neither "if not st.connected"
+        nor "if not was_connected" could ever fire again to correct it, because
+        both had just been satisfied.  A genuinely active mount stayed greyed
+        for the rest of the session — a different one each launch, depending on
+        which mount's first packet landed inside that window.
+
+        Note `connected` still means HEARD.  The idle probe deliberately keeps
+        polling a heard-but-unresponsive mount, because an ACK is the only thing
+        that clears unresponsive.
+
+        Returns True if the effective state changed.
+        """
+        st = self._states.get(mount_id)
+        if st is None:
+            return False
+        before = st.connected and not st.unresponsive
+        if connected is not None:
+            st.connected = connected
+        if unresponsive is not None:
+            st.unresponsive = unresponsive
+        after = st.connected and not st.unresponsive
+        if after == before:
+            return False
+        (self.mount_connected if after else self.mount_disconnected).emit(mount_id)
+        return True
+
     def _note_tracked_send(self, mount_id: int) -> None:
         st = self._states.get(mount_id)
         if not st or not st.connected:
             return
         st.unacked += 1
         if st.unacked >= self.UNACKED_LIMIT and not st.unresponsive:
-            st.unresponsive = True
             log.warning("Mount %d is HEARD BUT NOT RESPONDING — %d commands "
                         "unacknowledged. It will keep reporting health, so it "
                         "looks connected; it is not accepting commands.",
                         mount_id, st.unacked)
-            self.mount_disconnected.emit(mount_id)
+            self._set_mount_online(mount_id, unresponsive=True)
 
     def send_get_config(self, mount_id: int) -> None:
         """Request speed presets and orientation from a mount."""
@@ -956,9 +991,7 @@ class MountManager(QObject):
         # walk it straight back to looking connected — which is exactly how 79%
         # command loss displayed as a perfectly healthy mount 4.
         if not st.connected:
-            st.connected = True
-            if not st.unresponsive:
-                self.mount_connected.emit(mid)
+            self._set_mount_online(mid, connected=True)
             self._send(pkt_get_state(mid))     # as the STATUS path does
         st.last_pong_ms = time.monotonic() * 1000
 
@@ -1072,8 +1105,8 @@ class MountManager(QObject):
         if pkt.cmd == Cmd.STATUS:
             try:
                 s = decode_status(pkt.payload)
-                was_connected = st.connected
-                st.connected   = True
+                was_online = st.connected and not st.unresponsive
+                self._set_mount_online(mid, connected=True)
                 st.last_pong_ms = time.monotonic() * 1000
                 st.state       = s.state
                 st.flags       = s.flags
@@ -1095,8 +1128,7 @@ class MountManager(QObject):
                 if s.la_subject_present:
                     st.active_subject_id = s.active_la_subject  # 0-7 or 0xFF (none)
 
-                if not was_connected:
-                    self.mount_connected.emit(mid)
+                if not was_online:
                     # Request full state so slot coordinates are populated via STATE_REPORT
                     self._send(pkt_get_state(mid))
                     # Request subject list for mounts in look-at mode so the UI
@@ -1328,12 +1360,11 @@ class MountManager(QObject):
             # Proof the mount is not just audible but ACTING on what it is told.
             st.unacked = 0
             if st.unresponsive:
-                st.unresponsive = False
                 log.warning("Mount %d is responding again", mid)
-                self.mount_connected.emit(mid)
+                self._set_mount_online(mid, unresponsive=False)
 
         elif pkt.cmd == Cmd.PONG:
-            st.connected    = True
+            self._set_mount_online(mid, connected=True)
             st.last_pong_ms = time.monotonic() * 1000
             # No GET_STATUS here.  This turned one heartbeat into two downlink
             # frames per mount — ping out, pong back, status request out — and
@@ -1444,8 +1475,12 @@ class MountManager(QObject):
         now_ms = time.monotonic() * 1000
         for mid, st in self._states.items():
             if st.connected and (now_ms - st.last_pong_ms) > HEARTBEAT_TIMEOUT_MS:
-                st.connected = False
-                self.mount_disconnected.emit(mid)
+                # unresponsive is cleared too: it describes a mount that is
+                # heard and not acting.  Leaving it set on one that has gone
+                # silent means the next packet re-enters as "heard but still
+                # unresponsive" and cannot come back online until an ACK, which
+                # is exactly how a live mount used to stay greyed.
+                self._set_mount_online(mid, connected=False, unresponsive=False)
 
     # ------------------------------------------------------------------
     # Internal
