@@ -1212,6 +1212,16 @@ class MountManager(QObject):
         elif pkt.cmd == Cmd.CONFIG_REPORT:
             try:
                 cr = decode_config_report(pkt.payload)
+                # Report the rail geometry when it changes.  A flash bumps
+                # EEPROM_MAGIC and silently resets the tilt to 0, which leaves
+                # pan tracking fine and tilt almost flat — a failure that looks
+                # like bad tracking rather than lost config.  GET_CONFIG is
+                # polled every ~2 s, so log only on change.
+                prev_cr = st.last_config_report
+                if (prev_cr is None
+                        or abs(prev_cr.slider_tilt_deg - cr.slider_tilt_deg) > 0.05):
+                    log.info(f"RAIL cam{mid}: slider tilt {cr.slider_tilt_deg:+.1f}° "
+                             f"({'level — tilt tracking will be flat' if abs(cr.slider_tilt_deg) < 0.05 else 'inclined'})")
                 st.look_at_mode = cr.look_at_mode
                 st.last_config_report = cr   # cache for config dialog pre-population
                 self.config_report_received.emit(mid, cr)
@@ -1222,6 +1232,21 @@ class MountManager(QObject):
         elif pkt.cmd == Cmd.SUBJECT_LIST:
             try:
                 subjects = decode_subject_list(pkt.payload)
+                # Log a subject whenever its solved position changes.  The
+                # mount's own account of the solve goes to USB serial, which
+                # nothing reads at the rig — so a calibration that succeeded
+                # and one that landed somewhere impossible looked identical
+                # from here.  This is polled every ~4 s, hence "on change".
+                prev = {(s.name, round(s.x_mm), round(s.y_mm), round(s.z_mm))
+                        for s in (st.subjects or []) if s.valid}
+                for s in subjects:
+                    if not s.valid:
+                        continue
+                    key = (s.name, round(s.x_mm), round(s.y_mm), round(s.z_mm))
+                    if key not in prev:
+                        log.info(f"SUBJECT cam{mid}: '{s.name}' solved at "
+                                 f"x={s.x_mm:.0f} y={s.y_mm:.0f} z={s.z_mm:.0f} mm "
+                                 f"(z is distance in front of the rail)")
                 st.subjects = subjects
                 self.subject_list_received.emit(mid)
             except Exception as e:
