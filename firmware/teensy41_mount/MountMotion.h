@@ -336,6 +336,12 @@ public:
     // Currently tracked subject ID (0xFF = none)
     uint8_t getLaSubjectId() const { return _la_subject_id; }
     void    clearLaSubject()       { _la_subject_id = 0xFF; }
+    // Look-at mode itself, not merely "a subject id is set".  The subject id
+    // persists across a mode change, so it cannot stand in for the mode: a
+    // subject selected before look-at was switched off would otherwise still
+    // satisfy a check that meant to ask whether look-at is on.
+    void    setLookAtMode(bool on)  { _look_at_mode = on; }
+    bool    getLookAtMode() const   { return _look_at_mode; }
 
     // Persist slider-end state in flags after a look-at move arrives.
     // dir 0 = min/◀, dir 1 = max/▶.  Replaces both limit flags atomically
@@ -437,6 +443,7 @@ private:
     int8_t          _la_pt_dir[2];         // current rotateAsync direction: PAN[0], TILT[1]
     uint32_t        _la_last_update_ms;    // timestamp of last look-at controller tick
     uint8_t         _la_subject_id;        // currently tracked subject slot (0xFF = none)
+    bool            _look_at_mode = false;  // set by setLookAtMode() / EEPROM load
     uint32_t        _la_slew_until_ms;     // apply slew-accel until this timestamp (mid-move switch)
 
     // Pre-aim phase: pan/tilt settle to start position before slider moves

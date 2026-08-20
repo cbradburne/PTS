@@ -355,6 +355,7 @@ static void eeprom_load() {
 
     mount.setOrientation(cfg.pan_invert, cfg.tilt_invert, cfg.slider_invert, cfg.zoom_invert);
     mount.setHasSlider(cfg.has_slider);
+    mount.setLookAtMode(cfg.look_at_mode);
     if (cfg.lanc_zoom) lanc_ensure_init();
 
     for (int i = 0; i < 4; i++) {
@@ -1071,6 +1072,7 @@ static void dispatch(const ParsedPacket &pkt) {
             bool old_zoom_inv     = _cfg.zoom_invert;
             mount.setOrientation(pan_inv, tilt_inv, slider_inv, zoom_inv);
             mount.setHasSlider(has_slider);
+            mount.setLookAtMode(look_at_mode);
             _cfg.pan_invert    = pan_inv;
             _cfg.tilt_invert   = tilt_inv;
             _cfg.slider_invert = slider_inv;
@@ -1089,6 +1091,10 @@ static void dispatch(const ParsedPacket &pkt) {
                 _slot_occupied = 0;
                 _slot_at       = 0;
                 memset(_subjects, 0, sizeof(_subjects));
+                // The SELECTED subject too.  stopAll() does not clear it, and
+                // the id outliving the mode is exactly the staleness the slot
+                // and subject wipes above exist to prevent.
+                mount.clearLaSubject();
                 mount.stopAll();
                 send_subject_list();   // broadcast empty list before send_status()
             }

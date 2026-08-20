@@ -441,7 +441,7 @@ void MountMotion::update() {
     // is no commanded destination to arrive at.  Requires pan/tilt to be idle:
     // jogging either of those is the one thing that means "aim somewhere else",
     // and it drops the subject before reaching here.
-    else if (_state == STATE_JOGGING && _ref_set &&
+    else if (_state == STATE_JOGGING && _look_at_mode && _ref_set &&
              _la_subject_id != 0xFF &&
              _jog_vel[AXIS_PAN] == 0 && _jog_vel[AXIS_TILT] == 0) {
         _updateLookAt(false);
