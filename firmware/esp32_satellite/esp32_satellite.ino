@@ -53,27 +53,26 @@
 #include "../shared/protocol.h"
 #define ETH_HOSTNAME "pts-sat"
 
-// This satellite's address on the wired (Dante) network.  Static for the same
-// reason the hub's is: 169.254.0.0/16 is the link-local range, which by
-// definition has no DHCP server to ask.  Without an address _eth_up never
-// becomes true and uplink_service() returns before it even attempts to connect
-// — a satellite that looks healthy at both ends and silently relays nothing.
+// This satellite takes its wired address from DHCP, like the hub.  Every unit
+// is registered on the network, so each gets its own lease and nothing here
+// needs editing per satellite — which is the main reason to leave it this way.
 //
-// Gateway 0.0.0.0 deliberately: a flat link-local network has no router, and
-// the only thing this box talks to over the wire is the hub, on this subnet.
-// No DNS server either — "pts-hub.local" is resolved by mDNS multicast, which
-// asks the network rather than a server.
+// Without an address _eth_up never becomes true and uplink_service() returns
+// before it even attempts to connect — a satellite that looks healthy at both
+// ends and silently relays nothing.  So if you do pin an address, check the one
+// printed at boot actually took.
 //
-// >> ONE ADDRESS PER SATELLITE <<  This is a fixed value, so a second unit
-// built from this sketch unchanged would claim the same address as the first.
-// Two hosts sharing an IP fail intermittently and asymmetrically, which on a
-// radio bridge looks exactly like interference — the last thing you would
-// suspect.  Give each satellite its own last octet and write them down:
+// >> ONE ADDRESS PER SATELLITE <<  applies only if you define these again.  The
+// value is fixed in the sketch, so a second unit built from it unchanged would
+// claim the same address as the first.  Two hosts sharing an IP fail
+// intermittently and asymmetrically, which on a radio bridge looks exactly like
+// interference — the last thing you would suspect.  Give each satellite its own
+// last octet and write them down:
 //
-//     .22  hub          .23  first satellite          .24, .25, ...
-#define ETH_STATIC_IP  "169.254.22.23"
-#define ETH_SUBNET     "255.255.0.0"
-#define ETH_GATEWAY    "0.0.0.0"
+//     .10  hub          .11  first satellite          .12, .13, ...
+//#define ETH_STATIC_IP  "192.169.1.11"
+//#define ETH_SUBNET     "255.255.255.0"
+//#define ETH_GATEWAY    "192.169.1.1"
 
 #include "../shared/board_eth.h"
 #include "../shared/sat_link.h"

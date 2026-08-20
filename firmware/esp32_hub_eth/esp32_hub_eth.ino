@@ -98,21 +98,22 @@
 #include "../shared/sat_link.h"
 #define ETH_HOSTNAME SAT_HUB_HOSTNAME
 
-// The hub's address on the wired (Dante) network.  Static rather than DHCP
-// because that network is link-local: 169.254.0.0/16 is the range devices use
-// when there is no DHCP server, so there is generally nothing there to ask.
+// The hub takes its wired address from DHCP.  The network now serves one, and
+// the hub and every satellite are registered on it, so there is nothing to
+// configure here — the address it received is printed at boot alongside the
+// Ethernet MAC.
 //
-// The gateway is deliberately 0.0.0.0.  A flat link-local network has no router
-// to send off-subnet traffic to, and naming one that does not exist would just
-// black-hole anything not on 169.254.  Everything this hub talks to over the
-// wire — the satellites — is on that subnet, and mDNS needs no DNS server, so
-// ETH_DNS follows the gateway and is unused.
+// Define these three again to pin a static address instead.  That is worth
+// doing when the DHCP server only serves registered MACs and this board is not
+// on the list yet: the chicken-and-egg where you need the lease to find the
+// board and the board to find the MAC.  It costs you a second place the network
+// is configured, so prefer registering the MAC and commenting them out again.
 //
-// Comment all three out to use DHCP instead, once the Ethernet MAC printed at
-// boot has been registered with a network that serves one.
-#define ETH_STATIC_IP  "169.254.22.22"
-#define ETH_SUBNET     "255.255.0.0"
-#define ETH_GATEWAY    "0.0.0.0"
+// ETH_DNS follows ETH_GATEWAY when unset, and mDNS resolves "pts-sat*.local"
+// by multicast rather than by asking a server, so it is not usually needed.
+//#define ETH_STATIC_IP  "192.169.1.10"
+//#define ETH_SUBNET     "255.255.255.0"
+//#define ETH_GATEWAY    "192.169.1.1"
 
 #include "../shared/board_eth.h"
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
