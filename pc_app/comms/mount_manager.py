@@ -504,6 +504,25 @@ class MountManager(QObject):
         (self.mount_connected if after else self.mount_disconnected).emit(mount_id)
         return True
 
+    def resync_presence(self) -> None:
+        """Re-announce every mount's presence as it currently stands.
+
+        Presence reaches the UI as transitions, and the UI subscribes to those
+        signals AFTER the bridge is already connected — MainWindow.__init__
+        connects the bridge around 230 lines before it connects these signals.
+        A mount whose first packet lands inside that window has its transition
+        emitted into a void, and since presence only changes on a transition,
+        nothing afterwards corrects it: the row stays greyed for the whole
+        session with the mount plainly working and its data arriving.
+
+        This makes the UI's view a function of the current state rather than of
+        an event it had to be present to hear.  Call it once the signals are
+        wired, and on reconnect.
+        """
+        for mid, st in self._states.items():
+            online = st.connected and not st.unresponsive
+            (self.mount_connected if online else self.mount_disconnected).emit(mid)
+
     def _note_tracked_send(self, mount_id: int) -> None:
         st = self._states.get(mount_id)
         if not st or not st.connected:

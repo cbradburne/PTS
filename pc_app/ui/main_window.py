@@ -508,6 +508,12 @@ class MainWindow(QMainWindow):
         self._mm.mount_status_updated.connect(self._on_status_updated)
         self._mm.mount_connected.connect(self._on_mount_connected)
         self._mm.mount_disconnected.connect(self._on_mount_disconnected)
+        # The bridge was connected far earlier in this constructor, so mounts
+        # heard before this line had their presence emitted with nothing
+        # listening.  Ask for it again now that there is.  Deferred to the event
+        # loop because the handlers touch widgets this constructor has not built
+        # yet.
+        QTimer.singleShot(0, self._mm.resync_presence)
         self._mm.limits_found.connect(self._on_limits_found)
         self._mm.state_report_received.connect(self._on_state_report)
         self._mm.pair_conflict.connect(self._on_pair_conflict)

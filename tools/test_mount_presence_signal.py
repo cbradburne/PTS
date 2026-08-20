@@ -140,6 +140,29 @@ assert before.connected and not before.ui_online, \
 assert after.ui_online, "the fix does not bring the mount back online"
 print("   a live mount is no longer stranded greyed          OK")
 
+# ---- 4b. the UI can ask, rather than having to have been listening ---------
+print("\n3b. presence survives the startup race:")
+MW = (REPO / "pc_app/ui/main_window.py").read_text()
+assert "def resync_presence" in MM, "there is no way to re-ask for current presence"
+resync = MM[MM.index("def resync_presence"):]
+resync = resync[:resync.index("\n    def ", 1)]
+assert "online = st.connected and not st.unresponsive" in resync, \
+    "resync_presence does not report the effective state"
+assert "for mid, st in self._states.items()" in resync, "resync_presence skips mounts"
+print("   resync_presence reports every mount's real state   OK")
+
+# It has to be called AFTER the signals are connected, and the bridge is
+# connected long before that in the same constructor.
+i_conn   = MW.index("self._mm.mount_connected.connect")
+i_resync = MW.index("self._mm.resync_presence")
+i_bridge = MW.index("self._connect_bridge()")
+assert i_bridge < i_conn, \
+    "the bridge is now connected after the signals — re-check whether resync is still needed"
+assert i_conn < i_resync, "resync runs before the signals are wired; it would emit into a void too"
+assert "QTimer.singleShot(0, self._mm.resync_presence)" in MW, \
+    "resync is called inline; the handlers touch widgets __init__ has not built yet"
+print("   called after wiring, deferred to the event loop    OK")
+
 # ---- 5. and an offline row shows nothing -------------------------------------
 # The overlay is translucent, so anything drawn underneath stays readable.
 # Half-lit is the one state that cannot be read at a glance.
