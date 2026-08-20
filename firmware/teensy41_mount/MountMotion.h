@@ -51,6 +51,28 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 #define LOOK_AT_SLEW_DURATION_MS  2000
 
 // ---------------------------------------------------------------------------
+// Subject-switch blend
+// ---------------------------------------------------------------------------
+// Selecting a new subject mid-move moved the TARGET in a single step, leaving
+// the controller to chase a discontinuity.  However gently it was tuned to
+// respond, it was still reacting to a jump: full slew speed almost at once,
+// then a braking curve into the new aim.  And because pan and tilt are separate
+// P-loops with separate errors, whichever had less to travel arrived first — so
+// the move read as two axis motions rather than one arc.
+//
+// Easing the SETPOINT fixes both without touching the controller.  The subject
+// position is interpolated from the old to the new one on a smoothstep, which
+// has zero velocity at both ends, so the camera eases out of the old subject
+// and into the new one.  Both axes are derived from the same moving point, so
+// they stay coordinated for free and land together.
+//
+// Duration scales with how far the camera has to turn — a small correction
+// should not take as long as a sweep across the room.
+#define LOOK_AT_BLEND_MS_PER_DEG   55.0f
+#define LOOK_AT_BLEND_MIN_MS        300
+#define LOOK_AT_BLEND_MAX_MS       2200
+
+// ---------------------------------------------------------------------------
 // DRIVE GEOMETRY — change these when the hardware changes, nothing else
 // ---------------------------------------------------------------------------
 // Every ratio in the firmware derives from the numbers in this block.
@@ -335,7 +357,9 @@ public:
 
     // Currently tracked subject ID (0xFF = none)
     uint8_t getLaSubjectId() const { return _la_subject_id; }
-    void    clearLaSubject()       { _la_subject_id = 0xFF; }
+    // Dropping the subject cancels any blend with it — otherwise a half-finished
+    // ease would still be running when the next subject is chosen.
+    void    clearLaSubject()       { _la_subject_id = 0xFF; _la_blend_ms = 0; }
     // Look-at mode itself, not merely "a subject id is set".  The subject id
     // persists across a mode change, so it cannot stand in for the mode: a
     // subject selected before look-at was switched off would otherwise still
@@ -444,6 +468,16 @@ private:
     uint32_t        _la_last_update_ms;    // timestamp of last look-at controller tick
     uint8_t         _la_subject_id;        // currently tracked subject slot (0xFF = none)
     bool            _look_at_mode = false;  // set by setLookAtMode() / EEPROM load
+
+    // Subject-switch blend.  _la_blend_ms == 0 means no blend is running and
+    // the subject is simply _la_subject_*.
+    float           _la_blend_from[3] = { 0.f, 0.f, 0.f };
+    uint32_t        _la_blend_start_ms = 0;
+    uint32_t        _la_blend_ms       = 0;
+
+    // The subject position to aim at RIGHT NOW — the blend evaluated at this
+    // instant, or the subject itself when no blend is running.
+    void     _laSubjectNow(float *sx, float *sy, float *sz) const;
     uint32_t        _la_slew_until_ms;     // apply slew-accel until this timestamp (mid-move switch)
 
     // Pre-aim phase: pan/tilt settle to start position before slider moves

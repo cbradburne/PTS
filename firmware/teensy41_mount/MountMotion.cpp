@@ -1784,7 +1784,44 @@ void MountMotion::_clampToLimits(int32_t &target, Axis axis) const {
 // setLookAtSubject()  — update the 3D world target (safe to call mid-move)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// _laSubjectNow() — where to aim RIGHT NOW
+// ---------------------------------------------------------------------------
+// Mid-blend this is a point travelling from the old subject to the new one on a
+// smoothstep: 3t^2 - 2t^3, whose derivative is zero at both ends.  The camera
+// therefore eases out of the old aim and into the new one, and since pan and
+// tilt are both derived from this one moving point they stay coordinated and
+// arrive together without needing to be synchronised explicitly.
+void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
+    if (_la_blend_ms == 0) {
+        *sx = _la_subject_x;  *sy = _la_subject_y;  *sz = _la_subject_z;
+        return;
+    }
+    uint32_t elapsed = millis() - _la_blend_start_ms;
+    if (elapsed >= _la_blend_ms) {
+        *sx = _la_subject_x;  *sy = _la_subject_y;  *sz = _la_subject_z;
+        return;
+    }
+    float t = (float)elapsed / (float)_la_blend_ms;
+    float e = t * t * (3.0f - 2.0f * t);          // smoothstep
+    *sx = _la_blend_from[0] + (_la_subject_x - _la_blend_from[0]) * e;
+    *sy = _la_blend_from[1] + (_la_subject_y - _la_blend_from[1]) * e;
+    *sz = _la_blend_from[2] + (_la_subject_z - _la_blend_from[2]) * e;
+}
+
 void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id) {
+    // Switching subject while already tracking one: ease the target across
+    // instead of stepping it.  Start from where we are aiming NOW, which may
+    // itself be part-way through an earlier blend, so a switch during a switch
+    // stays continuous rather than snapping back to the previous subject.
+    bool switching = (_look_at_mode && _la_subject_id != 0xFF &&
+                      subject_id != _la_subject_id &&
+                      (_state == STATE_LOOK_AT_MOVE ||
+                       _state == STATE_LOOK_AT_PRE_AIM ||
+                       _state == STATE_JOGGING));
+    float from_x = 0.f, from_y = 0.f, from_z = 0.f;
+    if (switching) _laSubjectNow(&from_x, &from_y, &from_z);
+
     // Atomic write — update atomically enough for Teensy (no ISR touches these)
     _la_subject_x  = sx;
     _la_subject_y  = sy;
@@ -1798,6 +1835,40 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
         _la_slew_until_ms = millis() + LOOK_AT_SLEW_DURATION_MS;
     }
+
+    if (!switching) {
+        _la_blend_ms = 0;            // first selection — aim straight at it
+        return;
+    }
+
+    // Duration from how far the camera actually has to turn, measured at the
+    // current rail position: a nudge between two people standing together
+    // should not take as long as a sweep across the room.
+    int32_t sl_phys = _stepper[AXIS_SLIDER]->getPosition();
+    float   cx      = (float)sl_phys * _slider_mm_per_step;
+    if (_slider_invert) cx = -cx;
+    float wx, wy;
+    _railWorldPos(cx, &wx, &wy);
+
+    float pan_a  = atan2f(from_x - wx, from_z) * (180.0f / (float)M_PI);
+    float pan_b  = atan2f(sx      - wx, sz)    * (180.0f / (float)M_PI);
+    float tilt_a = atan2f(from_y - wy, sqrtf((from_x-wx)*(from_x-wx) + from_z*from_z))
+                   * (180.0f / (float)M_PI);
+    float tilt_b = atan2f(sy      - wy, sqrtf((sx-wx)*(sx-wx) + sz*sz))
+                   * (180.0f / (float)M_PI);
+    float travel = fmaxf(fabsf(pan_b - pan_a), fabsf(tilt_b - tilt_a));
+
+    float ms = travel * LOOK_AT_BLEND_MS_PER_DEG;
+    if (ms < (float)LOOK_AT_BLEND_MIN_MS) ms = (float)LOOK_AT_BLEND_MIN_MS;
+    if (ms > (float)LOOK_AT_BLEND_MAX_MS) ms = (float)LOOK_AT_BLEND_MAX_MS;
+
+    _la_blend_from[0] = from_x;
+    _la_blend_from[1] = from_y;
+    _la_blend_from[2] = from_z;
+    _la_blend_start_ms = millis();
+    _la_blend_ms       = (uint32_t)ms;
+    Serial.printf("[LA] subject switch: %.1f deg to travel, easing over %lums\n",
+                  travel, (unsigned long)_la_blend_ms);
 }
 
 // ---------------------------------------------------------------------------
@@ -2056,11 +2127,13 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
     if (_slider_invert) cx = -cx;
 
     // 2. Vector from camera to subject
+    float sx_now, sy_now, sz_now;
+    _laSubjectNow(&sx_now, &sy_now, &sz_now);
     float wx, wy;
     _railWorldPos(cx, &wx, &wy);
-    float dx = _la_subject_x - wx;
-    float dy = _la_subject_y - wy;
-    float dz = _la_subject_z;   // Z positive = into room (away from rail)
+    float dx = sx_now - wx;
+    float dy = sy_now - wy;
+    float dz = sz_now;   // Z positive = into room (away from rail)
 
     // 3. Required pan/tilt angles (world frame)
     float pan_rad  = atan2f(dx, dz);
@@ -2086,7 +2159,7 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
         float tilt_err = (float)(tilt_target - tilt_pos);
         Serial.printf("[LA] sl_phys=%ld  cx=%.1fmm  subj=(%.1f,%.1f,%.1f)\n",
                       (long)sl_phys, cx,
-                      _la_subject_x, _la_subject_y, _la_subject_z);
+                      sx_now, sy_now, sz_now);
         Serial.printf("[LA] dx=%.1f dz=%.1f  pan=%.3f° tilt=%.3f°\n",
                       dx, dz, pan_deg, tilt_deg);
         Serial.printf("[LA] ref: pan_ref=%.3f° tilt_ref=%.3f°\n",

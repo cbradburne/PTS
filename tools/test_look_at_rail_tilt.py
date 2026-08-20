@@ -49,7 +49,10 @@ print("   _railWorldPos resolves along/up components          OK")
 print("\n2. every site that aims at the subject:")
 assert "float dy = _la_subject_y;" not in CPP, \
     "a look-at site still takes the camera height as zero"
-n = CPP.count("float dy = _la_subject_y - w")
+# The tracking site aims at the BLENDED subject (see test_look_at_subject_blend),
+# so match on the property — the camera's height on the rail is subtracted —
+# rather than on one spelling of the subject.
+n = len(re.findall(r"float dy = (?:_la_subject_y|sy_now) - w", CPP))
 assert n == 3, f"expected 3 rail-aware sites (pre-aim, aimAtSubject, tracking), found {n}"
 print(f"   {n} of 3 subtract the camera's height on the rail   OK")
 n = CPP.count("_railWorldPos(")
