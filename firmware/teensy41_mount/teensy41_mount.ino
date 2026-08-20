@@ -917,10 +917,16 @@ static void dispatch(const ParsedPacket &pkt) {
             // If the operator manually moves any physical axis while in look-at
             // mode (but not during an active tracking move), deselect the active
             // subject so all UIs show "not tracking" (red border).
+            // Only PAN or TILT drops the subject.  Moving the slider is not
+            // aiming somewhere else — it is the operator repositioning the
+            // camera along the rail while the triangulation keeps the subject
+            // framed, which is the point of look-at mode.  The slider used to
+            // be in this list, so a manual slide both deselected the subject
+            // and left pan/tilt where they were.
             if (_cfg.look_at_mode &&
                     mount.getState() != STATE_LOOK_AT_MOVE &&
                     mount.getState() != STATE_LOOK_AT_PRE_AIM &&
-                    (pan != 0 || tilt != 0 || slider != 0)) {
+                    (pan != 0 || tilt != 0)) {
                 mount.clearLaSubject();
                 send_look_at_status();
             }
@@ -956,10 +962,11 @@ static void dispatch(const ParsedPacket &pkt) {
             // app and the web app send MOVE_REL, not JOG, so without this the
             // border stayed green after the camera had been moved away — the
             // operator had no way to see that pressing the slot would re-aim.
+            // Slider deliberately absent — see the CMD_JOG note above.
             if (_cfg.look_at_mode &&
                     mount.getState() != STATE_LOOK_AT_MOVE &&
                     mount.getState() != STATE_LOOK_AT_PRE_AIM &&
-                    (d_pan != 0 || d_tilt != 0 || d_slider != 0)) {
+                    (d_pan != 0 || d_tilt != 0)) {
                 mount.clearLaSubject();
                 send_look_at_status();
             }

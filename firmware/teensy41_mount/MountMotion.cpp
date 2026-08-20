@@ -435,6 +435,17 @@ void MountMotion::update() {
     if (_state == STATE_LOOK_AT_MOVE) {
         _updateLookAt();
     }
+    // Manual slide with a subject selected: keep pan and tilt on the subject.
+    // The operator owns the slider, the triangulation owns pan/tilt — the same
+    // split as a commanded look-at move, minus the arrival test, because there
+    // is no commanded destination to arrive at.  Requires pan/tilt to be idle:
+    // jogging either of those is the one thing that means "aim somewhere else",
+    // and it drops the subject before reaching here.
+    else if (_state == STATE_JOGGING && _ref_set &&
+             _la_subject_id != 0xFF &&
+             _jog_vel[AXIS_PAN] == 0 && _jog_vel[AXIS_TILT] == 0) {
+        _updateLookAt(false);
+    }
 
     if (_state == STATE_MOVING_TO_POS) {
         _updateGoto();
@@ -2032,7 +2043,7 @@ void MountMotion::_railWorldPos(float cx, float *wx, float *wy) const {
     *wy = cx * sinf(t);
 }
 
-void MountMotion::_updateLookAt() {
+void MountMotion::_updateLookAt(bool check_slider_arrival) {
     uint32_t now = millis();
     if (now - _la_last_update_ms < LOOK_AT_INTERVAL_MS) return;
     _la_last_update_ms = now;
@@ -2141,7 +2152,7 @@ void MountMotion::_updateLookAt() {
     // destination when startLookAtMove() was called (e.g. user presses the arrow
     // toward the limit the slider is already at), because moveAsync() targeting
     // the current position leaves isMoving=false from the very first tick.
-    {
+    if (check_slider_arrival) {
         int32_t sl_pos = _stepper[AXIS_SLIDER]->getPosition();
         int32_t sl_err = labs(sl_pos - _goto_target[AXIS_SLIDER]);
         if (!_stepper[AXIS_SLIDER]->isMoving && sl_err <= GOTO_ARRIVE_STEPS) {

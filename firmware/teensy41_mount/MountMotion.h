@@ -487,7 +487,10 @@ private:
     void     _updateJog();
     void     _updateGoto();                                // velocity P-loop for position moves
     void     _updateLimitFind();
-    void     _updateLookAt();                              // v2: 50 Hz look-at controller
+    // v2: 50 Hz look-at controller.  check_slider_arrival=false tracks the
+    // subject WITHOUT the end-of-move test, for when the operator is driving
+    // the slider by hand and there is no commanded destination to arrive at.
+    void     _updateLookAt(bool check_slider_arrival = true);
     void     _updatePreAim();                             // v2: wait for pre-aim to settle, then start slider
     void     _driveTowardTarget(int axis, int32_t target, float max_steps_s); // v2: P-follower for one axis
     void     _setFlag(uint8_t flag)   { _flags |= flag; }
