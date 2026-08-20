@@ -304,6 +304,12 @@ public:
     // Set the deg/µstep scale factors (stored in EEPROM by the .ino after calibration).
     void setDegPerStep(float pan_dps, float tilt_dps);
     void setSliderMmPerStep(float mm_per_step);
+    // Rail inclination in degrees, signed; 0 is level.  The look-at maths in
+    // here places the camera on the rail, so it needs the same geometry the
+    // solver used — otherwise a subject solved for a climbing rail is tracked
+    // as though the rail were flat, and tilt comes out very nearly constant.
+    void setSliderTiltDeg(float deg) { _slider_tilt_deg = deg; }
+    float getSliderTiltDeg() const   { return _slider_tilt_deg; }
 
     // Set the session reference: maps current step count to known angles.
     // Called every session (and after subject calibration, automatically).
@@ -443,6 +449,11 @@ private:
     float           _pan_deg_per_step;     // set by setDegPerStep() / EEPROM load
     float           _tilt_deg_per_step;
     float           _slider_mm_per_step;   // set by setSliderMmPerStep() / EEPROM load
+    float           _slider_tilt_deg = 0.0f;  // set by setSliderTiltDeg() / EEPROM load
+
+    // Where the camera actually is when the slider reads cx mm along the rail.
+    // On a level rail this is (cx, 0) and everything below is unchanged.
+    void _railWorldPos(float cx, float *wx, float *wy) const;
 
     // ── v2 Session reference (RAM only — cleared on power-cycle) ───────────
     float           _pan_ref_deg;          // pan angle (deg) at step count 0

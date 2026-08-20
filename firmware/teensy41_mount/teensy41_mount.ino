@@ -401,6 +401,8 @@ static void eeprom_load() {
         }
     }
     if (cfg.slider_mm_per_step > 0.0f) mount.setSliderMmPerStep(cfg.slider_mm_per_step);
+    // The look-at maths lives in MountMotion; it needs the rail geometry too.
+    mount.setSliderTiltDeg(cfg.slider_tilt_deg);
 
     Serial.printf("[eeprom_load] sl_mm_step=%.8f\n", cfg.slider_mm_per_step);
 
@@ -1056,6 +1058,7 @@ static void dispatch(const ParsedPacket &pkt) {
             if (len >= 3) {
                 int16_t t10 = (int16_t)((p[1] << 8) | p[2]);
                 _cfg.slider_tilt_deg = (float)t10 / 10.0f;
+                mount.setSliderTiltDeg(_cfg.slider_tilt_deg);
             }
             bool look_at_changed  = (look_at_mode != _cfg.look_at_mode);
             bool old_zoom_inv     = _cfg.zoom_invert;

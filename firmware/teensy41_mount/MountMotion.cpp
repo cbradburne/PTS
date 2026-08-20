@@ -1830,8 +1830,10 @@ bool MountMotion::startLookAtMove(int32_t slider_start_steps, int32_t slider_end
         float cx_now = (float)sl_phys_now * _slider_mm_per_step;
         if (_slider_invert) cx_now = -cx_now;
 
-        float dx = _la_subject_x - cx_now;
-        float dy = _la_subject_y;
+        float wx_now, wy_now;
+        _railWorldPos(cx_now, &wx_now, &wy_now);
+        float dx = _la_subject_x - wx_now;
+        float dy = _la_subject_y - wy_now;
         float dz = _la_subject_z;
 
         float pan_deg_now  = atan2f(dx, dz) * (180.0f / (float)M_PI);
@@ -1912,9 +1914,11 @@ bool MountMotion::aimAtSubject(uint8_t pt_preset) {
     float cx = (float)sl_phys * _slider_mm_per_step;
     if (_slider_invert) cx = -cx;
 
-    // Vector from camera to subject
-    float dx = _la_subject_x - cx;
-    float dy = _la_subject_y;
+    // Vector from camera to subject, both on the real (possibly climbing) rail
+    float wx, wy;
+    _railWorldPos(cx, &wx, &wy);
+    float dx = _la_subject_x - wx;
+    float dy = _la_subject_y - wy;
     float dz = _la_subject_z;
 
     // Required world-frame angles
@@ -2017,6 +2021,17 @@ void MountMotion::_updatePreAim() {
 // _updateLookAt()  — called from update() every LOOK_AT_INTERVAL_MS
 // ---------------------------------------------------------------------------
 
+// Where the camera sits when the slider reads cx mm along the rail.  The rail
+// may climb: at 21 degrees it rises 358 mm per metre, so the camera is neither
+// at the along-rail distance the slider reports nor at a constant height.  The
+// solver in the .ino resolves this the same way (slider_world_pos); both must
+// agree or a subject is solved in one frame and tracked in another.
+void MountMotion::_railWorldPos(float cx, float *wx, float *wy) const {
+    float t = _slider_tilt_deg * (float)DEG_TO_RAD;
+    *wx = cx * cosf(t);
+    *wy = cx * sinf(t);
+}
+
 void MountMotion::_updateLookAt() {
     uint32_t now = millis();
     if (now - _la_last_update_ms < LOOK_AT_INTERVAL_MS) return;
@@ -2030,8 +2045,10 @@ void MountMotion::_updateLookAt() {
     if (_slider_invert) cx = -cx;
 
     // 2. Vector from camera to subject
-    float dx = _la_subject_x - cx;
-    float dy = _la_subject_y;
+    float wx, wy;
+    _railWorldPos(cx, &wx, &wy);
+    float dx = _la_subject_x - wx;
+    float dy = _la_subject_y - wy;
     float dz = _la_subject_z;   // Z positive = into room (away from rail)
 
     // 3. Required pan/tilt angles (world frame)
