@@ -1220,8 +1220,10 @@ class MountManager(QObject):
                 prev_cr = st.last_config_report
                 if (prev_cr is None
                         or abs(prev_cr.slider_tilt_deg - cr.slider_tilt_deg) > 0.05):
-                    log.info(f"RAIL cam{mid}: slider tilt {cr.slider_tilt_deg:+.1f}° "
-                             f"({'level — tilt tracking will be flat' if abs(cr.slider_tilt_deg) < 0.05 else 'inclined'})")
+                    note = ("level — correct for a horizontal rail; if this rail "
+                            "is inclined, a flash has reset it"
+                            if abs(cr.slider_tilt_deg) < 0.05 else "inclined")
+                    log.info(f"RAIL cam{mid}: slider tilt {cr.slider_tilt_deg:+.1f}° ({note})")
                 st.look_at_mode = cr.look_at_mode
                 st.last_config_report = cr   # cache for config dialog pre-population
                 self.config_report_received.emit(mid, cr)
