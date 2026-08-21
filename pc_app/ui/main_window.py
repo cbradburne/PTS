@@ -506,6 +506,7 @@ class MainWindow(QMainWindow):
 
         self._pair_conflict_box = None   # open pairing-conflict QMessageBox, or None
         self._mm.mount_status_updated.connect(self._on_status_updated)
+        self._mm.slider_jogged.connect(self._on_slider_jogged)
         self._mm.mount_connected.connect(self._on_mount_connected)
         self._mm.mount_disconnected.connect(self._on_mount_disconnected)
         # The bridge was connected far earlier in this constructor, so mounts
@@ -554,6 +555,21 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Look-at arrow state helper
     # ------------------------------------------------------------------
+
+    @pyqtSlot(int)
+    def _on_slider_jogged(self, mount_id: int) -> None:
+        """Driving the slider by hand clears a green look-at arrow.
+
+        Green on the arrows means "parked at that end of the rail", and the
+        STATUS logic deliberately latches it — target_slot only reports a move
+        in progress, so once the move finishes there is nothing left in STATUS
+        saying where the slider ended up. The latch is right for a commanded
+        move and wrong the instant the operator slides away from that end by
+        hand, which since the manual-slide work is a normal thing to do with a
+        subject still tracking.
+        """
+        if self._la_arrow.get(mount_id) in ('left_done', 'right_done'):
+            self._set_la_arrow(mount_id, None)
 
     def _set_la_arrow(self, mount_id: int, state: "str | None") -> None:
         """Set the ◀/▶ border state in both the tracking dict and the grid."""

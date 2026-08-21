@@ -228,6 +228,10 @@ class MountManager(QObject):
 
     # mount_id (1-5)
     mount_status_updated  = pyqtSignal(int)       # new STATUS packet processed
+    # Emitted when a jog with a real slider component goes out.  The look-at
+    # arrows mean "the slider is parked at that end", which stops being true the
+    # moment the operator drives it away by hand.
+    slider_jogged         = pyqtSignal(int)
     mount_connected       = pyqtSignal(int)
     mount_disconnected    = pyqtSignal(int)
     limits_found          = pyqtSignal(int, int, int, int)  # mount_id, axis, min, max
@@ -315,6 +319,12 @@ class MountManager(QObject):
         """
         self._send(pkt_jog(mount_id, pan, tilt, slider, zoom,
                            pt_preset, sz_preset, axis_mask))
+
+        # A slider jog invalidates "at the end", which is what a green look-at
+        # arrow asserts.  Only a real deflection counts: the stream ends with a
+        # zero packet, and the CV path sends slider=0 constantly.
+        if slider != 0:
+            self.slider_jogged.emit(mount_id)
 
         # TEMPORARY (see ZOOM_DIAGNOSTIC) — make a sustained jog visible.
         #
