@@ -2291,6 +2291,20 @@ static void osc_feedback_mount(int i, bool force) {
                     (millis() - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS)) ? 1 : 0;
     uint8_t  pt  = _mount_pt_preset[i];
     uint8_t  sl  = _mount_sl_preset[i];
+
+    // A mount that is not being heard has no slots.  occ/at/target are the last
+    // values it sent, and they survive it being powered off — so a dark mount
+    // went on lighting stored-location buttons on the desk, and one of them
+    // could still show "moving to" for a move that ended when the power did.
+    // The operator reads those buttons as "this location is there to recall",
+    // which for an offline mount is exactly wrong: pressing it does nothing.
+    //
+    // Reported as EMPTY rather than held, so /slot/N/state means the same thing
+    // whether a mount is off, has no positions stored, or has just been
+    // cleared. /active already says 0 alongside it for a surface that wants to
+    // tell those apart.
+    if (!act) { occ = 0; at = 0; tgt = 0; }
+
     bool all = force || !_fb_valid[i];
 
     if (all || st != _fb_state[i]) {
