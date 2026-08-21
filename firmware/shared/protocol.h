@@ -59,6 +59,15 @@
 #define TARGET_SLOT_LA_MIN  8     // look-at slider move running toward min (left arrow)
 #define TARGET_SLOT_LA_MAX  9     // look-at slider move running toward max (right arrow)
 
+// In look-at mode slots 8 and 9 hold no stored position — they ARE the ◀/▶
+// arrows.  Their slot_at_mask bits therefore carry a different fact from the
+// other eight: not "the mount is at the position stored here" but "the slider
+// is parked at that end of the rail".  Reported through the same mask so every
+// client sees it change the instant the slider leaves the end, whoever moved
+// it — a green arrow with the slider mid-rail is a lie about where the rig is.
+#define SLOT_LA_LEFT_END    8
+#define SLOT_LA_RIGHT_END   9
+
 // CMD_STATE_REPORT payload size (10 slots × 16 bytes + 22 bytes metadata = 182)
 #define STATE_REPORT_PAYLOAD_LEN  182
 // CMD_SAVE_SPEEDS payload size (4 PT + 4 SL + 1 ZM) × 8 bytes = 72

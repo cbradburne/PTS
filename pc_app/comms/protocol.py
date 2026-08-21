@@ -42,6 +42,12 @@ TARGET_SLOT_NONE   = 0xFF
 TARGET_SLOT_LA_MIN = 8    # look-at slider move running toward min (left arrow)
 TARGET_SLOT_LA_MAX = 9    # look-at slider move running toward max (right arrow)
 
+# Look-at mode reuses slots 8 and 9 as the ◀/▶ arrows, so their slot_at_mask
+# bits mean "the slider is parked at that end of the rail" rather than "the
+# mount is at the position stored here".
+SLOT_LA_LEFT_END = 8      # slot_at bit: slider parked at the left end
+SLOT_LA_RIGHT_END = 9     # slot_at bit: slider parked at the right end
+
 # Minimum bytes in a valid packet: start(2) + len(1) + mount_id(1) + seq(2) + cmd(1) + crc(2) = 9
 PACKET_MIN_SIZE = 9
 PACKET_MAX_PAYLOAD = 256   # raised: CMD_SUBJECT_LIST needs 232 bytes

@@ -632,6 +632,8 @@ const CMD_LA_MOVE_DIR        = 0x94;  // hub-injected: direction(1) — 0=min/�
 // on any other mount they are ordinary position slots 9 and 10.
 const TARGET_SLOT_LA_MIN     = 8;
 const TARGET_SLOT_LA_MAX     = 9;
+const SLOT_LA_LEFT_END       = 8;   // slot_at bit: slider parked at the left end
+const SLOT_LA_RIGHT_END      = 9;   // slot_at bit: slider parked at the right end
 // Pairing management (hub owns the mount table; these view/set/clear it)
 const CMD_GET_MOUNT_TABLE    = 0x9B;  // →hub, no payload: request a MOUNT_TABLE push
 const CMD_MOUNT_TABLE        = 0x9C;  // hub→: 30B = 5 × MAC(6); all-zero slot = unbound
@@ -1165,19 +1167,18 @@ function _onOnePkt(buf, off) {
         // window that held 'moving' while waiting for the Teensy to enter
         // LOOK_AT_MOVE: target_slot only appears once it genuinely has.
         if (camIsLookAt(mountId)) {
+            // Green comes from the mount, not from "a move just finished here".
+            // slot_at bits 8/9 say the slider IS parked at that end, so the
+            // arrow clears itself when it leaves — whoever moved it. The latch
+            // this replaces could only see moves this page had watched, and its
+            // AT_MIN/AT_MAX fallback was unreliable anyway: those flags are set
+            // by whichever axis hits a limit and cleared by whichever is checked
+            // last, so they say nothing certain about the slider.
             if      (cs.targetSlot === TARGET_SLOT_LA_MIN) cs.laArrow = 'left';
             else if (cs.targetSlot === TARGET_SLOT_LA_MAX) cs.laArrow = 'right';
-            else if (cs.laArrow === 'left')  cs.laArrow = 'left-done';
-            else if (cs.laArrow === 'right') cs.laArrow = 'right-done';
-            else if (cs.laArrow === 'left-done' || cs.laArrow === 'right-done') {
-                // Preserve green until an explicit jog clears it.
-            } else if (cs.flags & FLAG_AT_MIN_LIMIT) {
-                cs.laArrow = 'left-done';   // fresh page load: slider is at min end
-            } else if (cs.flags & FLAG_AT_MAX_LIMIT) {
-                cs.laArrow = 'right-done';  // fresh page load: slider is at max end
-            } else {
-                cs.laArrow = null;
-            }
+            else if (cs.slotAt & (1 << SLOT_LA_LEFT_END))  cs.laArrow = 'left-done';
+            else if (cs.slotAt & (1 << SLOT_LA_RIGHT_END)) cs.laArrow = 'right-done';
+            else                                          cs.laArrow = null;
         }
 
         refreshCamBtns();

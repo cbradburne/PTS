@@ -3256,10 +3256,9 @@ void hub_ui_update_cam(uint8_t mount_id,
     // Restore look-at arrow state from limit flags on power-on / reconnect.
     // Only acts when the arrow is in the unknown-idle state (-1) so it never
     // overwrites an active flash (0/1) or an already-known green (2/3).
-    if (cam_is_look_at(i) && _la_arrow_state[i] == -1) {
-        if      (flags & FLAG_AT_MIN_LIMIT) { _la_arrow_state[i] = 2; _la_refresh_pending = true; }
-        else if (flags & FLAG_AT_MAX_LIMIT) { _la_arrow_state[i] = 3; _la_refresh_pending = true; }
-    }
+    // The AT_MIN/AT_MAX seeding that used to sit here is gone: slot_at bits 8/9
+    // carry the fact outright, on every STATUS, so there is no unknown-idle
+    // state left to guess at on a fresh boot.
 
     // If Look-at mode toggled, clear the active subject selection and refresh
     // whichever position view is currently open.
@@ -3382,23 +3381,24 @@ static void apply_slots_locked(int i) {
         // an arrow flashing here for a move that never ran, with nothing able
         // to correct it.  Deriving it from the relayed STATUS means the
         // display cannot show motion the mount is not reporting.
-        int8_t want = _la_arrow_state[i];
-        if      (target_slot == TARGET_SLOT_LA_MIN) want = 0;   // ◀ moving
-        else if (target_slot == TARGET_SLOT_LA_MAX) want = 1;   // ▶ moving
-        else if (_la_arrow_state[i] == 0)           want = 2;   // ◀ done (green)
-        else if (_la_arrow_state[i] == 1)           want = 3;   // ▶ done (green)
+        // Green comes from the mount now.  slot_at bits 8/9 report that the
+        // slider IS parked at that end of the rail, so the arrow clears when it
+        // leaves — however it was moved.  Latching "a move finished" could only
+        // ever reflect moves this display had watched.
+        int8_t want;
+        if      (target_slot == TARGET_SLOT_LA_MIN)         want = 0;   // ◀ moving
+        else if (target_slot == TARGET_SLOT_LA_MAX)         want = 1;   // ▶ moving
+        else if (slot_at & (1u << SLOT_LA_LEFT_END))        want = 2;   // ◀ at end
+        else if (slot_at & (1u << SLOT_LA_RIGHT_END))       want = 3;   // ▶ at end
+        else                                                want = -1;  // away from both
         if (want != _la_arrow_state[i]) {
             _la_arrow_state[i]  = want;
             _la_refresh_pending = true;
         }
-        if (state == STATE_JOGGING &&
-                   (_la_arrow_state[i] == 0 || _la_arrow_state[i] == 1)) {
-            // Manual slider jog while arrow is in "moving" state — clear to grey.
-            // Do NOT clear "done" state (2/3 = green) — a brief post-move deceleration
-            // jog must not wipe the green arrival indicator.
-            _la_arrow_state[i] = -1;
-            _la_refresh_pending = true;
-        }
+        // No jog special-case any more.  It existed to clear a stale "moving"
+        // arrow, and had to carefully avoid clearing green because a brief
+        // post-move deceleration jog would have wiped a correct indicator.
+        // Both cases now follow from the mount's own report.
     }
     // Only push LVGL updates when slot data actually changed.  When the mount
     // is idle for hours these values are constant, reducing LVGL work from

@@ -76,6 +76,11 @@
 // AT_POSITION detection thresholds (steps)
 #define AT_POS_THRESHOLD_PT   427   // ~0.1 deg at 256 µstep, 15:1 gear
 #define AT_POS_THRESHOLD_SZ    80   // ~0.5 mm at 32 µstep slider
+// "Parked at the end of the rail" is a REGION, not a target you either hit or
+// missed: a look-at move stops near the limit and the operator reads a few mm
+// either way as the end.  AT_POS_THRESHOLD_SZ is 0.5 mm, right for deciding
+// whether the mount reached a stored position and far too strict for this.
+#define AT_END_THRESHOLD_SZ   800   // ~5 mm at 32 µstep slider
 
 // LANC zoom (Serial7 — RX=28, TX=29)
 // The LANC device expects 9600 baud, 8E1 framing.
@@ -629,6 +634,28 @@ static void update_slot_at_mask() {
             new_at |= (1u << slot);
         }
     }
+    // In look-at mode slots 8 and 9 hold no stored position — they ARE the
+    // ◀/▶ arrows, and a lit arrow asserts "the slider is parked at that end of
+    // the rail".  Report it through the same mask as every other border, so it
+    // clears the moment the slider leaves the end no matter which client moved
+    // it.  The PC app previously latched this locally, which meant it could
+    // only notice slides it had sent itself: one driven from the hub display or
+    // the web app left the arrow green with the slider mid-rail.
+    //
+    // Which physical limit each arrow means is exactly the mapping
+    // CMD_START_LOOK_AT_MOVE uses — slider_invert flips what "left" is — and
+    // the two must agree, or the arrow that takes you to an end is not the one
+    // that lights when you get there.
+    if (_cfg.look_at_mode && _cfg.has_slider && mount.hasLimits(AXIS_SLIDER)) {
+        int32_t sl_phys   = s.pos[AXIS_SLIDER];
+        int32_t phys_min  = mount.getMinLimit(AXIS_SLIDER);
+        int32_t phys_max  = mount.getMaxLimit(AXIS_SLIDER);
+        int32_t left_end  = _cfg.slider_invert ? phys_max : phys_min;
+        int32_t right_end = _cfg.slider_invert ? phys_min : phys_max;
+        if (abs(sl_phys - left_end)  <= AT_END_THRESHOLD_SZ) new_at |= (1u << 8);
+        if (abs(sl_phys - right_end) <= AT_END_THRESHOLD_SZ) new_at |= (1u << 9);
+    }
+
     _slot_at = new_at;
 }
 
