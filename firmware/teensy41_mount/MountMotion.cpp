@@ -110,10 +110,36 @@ static constexpr int32_t  LIMIT_BACK_OFF[4]      = { 0, 0, 300, 300 };
 // 0.8 s gives a smooth, professional-feeling position move at any preset.
 static constexpr float GOTO_MIN_RAMP_S = 1.0f;  //0.8f;
 
-// Per-axis safety margin (steps) subtracted from each stored limit end.
-// Slider: at 32 µstep / 40 mm pitch, 1 step = 6.25 µm → 300 steps ≈ 1.9 mm
-// Zoom:   tune independently — set 0 if the zoom has no physical runout concern.
-static constexpr int32_t  LIMIT_SAFETY_MARGIN[4] = { 0, 0, 100, 100 };
+// Per-axis safety margin (steps) held back from the FAR limit.  The near end
+// is position 0 — the home stall itself — so only the far end takes this.
+//
+// SLIDER — 30 mm, and the reason is worth writing down.  The rail is tilted,
+// which needed more motor current and a less twitchy StallGuard threshold to
+// stop the carriage stalling part-way along a move.  A less sensitive stall
+// detector notices the end stop LATER, so by the time limit-find records the
+// far end the carriage has already run into it: the recorded position is not
+// where the travel safely ends, it is somewhere inside the stop.  Every later
+// goto to that limit then drives back to the same place and grinds.
+//
+// Pulling the usable far end back by 30 mm costs 30 mm of travel and means a
+// move to the limit stops short of the stop rather than against it.  It is a
+// workaround for late detection rather than a fix for it — the honest fix is a
+// stall threshold that trips at the stop with the current the tilt demands, or
+// a physical switch, either of which would let this go back to a millimetre or
+// two.
+//
+// Expressed in mm and converted here, so it survives a pulley change: the
+// tooth counts in MountMotion.h drive the conversion.
+// ZOOM — tune independently; set 0 if the zoom has no physical runout concern.
+static constexpr int32_t  SLIDER_SAFETY_MARGIN_MM = 30;
+static constexpr int32_t  LIMIT_SAFETY_MARGIN[4] = {
+    0, 0,
+    (int32_t)(SLIDER_SAFETY_MARGIN_MM / NOMINAL_SLIDER_MM_PER_STEP),
+    100
+};
+static_assert(LIMIT_SAFETY_MARGIN[AXIS_SLIDER] > LIMIT_BACK_OFF[AXIS_SLIDER],
+              "the slider safety margin should exceed the jog back-off, or the "
+              "soft limit a jog respects sits further out than the goto limit");
 static constexpr uint32_t LIMIT_FIND_TIMEOUT_MS  = 2000000;
 // Ignore stall for this many ms after a new move starts (MUST exceed the ramp
 // time).  These two are one setting in two numbers: StallGuard cannot be trusted
