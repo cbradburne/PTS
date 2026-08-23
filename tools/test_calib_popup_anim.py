@@ -4,16 +4,16 @@ Find Limits showed the travel animation and the look-at "moving to far end"
 popup did not. They are the same situation — the mount is moving, reports no
 position, and the operator can only wait — so the same picture belongs in both.
 
-There are two calibration UIs and only one had it. SubjectCalibrationDialog,
-reached from the subject grid, has had the animation all along;
-main_window._CalibPopup, which is what a subject slot actually opens, was built
-without one.
+There were two calibration UIs and only one had it. SubjectCalibrationDialog had
+the animation all along, but nothing could reach it: the SubjectGrid that opened
+it was never instantiated anywhere, and both had been broken against the current
+API since the initial commit. Both have since been deleted.
+main_window._CalibPopup, which is what pressing a subject slot actually opens,
+was the one in use and was built without an animation.
 
 The animation is REMOVED when the slider arrives, not parked. This popup is
 small and the operator's next job is to aim the camera; a carriage sitting in
-the middle of it with nothing left to report is just something to look at. The
-fuller dialog parks its copy instead, and should — there the picture still means
-something, showing which end the slider is at while it waits for Set A or Set B.
+the middle of it with nothing left to report is just something to look at.
 
 Unlike most checks here this one builds the real dialog and drives its state
 machine, so it tests behaviour rather than the source text.
@@ -101,15 +101,14 @@ assert state(d)[0], "the carriage returns while solving"
 assert d._mm.calls[-1] == ("set_b", 5), "Set no longer sends the observation"
 print("   Solving…: removed, and Set still sends set_b       OK")
 
-# ---- 5. the fuller dialog still PARKS, deliberately -------------------------
-# Different rule, and the difference is the point: there the picture keeps
-# meaning something while waiting.
-print("\n5. the other calibration dialog:")
-src = (REPO / "pc_app/ui/dialogs/subject_calibration_dialog.py").read_text()
-assert "self._anim.park(at_far_end=True)" in src, \
-    "SubjectCalibrationDialog no longer parks at the far end for Set B"
-assert "self._anim.hide()" not in src, \
-    "SubjectCalibrationDialog now hides its animation; it should park instead"
-print("   SubjectCalibrationDialog still parks, not hides    OK")
+# ---- 5. this is the only calibration UI ------------------------------------
+# The second one and the panel that opened it are gone. If either comes back,
+# the two need to agree about the picture — an operator who learns one rule and
+# then meets another has been given a worse UI than either on its own.
+print("\n5. no second calibration UI:")
+for gone in ("pc_app/ui/widgets/subject_grid.py",
+             "pc_app/ui/dialogs/subject_calibration_dialog.py"):
+    assert not (REPO / gone).exists(), f"{gone} is back — make it agree with this one"
+print("   _CalibPopup is the only one                        OK")
 
 print("\nALL CHECKS PASSED")
