@@ -10,7 +10,8 @@ Companion, and QLab cue stacks.
 🌐 **[Project site](https://cbradburne.github.io/PTS/)** ·
 📄 **[Two-page overview + OSC reference (PDF)](docs/PTS_Overview.pdf)** ·
 🎛 **[Companion / QLab setup](docs/companion.md)** ·
-📐 **[Look-at tracking design notes](DESIGN_V2.md)**
+📐 **[Look-at tracking design notes](DESIGN_V2.md)** ·
+📡 **[What travels between a mount and the hub](docs/link_traffic.md)**
 
 ---
 
