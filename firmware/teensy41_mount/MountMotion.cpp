@@ -1019,13 +1019,6 @@ void MountMotion::moveTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom
         _goto_spd_scale[i]   = (preset_spd > 0.f) ? (actual_spd / preset_spd) : 1.f;
         _goto_accel_st[i]   = (uint32_t)actual_acc;
 
-        // TEMPORARY — see GotoPlan.  Captured here because this is where the
-        // numbers are final: after orientation, after clamping, after any
-        // synchronisation scaling.
-        _goto_plan.target[i] = targets[i];
-        _goto_plan.pos[i]    = _stepper[i]->getPosition();
-        _goto_plan.spd[i]    = (uint16_t)(actual_spd > 65535.f ? 65535 : actual_spd);
-
         // Cap the P-controller decel window to the actual move distance.
         // Without this cap, raising speed without proportionally raising accel
         // makes decel_dist = spd²/(2·acc) grow as v², so short moves (like
@@ -1054,10 +1047,6 @@ void MountMotion::moveTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom
         interrupts();
         _goto_dir[i] = 1;  // rotateAsync registered positive; overrideSpeed sign is relative
     }
-    _goto_plan.path      = 0;
-    _goto_plan.sync      = sync;
-    _goto_plan.t_move_ms = (uint16_t)(t_move * 1000.0f > 65535.f ? 65535 : t_move * 1000.0f);
-    _goto_plan.pending   = true;
     // A new move re-claims the axes — except one the operator is still jogging.
     // Re-claiming that would restart the fight this flag exists to prevent, and
     // the stick is a live input: it outranks a move the operator just queued.
@@ -2533,14 +2522,7 @@ void MountMotion::retargetTo(int32_t pan, int32_t tilt, int32_t slider, int32_t 
             _goto_dir[i] = 1;
         }
 
-        _goto_plan.target[i] = targets[i];
-        _goto_plan.pos[i]    = _stepper[i]->getPosition();
-        _goto_plan.spd[i]    = (uint16_t)(actual_spd > 65535.f ? 65535 : actual_spd);
     }
-    _goto_plan.path      = 1;
-    _goto_plan.sync      = true;
-    _goto_plan.t_move_ms = (uint16_t)(t_move * 1000.0f > 65535.f ? 65535 : t_move * 1000.0f);
-    _goto_plan.pending   = true;
     // _updateGoto() running in update() steers toward the new targets on its
     // next tick — no motor command needed here.
     // A new move re-claims the axes — except one the operator is still jogging.
@@ -2552,10 +2534,3 @@ void MountMotion::retargetTo(int32_t pan, int32_t tilt, int32_t slider, int32_t 
 }
 
 
-// TEMPORARY — hand the last goto plan to the sketch, once.  See CMD_GOTO_DEBUG.
-bool MountMotion::takeGotoPlan(GotoPlan &out) {
-    if (!_goto_plan.pending) return false;
-    out = _goto_plan;
-    _goto_plan.pending = false;
-    return true;
-}

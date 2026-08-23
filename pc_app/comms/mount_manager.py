@@ -29,7 +29,7 @@ from .protocol import (
     pkt_e_stop, pkt_get_status, pkt_ping,
     pkt_get_state, pkt_store_pos, pkt_clear_pos,
     pkt_set_active_preset, pkt_save_speeds, pkt_goto_slot, pkt_move_rel,
-    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus, pkt_get_position,
+    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus,
     pkt_cam_iso, pkt_cam_white_balance, decode_cam_status,
     pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
@@ -40,7 +40,7 @@ from .protocol import (
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
     decode_subject_list, decode_look_at_status, decode_ref_confirmed,
-    decode_calib_prompt, decode_position, decode_goto_debug,
+    decode_calib_prompt, decode_position,
     SubjectRecord, LookAtStatusPayload, RefConfirmedPayload, CalibPrompt,
     pkt_get_subjects, pkt_add_subject_start, pkt_add_subject_set_a,
     pkt_add_subject_set_b, pkt_add_subject_abort, pkt_delete_subject,
@@ -62,22 +62,6 @@ from .bridge import Bridge
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# TEMPORARY — zoom creep diagnostic (2026-08-19).  REMOVE WHEN DONE.
-# ---------------------------------------------------------------------------
-# Set False, or revert the commit that added this, to take it all out.  Nothing
-# in the product needs position telemetry: the mounts' bridges stopped
-# forwarding the 5 Hz CMD_POSITION stream precisely because it had no consumer,
-# and that remains the right default.  This exists only to catch cam5's zoom
-# creeping away from a recalled position, and should not outlive that.
-#
-# What it switches on, both of which are inert without it:
-#   * _poll_positions() — one CMD_GET_POSITION per moving mount per heartbeat,
-#     which is what reopens the bridge's 2 s forwarding window.  Without a
-#     request the stream never flows, which is why the first two attempts at
-#     this logged nothing at all.
-#   * _note_zoom_travel() — the ZOOM / POSITION lines themselves.
-ZOOM_DIAGNOSTIC = True
 
 HEARTBEAT_INTERVAL_MS  = 1000
 HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
@@ -269,14 +253,6 @@ class MountManager(QObject):
         self._route_logged = False
         self._asked_for_table = False
         self._sat_names: dict[int, str] = {}
-        # Per-mount zoom-travel logging state — see _note_zoom_travel().
-        self._zoom_travel: dict[int, dict] = {}
-        # Per-mount: when we last asked for a position, and until when to keep
-        # asking after motion ends — see _poll_positions().
-        self._pos_asked: dict[int, float] = {}
-        self._pos_until: dict[int, float] = {}
-        # TEMPORARY — last time a non-zero jog was logged, per mount.
-        self._jog_seen: dict[int, float] = {}
         # (mount, category, parameter) -> the value last logged for it.
         self._cam_params_seen: dict[tuple[int, int, int], object] = {}
         # key -> (window start, changes this window, gone quiet)
@@ -315,26 +291,6 @@ class MountManager(QObject):
         """
         self._send(pkt_jog(mount_id, pan, tilt, slider, zoom,
                            pt_preset, sz_preset, axis_mask))
-
-        # TEMPORARY (see ZOOM_DIAGNOSTIC) — make a sustained jog visible.
-        #
-        # Cmd.JOG is in the bridge's _TX_QUIET_CMDS, deliberately: it streams at
-        # 20 Hz and would drown the log.  The cost is that a jog nobody meant to
-        # send is invisible, and that is exactly the open question here — cam5's
-        # zoom travelled at a near-constant velocity for 14 s with no command in
-        # the log, which is what a jog looks like and also what the log looks
-        # like when jogs are hidden.  A stick resting just outside its deadzone
-        # streams one continuously with nobody touching it.
-        #
-        # Prints only while a jog is NON-ZERO, once a second, per mount.  Silence
-        # here now means no jog is being sent, which is the thing that could not
-        # be established before.
-        if ZOOM_DIAGNOSTIC and (pan or tilt or slider or zoom):
-            now = time.monotonic()
-            if now - self._jog_seen.get(mount_id, 0.0) >= 1.0:
-                self._jog_seen[mount_id] = now
-                log.warning("JOG cam%d: pan=%d tilt=%d slider=%d zoom=%d "
-                            "— a jog IS being streamed", mount_id, pan, tilt, slider, zoom)
 
         # In look-at mode, any physical axis movement deselects the active
         # subject immediately so the UI doesn't wait for a Teensy round-trip.
@@ -680,105 +636,6 @@ class MountManager(QObject):
     # at the top of camera_advanced_dialog.py.
     # Axis bits in PositionPayload.moving_mask.
     _AX_PAN, _AX_TILT, _AX_SLIDER, _AX_ZOOM = 1, 2, 4, 8
-
-    def _note_zoom_travel(self, mid: int, prev, pos) -> None:
-        """Log what the ZOOM axis is doing while a move is in progress.
-
-        The mount has been sending CMD_POSITION all along — 5 Hz while moving,
-        1 Hz at rest — carrying zoom_steps and a per-axis moving_mask.  Nothing
-        logged it, so a zoom that crept away from its stored position after the
-        other three axes had arrived left no trace at all: the symptom was
-        visible on the rig and invisible in the log.
-
-        Deliberately not a firehose.  At 5 Hz across five mounts this would be
-        25 lines a second and would bury everything else, so it prints only
-        while zoom is actually moving, at 2 Hz, and says which other axes are
-        still going.  The line that matters is the one where zoom is the ONLY
-        axis left — that is the reported fault, and it is called out by name
-        along with how long it has been alone, because "still moving" and
-        "moving for nine seconds" are different findings.
-
-        The step DELTA is what makes it readable.  Position alone cannot show
-        direction, and the question is whether zoom is approaching its target,
-        running past it, or oscillating — which consecutive deltas answer and a
-        single number never can.
-        """
-        if pos is None or not ZOOM_DIAGNOSTIC:   # TEMPORARY — see ZOOM_DIAGNOSTIC
-            return
-        state = self._zoom_travel.setdefault(
-            mid, {"alone_since": None, "last": 0.0, "seen": False, "creep": 0.0})
-
-        # Say once, per mount, that position telemetry is arriving.
-        #
-        # The first version of this logged nothing at all on a rig where the
-        # fault was reproducing every time, and there was no way to tell "zoom
-        # is behaving" from "these packets never reach me".  Everything below is
-        # conditional; this line is not.
-        if not state["seen"]:
-            state["seen"] = True
-            log.info("POSITION cam%d: telemetry arriving — zoom %d steps, "
-                     "moving_mask 0x%02X", mid, pos.zoom_steps, pos.moving_mask)
-        if prev is None:
-            return
-
-        zoom_moving = bool(pos.moving_mask & self._AX_ZOOM)
-        moved = pos.zoom_steps - prev.zoom_steps
-
-        # Zoom that MOVES while the mount says it is not moving.
-        #
-        # The mask comes from _stepper[i]->isMoving, and the whole of the zoom
-        # logging below hangs off it — so if the axis can travel without that
-        # flag being set, keying on it makes the instrument blind to exactly the
-        # fault it was added for.  A changing step count is the ground truth and
-        # cannot be argued with: if these disagree, that disagreement IS the
-        # finding, and it is worth more than anything else on this line.
-        # Only once zoom was ALREADY reported stopped on the previous sample.
-        # The last sample of any normal move has the mask cleared and a position
-        # that still changed — the final steps — so firing on that would report
-        # every ordinary arrival as a fault.  Two consecutive stopped samples
-        # with the count still climbing is travel the mount is genuinely not
-        # admitting to.
-        prev_zoom_moving = bool(prev.moving_mask & self._AX_ZOOM)
-        if moved and not zoom_moving and not prev_zoom_moving:
-            now = time.monotonic()
-            if now - state["creep"] >= 0.5:
-                state["creep"] = now
-                log.warning("ZOOM cam%d: %d steps (%+d) but moving_mask 0x%02X says "
-                            "zoom is STOPPED — moving without reporting it",
-                            mid, pos.zoom_steps, moved, pos.moving_mask)
-            return
-        others = pos.moving_mask & ~self._AX_ZOOM
-
-        if not zoom_moving:
-            if state["alone_since"] is not None:
-                # Report the end, or a creep that stopped is never accounted for.
-                log.info("ZOOM cam%d: stopped at %d steps after %.1fs alone",
-                         mid, pos.zoom_steps, time.monotonic() - state["alone_since"])
-            state["alone_since"] = None
-            return
-
-        alone = zoom_moving and not others
-        if alone and state["alone_since"] is None:
-            state["alone_since"] = time.monotonic()
-        elif not alone:
-            state["alone_since"] = None
-
-        now = time.monotonic()
-        if now - state["last"] < 0.5:          # 2 Hz is enough to see a trend
-            return
-        state["last"] = now
-
-        delta = moved
-        moving = [n for b, n in ((self._AX_PAN, "pan"), (self._AX_TILT, "tilt"),
-                                 (self._AX_SLIDER, "slider")) if pos.moving_mask & b]
-        if alone:
-            held = now - (state["alone_since"] or now)
-            log.warning("ZOOM cam%d: %d steps (%+d) — ZOOM ALONE for %.1fs, "
-                        "every other axis has arrived",
-                        mid, pos.zoom_steps, delta, held)
-        else:
-            log.info("ZOOM cam%d: %d steps (%+d) — also moving: %s",
-                     mid, pos.zoom_steps, delta, ", ".join(moving) or "none")
 
     def _note_cam(self, m: int, key: str, value) -> None:
         """Remember a value we sent, under the name the camera would report it by.
@@ -1345,32 +1202,11 @@ class MountManager(QObject):
             if pkt.payload:
                 self.la_move_dir_received.emit(mid, pkt.payload[0])
 
-        elif pkt.cmd == Cmd.GOTO_DEBUG:
-            # TEMPORARY — see ZOOM_DIAGNOSTIC.  What the mount's planner
-            # actually decided, rather than what it can be inferred to have
-            # decided from position samples.
-            if ZOOM_DIAGNOSTIC:
-                try:
-                    d = decode_goto_debug(pkt.payload)
-                except Exception as e:
-                    log.warning("Bad GOTO_DEBUG from mount %d: %s", mid, e)
-                else:
-                    names = ("pan", "tilt", "slider", "zoom")
-                    log.warning("GOTO PLAN cam%d via %s — t_move=%dms sync=%s",
-                                mid, d["path"], d["t_move_ms"], d["sync"])
-                    for n, a in zip(names, d["axes"]):
-                        dist = a["target"] - a["pos"]
-                        secs = (abs(dist) / a["spd"]) if a["spd"] else 0.0
-                        log.warning("    %-6s pos=%-9d target=%-9d dist=%-9d "
-                                    "spd=%-6d => %.1fs",
-                                    n, a["pos"], a["target"], dist, a["spd"], secs)
-
         elif pkt.cmd == Cmd.POSITION:
             try:
                 pos = decode_position(pkt.payload)
                 prev = st.position
                 st.position = pos
-                self._note_zoom_travel(mid, prev, pos)
                 self.position_updated.emit(mid, pos)
             except Exception as e:
                 log.warning(f"Bad POSITION from mount {mid}: {e}")
@@ -1409,53 +1245,6 @@ class MountManager(QObject):
     # Heartbeat
     # ------------------------------------------------------------------
 
-    # Motion states — any of these means the mount is going somewhere.
-    _MOVING_STATES = (MountState.JOGGING, MountState.MOVING_TO_POS,
-                      MountState.FINDING_LIMITS, MountState.LOOK_AT_MOVE,
-                      MountState.LOOK_AT_PRE_AIM)
-
-    # The mount's bridge forwards CMD_POSITION only for POS_ON_DEMAND_MS (2 s)
-    # after a CMD_GET_POSITION reaches it, so the window has to be reopened
-    # before it lapses.
-    #
-    # This runs off the 1 s heartbeat, so the interval must be UNDER one second
-    # or it lands on every second beat: 1.2 s would ask at t=2, 4, 6 — a 2 s
-    # cadence against a 2 s window, with no margin for a late or lost packet and
-    # a gap in the stream every time one slipped.  0.9 s means every beat.
-    _POS_ASK_EVERY_S = 0.9
-    # Keep asking this long after motion is reported finished.  The whole point
-    # is an axis that is STILL moving once the mount believes it has arrived —
-    # stopping the moment the state goes IDLE would blind us at exactly the
-    # moment of interest.
-    _POS_TAIL_S = 6.0
-
-    def _poll_positions(self, now: float) -> None:
-        """Ask moving mounts for their positions.
-
-        The mounts stopped broadcasting CMD_POSITION unsolicited: the bridge
-        forwards it only on demand, because at the time nothing consumed the
-        5 Hz stream.  Something does now — PositionLogger, and the zoom-travel
-        logging — and neither had any way to work, because nothing in the app
-        had ever sent a CMD_GET_POSITION.  A consumer and a producer, both
-        present, with no request between them.
-
-        One small packet per moving mount per heartbeat reopens the window, and
-        the 5 Hz stream behind it flows for as long as it is held open.
-        """
-        if not ZOOM_DIAGNOSTIC:      # TEMPORARY — guarded here as well as at the
-            return                   # call site, so the flag cannot half-apply
-        for mid, st in self._states.items():
-            if not st.connected:
-                continue
-            if st.state in self._MOVING_STATES:
-                self._pos_until[mid] = now + self._POS_TAIL_S
-            elif now > self._pos_until.get(mid, 0.0):
-                continue
-            if now - self._pos_asked.get(mid, 0.0) < self._POS_ASK_EVERY_S:
-                continue
-            self._pos_asked[mid] = now
-            self._send(pkt_get_position(mid))
-
     def _heartbeat(self) -> None:
         if not self._bridge.connected:
             # Ask again on the next connection, and say the route again with
@@ -1474,11 +1263,6 @@ class MountManager(QObject):
         if not self._asked_for_table:
             self._asked_for_table = True
             self.request_mount_table()
-
-        # TEMPORARY (see ZOOM_DIAGNOSTIC) — keep the position window open on
-        # anything that is moving.
-        if ZOOM_DIAGNOSTIC:
-            self._poll_positions(time.monotonic())
 
         self._send(pkt_ping(MOUNT_BROADCAST))
 

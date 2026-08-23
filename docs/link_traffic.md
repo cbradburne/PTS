@@ -35,7 +35,6 @@ Not radio. A private wire to one peer, so rate here is cheap.
 | `STATE_REPORT` | on request | 182 B |
 | `SUBJECT_LIST` | on request / after a calibration | 232 B |
 | `CALIB_PROMPT`, `LIMITS_FOUND`, `HOME_COMPLETE`, `REF_CONFIRMED`, `ACK`, `NACK` | one-off events | small |
-| `GOTO_DEBUG` | per goto — **temporary, see below** | — |
 
 Framing costs 9 bytes on top of every payload.
 
@@ -64,7 +63,7 @@ knowing exists before concluding the radio is quiet.
 | PC app | `PING` broadcast | **1 s** |
 | PC app | `GET_CONFIG` idle probe, per connected mount | after 3 s with no ack-tracked send |
 | PC app | `GET_SUBJECTS`, look-at mounts | ~4 s |
-| PC app | `GET_POSITION` | only under `ZOOM_DIAGNOSTIC` — **temporary, see below** |
+| PC app | `GET_POSITION` | nothing sends one — see below |
 | any client | `JOG` | **streamed while a stick is held** — the heaviest thing on the link |
 | any client | `MOVE_REL`, `GOTO`, `SET_*`, `GET_*` | user-driven |
 
@@ -113,42 +112,37 @@ the rig transmits.
 
 ---
 
-## Temporary diagnostics — remove when done
+## The position stream has no consumer
 
-Two instrumentation patches are live. Both were added to answer a specific
-question, both have answered it.
+`POSITION` is the one packet the mount produces that nothing currently asks
+for. The bridge forwards it only within `POS_ON_DEMAND_MS` of a
+`CMD_GET_POSITION`, and since the zoom diagnostic was removed nothing in the
+system sends one — so it goes Teensy → bridge at 5 Hz while moving and stops
+there.
 
-### `ZOOM_DIAGNOSTIC` — PC app (`comms/mount_manager.py:80`)
+That is a working arrangement rather than an oversight: the producer and the
+gate both remain, so a future diagnostic only has to send `GET_POSITION` to
+open the tap. But it does mean position data is not available to any client
+today, and a tool that assumes otherwise will sit waiting for packets that are
+never requested.
 
-Added when zoom on mount 5 crept away from stored positions and sprang back when
-the slot was pressed again. Turns on three things: `GET_POSITION` polling (so
-there is any position data at all), per-axis zoom travel logging, and naming
-OSC-driven jogs in the log so surface-driven motion can be told from joystick
-motion.
+Two diagnostics that once used it have been removed, both having answered the
+question they were added for:
 
-It did its job twice over. The creep during a recall was a stranded goto axis —
-a jog took the state away from the P-loop and left the axis turning with a
-frozen speed override — fixed in "a jog no longer strands a goto axis turning
-forever". The separate zoom movement that started the hunt was OSC commands,
-which never touch the PC app, which is why three rounds of PC-app instrumentation
-could not see them.
+- **`ZOOM_DIAGNOSTIC`** (PC app) — added when zoom on mount 5 crept away from
+  stored positions and sprang back when the slot was pressed again. It turned on
+  `GET_POSITION` polling, zoom travel logging, and naming OSC-driven jogs so
+  surface-driven motion could be told from joystick motion. The creep turned out
+  to be a stranded goto axis; the movement that started the hunt turned out to be
+  OSC commands, which never reach the PC app at all — which is why three rounds
+  of PC-app instrumentation could not see them. Removed in "remove both
+  temporary diagnostics".
 
-Commits: `73a2837`, `1f1f97e`, `336a5bc`.
+- **`GOTO_DEBUG`** (Teensy → clients) — had the mount report what its goto
+  planner decided the moment it decided it. It is what proved the stranded axis:
+  the plan said 399 ms and the moving mask still showed that axis turning three
+  seconds later. Removed with the same commit.
 
-### `GOTO_DEBUG` — Teensy → clients (`shared/protocol.h`, `CMD_GOTO_DEBUG`)
-
-Added so the mount reports what its goto planner decided the moment it decides
-it: move time, which path (`moveTo` or `retargetTo`), whether the axes were
-synchronised, and per-axis target, position and speed. Produces the
-`GOTO PLAN cam5 via moveTo — t_move=399ms sync=True` lines.
-
-It is what proved the stranded-axis bug: the plan said the move would take
-399 ms, and the moving mask still showed that axis turning three seconds later.
-Without the planner's own account there was no way to compare intent against
-behaviour.
-
-Commit: `a7c70f7`.
-
-**Both can go when you are confident the goto and zoom behaviour is settled.**
-`ZOOM_DIAGNOSTIC` also gates the only `GET_POSITION` traffic on the rig, so
-removing it takes the position polling with it.
+If either is ever needed again, the shape to copy is this: report what the
+firmware DECIDED, not just what it did. Position samples alone could not
+distinguish an axis overshooting from an axis being commanded somewhere new.
