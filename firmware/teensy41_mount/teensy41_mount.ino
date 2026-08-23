@@ -1915,17 +1915,35 @@ void loop() {
     // v2 — Calibration state machine
     update_calib();
 
-    // v2 — Look-at telemetry: send LOOK_AT_STATUS during tracking and pre-aim
+    // v2 — Look-at: report the END of a move.  There is deliberately no
+    // periodic send during one.
+    //
+    // This used to broadcast a 14-byte LOOK_AT_STATUS every STATUS_INTERVAL_MS
+    // for the whole move, and every consumer read one byte of it: payload[12],
+    // the subject id.  The hub forwards only that byte to the display, the web
+    // app reads only that byte and acts only when it changes, and the PC app
+    // reads only la.subject_id.  Nothing reads slider_mm, pan_deg, tilt_deg or
+    // flags — the run advancement that once did now lives on the mount, and the
+    // panel that showed them as telemetry was deleted.
+    //
+    // That byte is already in the ordinary STATUS packet (active_la_subject),
+    // which goes out unconditionally at the same interval, move or no move.  So
+    // this was a second 10 Hz stream duplicating the first, and the hub set
+    // ws_force on each one — forcing a WebSocket push to every browser ten times
+    // a second for a value that had not changed.
+    //
+    // It is not the mount's liveness signal either: STATUS is ungated and every
+    // presence check upstream refreshes on ANY packet, so removing this leaves
+    // "I'm alive" exactly where it was, at 10 Hz.
+    //
+    // The subject id still propagates the instant it changes — selection, switch
+    // and both manual-deselect paths each send one, and the hub intercepts
+    // CMD_SWITCH_SUBJECT directly so the display never waits on this at all.
     {
-        static uint32_t _last_la_ms = 0;
         MountState cur_state = mount.getState();
         bool la_active = (cur_state == STATE_LOOK_AT_MOVE ||
                           cur_state == STATE_LOOK_AT_PRE_AIM);
-        if (la_active && millis() - _last_la_ms >= STATUS_INTERVAL_MS) {
-            _last_la_ms = millis();
-            send_look_at_status();
-        }
-        // Also send once when look-at sequence ends entirely
+        // Send once when the look-at sequence ends entirely
         static MountState _prev_state = STATE_IDLE;
         bool prev_la = (_prev_state == STATE_LOOK_AT_MOVE ||
                         _prev_state == STATE_LOOK_AT_PRE_AIM);
