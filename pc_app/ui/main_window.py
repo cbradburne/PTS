@@ -36,6 +36,7 @@ from .widgets.position_grid import (
 )
 from .widgets.estop_button import EStopButton
 from .widgets.nudge_overlay import NudgeOverlay
+from .widgets.slider_travel_anim import SliderTravelAnim
 from .dialogs.config_dialog import ConfigDialog
 from . import virtual_keyboard
 from comms.bridge import Bridge
@@ -1508,6 +1509,14 @@ class _CalibPopup(QDialog):
       WAIT_SET_B   → "Aim at subject and press Set"  (Set button enabled)
       SOLVED       → success label, auto-closes after 1.5 s
       ERROR        → error label, stays open for dismissal
+
+    The travel animation runs only while the slider is actually moving, and is
+    removed — not parked — the moment it arrives.  This popup is small and the
+    operator's next job is to aim the camera; a carriage still sitting in the
+    middle of it is something to look at that has nothing left to say.  The
+    fuller SubjectCalibrationDialog parks its copy instead, because there the
+    picture keeps meaning something: it shows which end the slider is at while
+    waiting for Set A or Set B.
     """
 
     def __init__(self, mount_id: int, subject_name: str,
@@ -1534,6 +1543,12 @@ class _CalibPopup(QDialog):
         self._info.setStyleSheet("font-size: 14px;")
         vl.addWidget(self._info)
 
+        # The same carriage sketch Find Limits uses.  Both are "the mount is
+        # moving and reports no position, please wait" — the one situation the
+        # picture exists for.
+        self._anim = SliderTravelAnim()
+        vl.addWidget(self._anim)
+
         self._detail = QLabel(
             f"Camera {mount_id}  ·  {subject_name}\n"
             "Observation A recorded at current position.")
@@ -1549,6 +1564,11 @@ class _CalibPopup(QDialog):
         self._cancel_btn.clicked.connect(self._on_cancel)
         vl.addWidget(btns)
 
+        # This popup opens because the slider has ALREADY started travelling to
+        # the far end, so start moving rather than waiting for a MOVING_TO_B
+        # that has in all likelihood already arrived.
+        self._anim.start(forward=True)
+
     def update_prompt(self, prompt_int: int) -> None:
         CP = self._CalibPrompt
         try:
@@ -1560,6 +1580,8 @@ class _CalibPopup(QDialog):
             self._info.setText("Slider moving to far end…")
             self._info.setStyleSheet("font-size: 14px;")
             self._set_btn.setEnabled(False)
+            self._anim.show()
+            self._anim.start(forward=True)
 
         elif prompt == CP.WAIT_SET_B:
             self._info.setText(
@@ -1567,12 +1589,14 @@ class _CalibPopup(QDialog):
             self._info.setStyleSheet("font-size: 14px; font-weight: bold;")
             self._set_btn.setEnabled(True)
             self._can_set = True
+            self._hide_anim()
 
         elif prompt == CP.SOLVED:
             self._info.setText("✓  Subject saved.")
             self._info.setStyleSheet("font-size: 14px; color: #4CAF50; font-weight: bold;")
             self._set_btn.setEnabled(False)
             self._cancel_btn.setText("Close")
+            self._hide_anim()
             # Refresh subject list on the manager
             self._mm.send_get_subjects(self._mount_id)
             QTimer.singleShot(1500, self.accept)
@@ -1584,6 +1608,14 @@ class _CalibPopup(QDialog):
             self._info.setStyleSheet("font-size: 14px; color: #EF5350;")
             self._set_btn.setEnabled(False)
             self._cancel_btn.setText("Close")
+            self._hide_anim()
+
+    def _hide_anim(self) -> None:
+        """Stop AND hide.  park() alone leaves a 48 px carriage sitting in the
+        dialog with nothing to report, and hide() alone leaves the 2 fps timer
+        repainting a widget nobody can see."""
+        self._anim.park()
+        self._anim.hide()
 
     def _on_set(self) -> None:
         if self._can_set:
@@ -1592,6 +1624,7 @@ class _CalibPopup(QDialog):
             self._set_btn.setEnabled(False)
             self._info.setText("Solving…")
             self._info.setStyleSheet("font-size: 14px;")
+            self._hide_anim()
 
     def _on_cancel(self) -> None:
         self._mm.send_add_subject_abort(self._mount_id)
