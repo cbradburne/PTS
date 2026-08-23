@@ -2267,6 +2267,16 @@ static uint8_t  _fb_slot[NUM_MOUNTS][NUM_POSITIONS] = {};
 static uint8_t  _fb_pt[NUM_MOUNTS]       = {};
 static uint8_t  _fb_sl[NUM_MOUNTS]       = {};
 static uint8_t  _fb_recording[NUM_MOUNTS] = {};
+static uint8_t  _fb_lamode[NUM_MOUNTS]   = {};
+static int8_t   _fb_lasubj[NUM_MOUNTS]   = { -1, -1, -1, -1, -1 };
+static uint8_t  _fb_calib[NUM_MOUNTS]    = {};
+// The last calibration prompt, which the hub forwarded to the display board
+// without keeping.  Held here so it can be published, and stamped so it can be
+// let go of again: an outcome is worth showing, and worth showing for a while
+// rather than until the next calibration hours later.
+static uint8_t  _calib_prompt[NUM_MOUNTS]    = {};
+static uint32_t _calib_prompt_ms[NUM_MOUNTS] = {};
+#define CALIB_PROMPT_HOLD_MS  8000UL
 static bool     _fb_valid[NUM_MOUNTS]    = {};
 
 // The camera's OWN account of whether it is rolling, lifted out of
@@ -2354,8 +2364,45 @@ static void osc_feedback_mount(int i, bool force) {
         snprintf(a, sizeof(a), "/pts/cam/%d/recording", i + 1); osc_send_int(a, rec);
     }
 
+    // ── Look-at, so a surface can lay itself out correctly ──────────────────
+    // Which mode a mount is in decides what buttons 9 and 10 MEAN: two stored
+    // positions, or the ◀/▶ ends of the rail.  Without this a Companion page
+    // has to be told by hand and goes wrong the moment the mode is changed
+    // from anywhere else.
+    uint8_t lamode = (act && (_mount_flags[i] & FLAG_LOOK_AT_MODE)) ? 1 : 0;
+    if (all || lamode != _fb_lamode[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/lookat/mode", i + 1);
+        osc_send_int(a, lamode);
+    }
+
+    // Which subject is being tracked, or -1 for none.  The slot addresses say
+    // which subjects EXIST; this is the one that is live, and it is what the
+    // green border shows on every other client.
+    int8_t lasubj = (act && _mount_la_subject[i] <= 7)
+                        ? (int8_t)_mount_la_subject[i] : (int8_t)-1;
+    if (all || lasubj != _fb_lasubj[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/lookat/subject", i + 1);
+        osc_send_int(a, lasubj);
+    }
+
+    // Calibration prompt — CalibPrompt, or 0 for "nothing in progress".  The
+    // terminal values (SOLVED / ERROR) are let go of after a hold, so a button
+    // shows the outcome and then returns to idle rather than sitting lit until
+    // the next calibration.
+    uint8_t calib = _calib_prompt[i];
+    if (calib && (millis() - _calib_prompt_ms[i]) > CALIB_PROMPT_HOLD_MS &&
+            (calib == CALIB_SOLVED || calib == CALIB_ERROR)) {
+        calib = _calib_prompt[i] = 0;
+    }
+    if (!act) calib = 0;          // an offline mount is not calibrating
+    if (all || calib != _fb_calib[i]) {
+        snprintf(a, sizeof(a), "/pts/cam/%d/calib/prompt", i + 1);
+        osc_send_int(a, calib);
+    }
+
     _fb_state[i] = st; _fb_active[i] = act; _fb_target[i] = tgt;
     _fb_pt[i] = pt; _fb_sl[i] = sl; _fb_recording[i] = rec;
+    _fb_lamode[i] = lamode; _fb_lasubj[i] = lasubj; _fb_calib[i] = calib;
     _fb_valid[i] = true;
 }
 
@@ -3805,6 +3852,8 @@ void loop() {
                             && pkt.payload_len >= 1
                             && msg.src_idx < NUM_MOUNTS) {
                         disp_calib_prompt(msg.src_idx + 1, pkt.payload[0]);
+                        _calib_prompt[msg.src_idx]    = pkt.payload[0];
+                        _calib_prompt_ms[msg.src_idx] = millis();
                         ws_force = true;   // one-shot — must reach WS even if STATUS is rate-limited
                     }
                     // Suppress STATUS to WS while jogging (radio shared with ESP-NOW)

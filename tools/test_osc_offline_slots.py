@@ -83,4 +83,23 @@ assert "_fb_slot[i][sN] = ss;" in fb, \
     "the per-slot cache is gone; the change test cannot work"
 print("   cached per slot, so it repaints on return          OK")
 
+# ---- 4. the look-at feedback follows the same offline rule ------------------
+# Added later than the rest of this file: a surface lays its buttons out from
+# lookat/mode, so a stale 1 on a dark mount would leave a page showing rail
+# arrows for a rig that is not there.
+print("\n4. look-at feedback on an offline mount:")
+for expr, what in (("uint8_t lamode = (act &&", "lookat/mode"),
+                   ("int8_t lasubj = (act &&", "lookat/subject")):
+    assert expr in fb, f"{what} is not gated on the mount being heard"
+    print(f"   {what:<16} reads 0/-1 when offline           OK")
+assert "if (!act) calib = 0;" in fb, "calib/prompt survives the mount going offline"
+print("   calib/prompt     cleared when offline           OK")
+
+# The prompt must not latch a finished outcome indefinitely.
+assert "CALIB_PROMPT_HOLD_MS" in HUB, "the calibration prompt has no release"
+assert "calib == CALIB_SOLVED || calib == CALIB_ERROR" in fb, \
+    "the hold applies to more than the terminal prompts — a mid-calibration step\n"\
+    "    would clear itself while the operator was still working through it"
+print("   only SOLVED/ERROR time out, mid-flow steps hold  OK")
+
 print("\nALL CHECKS PASSED")

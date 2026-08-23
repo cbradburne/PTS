@@ -159,6 +159,9 @@ All arguments are a single int.
 | `/pts/cam/N/speed/sl`            | 0-4   | Active slider speed preset — **0 = this mount has no rail** |
 | `/pts/cam/N/slot/M/state`        | 0-3   | Slot M — see below |
 | `/pts/cam/N/recording`           | 0/1   | That camera is **rolling** — see below |
+| `/pts/cam/N/lookat/mode`         | 0/1   | 1 = look-at mode — **buttons 9 and 10 are the ◀/▶ rail ends, not slots** |
+| `/pts/cam/N/lookat/subject`      | -1..7 | Subject currently being tracked, -1 = none |
+| `/pts/cam/N/calib/prompt`        | 0-6   | Calibration step in progress — see below |
 
 `/pts/cam/N/recording` is the camera's own account of its transport mode, not
 an echo of the record command. Blackmagic never acknowledges a command, so a
@@ -168,6 +171,41 @@ actually recording.
 
 It reads 0 until the camera reports otherwise, which is also what it reads when
 no camera is paired to that mount.
+
+### Look-at
+
+`/pts/cam/N/lookat/mode` is the one to build a page around. It decides what
+buttons 9 and 10 **mean** — two more stored positions, or the two ends of the
+rail. A page that assumes one or the other goes wrong the moment the mode is
+changed from the PC app, the web app or the hub display, so drive the button
+labels from this rather than setting them by hand.
+
+With it at 1, slots 9 and 10 report the arrows through the ordinary slot
+addresses: `2` (AT) when the slider is parked at that end, `3` (MOVING) while
+it is travelling there, `0` otherwise. Slots 1-8 report `1` (OCCUPIED) for each
+subject that has been calibrated.
+
+`/pts/cam/N/lookat/subject` is the one being tracked right now — the green
+border on every other client. The slot addresses say which subjects exist; this
+says which is live.
+
+`/pts/cam/N/calib/prompt` follows a subject calibration:
+
+| Value | Meaning |
+|-------|---------|
+| `0` | nothing in progress |
+| `1` | moving the slider to the home end |
+| `2` | at home — aim the camera, then Set A |
+| `3` | moving the slider to the far end |
+| `4` | at the far end — re-aim at the same subject, then Set B |
+| `5` | solved and stored |
+| `6` | failed — the two observations were too alike |
+
+Calibration cannot yet be *started* from Companion; there is no OSC command for
+it. This publishes the prompt so a Deck can show where a calibration driven
+from another client has got to — useful when the person aiming the camera is
+not the person at the PC. `5` and `6` clear themselves back to `0` after eight
+seconds, so a button shows the outcome and then goes quiet.
 
 Slot state is one address per slot carrying one value:
 
