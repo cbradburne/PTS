@@ -529,6 +529,10 @@ private:
     // Write SGTHRS for one leg of a limit find, compensating for the rail's
     // slope.  Direction is the PHYSICAL sense the leg travels in.
     void     _applyStallThreshold(Axis axis, bool phys_positive);
+    // Shared setup for findLimits() and findHome().  They differ only in what
+    // happens once the min stop is reached, so everything up to launching the
+    // first leg lives here — the two used to keep their own copies and drifted.
+    void     _beginLimitSeek(Axis axis, LimitsFoundCb cb, bool homing_only);
     void     _updateLimitFind();
     // v2: 50 Hz look-at controller.  check_slider_arrival=false tracks the
     // subject WITHOUT the end-of-move test, for when the operator is driving

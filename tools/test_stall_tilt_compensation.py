@@ -47,9 +47,11 @@ print("   other axes unchanged                               OK")
 print("\n2. when it is applied:")
 n = CPP.count("_applyStallThreshold(")
 assert n >= 3, f"called {n} times; expected the definition plus both legs"
-find = CPP[CPP.index("void MountMotion::findLimits("):]
-find = find[:find.index("\n}\n")]
-assert "_applyStallThreshold(axis," in find, "the first leg does not set a threshold"
+# The min leg's threshold is set in the shared setup that findLimits() and
+# findHome() both delegate to — see 4b.
+seek0 = CPP[CPP.index("void MountMotion::_beginLimitSeek("):]
+seek0 = seek0[:seek0.index("\n}\n")]
+assert "_applyStallThreshold(axis," in seek0, "the first leg does not set a threshold"
 upd = CPP[CPP.index("void MountMotion::_updateLimitFind("):]
 assert "_applyStallThreshold(ax, go_max_positive);" in upd, \
     "the max leg reuses the min leg's threshold — it runs the other way"
@@ -95,6 +97,32 @@ desc = t_max if s_min > 0 else t_min
 assert climb < base < desc, \
     f"the correction is INVERTED: climbing {climb}, descending {desc}, base {base}"
 print("   climbing lower, descending higher — not inverted   OK")
+
+# ---- 4b. homing gets the same treatment ------------------------------------
+# findHome() drives the SAME leg as the first half of findLimits(), and on this
+# rig that leg is the climb.  It used to keep its own copy of the setup and wrote
+# SGTHRS raw, so homing false-stalled part-way up the rail while Find Limits
+# survived — the compensation existed and homing could not see it.
+print("\n4b. homing:")
+assert "void MountMotion::_beginLimitSeek(" in CPP, \
+    "the shared limit-seek setup is gone; findHome may drift from findLimits again"
+for entry in ("findLimits", "findHome"):
+    body = CPP[CPP.index(f"void MountMotion::{entry}("):]
+    body = body[:body.index("\n}\n")]
+    assert "_beginLimitSeek(" in body, f"{entry} no longer delegates to the shared setup"
+    assert "SGTHRS" not in body, \
+        f"{entry} writes SGTHRS itself again — that is how homing lost the tilt\n" \
+        f"    compensation in the first place"
+print("   findLimits and findHome share one setup            OK")
+print("   neither writes SGTHRS directly                     OK")
+
+seek = CPP[CPP.index("void MountMotion::_beginLimitSeek("):]
+seek = seek[:seek.index("\n}\n")]
+assert "_applyStallThreshold(axis," in seek, \
+    "the shared setup does not apply the slope-compensated threshold"
+assert "_homing_only = homing_only;" in seek, \
+    "the shared setup does not carry the homing flag through"
+print("   the shared setup applies the compensation          OK")
 
 # ---- 5. a level rail is untouched -------------------------------------------
 print("\n5. every other rig:")

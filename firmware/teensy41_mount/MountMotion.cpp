@@ -1230,7 +1230,16 @@ int32_t MountMotion::getMaxLimit(Axis axis)  const { return _max_limit[(int)axis
 // findLimits() — state machine driven from update()
 // ---------------------------------------------------------------------------
 
-void MountMotion::findLimits(Axis axis, LimitsFoundCb cb) {
+// ---------------------------------------------------------------------------
+// _beginLimitSeek() — everything findLimits() and findHome() do identically
+// ---------------------------------------------------------------------------
+// Both drive to the min end stop with StallGuard armed and differ only in what
+// they do on arrival: findHome() stops there, findLimits() carries on to the
+// max end.  They used to hold separate copies of this setup, and the copies
+// drifted — findHome() went on writing SGTHRS raw after findLimits() started
+// adjusting it for the rail's slope, so homing false-stalled on the climb that
+// the adjustment exists to survive.
+void MountMotion::_beginLimitSeek(Axis axis, LimitsFoundCb cb, bool homing_only) {
     if (axis != AXIS_SLIDER && axis != AXIS_ZOOM) return;
     if (_state == STATE_FINDING_LIMITS) return;
 
@@ -1240,6 +1249,7 @@ void MountMotion::findLimits(Axis axis, LimitsFoundCb cb) {
     _lf_cb       = cb;
     _lf_state    = LimitFindState::MOVING_TO_MIN;
     _lf_start_ms = millis();
+    _homing_only = homing_only;
     _state       = STATE_FINDING_LIMITS;
 
     // Stay in StealthChop (do NOT force SpreadCycle) — working examples show StallGuard
@@ -1295,42 +1305,20 @@ void MountMotion::findLimits(Axis axis, LimitsFoundCb cb) {
 }
 
 // ---------------------------------------------------------------------------
-// findHome() — move to min end stop, zero there, back off.
+// findLimits() / findHome()
 // ---------------------------------------------------------------------------
+// findLimits(): min stop, then on to the max stop, storing both.
+// findHome():   min stop only — zero there and back off.
+// The seek itself is identical, so it lives in one place.
+
+void MountMotion::findLimits(Axis axis, LimitsFoundCb cb) {
+    _beginLimitSeek(axis, cb, false);
+}
 
 void MountMotion::findHome(Axis axis, LimitsFoundCb cb) {
-    if (axis != AXIS_SLIDER && axis != AXIS_ZOOM) return;
-    if (_state == STATE_FINDING_LIMITS) return;
-
-    emergencyStop();
-
-    _lf_axis     = axis;
-    _lf_cb       = cb;
-    _lf_state    = LimitFindState::MOVING_TO_MIN;
-    _lf_start_ms = millis();
-    _homing_only = true;
-    _state       = STATE_FINDING_LIMITS;
-
-    _tmc[(int)axis]->rms_current(DEFAULT_CURRENT_MA[(int)axis] * LIMIT_FIND_CURRENT_SCALE[(int)axis]);
-    _tmc[(int)axis]->SGTHRS(max((uint8_t)1,
-                                (uint8_t)(_stall_threshold[(int)axis] / SGTHRS_DIVISOR[(int)axis])));
-    _tmc[(int)axis]->TCOOLTHRS(0xFFFFF);  // enable StallGuard at all speeds
-
-    _stall_isr_fired = false;
-    attachInterrupt(digitalPinToInterrupt(PIN_DIAG[(int)axis]), _diag_isr, RISING);
-
-    {
-        uint32_t spd = (axis == AXIS_ZOOM) ? LIMIT_FIND_SPEED_ZOOM : LIMIT_FIND_SPEED;
-        uint32_t acc = (axis == AXIS_ZOOM) ? LIMIT_FIND_ACCEL_ZOOM : LIMIT_FIND_ACCEL;
-        _stepper[(int)axis]->setMaxSpeed(spd);
-        _stepper[(int)axis]->setAcceleration(acc);
-    }
-    // If zoom is inverted, "fully zoomed out" (home) is at the positive physical
-    // end — reverse the homing direction so we seek the correct end stop.
-    bool go_positive = (axis == AXIS_ZOOM && _zoom_invert);
-    _stepper[(int)axis]->setTargetAbs(go_positive ? 10000000L : -10000000L);
-    _stepper[(int)axis]->moveAsync();
+    _beginLimitSeek(axis, cb, true);
 }
+
 
 // ---------------------------------------------------------------------------
 // _updateGoto() — velocity P-loop for position moves
