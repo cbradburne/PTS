@@ -21,7 +21,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from .protocol import (
     Packet, Cmd, MountState, Axis, AxisGroup,
     decode_status, decode_limits_found, decode_home_complete,
-    decode_ack, decode_nack, decode_pong,
+    decode_ack, decode_nack, decode_pong, NackError,
     decode_state_report, decode_config_report,
     StatusPayload, LimitsFoundPayload, StateReportPayload, ConfigReportPayload,
     pkt_jog, pkt_goto, pkt_save_pos, pkt_set_speed_preset,
@@ -1260,7 +1260,16 @@ class MountManager(QObject):
         elif pkt.cmd == Cmd.NACK:
             try:
                 n = decode_nack(pkt.payload)
-                log.warning(f"NACK from mount {mid}: seq={n.nacked_seq} err={n.error}")
+                # Name the refusal.  NO_REF in particular has an action attached
+                # to it, and "err=6" does not carry that to whoever is at the
+                # rig wondering why a calibration will not start.
+                if int(n.error) == int(NackError.NO_REF):
+                    log.warning("NACK from mount %d: no session reference — "
+                                "run Set Ref (0/0) before calibrating a subject "
+                                "or starting a look-at move. The reference is "
+                                "cleared by a reboot or a firmware flash.", mid)
+                else:
+                    log.warning(f"NACK from mount {mid}: seq={n.nacked_seq} err={n.error}")
                 self.nack_received.emit(mid, n.nacked_seq, int(n.error))
             except Exception:
                 pass

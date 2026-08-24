@@ -1323,6 +1323,27 @@ static void dispatch(const ParsedPacket &pkt) {
         // ------------------------------------------------------------------
         case CMD_ADD_SUBJECT_START: {
             if (len < 17) break;
+            // A calibration without a session reference cannot be right, and
+            // fails SILENTLY: the two observations are measured from wherever
+            // the head happened to sit when the Teensy last booted, so the solve
+            // succeeds, reports SOLVED, stores a subject, and points nowhere.
+            //
+            // The reference is RAM-only and a flash clears it, which is exactly
+            // when someone is most likely to recalibrate.  On 2026-08-24 that
+            // put two subjects nearly 3 m above the rail — the same rig had
+            // solved to 1.3 m BELOW it with a reference set.
+            //
+            // startLookAtMove() and aimAtSubject() have always refused without
+            // one.  Refusing to CREATE what they will not use closes the gap
+            // between "stored" and "usable".
+            if (!mount.isRefSet()) {
+                Serial.println("[Calib] REFUSED — no session reference; run Set Ref first");
+                uint8_t nack_buf[PKT_BUF_SIZE];
+                uint16_t nack_len = build_nack(nack_buf, THIS_MOUNT_ID, ++_tx_seq,
+                                               pkt.seq, NACK_NO_REF);
+                ESP_SERIAL.write(nack_buf, nack_len);
+                break;
+            }
             if (_calib_state != CalibState::IDLE) {
                 _calib_state = CalibState::IDLE;  // abort any previous attempt
             }
@@ -1754,9 +1775,15 @@ static void dispatch(const ParsedPacket &pkt) {
             if (!started) {
                 Serial.printf("[LookAt] FAILED to start (ref_set=%d limits_set=%d)\n",
                               (int)mount.isRefSet(), (int)mount.hasLimits(AXIS_SLIDER));
+                // Name the actual cause.  This reported BUSY whatever the
+                // reason, and "busy" sends someone looking for a move in
+                // progress when the mount is sitting still waiting for a
+                // reference it was never given.
                 uint8_t nack_buf[PKT_BUF_SIZE];
                 uint16_t nack_len = build_nack(nack_buf, THIS_MOUNT_ID, ++_tx_seq,
-                                               pkt.seq, NACK_BUSY);
+                                               pkt.seq,
+                                               mount.isRefSet() ? NACK_BUSY
+                                                                : NACK_NO_REF);
                 ESP_SERIAL.write(nack_buf, nack_len);
             } else {
                 // Report which arrow is running, from the mount's own state.
