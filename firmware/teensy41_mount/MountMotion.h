@@ -509,6 +509,9 @@ private:
     void     _clampToLimits(int32_t &target, Axis axis) const;
     void     _updateJog();
     void     _updateGoto();                                // velocity P-loop for position moves
+    // Write SGTHRS for one leg of a limit find, compensating for the rail's
+    // slope.  Direction is the PHYSICAL sense the leg travels in.
+    void     _applyStallThreshold(Axis axis, bool phys_positive);
     void     _updateLimitFind();
     // v2: 50 Hz look-at controller.  check_slider_arrival=false tracks the
     // subject WITHOUT the end-of-move test, for when the operator is driving

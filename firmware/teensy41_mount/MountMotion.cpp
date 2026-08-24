@@ -194,6 +194,30 @@ static constexpr float LIMIT_FIND_CURRENT_SCALE[4] = { 0.75f, 0.75f, 0.75f, 0.9f
 //   Tune SGTHRS_DIVISOR[3] if the effective chip range turns out wider or narrower.
 static constexpr uint8_t SGTHRS_DIVISOR[4] = { 1, 1, 1, 5 };
 
+// STALL_TILT_COMP
+//   A tilted rail loads the slider motor differently in each direction: going
+//   up it carries the carriage AND its weight down the slope, coming down that
+//   weight helps.  StallGuard measures load, so one threshold cannot serve both
+//   legs of a limit find — set it for the climb and the descent detects the
+//   stop late (the carriage is into it before DIAG fires); set it for the
+//   descent and the climb trips on the gradient alone, part-way along the rail.
+//
+//   SG_RESULT falls as load rises and DIAG fires when SG_RESULT < SGTHRS x 2,
+//   so a HIGHER SGTHRS trips at LOWER load.  Climbing therefore wants a lower
+//   threshold, descending a higher one.  The gravity component along the rail
+//   goes as sin(tilt), so that is what scales it.
+//
+//   This is the fraction of the threshold shifted at sin(tilt) = 1 (a vertical
+//   rail).  0.6 at 21 degrees works out at +/-21%: a threshold of 80 becomes 63
+//   climbing and 97 descending.
+//
+//   TO TUNE: watch the [LimitFind] SG= prints on USB serial for both legs.  The
+//   idle SG_RESULT differs between them by roughly the gravity load; this wants
+//   to be large enough that each leg's threshold sits the same distance below
+//   its own idle reading.  Too small and the descent still detects late; too
+//   large and the climb false-trips.
+static constexpr float STALL_TILT_COMP = 0.6f;
+
 // Jog watchdog: stop all axes if no JOG packet arrives within this window.
 // PC/web app sends at 20 Hz (50 ms); allow 10 misses before declaring lost.
 static constexpr uint32_t JOG_WATCHDOG_MS = 500;
@@ -1208,10 +1232,10 @@ void MountMotion::findLimits(Axis axis, LimitsFoundCb cb) {
     // functions correctly via TCOOLTHRS even in StealthChop mode on BTT TMC2209 boards.
     // Use per-axis current scale: lower current widens the useful SGTHRS range (zoom especially).
     _tmc[(int)axis]->rms_current(DEFAULT_CURRENT_MA[(int)axis] * LIMIT_FIND_CURRENT_SCALE[(int)axis]);
-    // Scale user threshold to the axis's effective chip range via SGTHRS_DIVISOR.
-    uint8_t sgthrs = max((uint8_t)1,
-                         (uint8_t)(_stall_threshold[(int)axis] / SGTHRS_DIVISOR[(int)axis]));
-    _tmc[(int)axis]->SGTHRS(sgthrs);
+    // Threshold for the first leg.  Scaled to the axis's effective chip range
+    // via SGTHRS_DIVISOR, and on the slider adjusted for which way this leg
+    // runs along the rail — see STALL_TILT_COMP.
+    _applyStallThreshold(axis, (axis == AXIS_ZOOM && _zoom_invert));
     _tmc[(int)axis]->TCOOLTHRS(0xFFFFF);
 
     // Arm the DIAG rising-edge interrupt — fires when stall is detected
@@ -1239,8 +1263,11 @@ void MountMotion::findLimits(Axis axis, LimitsFoundCb cb) {
     uint8_t  sgthrs_rb    = _tmc[(int)axis]->SGTHRS();
     bool     spread_rb    = (gconf_rb >> 2) & 0x01;
     bool     pdn_rb       = (gconf_rb >> 6) & 0x01;
-    Serial.printf("[LimitFind] axis=%d  SGTHRS=%u (chip=%u)  TCOOLTHRS=0xFFFFF (chip=0x%X)\n",
-                  (int)axis, sgthrs, sgthrs_rb, tcool_rb);
+    // The chip readback IS the value in force — _applyStallThreshold() has just
+    // written it, and on the slider it may have been adjusted for the slope, so
+    // reading it back beats reporting what was asked for.
+    Serial.printf("[LimitFind] axis=%d  SGTHRS chip=%u  TCOOLTHRS=0xFFFFF (chip=0x%X)\n",
+                  (int)axis, sgthrs_rb, tcool_rb);
     Serial.printf("[LimitFind] GCONF=0x%08X  en_spreadCycle=%d (want 0)  pdn_disable=%d (want 1)\n",
                   gconf_rb, (int)spread_rb, (int)pdn_rb);
     Serial.printf("[LimitFind] DIAG pin %d = %s (expect LOW at standstill — normal)\n",
@@ -1376,6 +1403,37 @@ void MountMotion::_updateGoto() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// _applyStallThreshold() — SGTHRS for one leg, allowing for the rail's slope
+// ---------------------------------------------------------------------------
+void MountMotion::_applyStallThreshold(Axis axis, bool phys_positive) {
+    int idx = (int)axis;
+    float thr = (float)_stall_threshold[idx] / (float)SGTHRS_DIVISOR[idx];
+
+    // Only the slider runs along a rail that can be tilted.  Everything else
+    // keeps the threshold it was given.
+    if (axis == AXIS_SLIDER && _slider_tilt_deg != 0.0f) {
+        // The rail rises as the LOGICAL coordinate increases, so translate the
+        // physical direction this leg travels in before comparing with the
+        // tilt — slider_invert flips the two apart.
+        int logical_dir = phys_positive ? 1 : -1;
+        if (_slider_invert) logical_dir = -logical_dir;
+
+        // > 0 climbing, < 0 descending, scaled by the gravity component.
+        float slope = sinf(_slider_tilt_deg * (float)DEG_TO_RAD) * (float)logical_dir;
+        thr *= (1.0f - STALL_TILT_COMP * slope);
+
+        Serial.printf("[LimitFind] slider leg %s: tilt %.1f deg, slope %+.3f, "
+                      "SGTHRS %u -> %u\n",
+                      slope > 0 ? "CLIMBING" : "DESCENDING",
+                      _slider_tilt_deg, slope,
+                      (unsigned)(_stall_threshold[idx] / SGTHRS_DIVISOR[idx]),
+                      (unsigned)constrain((int)(thr + 0.5f), 1, 255));
+    }
+
+    _tmc[idx]->SGTHRS((uint8_t)constrain((int)(thr + 0.5f), 1, 255));
+}
+
 void MountMotion::_updateLimitFind() {
     Axis ax  = _lf_axis;
     int  idx = (int)ax;
@@ -1452,6 +1510,10 @@ void MountMotion::_updateLimitFind() {
                     _stall_isr_fired = false;  // clear any flag from min phase
                     {
                         bool go_max_positive = !(ax == AXIS_ZOOM && _zoom_invert);
+                        // This leg runs the OPPOSITE way to the last one, which
+                        // on a tilted rail means the other side of the gravity
+                        // load.  Re-apply the threshold for the new direction.
+                        _applyStallThreshold(ax, go_max_positive);
                         _stepper[idx]->setTargetAbs(go_max_positive ? 10000000L : -10000000L);
                     }
                     _stepper[idx]->moveAsync();
