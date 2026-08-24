@@ -88,10 +88,7 @@ class ConfigDialog(QWidget):
         avail_h = scr.availableGeometry().height() if scr else 900
         self.resize(720, max(640, min(820, avail_h - 80)))
         # Live-position readout widgets, per mount — filled in by _build().
-        self._pos_labels: dict[int, dict] = {}
-        self._pos_captions: dict[int, dict] = {}
         self._build()
-        self._mm.position_updated.connect(self._on_position)
         # Touchscreen numeric entry — a keypad beside the dialog, shown when a
         # spin box takes focus.  Built after _build() so the fields exist.
         if self._config.numeric_keypad:
@@ -694,42 +691,6 @@ class ConfigDialog(QWidget):
     # Live position readout
     # ------------------------------------------------------------------
 
-    def _set_pos_row_visible(self, mount_id: int, key: str, visible: bool) -> None:
-        """Show/hide one readout row, caption and value together."""
-        val = self._pos_labels.get(mount_id, {}).get(key)
-        cap = self._pos_captions.get(mount_id, {}).get(key)
-        if val is not None:
-            val.setVisible(visible)
-        if cap is not None:
-            cap.setVisible(visible)
-
-    def _on_position(self, mount_id: int, pos) -> None:
-        """Update one mount's readout from a CMD_POSITION broadcast.
-
-        Values are shown in the units the mount reports — degrees for pan/tilt,
-        millimetres for the slider — rather than steps, so they can be checked
-        against a tape measure.  An axis in motion is marked so it's obvious
-        the number is still changing rather than stale.
-        """
-        labels = self._pos_labels.get(mount_id)
-        if not labels:
-            return
-        moving = pos.moving_mask
-        for idx, (key, text) in enumerate((
-                ("pan",    f"{pos.pan_deg:8.1f} °"),
-                ("tilt",   f"{pos.tilt_deg:8.1f} °"),
-                ("slider", f"{pos.slider_mm:8.1f} mm"),
-                ("zoom",   f"{pos.zoom_steps:8d} steps"))):
-            lbl = labels.get(key)
-            if lbl is None:
-                continue
-            if moving & (1 << idx):
-                lbl.setText(f"{text}  ▸")
-                lbl.setStyleSheet("color:#4FC3F7;")   # in motion
-            else:
-                lbl.setText(text)
-                lbl.setStyleSheet("")
-
     def _build_mount_tab(self, mount_id: int) -> QWidget:
         mc = self._config.mount(mount_id)
 
@@ -740,31 +701,6 @@ class ConfigDialog(QWidget):
         layout.setSpacing(12)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # ---- Live position readout ------------------------------------
-        # CMD_POSITION arrives unsolicited at 5 Hz while moving and 1 Hz at
-        # rest, so this fills itself in within a second of the tab opening and
-        # needs no polling.  Slider and zoom rows are shown per the hardware
-        # checkboxes below, and follow them live: a slider reads 0.0 on a mount
-        # without one, and zoom steps are meaningless under LANC control, where
-        # the camera moves its own lens and reports nothing back.
-        pos_box  = QGroupBox("Live Position")
-        pos_form = QFormLayout(pos_box)
-        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        pos_labels: dict[str, QLabel] = {}
-        pos_captions: dict[str, QLabel] = {}
-        for key, caption in (("pan",    "Pan:"),
-                             ("tilt",   "Tilt:"),
-                             ("slider", "Slider:"),
-                             ("zoom",   "Zoom:")):
-            val = QLabel("—")
-            val.setFont(mono)
-            cap = QLabel(caption)
-            pos_form.addRow(cap, val)
-            pos_labels[key]   = val
-            pos_captions[key] = cap
-        self._pos_labels[mount_id]   = pos_labels
-        self._pos_captions[mount_id] = pos_captions
-        layout.addWidget(pos_box)
 
         # Orientation / hardware
         orientation_box = QGroupBox("Orientation / Hardware")
@@ -786,15 +722,6 @@ class ConfigDialog(QWidget):
         # Look-at mode only makes sense when there's a slider
         look_at_mode_cb.setEnabled(mc.has_slider)
         has_slider_cb.toggled.connect(look_at_mode_cb.setEnabled)
-        # Drive the position readout's optional rows from these same boxes, so
-        # ticking one updates the readout without reopening the dialog.
-        def _sync_pos_rows(_=None, mid=mount_id,
-                           slider_cb=has_slider_cb, lanc_cb=lanc_zoom_cb) -> None:
-            self._set_pos_row_visible(mid, "slider", slider_cb.isChecked())
-            self._set_pos_row_visible(mid, "zoom",   not lanc_cb.isChecked())
-        has_slider_cb.toggled.connect(_sync_pos_rows)
-        lanc_zoom_cb.toggled.connect(_sync_pos_rows)
-        _sync_pos_rows()
         ol.addWidget(has_slider_cb)
         ol.addWidget(pan_inv_cb)
         ol.addWidget(tilt_inv_cb)

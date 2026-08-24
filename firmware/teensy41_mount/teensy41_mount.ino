@@ -1964,15 +1964,18 @@ void loop() {
     }
 
 
-    {
-        static uint32_t _last_pos_ms = 0;
-        uint32_t iv = (mount.movingMask() != 0 ||
-                       mount.getState() != STATE_IDLE) ? 200 : 1000;
-        if (millis() - _last_pos_ms >= iv) {
-            _last_pos_ms = millis();
-            send_position();
-        }
-    }
+    // No unsolicited position broadcast.  CMD_POSITION is answered on request
+    // (see CMD_GET_POSITION above) and nothing else.
+    //
+    // This used to run at 5 Hz while moving and 1 Hz at rest.  The bridge has
+    // dropped it since 2026-08-12 unless a GET_POSITION arrived within the last
+    // two seconds, so for most of that time it was 5 Hz of UART and bridge CPU
+    // spent on frames that were parsed and discarded a few centimetres away.
+    //
+    // Sending only on request also makes the tap explicit: whatever wants
+    // positions has to ask, and is therefore visible in the log as the thing
+    // that opened it.  An unsolicited stream is a producer nobody is accountable
+    // for.
 
     // ── Uniform health telemetry (teensy node) ──────────────────────────
     // 10 s cadence + anomaly sends (first report / low RAM / loop stall).

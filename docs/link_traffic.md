@@ -28,7 +28,7 @@ Not radio. A private wire to one peer, so rate here is cheap.
 | Mount → bridge | Rate | Payload |
 |---|---|---|
 | `STATUS` | **100 ms** (10 Hz) | 10 B |
-| `POSITION` | **200 ms** moving, **1 s** at rest | 17 B |
+| `POSITION` | **on request only** — nothing sends `GET_POSITION` today | 17 B |
 | `HEALTH` | 10 s | — |
 | `LOOK_AT_STATUS` | on change only | 14 B |
 | `CONFIG_REPORT` | on request | 77 B |
@@ -112,19 +112,30 @@ the rig transmits.
 
 ---
 
-## The position stream has no consumer
+## Positions are answered, never volunteered
 
-`POSITION` is the one packet the mount produces that nothing currently asks
-for. The bridge forwards it only within `POS_ON_DEMAND_MS` of a
-`CMD_GET_POSITION`, and since the zoom diagnostic was removed nothing in the
-system sends one — so it goes Teensy → bridge at 5 Hz while moving and stops
-there.
+`CMD_POSITION` is sent only in reply to a `CMD_GET_POSITION`, and **nothing
+sends one today**. So there is no position data anywhere in the system unless
+something is added that asks for it.
 
-That is a working arrangement rather than an oversight: the producer and the
-gate both remain, so a future diagnostic only has to send `GET_POSITION` to
-open the tap. But it does mean position data is not available to any client
-today, and a tool that assumes otherwise will sit waiting for packets that are
-never requested.
+It was not always so, and the history is a good illustration of how a stream
+outlives its readers:
+
+| | |
+|---|---|
+| 30 Jul | Teensy broadcast `POSITION` at 5 Hz moving / 1 Hz at rest. The PC app's Config tab showed it live. |
+| 12 Aug | The bridge began gating it on a recent `GET_POSITION` — "stop putting telemetry on the air that nothing reads". The Config readout went blank, and nobody noticed. |
+| 19 Aug | A zoom diagnostic polled `GET_POSITION`, which revived the readout and the position log by accident. |
+| 21 Aug | The diagnostic was removed, both went quiet again, and the dead Config readout was deleted. |
+| 21 Aug | The unsolicited broadcast was removed at the Teensy, since the bridge had been discarding it for nine days. |
+
+**Two consumers are dormant, not broken.** `comms/position_log.py` still
+subscribes and would log travel and overshoot the moment positions flowed —
+it is what measured the rail geometry — and anything else can subscribe the
+same way. Reviving either means sending `GET_POSITION`, which is deliberately
+the visible act: whatever wants positions has to ask, and shows up in the log
+as the thing that opened the tap. An unsolicited stream is a producer nobody is
+accountable for.
 
 Two diagnostics that once used it have been removed, both having answered the
 question they were added for:
