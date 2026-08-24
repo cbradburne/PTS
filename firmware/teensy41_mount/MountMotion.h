@@ -50,6 +50,23 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 // ramp at LOOK_AT_SLEW_ACCEL_FACTOR=0.10 with margin.
 #define LOOK_AT_SLEW_DURATION_MS  2000
 
+// How long the gentle slew cap outlasts the BLEND, once one is running.
+//
+// The cap is a step, not a ramp: when the grace expires _driveTowardTarget()
+// goes from LOOK_AT_SLEW_BRAKE_FACTOR to LOOK_AT_BRAKE_FACTOR, which is a 67%
+// jump in permitted speed.  That is invisible if the camera has already settled
+// and visible as a kick if it has not.
+//
+// A fixed grace could not stay clear of it, because the blend's length depends
+// on how far the camera has to turn.  A 30 degree switch blends for ~1.6 s, the
+// setpoint arrives, the camera is still closing the P-loop's following error
+// behind it — and the fixed 2 s grace expired mid-catch-up.  The move eased in
+// beautifully and then kicked on the way out.
+//
+// So the grace now runs for the blend plus this, which needs to cover the
+// following error settling after the setpoint stops moving.
+#define LOOK_AT_SLEW_SETTLE_MS    1000
+
 // ---------------------------------------------------------------------------
 // Subject-switch blend
 // ---------------------------------------------------------------------------

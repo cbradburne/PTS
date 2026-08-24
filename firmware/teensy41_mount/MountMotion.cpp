@@ -1919,16 +1919,12 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     _la_subject_z  = sz;
     _la_subject_id = subject_id;
 
-    // When switching subjects during an active look-at move, arm the slew-accel
-    // grace period so _driveTowardTarget() uses reduced acceleration for the full
-    // duration of the reposition, not just on ticks where abs_err happens to be
-    // above the KP threshold (which can shrink quickly as the motor starts moving).
-    if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
-        _la_slew_until_ms = millis() + LOOK_AT_SLEW_DURATION_MS;
-    }
-
     if (!switching) {
         _la_blend_ms = 0;            // first selection — aim straight at it
+        // No blend to cover, so the grace keeps its original fixed length.
+        if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
+            _la_slew_until_ms = millis() + LOOK_AT_SLEW_DURATION_MS;
+        }
         return;
     }
 
@@ -1958,8 +1954,17 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     _la_blend_from[2] = from_z;
     _la_blend_start_ms = millis();
     _la_blend_ms       = (uint32_t)ms;
-    Serial.printf("[LA] subject switch: %.1f deg to travel, easing over %lums\n",
-                  travel, (unsigned long)_la_blend_ms);
+
+    // Hold the gentle slew cap for the whole blend AND the settling after it.
+    // The cap comes off in a step, so it has to come off when the camera is
+    // already still — not while it is closing the last of its following error,
+    // which is where a fixed grace put it and why the ease OUT kicked.
+    _la_slew_until_ms = millis() + _la_blend_ms + LOOK_AT_SLEW_SETTLE_MS;
+
+    Serial.printf("[LA] subject switch: %.1f deg to travel, easing over %lums, "
+                  "slew cap held %lums\n",
+                  travel, (unsigned long)_la_blend_ms,
+                  (unsigned long)(_la_blend_ms + LOOK_AT_SLEW_SETTLE_MS));
 }
 
 // ---------------------------------------------------------------------------
