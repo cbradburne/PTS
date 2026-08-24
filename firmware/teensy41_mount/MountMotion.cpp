@@ -90,19 +90,33 @@ static constexpr uint16_t DEFAULT_CURRENT_MA[4] = { 800, 800, 2600, 1300 };
 // NOTE: StallGuard on TMC2209 requires ~20 RPM minimum to produce reliable SG_RESULT.
 // Both SLIDER and ZOOM are now 32 µsteps:
 //   6000 steps/s ÷ (32 µstep × 200 steps/rev) × 60 ≈ 56 RPM  ✓
-static constexpr uint32_t LIMIT_FIND_SPEED       = 6000;   // steps/s — both axes (32 µstep)
-// 6400 steps/s² = 40 mm/s² at 160 steps/mm, which is exactly the fastest SLIDER
-// speed preset (1, 10, 20, 40 mm/s²).  It was 150000 — 938 mm/s², TWENTY-THREE
-// TIMES the most aggressive acceleration the axis is ever asked for in normal
-// use — and homing does it from a dead stop with the current scaled to 75%.
-// The slider buzzed and did not move: a genuine torque stall at the start of the
-// ramp, not a StallGuard misread.
+// 4000 steps/s = 25 mm/s, and 4000 / (32 µstep × 200 steps/rev) × 60 = 38 RPM,
+// comfortably above the ~20 RPM StallGuard needs for a usable SG_RESULT.
+// It was 6000 (37.5 mm/s, 56 RPM).  Easing it is what lets the acceleration
+// come down without lengthening the settle guard — see LIMIT_FIND_ACCEL.
+static constexpr uint32_t LIMIT_FIND_SPEED       = 4000;   // steps/s — both axes (32 µstep)
+// 3200 steps/s² = 20 mm/s² at 160 steps/mm.
 //
-// 40 mm/s² is not a guess.  It is the one figure the hardware has demonstrated
-// it can do under this load, every day, on preset 4.  The whole cost is ramp
-// distance: 0.75 mm becomes about 17 mm, on a rail hundreds of mm long, and the
-// 0.94 s ramp is lost inside a traverse that takes ~20 s.
-static constexpr uint32_t LIMIT_FIND_ACCEL       = 6400;   // steps/s² — ramp = 6000/6400 = 0.94 s
+// This was 150000 (938 mm/s²) and the slider buzzed without moving — a torque
+// stall at the start of the ramp, not a StallGuard misread.  It then became
+// 6400 (40 mm/s²), defended as "the one figure the hardware has demonstrated it
+// can do under this load, every day, on preset 4".
+//
+// That reasoning was sound and its premise has since gone: the rail is tilted
+// now, so the load it referred to no longer exists.  Starting UPHILL from a dead
+// stop with the current scaled to 75% is a different demand from starting level,
+// and the slider judders and fails to move — two of three limit finds on
+// 2026-08-24 halted that way.  20 mm/s² is what the axis is observed to start
+// cleanly from on the incline.
+//
+// LIMIT_FIND_SPEED came down with it, and that pairing is the point.  Halving
+// the acceleration alone would have stretched the ramp from 0.94 s to 1.88 s,
+// and the settle guard has to outlast the ramp — so the window in which a stall
+// cannot be detected would have grown from 42 mm of travel to 55 mm.  Easing the
+// speed to 25 mm/s keeps the ramp at 1.25 s, lets the settle guard stay where it
+// is, and shrinks that blind window to 24 mm.  Slower, gentler, AND less of the
+// rail travelled blind.
+static constexpr uint32_t LIMIT_FIND_ACCEL       = 3200;   // steps/s² — ramp = 4000/3200 = 1.25 s
 static constexpr int32_t  LIMIT_BACK_OFF[4]      = { 0, 0, 300, 300 };
 // Minimum ramp time (seconds) enforced for all moveTo() GOTO moves.
 // Caps the acceleration to  speed / GOTO_MIN_RAMP_S  so that even at fast
