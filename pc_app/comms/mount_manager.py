@@ -424,6 +424,35 @@ class MountManager(QObject):
     # short enough to notice before an operator reaches for the joystick.
     UNACKED_LIMIT = 3
 
+    @staticmethod
+    def _subject_key(s):
+        """Identity of a solved subject: its name and where it solved to."""
+        return (s.name, round(s.x_mm), round(s.y_mm), round(s.z_mm))
+
+    def _log_solved_subjects(self, mid: int, prev: list, now: list) -> None:
+        """Say where a subject solved, when that changes.
+
+        The mount's own account of a solve goes to its USB serial, which nothing
+        reads at the rig, so a calibration that landed 5 m in front and one that
+        landed behind the rail looked identical from here.  SUBJECT_LIST is
+        polled every few seconds, hence "on change" rather than on arrival.
+
+        `prev` may still be the initial [None] * MAX_SUBJECTS — a mount that has
+        not sent a list yet — so entries are checked before use rather than
+        assumed to be records.
+        """
+        try:
+            was = {self._subject_key(s) for s in (prev or []) if s and s.valid}
+            for s in now:
+                if s and s.valid and self._subject_key(s) not in was:
+                    log.info(f"SUBJECT cam{mid}: '{s.name}' solved at "
+                             f"x={s.x_mm:.0f} y={s.y_mm:.0f} z={s.z_mm:.0f} mm "
+                             f"(z is distance in front of the rail)")
+        except Exception as e:
+            # Never let a log line cost the caller anything.  Reported as this
+            # app's fault, which is what it would be.
+            log.warning("SUBJECT logging failed for mount %d: %s", mid, e)
+
     def _set_mount_online(self, mount_id: int, *,
                           connected: bool | None = None,
                           unresponsive: bool | None = None) -> bool:
@@ -1142,25 +1171,20 @@ class MountManager(QObject):
         elif pkt.cmd == Cmd.SUBJECT_LIST:
             try:
                 subjects = decode_subject_list(pkt.payload)
-                # Log a subject whenever its solved position changes.  The
-                # mount's own account of the solve goes to USB serial, which
-                # nothing reads at the rig — so a calibration that succeeded
-                # and one that landed somewhere impossible looked identical
-                # from here.  This is polled every ~4 s, hence "on change".
-                prev = {(s.name, round(s.x_mm), round(s.y_mm), round(s.z_mm))
-                        for s in (st.subjects or []) if s.valid}
-                for s in subjects:
-                    if not s.valid:
-                        continue
-                    key = (s.name, round(s.x_mm), round(s.y_mm), round(s.z_mm))
-                    if key not in prev:
-                        log.info(f"SUBJECT cam{mid}: '{s.name}' solved at "
-                                 f"x={s.x_mm:.0f} y={s.y_mm:.0f} z={s.z_mm:.0f} mm "
-                                 f"(z is distance in front of the rail)")
-                st.subjects = subjects
-                self.subject_list_received.emit(mid)
             except Exception as e:
                 log.warning(f"Bad SUBJECT_LIST from mount {mid}: {e}")
+            else:
+                # Store and publish FIRST.  Logging is a nicety; the subject
+                # list is what the UI draws its borders from, and an exception
+                # raised while logging must not cost the app the packet.  It
+                # did: a crash here skipped both lines below, so st.subjects
+                # kept its initial [None] * 8, which then crashed the next one
+                # the same way — a permanent loop that also blamed the mount
+                # for a fault in this file.
+                prev = st.subjects
+                st.subjects = subjects
+                self.subject_list_received.emit(mid)
+                self._log_solved_subjects(mid, prev, subjects)
 
         elif pkt.cmd == Cmd.LOOK_AT_STATUS:
             try:
