@@ -1871,6 +1871,11 @@ void MountMotion::_clampToLimits(int32_t &target, Axis axis) const {
 // therefore eases out of the old aim and into the new one, and since pan and
 // tilt are both derived from this one moving point they stay coordinated and
 // arrive together without needing to be synchronised explicitly.
+bool MountMotion::_laBlendActive() const {
+    return _la_blend_ms != 0 &&
+           (millis() - _la_blend_start_ms) < _la_blend_ms;
+}
+
 void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
     if (_la_blend_ms == 0) {
         *sx = _la_subject_x;  *sy = _la_subject_y;  *sz = _la_subject_z;
@@ -1908,7 +1913,8 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     _la_subject_id = subject_id;
 
     if (!switching) {
-        _la_blend_ms = 0;            // first selection — aim straight at it
+        _la_blend_ms    = 0;         // first selection — aim straight at it
+        _la_blend_brake = 0.0f;      // and the fixed caps govern again
         // No blend to cover, so the grace keeps its original fixed length.
         if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
             _la_slew_until_ms = millis() + LOOK_AT_SLEW_DURATION_MS;
@@ -1943,15 +1949,29 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     _la_blend_start_ms = millis();
     _la_blend_ms       = (uint32_t)ms;
 
+    // Let the camera actually follow the curve.  A smoothstep peaks at 1.5x its
+    // average rate; the fixed slew cap is a flat fraction of the look-at max and
+    // knows nothing about the blend, so it was clamping the peak to less than
+    // half of what the curve asks for.  The result was constant speed for the
+    // whole move and a dead stop at the end — the shape the blend exists to
+    // remove.
+    float max_dps  = _la_max_steps_s[0] * _pan_deg_per_step;   // = max_pt_deg_s
+    float peak_dps = 1.5f * travel / (ms / 1000.0f);
+    _la_blend_brake = (max_dps > 0.f)
+                      ? constrain((peak_dps * LOOK_AT_BLEND_HEADROOM) / max_dps,
+                                  0.0f, 1.0f)
+                      : 0.0f;
+
     // Hold the gentle slew cap for the whole blend AND the settling after it.
     // The cap comes off in a step, so it has to come off when the camera is
     // already still — not while it is closing the last of its following error,
     // which is where a fixed grace put it and why the ease OUT kicked.
     _la_slew_until_ms = millis() + _la_blend_ms + LOOK_AT_SLEW_SETTLE_MS;
 
-    Serial.printf("[LA] subject switch: %.1f deg to travel, easing over %lums, "
-                  "slew cap held %lums\n",
-                  travel, (unsigned long)_la_blend_ms,
+    Serial.printf("[LA] subject switch: %.1f deg over %lums, peak %.1f deg/s, "
+                  "cap %.2f (was %.2f), held %lums\n",
+                  travel, (unsigned long)_la_blend_ms, peak_dps,
+                  _la_blend_brake, 0.15f,
                   (unsigned long)(_la_blend_ms + LOOK_AT_SLEW_SETTLE_MS));
 }
 
@@ -2418,7 +2438,17 @@ void MountMotion::_driveTowardTarget(int axis, int32_t target, float max_steps_s
     bool in_slew = (abs_err > LOOK_AT_SLEW_ERR_THRESHOLD)
                 || (millis() < _la_slew_until_ms);
 
-    float effective_brake = in_slew ? LOOK_AT_SLEW_BRAKE_FACTOR : LOOK_AT_BRAKE_FACTOR;
+    // While a blend is running the BLEND governs.  Its cap is derived from the
+    // curve's own peak rate, so the camera can follow the shape instead of
+    // saturating against a flat limit and turning it back into a rectangle.
+    // The fixed caps still apply everywhere else, where a step input is still
+    // possible and there is a lurch to prevent.
+    float effective_brake;
+    if (_laBlendActive() && _la_blend_brake > 0.0f) {
+        effective_brake = _la_blend_brake;
+    } else {
+        effective_brake = in_slew ? LOOK_AT_SLEW_BRAKE_FACTOR : LOOK_AT_BRAKE_FACTOR;
+    }
     float v_max_braking   = max_steps_s * effective_brake;
 
     // acc is derived so braking_distance == P/sqrt crossover distance.

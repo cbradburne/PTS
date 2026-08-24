@@ -67,6 +67,25 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 // following error settling after the setpoint stops moving.
 #define LOOK_AT_SLEW_SETTLE_MS    1000
 
+// How much faster than the blend's own peak the controller may go while
+// following it.
+//
+// A smoothstep's peak rate is 1.5x its average, and the controller has to be
+// able to EXCEED that to close the following error it accumulates — pinned
+// exactly at the peak it can only ever fall further behind.  1.3 gives it room
+// without letting it lurch.
+//
+// This exists because the fixed slew cap and the blend were solving the same
+// problem independently, and the cap won.  Measured on the rig on 2026-08-24: a
+// 25.6 degree switch should have peaked at 27.3 deg/s and instead sat pinned at
+// 12.4 for two seconds — 0.15 x 90 = 13.5 — then stopped dead.  Flat speed,
+// snap to stop.  The setpoint was easing perfectly the whole time and the
+// camera never once followed it.
+//
+// The cap exists to stop a STEP input lurching.  An eased setpoint has no step
+// in it, so during a blend the blend governs and the fixed cap does not apply.
+#define LOOK_AT_BLEND_HEADROOM    1.3f
+
 // ---------------------------------------------------------------------------
 // Subject-switch blend
 // ---------------------------------------------------------------------------
@@ -359,7 +378,8 @@ public:
     uint8_t getLaSubjectId() const { return _la_subject_id; }
     // Dropping the subject cancels any blend with it — otherwise a half-finished
     // ease would still be running when the next subject is chosen.
-    void    clearLaSubject()       { _la_subject_id = 0xFF; _la_blend_ms = 0; }
+    void    clearLaSubject()       { _la_subject_id = 0xFF; _la_blend_ms = 0;
+                                     _la_blend_brake = 0.0f; }
     // Look-at mode itself, not merely "a subject id is set".  The subject id
     // persists across a mode change, so it cannot stand in for the mode: a
     // subject selected before look-at was switched off would otherwise still
@@ -474,10 +494,16 @@ private:
     float           _la_blend_from[3] = { 0.f, 0.f, 0.f };
     uint32_t        _la_blend_start_ms = 0;
     uint32_t        _la_blend_ms       = 0;
+    // Speed cap for the duration of a blend, as a fraction of the look-at max —
+    // derived from the blend's own peak rate so the camera can actually follow
+    // the curve.  0 when no blend is running.
+    float           _la_blend_brake    = 0.0f;
 
     // The subject position to aim at RIGHT NOW — the blend evaluated at this
     // instant, or the subject itself when no blend is running.
     void     _laSubjectNow(float *sx, float *sy, float *sz) const;
+    // True while a subject-switch blend is still moving the aim.
+    bool     _laBlendActive() const;
     uint32_t        _la_slew_until_ms;     // apply slew-accel until this timestamp (mid-move switch)
 
     // Pre-aim phase: pan/tilt settle to start position before slider moves

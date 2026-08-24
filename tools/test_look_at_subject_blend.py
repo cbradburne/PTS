@@ -67,8 +67,13 @@ assert "subject_id != _la_subject_id" in setter, \
 assert "_la_subject_id != 0xFF" in setter, \
     "the first selection would blend from a subject that was never set"
 assert "_look_at_mode &&" in setter, "the blend can arm with look-at disabled"
-assert "if (!switching) {" in setter and "_la_blend_ms = 0;" in setter, \
+assert "if (!switching) {" in setter and \
+       re.search(r"_la_blend_ms\s*=\s*0;", setter), \
     "a first selection does not cancel any previous blend"
+# and it must drop the blend's speed cap with it, or the next non-blended aim
+# would run under a cap derived from a switch that is over.
+assert re.search(r"_la_blend_brake\s*=\s*0\.0f;", setter), \
+    "a first selection leaves the previous blend's speed cap in force"
 print("   only when already tracking a DIFFERENT subject     OK")
 
 # A switch during a switch must continue from where the aim actually is.
