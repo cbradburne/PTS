@@ -3325,7 +3325,22 @@ void loop() {
 
     bool rx_stale = (rx_age > iso_window);
     bool tx_stale = (tx_age > iso_window);
-    if (_cfg_valid && !_setup_active && !hub_ok && rx_stale && tx_stale) {
+    // _pair_active suspends this for the same reason _setup_active does, and it
+    // matters more.  Camera pairing STOPS WIFI so BLE can have the radio, so
+    // there is no RX and no TX by design — and because no send is being
+    // attempted, the failure counters do not move, ladder_running is false and
+    // the SHORT stalled window applies.  Twenty seconds, while somebody is
+    // typing a six-digit code and confirming it on the camera.  The mount
+    // rebooted mid-entry, every time, and the screen coming back looked like the
+    // pairing screen timing out.
+    //
+    // Silence during pairing is not isolation.  It is the one case where the
+    // mount is deliberately off the air and knows it.  The screen has its own
+    // bound — CAMPAIR_IDLE_MS, two minutes, restarted by every keypress — and it
+    // EXITS rather than restarting the chip, which is the right remedy for
+    // "wandered off and left it open".
+    if (_cfg_valid && !_setup_active && !_pair_active &&
+            !hub_ok && rx_stale && tx_stale) {
         if (_iso_restarts < ESPNOW_RESTART_MAX) {
             _iso_restarts++;
             Serial.printf("[ESPNOW] Mount isolated (no RX or TX) after %lus — %s — "

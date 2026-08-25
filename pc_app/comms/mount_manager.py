@@ -29,7 +29,7 @@ from .protocol import (
     pkt_e_stop, pkt_get_status, pkt_ping,
     pkt_get_state, pkt_store_pos, pkt_clear_pos,
     pkt_set_active_preset, pkt_save_speeds, pkt_goto_slot, pkt_move_rel,
-    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus, pkt_get_position,
+    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus,
     pkt_cam_iso, pkt_cam_white_balance, decode_cam_status,
     pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
@@ -73,27 +73,6 @@ HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
 # wedge only surfacing the next time the user presses a button.
 IDLE_PROBE_INTERVAL_S  = 3.0
 
-# TEMPORARY — look-at motion diagnostic.
-#
-# Switching subject mid-move reads as abrupt, and two attempts to fix it were
-# reasoned from the firmware rather than measured: the setpoint blend, then the
-# slew-cap timing.  Both were sound about what the code does and neither changed
-# what the operator sees, which is the point at which guessing stops being
-# useful.
-#
-# There is no position data anywhere in the system — CMD_POSITION is answered on
-# request and nothing asks (see docs/link_traffic.md).  This asks, at 5 Hz, ONLY
-# while a mount is actually in a look-at state, and logs pan/tilt with the
-# angular velocity between samples.  Velocity is the thing being complained
-# about; position alone would need reading off with a ruler.
-#
-# Cost: 5 requests + 5 replies per second, for the few seconds a switch lasts,
-# on a link that is otherwise one packet per 5 s at rest.  Bounded, and only
-# while the thing under study is happening.
-#
-# REMOVE once the profile has been read.  Set False to silence without deleting.
-LOOK_AT_DIAGNOSTIC     = True
-LOOK_AT_POLL_MS        = 200
 
 # Camera-parameter logging: how many changes one parameter may report in a
 # minute before it is silenced as a runaway.  Generous, because a setting
@@ -288,16 +267,6 @@ class MountManager(QObject):
         self._hb_timer.setInterval(HEARTBEAT_INTERVAL_MS)
         self._hb_timer.timeout.connect(self._heartbeat)
         self._hb_timer.start()
-
-        # TEMPORARY — see LOOK_AT_DIAGNOSTIC.  Separate from the heartbeat
-        # because 1 Hz cannot resolve a 1.6 s move, which is the whole reason
-        # the previous position logging could not answer this.
-        if LOOK_AT_DIAGNOSTIC:
-            self._la_poll_timer = QTimer(self)
-            self._la_poll_timer.setInterval(LOOK_AT_POLL_MS)
-            self._la_poll_timer.timeout.connect(self._poll_look_at_positions)
-            self._la_poll_timer.start()
-        self._la_last: dict[int, tuple] = {}   # mount -> (t, pan, tilt)
 
     # ------------------------------------------------------------------
     # Public — read state
@@ -1264,7 +1233,6 @@ class MountManager(QObject):
                 prev = st.position
                 st.position = pos
                 self.position_updated.emit(mid, pos)
-                self._log_look_at_sample(mid, st, pos)
             except Exception as e:
                 log.warning(f"Bad POSITION from mount {mid}: {e}")
 
@@ -1311,55 +1279,6 @@ class MountManager(QObject):
     # Heartbeat
     # ------------------------------------------------------------------
 
-    # TEMPORARY — see LOOK_AT_DIAGNOSTIC.
-    _LOOK_AT_STATES = (MountState.LOOK_AT_MOVE, MountState.LOOK_AT_PRE_AIM)
-
-    def _log_look_at_sample(self, mid: int, st, pos) -> None:
-        """TEMPORARY — see LOOK_AT_DIAGNOSTIC.  One line per sample, with the
-        angular velocity since the last one.
-
-        Velocity rather than position because abruptness IS velocity: a
-        position series would have to be differenced by hand to say anything
-        about it, and the question is where the rate changes, not where the
-        camera is.
-        """
-        if not LOOK_AT_DIAGNOSTIC or st.state not in self._LOOK_AT_STATES:
-            return
-        now = time.monotonic()
-        last = self._la_last.get(mid)
-        self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
-        if last is None:
-            log.warning("LA POS cam%d: tracking — pan %+.2f tilt %+.2f "
-                        "(velocity from the next sample)",
-                        mid, pos.pan_deg, pos.tilt_deg)
-            return
-        dt = now - last[0]
-        if dt <= 0.0:
-            return
-        log.warning("LA POS cam%d %+.2fs  pan %+7.2f (%+7.1f deg/s)  "
-                    "tilt %+7.2f (%+7.1f deg/s)",
-                    mid, dt,
-                    pos.pan_deg,  (pos.pan_deg  - last[1]) / dt,
-                    pos.tilt_deg, (pos.tilt_deg - last[2]) / dt)
-
-    def _poll_look_at_positions(self) -> None:
-        """Ask for a position, 5 Hz, only from a mount that is tracking.
-
-        The mount answers one CMD_POSITION per request — the unsolicited stream
-        was removed — so the sample rate is exactly the request rate, and the
-        traffic stops the moment the look-at move does.
-        """
-        if not LOOK_AT_DIAGNOSTIC:
-            return
-        for mid, st in self._states.items():
-            if not st.connected:
-                continue
-            if st.state in self._LOOK_AT_STATES:
-                self._send(pkt_get_position(mid))
-            elif mid in self._la_last:
-                # Move over — drop the anchor so the next one starts clean
-                # rather than reporting a velocity across the gap between them.
-                del self._la_last[mid]
 
     def _heartbeat(self) -> None:
         if not self._bridge.connected:

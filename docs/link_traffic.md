@@ -129,6 +129,12 @@ outlives its readers:
 | 21 Aug | The diagnostic was removed, both went quiet again, and the dead Config readout was deleted. |
 | 21 Aug | The unsolicited broadcast was removed at the Teensy, since the bridge had been discarding it for nine days. |
 
+A third diagnostic came and went the same way in August: a 5 Hz poll during
+look-at moves, added because two attempts to fix an abrupt subject switch had
+been reasoned from the firmware rather than measured. It found the cause in one
+run — the camera pinned against a speed cap at half the peak the easing curve
+asked for — and was removed once the profile came back a bell.
+
 **Two consumers are dormant, not broken.** `comms/position_log.py` still
 subscribes and would log travel and overshoot the moment positions flowed —
 it is what measured the rail geometry — and anything else can subscribe the
