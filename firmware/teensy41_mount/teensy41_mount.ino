@@ -387,25 +387,23 @@ static void eeprom_load() {
     // subsequent calibration to produce pan angles > 90° (rays pointing
     // backward) and fail.  If out of range, fall back to nominal so the next
     // calibration starts clean.
-    if (cfg.pan_deg_per_step > 0.0f && cfg.tilt_deg_per_step > 0.0f) {
-        const float pan_lo  = NOMINAL_PAN_DEG_PER_STEP  * 0.75f;
-        const float pan_hi  = NOMINAL_PAN_DEG_PER_STEP  * 1.25f;
-        const float tilt_lo = NOMINAL_TILT_DEG_PER_STEP * 0.75f;
-        const float tilt_hi = NOMINAL_TILT_DEG_PER_STEP * 1.25f;
-        bool dps_ok = (cfg.pan_deg_per_step  >= pan_lo  && cfg.pan_deg_per_step  <= pan_hi &&
-                       cfg.tilt_deg_per_step >= tilt_lo && cfg.tilt_deg_per_step <= tilt_hi);
-        if (dps_ok) {
-            mount.setDegPerStep(cfg.pan_deg_per_step, cfg.tilt_deg_per_step);
-            Serial.printf("[eeprom_load] dps OK: pan=%.8f  tilt=%.8f\n",
-                          cfg.pan_deg_per_step, cfg.tilt_deg_per_step);
-        } else {
-            cfg.pan_deg_per_step  = NOMINAL_PAN_DEG_PER_STEP;
-            cfg.tilt_deg_per_step = NOMINAL_TILT_DEG_PER_STEP;
-            mount.setDegPerStep(NOMINAL_PAN_DEG_PER_STEP, NOMINAL_TILT_DEG_PER_STEP);
-            Serial.printf("[eeprom_load] dps OUT OF RANGE — reset to nominal: pan=%.8f  tilt=%.8f\n",
-                          NOMINAL_PAN_DEG_PER_STEP, NOMINAL_TILT_DEG_PER_STEP);
-        }
-    }
+    // deg/step always comes from the drive geometry, never from EEPROM.
+    //
+    // The stored value only ever existed because each subject calibration used
+    // to write a refined one back.  That is gone — it moved the global angular
+    // frame under every subject already stored, and since subjects are kept as
+    // solved POINTS rather than the observations behind them, nothing could
+    // re-derive them.  A second calibration lost the first.
+    //
+    // So the field is vestigial, and a mount that has been calibrated under the
+    // old firmware is still carrying a bent scale in EEPROM.  Ignoring it is
+    // what un-bends those without making anyone wipe their config: the tooth
+    // counts in MountMotion.h are the source of truth and are exact.
+    cfg.pan_deg_per_step  = NOMINAL_PAN_DEG_PER_STEP;
+    cfg.tilt_deg_per_step = NOMINAL_TILT_DEG_PER_STEP;
+    mount.setDegPerStep(NOMINAL_PAN_DEG_PER_STEP, NOMINAL_TILT_DEG_PER_STEP);
+    Serial.printf("[eeprom_load] dps from drive geometry: pan=%.8f  tilt=%.8f\n",
+                  NOMINAL_PAN_DEG_PER_STEP, NOMINAL_TILT_DEG_PER_STEP);
     if (cfg.slider_mm_per_step > 0.0f) mount.setSliderMmPerStep(cfg.slider_mm_per_step);
     // The look-at maths lives in MountMotion; it needs the rail geometry too.
     mount.setSliderTiltDeg(cfg.slider_tilt_deg);
@@ -1522,9 +1520,42 @@ static void dispatch(const ParsedPacket &pkt) {
                 Serial.println("[Calib]   from BOTH slider positions.");
             }
 
-            // ── Refine deg/step from the geometry ───────────────────────
-            // The solved 3D position lets us compute exactly what the pan angle
-            // should have been at A and B, giving a refined deg/step.
+            // ── Check deg/step against the geometry — REPORT, never apply ──
+            //
+            // The solved position implies what the pan angle should have been at
+            // A and B, and dividing that by the step count gives a deg/step this
+            // one subject is consistent with.  That number used to be WRITTEN
+            // BACK, to _cfg and to MountMotion.
+            //
+            // It cannot be.  deg/step is the global scale from motor steps to
+            // world angles — every subject is tracked through it.  Subjects are
+            // stored as solved 3D POINTS, not as the observations they came from,
+            // so moving the scale re-reads every existing point against different
+            // arithmetic and nothing can re-derive them.  Calibrate a second
+            // subject and the first one stops aiming where it was set.  Reported
+            // on the rig on 2026-08-25: "the 1st subject set a & b is pretty much
+            // lost".
+            //
+            // It was not even self-consistent for the subject being calibrated.
+            // The solve above runs on the OLD scale and the write happened after,
+            // so that subject was stored in one frame and tracked in another —
+            // small enough to look fine, which is why only the second calibration
+            // showed the fault.
+            //
+            // The operator's argument is the right one: the A and B observations
+            // are facts about where the camera was pointed, and the reference is
+            // what ties them to the world.  A later subject is not evidence that
+            // an earlier one was measured wrongly.
+            //
+            // The nominal scale needs no refining anyway.  It is derived from the
+            // tooth counts in MountMotion.h — 270/36 exactly, 0.9 deg per full
+            // step, 256 microsteps — and a toothed belt does not slip.  If those
+            // constants are ever wrong the fix is to correct them, not to have
+            // each calibration quietly bend the frame towards its own subject.
+            //
+            // So the number is still computed and printed, because a large
+            // disagreement would mean the drive geometry is genuinely wrong and
+            // that is worth knowing.  It is not applied.
             // Skip if sz was clamped — the clamped z would produce unreliable angles.
             float pan_A_true  = look_at_pan_deg(_calib_xa_mm, sx, sz);
             float pan_B_true  = look_at_pan_deg(_calib_xb_mm, sx, sz);
@@ -1534,12 +1565,10 @@ static void dispatch(const ParsedPacket &pkt) {
             int32_t pan_step_diff  = _calib_pan_steps_B  - _calib_pan_steps_A;
             int32_t tilt_step_diff = _calib_tilt_steps_B - _calib_tilt_steps_A;
 
-            // Clamp refined dps to ±25% of nominal — a bad solve could produce
-            // a wildly wrong value that poisons the next calibration attempt.
-            const float pan_dps_lo  = NOMINAL_PAN_DEG_PER_STEP  * 0.75f;
-            const float pan_dps_hi  = NOMINAL_PAN_DEG_PER_STEP  * 1.25f;
-            const float tilt_dps_lo = NOMINAL_TILT_DEG_PER_STEP * 0.75f;
-            const float tilt_dps_hi = NOMINAL_TILT_DEG_PER_STEP * 1.25f;
+            // How far off nominal is worth mentioning.  Below this it is
+            // measurement noise on one subject; above it, suspect the tooth
+            // counts in MountMotion.h rather than this calibration.
+            const float DPS_REPORT_TOL = 0.05f;   // 5%
 
             // Minimum angle-variation guard: if the true angle difference across
             // the slider travel is less than 3°, the dps estimate is unreliable
@@ -1552,57 +1581,57 @@ static void dispatch(const ParsedPacket &pkt) {
                           fabsf(pan_B_true - pan_A_true), fabsf(tilt_B_true - tilt_A_true),
                           (long)pan_step_diff, (long)tilt_step_diff);
 
-            if (!sz_clamped && abs(pan_step_diff) > 100) {
-                if (fabsf(pan_B_true - pan_A_true) >= 3.0f) {
-                    float new_dps = (pan_B_true - pan_A_true) / (float)pan_step_diff;
-                    if (new_dps >= pan_dps_lo && new_dps <= pan_dps_hi) {
-                        _cfg.pan_deg_per_step = new_dps;
-                        mount.setDegPerStep(new_dps, mount.getTiltDegPerStep());
-                        Serial.printf("[Calib] Refined pan_deg_per_step=%.8f\n", new_dps);
-                    } else {
-                        Serial.printf("[Calib] pan_dps=%.8f out of range [%.8f, %.8f] — not saved\n",
-                                      new_dps, pan_dps_lo, pan_dps_hi);
-                    }
-                } else {
-                    Serial.printf("[Calib] pan angle variation %.3f° < 3° — dps refinement skipped"
-                                  " (keeping %.8f)\n",
-                                  fabsf(pan_B_true - pan_A_true), mount.getPanDegPerStep());
+            if (!sz_clamped && abs(pan_step_diff) > 100 &&
+                    fabsf(pan_B_true - pan_A_true) >= 3.0f) {
+                float implied = (pan_B_true - pan_A_true) / (float)pan_step_diff;
+                float err = fabsf(implied - NOMINAL_PAN_DEG_PER_STEP)
+                            / NOMINAL_PAN_DEG_PER_STEP;
+                if (err > DPS_REPORT_TOL) {
+                    Serial.printf("[Calib] NOTE pan deg/step implied by this subject is "
+                                  "%.8f, %.1f%% from nominal %.8f — NOT applied. If that "
+                                  "persists across subjects, check PAN_DRIVEN_TEETH / "
+                                  "PAN_DRIVER_TEETH.\n",
+                                  implied, err * 100.0f, NOMINAL_PAN_DEG_PER_STEP);
                 }
             }
-            if (!sz_clamped && abs(tilt_step_diff) > 100) {
-                if (fabsf(tilt_B_true - tilt_A_true) >= 3.0f) {
-                    float new_dps = (tilt_B_true - tilt_A_true) / (float)tilt_step_diff;
-                    if (new_dps >= tilt_dps_lo && new_dps <= tilt_dps_hi) {
-                        _cfg.tilt_deg_per_step = new_dps;
-                        mount.setDegPerStep(mount.getPanDegPerStep(), new_dps);
-                        Serial.printf("[Calib] Refined tilt_deg_per_step=%.8f\n", new_dps);
-                    } else {
-                        Serial.printf("[Calib] tilt_dps=%.8f out of range [%.8f, %.8f] — not saved\n",
-                                      new_dps, tilt_dps_lo, tilt_dps_hi);
-                    }
-                } else {
-                    Serial.printf("[Calib] tilt angle variation %.3f° < 3° — dps refinement skipped"
-                                  " (keeping %.8f)\n",
-                                  fabsf(tilt_B_true - tilt_A_true), mount.getTiltDegPerStep());
+            if (!sz_clamped && abs(tilt_step_diff) > 100 &&
+                    fabsf(tilt_B_true - tilt_A_true) >= 3.0f) {
+                float implied = (tilt_B_true - tilt_A_true) / (float)tilt_step_diff;
+                float err = fabsf(implied - NOMINAL_TILT_DEG_PER_STEP)
+                            / NOMINAL_TILT_DEG_PER_STEP;
+                if (err > DPS_REPORT_TOL) {
+                    Serial.printf("[Calib] NOTE tilt deg/step implied by this subject is "
+                                  "%.8f, %.1f%% from nominal %.8f — NOT applied. If that "
+                                  "persists across subjects, check TILT_DRIVEN_TEETH / "
+                                  "TILT_DRIVER_TEETH.\n",
+                                  implied, err * 100.0f, NOMINAL_TILT_DEG_PER_STEP);
                 }
             }
 
-            // ── Auto-recalibrate look-at reference from SET_B position ─────
-            // The solved geometry tells us exactly what pan/tilt angle the mount
-            // *should* be pointing at when the motors are at the SET_B step counts.
-            // Setting the reference from this known-good position is more accurate
-            // than the manual 0/0 set at power-up, and ensures the look-at formula
-            // predicts the correct motor target everywhere along the slider travel.
-            // All subjects share this one global reference, so recalibrating it
-            // here improves accuracy for any subject calibrated in the same session.
-            {
-                float pan_ref_new  = pan_B_true  - (float)_calib_pan_steps_B  * mount.getPanDegPerStep();
-                float tilt_ref_new = tilt_B_true - (float)_calib_tilt_steps_B * mount.getTiltDegPerStep();
-                mount.setLookAtRef(pan_ref_new, tilt_ref_new);
-                Serial.printf("[Calib] Auto-ref from SET_B: pan_ref=%.4f°  tilt_ref=%.4f°\n",
-                              pan_ref_new, tilt_ref_new);
-            }
-
+            // ── The reference is NOT recalibrated here ─────────────────────
+            //
+            // This used to derive a new pan/tilt reference from the SET_B
+            // position and call mount.setLookAtRef() with it, on the grounds
+            // that the solved geometry knows better than a manual 0/0.
+            //
+            // It is the same fault as the deg/step refinement above, and a
+            // bigger one. The reference is GLOBAL — every stored subject is
+            // aimed at through it — and subjects are kept as solved points, not
+            // as the observations behind them. Moving it re-aims all of them and
+            // nothing can re-derive them. The block's own comment said as much:
+            // "All subjects share this one global reference". That was offered
+            // as the benefit; it is the defect.
+            //
+            // It is also circular. The solve that produces pan_B_true ran on the
+            // CURRENT reference, so deriving a new reference from it feeds the
+            // solve's own error back in as fact, then applies it to every
+            // subject calibrated before it.
+            //
+            // The operator's account of this is the correct one: the reference
+            // is set once, deliberately, with the camera level and square to the
+            // rail, and the A and B observations are facts measured against it.
+            // A later subject is not evidence that an earlier one was wrong.
+            //
             // ── Store subject in RAM (volatile — not persisted to EEPROM) ──
             SubjectRecord &rec = _subjects[_calib_subject_id];
             rec.valid = true;
@@ -1611,7 +1640,7 @@ static void dispatch(const ParsedPacket &pkt) {
             _slot_occupied |= (1u << _calib_subject_id);
 
             Serial.printf("[Calib] Subject %d stored  (%.1f, %.1f, %.1f)mm"
-                          "  ref (auto-updated): pan=%.4f°  tilt=%.4f°\n",
+                          "  against ref (unchanged): pan=%.4f°  tilt=%.4f°\n",
                           (int)_calib_subject_id, sx, sy, sz,
                           mount.getPanRefDeg(), mount.getTiltRefDeg());
 
