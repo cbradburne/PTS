@@ -3632,7 +3632,13 @@ void hub_ui_notify_home_complete(uint8_t mount_id, uint8_t axis) {
         if (_cfg_find_lbl) {
             char buf[32];
             const char *axis_name = (axis == AXIS_SLIDER) ? "Slider" : "Zoom";
-            snprintf(buf, sizeof(buf), "%s: homed \xE2\x9C\x93", axis_name);  // ✓
+            // LV_SYMBOL_OK, not a literal U+2713.  The built-in Montserrat
+            // fonts are generated with "-r 0x20-0x7F,0xB0,0x2022" plus the
+            // FontAwesome symbol range, so ASCII, the degree sign and the bullet
+            // are the only non-symbol glyphs there are.  A tick is none of
+            // those, and LVGL draws a missing glyph as a filled box — which is
+            // what the last character of this message has been.
+            snprintf(buf, sizeof(buf), "%s: homed " LV_SYMBOL_OK, axis_name);
             lv_label_set_text(_cfg_find_lbl, buf);
             lv_obj_set_style_text_color(_cfg_find_lbl, lv_color_hex(0x4CAF50), 0);
         }
