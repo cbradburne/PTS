@@ -611,7 +611,7 @@ const CMD_STORE_POS          = 0x0C;
 const CMD_CLEAR_POS          = 0x0D;
 const CMD_SET_ACTIVE_PRESET  = 0x0E;
 const CMD_GOTO_SLOT          = 0x10;
-const CMD_SET_ORIENTATION    = 0x07;  // 1B: orientation flags byte
+const CMD_SET_ORIENTATION    = 0x07;  // 1B flags, or 3B flags+int16 tilt tenths
 const CMD_FIND_LIMITS        = 0x06;  // 2B: axis(1) + stall_threshold(1)
 const CMD_FIND_HOME          = 0x13;  // 2B: axis(1) + stall_threshold(1)
 const CMD_SET_STALL_THRESHOLD = 0x14; // 2B: axis(1) + threshold(1) — persist StallGuard threshold
@@ -859,8 +859,19 @@ function mkSetSpeedPreset(id, group, preset, speed, accel) {
     return buildPkt(id, CMD_SET_SPEED_PRESET, p);
 }
 
-function mkSetOrientation(id, oriByte) {
-    const p = new Uint8Array(1); p[0] = oriByte & 0xFF;
+// tiltDeg omitted or null sends the FLAGS ONLY, which the mount reads as
+// "tilt unchanged".  That matters: a flag toggle must not carry a tilt of 0
+// just because this page has not been told the real one yet.
+function mkSetOrientation(id, oriByte, tiltDeg) {
+    if (tiltDeg === undefined || tiltDeg === null) {
+        const p = new Uint8Array(1); p[0] = oriByte & 0xFF;
+        return buildPkt(id, CMD_SET_ORIENTATION, p);
+    }
+    const t = Math.round(tiltDeg * 10) & 0xFFFF;   // int16, tenths of a degree
+    const p = new Uint8Array(3);
+    p[0] = oriByte & 0xFF;
+    p[1] = (t >> 8) & 0xFF;
+    p[2] = t & 0xFF;
     return buildPkt(id, CMD_SET_ORIENTATION, p);
 }
 
@@ -2727,15 +2738,28 @@ function buildExtConfig() {
             lblEl.style.cssText = 'width:64px;flex-shrink:0;color:var(--text);';
             lblEl.textContent = 'Tilt';
             row.appendChild(lblEl);
-            const val = document.createElement('span');
-            val.className = 'ext-spd-unit';
-            val.id = 'ext-tilt-' + i;
-            val.style.cssText = 'color:var(--text);font-variant-numeric:tabular-nums;';
-            val.textContent = '--';
-            row.appendChild(val);
-            const hint = document.createElement('span');
+            const inp = document.createElement('input');
+            inp.type = 'number'; inp.min = '-90'; inp.max = '90'; inp.step = '0.5';
+            inp.className = 'ext-spd-inp';
+            inp.id = 'ext-tilt-' + i;
+            const _i2 = i;
+            // Same rule as every other box on this page: it goes to the mount
+            // when the box is LEFT, not per keystroke.  'change' is blur or
+            // Enter; typing "-21" would otherwise send "-" then "-2" on the way.
+            inp.addEventListener('change', () => {
+                let v = parseFloat(inp.value);
+                if (!isFinite(v)) v = 0;
+                v = Math.max(-90, Math.min(90, Math.round(v * 2) / 2));
+                inp.value = v.toFixed(1);
+                const cs = camSt[_i2];
+                if (!cs.connected || cs.oriByte === null) return;
+                cs.sliderTilt = v;
+                wsSend(mkSetOrientation(_i2, cs.oriByte, v));
+            });
+            row.appendChild(inp);
+                const hint = document.createElement('span');
             hint.className = 'ext-spd-unit';
-            hint.textContent = '0 = horizontal';
+            hint.textContent = 'deg, 0 = horizontal';
             row.appendChild(hint);
             geoSec.appendChild(row);
         }
@@ -2863,9 +2887,8 @@ function refreshExtConfig() {
         // Rail geometry — only meaningful on a mount that has a slider
         const geo = document.getElementById('ext-cfg-geo-sec-' + i);
         if (geo) geo.style.display = (oriKnown && (cs.oriByte & 0x04)) ? '' : 'none';
-        const tiltEl = document.getElementById('ext-tilt-' + i);
-        if (tiltEl) tiltEl.textContent =
-            (cs.sliderTilt === null) ? '--' : (cs.sliderTilt.toFixed(1) + '\u00B0');
+        _setInp('ext-tilt-' + i,
+                 (cs.sliderTilt === null) ? undefined : cs.sliderTilt.toFixed(1));
 
         // Orientation toggles — disabled until CONFIG_REPORT received
         document.querySelectorAll('#ext-cfg-ori-sec-' + i + ' .ext-ori-btn').forEach(btn => {

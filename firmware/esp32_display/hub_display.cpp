@@ -318,7 +318,16 @@ static lv_obj_t *_cfg_sw_zminv    = nullptr;
 static lv_obj_t *_cfg_sw_lanczm   = nullptr;
 static lv_obj_t *_cfg_sw_hassl    = nullptr;
 static lv_obj_t *_cfg_sw_lookAt   = nullptr;   // "Look-at Mode" toggle
-static lv_obj_t *_cfg_lbl_tilt    = nullptr;   // rail inclination, read-only
+static lv_obj_t *_cfg_lbl_tilt    = nullptr;   // rail inclination, editable
+// The value the -/0/+ buttons edit.  Held here rather than parsed back out of
+// the label, and only sent when ev_send_config runs — Apply, a camera switch,
+// or leaving the screen — which is how every other control on this screen
+// behaves.  Tapping + six times should not be six packets.
+static float     _cfg_slider_tilt = 0.0f;
+// Until a CONFIG_REPORT has actually told us the tilt, Apply must send the
+// FLAGS ONLY.  The mount reads a short packet as "tilt unchanged", so a screen
+// opened before the report arrives cannot zero a rail it never knew about.
+static bool      _cfg_tilt_known  = false;
 static lv_obj_t *_cfg_btn_findsl  = nullptr;  // "Find: Slider" button
 static lv_obj_t *_cfg_btn_findzm  = nullptr;  // "Find: Zoom" button
 static lv_obj_t *_cfg_find_lbl    = nullptr;  // status label (e.g. "Slider: 4800 steps")
@@ -1023,7 +1032,14 @@ static void build_positions_screen() {
 static void det_cancel_set();
 static void det_cancel_clear();
 static void build_config_screen();
-static void ev_send_config(lv_event_t *e);  // save current camera config to mount EEPROM
+static void ev_send_config(lv_event_t *e);
+// Slider angle -/0/+.  Half a degree a tap, clamped to the range the wire
+// format carries (int16 tenths, but +/-90 is the only meaningful span for a
+// rail).  These only move the local value; ev_send_config puts it on the wire.
+static void _cfg_tilt_show();
+static void ev_cfg_tilt_minus(lv_event_t *e);
+static void ev_cfg_tilt_zero(lv_event_t *e);
+static void ev_cfg_tilt_plus(lv_event_t *e);  // save current camera config to mount EEPROM
 static void build_detail_screen();
 static void refresh_detail_slots();
 static void refresh_detail_dials();
@@ -1072,6 +1088,7 @@ static void destroy_config_screen() {
     _cfg_sw_hassl    = nullptr;
     _cfg_sw_lookAt   = nullptr;
     _cfg_lbl_tilt    = nullptr;
+    _cfg_tilt_known  = false;
     _cfg_btn_findsl  = nullptr;
     _cfg_btn_findzm  = nullptr;
     _cfg_find_lbl    = nullptr;
@@ -1149,7 +1166,10 @@ static void ev_cfg_cam_select(lv_event_t *e) {
     else                 lv_obj_clear_state(_cfg_sw_hassl, LV_STATE_CHECKED);
     if ((_cam[idx].flags & FLAG_LOOK_AT_MODE)) lv_obj_add_state(_cfg_sw_lookAt, LV_STATE_CHECKED);
     else lv_obj_clear_state(_cfg_sw_lookAt, LV_STATE_CHECKED);
-    if (_cfg_lbl_tilt) lv_label_set_text(_cfg_lbl_tilt, "--");  // filled by CONFIG_REPORT
+    // The new camera's angle is unknown until its CONFIG_REPORT lands, and the
+    // one on screen belongs to the camera we just left.
+    _cfg_tilt_known = false;
+    _cfg_tilt_show();
     if (_cfg_find_lbl) lv_label_set_text(_cfg_find_lbl, "");  // clear previous status
     _cfg_update_find_btns();
     if (_cfg_ref_lbl) lv_label_set_text(_cfg_ref_lbl, "");
@@ -1173,6 +1193,33 @@ static void ev_manual_ref(lv_event_t *e) {
     if (_cfg_ref_lbl) lv_label_set_text(_cfg_ref_lbl, "Reference set to 0° / 0°");
 }
 
+static void _cfg_tilt_show() {
+    if (!_cfg_lbl_tilt) return;
+    if (!_cfg_tilt_known) { lv_label_set_text(_cfg_lbl_tilt, "--"); return; }
+    int t10 = (int)lroundf(_cfg_slider_tilt * 10.0f);
+    lv_label_set_text_fmt(_cfg_lbl_tilt, "%s%d.%d\u00B0",
+                          t10 < 0 ? "-" : "", abs(t10) / 10, abs(t10) % 10);
+}
+
+static void _cfg_tilt_nudge(float delta) {
+    // Editing it is also learning it: a screen opened before the first
+    // CONFIG_REPORT starts from level rather than refusing to move.
+    _cfg_tilt_known  = true;
+    _cfg_slider_tilt += delta;
+    if (_cfg_slider_tilt >  90.0f) _cfg_slider_tilt =  90.0f;
+    if (_cfg_slider_tilt < -90.0f) _cfg_slider_tilt = -90.0f;
+    _cfg_tilt_show();
+}
+
+static void ev_cfg_tilt_minus(lv_event_t *e) { (void)e; _cfg_tilt_nudge(-0.5f); }
+static void ev_cfg_tilt_plus (lv_event_t *e) { (void)e; _cfg_tilt_nudge( 0.5f); }
+static void ev_cfg_tilt_zero (lv_event_t *e) {
+    (void)e;
+    _cfg_tilt_known  = true;
+    _cfg_slider_tilt = 0.0f;
+    _cfg_tilt_show();
+}
+
 static void ev_send_config(lv_event_t *e) {
     if (!_send_cb) return;
     uint8_t mount_id = _cfg_cam + 1;
@@ -1184,7 +1231,20 @@ static void ev_send_config(lv_event_t *e) {
     if (lv_obj_has_state(_cfg_sw_zminv,  LV_STATE_CHECKED)) ori |= 0x08;
     if (lv_obj_has_state(_cfg_sw_lanczm, LV_STATE_CHECKED)) ori |= 0x10;
     if (lv_obj_has_state(_cfg_sw_lookAt, LV_STATE_CHECKED)) ori |= 0x40;
-    _send_cb(mount_id, CMD_SET_ORIENTATION, &ori, 1);
+    // Flags plus the slider angle, as int16 tenths — but ONLY once a
+    // CONFIG_REPORT has told us what the angle is.  Before that, send the flags
+    // alone: the mount reads a short packet as "tilt unchanged", so pressing
+    // Apply on a screen that has not yet heard from the mount cannot level a
+    // rail it never knew was tilted.
+    if (_cfg_tilt_known) {
+        int16_t t10 = (int16_t)lroundf(_cfg_slider_tilt * 10.0f);
+        uint8_t p3[3] = { ori,
+                          (uint8_t)((uint16_t)t10 >> 8),
+                          (uint8_t)((uint16_t)t10 & 0xFF) };
+        _send_cb(mount_id, CMD_SET_ORIENTATION, p3, 3);
+    } else {
+        _send_cb(mount_id, CMD_SET_ORIENTATION, &ori, 1);
+    }
 
     for (uint8_t grp = 0; grp < 2; grp++) {
         for (uint8_t pr = 0; pr < 4; pr++) {
@@ -2173,8 +2233,20 @@ static void build_config_screen() {
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
-        make_label(row, "Slider Tilt", &lv_font_montserrat_12, C_TEXT);
+        make_label(row, "Slider Angle", &lv_font_montserrat_12, C_TEXT);
         _cfg_lbl_tilt = make_label(row, "--", &lv_font_montserrat_12, C_TEXT);
+
+        // Buttons rather than a keypad: this is an adjustment, not an entry.
+        // TILT_BTN is sized for a fingertip on a 7" panel — the surrounding
+        // toggles are switches, which are forgiving; a 0.5 degree step is not,
+        // so the target has to be big enough to hit without looking.
+        const int TILT_BTN = 44;
+        lv_obj_t *bm = make_button(row, "-", C_SURF2, ev_cfg_tilt_minus);
+        lv_obj_set_size(bm, TILT_BTN, TILT_BTN);
+        lv_obj_t *bz = make_button(row, "0", C_SURF2, ev_cfg_tilt_zero);
+        lv_obj_set_size(bz, TILT_BTN, TILT_BTN);
+        lv_obj_t *bp = make_button(row, "+", C_SURF2, ev_cfg_tilt_plus);
+        lv_obj_set_size(bp, TILT_BTN, TILT_BTN);
     }
 
     lv_obj_t *div2 = lv_obj_create(right);
@@ -3600,16 +3672,15 @@ void hub_ui_update_config(uint8_t mount_id, const uint8_t *payload, uint8_t payl
         // Rail inclination — int16, tenths of a degree, signed.  Older mount
         // firmware sends a 75-byte report with no tilt in it; show "--" rather
         // than a made-up 0.0, so an un-updated mount cannot read as a level rail.
-        if (_cfg_lbl_tilt) {
-            if (payload_len >= 77) {
-                int16_t t10 = (int16_t)(((uint16_t)payload[75] << 8) | payload[76]);
-                lv_label_set_text_fmt(_cfg_lbl_tilt, "%s%d.%d\u00B0",
-                                      t10 < 0 ? "-" : "",
-                                      abs(t10) / 10, abs(t10) % 10);
-            } else {
-                lv_label_set_text(_cfg_lbl_tilt, "--");
-            }
+        if (payload_len >= 77) {
+            int16_t t10 = (int16_t)(((uint16_t)payload[75] << 8) | payload[76]);
+            _cfg_slider_tilt = (float)t10 / 10.0f;
+            _cfg_tilt_known  = true;
+        } else {
+            // Older mount firmware sends 75 bytes and says nothing about tilt.
+            _cfg_tilt_known  = false;
         }
+        _cfg_tilt_show();
         // Sync Find Home button states with updated has_slider / lanc_zoom
         _cfg_update_find_btns();
     }
