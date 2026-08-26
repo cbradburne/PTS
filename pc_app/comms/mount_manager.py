@@ -1385,7 +1385,7 @@ class MountManager(QObject):
                     mid, dt, pos.pan_deg, v_pan, d_pan,
                     pos.tilt_deg, v_tilt, d_tilt)
 
-        self._la_series.setdefault(mid, []).append((v_pan, v_tilt))
+        self._la_series.setdefault(mid, []).append((dt, v_pan, v_tilt))
         self._la_check_settled(mid, v_pan, v_tilt)
 
     # Speeds that count as "moving" and as "stopped", for deciding when one
@@ -1435,21 +1435,53 @@ class MountManager(QObject):
         if len(series) < 3:
             return
 
-        pans  = [v for v, _ in series]
-        tilts = [v for _, v in series]
-        steps = [abs(pans[i] - pans[i - 1]) for i in range(1, len(pans))]
-        worst = max(steps)
-        where = steps.index(worst) + 1
+        dts   = [d for d, _, _ in series]
+        pans  = [v for _, v, _ in series]
+        tilts = [v for _, _, v in series]
+
+        # Is the motion steeper than the curve it is meant to be following?
+        #
+        # This used to print WHERE the biggest velocity step fell, which was
+        # the right question when the shape was a rectangle with a cliff on the
+        # end.  It is the wrong question now: a smoothstep's acceleration peaks
+        # at BOTH ends by definition, so once the shape is correct the biggest
+        # step lands near an end every time and reporting it reads as a fault
+        # that is not there.
+        #
+        # So compare it to what a smoothstep of this size and length actually
+        # demands, 6 x travel / duration^2.  Around 1.0 means the camera is
+        # following the curve; well above it means something is still stepping.
+        # Measure the MOVE, not the settling behind it.  The two quiet samples
+        # that triggered this summary add most of half a second of span and
+        # almost no travel, which flatters the curve estimate and makes a
+        # perfectly good bell look 30% too steep.
+        move = list(series)
+        while move and abs(move[-1][1]) < self._LA_STOPPED_DPS:
+            move.pop()
+        if len(move) < 3:
+            move = list(series)
+        span   = sum(d for d, _, _ in move)
+        travel = sum(abs(v) * d for d, v, _ in move)
+        curve  = (6.0 * travel / (span * span)) if span > 0 else 0.0
+        worst  = max((abs(pans[i] - pans[i - 1]) / dts[i]
+                      for i in range(1, len(pans)) if dts[i] > 0), default=0.0)
+
+        # Tilt should move one way through a switch.  A reversal means the aim
+        # is arcing — the signature of blending position instead of angle.
+        core = [v for _, p, v in series if abs(p) > self._LA_STOPPED_DPS]
+        revs = sum(1 for i in range(1, len(core))
+                   if core[i - 1] * core[i] < 0 and abs(core[i]) > 0.4)
+
         log.warning("LA MOVE cam%d pan:  %s", mid,
                     " ".join(f"{v:+.1f}" for v in pans))
         log.warning("LA MOVE cam%d tilt: %s", mid,
                     " ".join(f"{v:+.1f}" for v in tilts))
-        log.warning("LA MOVE cam%d %d samples, peak %.1f deg/s, biggest pan "
-                    "step %.1f deg/s at sample %d of %d (%s)",
-                    mid, len(series), max(abs(v) for v in pans), worst,
-                    where, len(pans),
-                    "during the ease out" if where > len(pans) * 0.6
-                    else "during the ease in")
+        log.warning("LA MOVE cam%d %.1f deg in %.2fs, peak %.1f deg/s, "
+                    "steepest %.0f deg/s2 vs %.0f the curve asks (%.2fx), "
+                    "tilt reversals %d%s",
+                    mid, travel, span, max(abs(v) for v in pans),
+                    worst, curve, (worst / curve) if curve > 0 else 0.0, revs,
+                    "" if revs == 0 else "  <-- the aim is arcing")
 
     def _poll_look_at_positions(self) -> None:
         """Ask for a position, 5 Hz, only from a mount that is tracking.

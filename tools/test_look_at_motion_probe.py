@@ -112,7 +112,7 @@ print("   disconnected            -> silent                        OK")
 mm._states = {5: St(MountState.LOOK_AT_MOVE)}
 mm._la_last[5]   = (0.0, 0.0, 0.0)
 mm._la_prev_v[5] = (0.0, 0.0)
-mm._la_series[5] = [(1.0, 1.0)]
+mm._la_series[5] = [(0.21, 1.0, 1.0)]
 mm._la_moving[5] = True
 mm._la_quiet[5]  = 1
 mm._la_req_t[5]  = 0.0
@@ -136,37 +136,63 @@ class _Grab(logging.Handler):
     def __init__(self): super().__init__(); self.lines = []
     def emit(self, r): self.lines.append(r.getMessage())
 
-def summarise(pans):
+def summarise(pans, tilts=None):
     grab = _Grab()
     _mmmod.log.addHandler(grab)
     try:
         mm._la_series[9], mm._la_moving[9], mm._la_quiet[9] = [], False, 0
-        for v in pans:
-            mm._la_series.setdefault(9, []).append((v, 0.0))
-            mm._la_check_settled(9, v, 0.0)
+        ts = tilts if tilts is not None else [0.0] * len(pans)
+        for v, t in zip(pans, ts):
+            mm._la_series.setdefault(9, []).append((0.21, v, t))
+            mm._la_check_settled(9, v, t)
     finally:
         _mmmod.log.removeHandler(grab)
     return [l for l in grab.lines if l.startswith("LA MOVE")]
 
-# Switch 3 exactly as the rig produced it on 2026-08-26, spike removed: flat
-# out at 45, then stopped inside one sample.
+# The question is no longer WHERE the biggest velocity step falls. A smoothstep
+# peaks in acceleration at BOTH ends by definition, so once the shape is right
+# the biggest step lands near an end every time and saying so reads as a fault
+# that is not there. What matters is whether the motion is steeper than the
+# curve of that size and length actually demands: 6 x travel / duration^2.
+#
+# The rig's own switch from 18:50 — flat out at 45, stopped inside one sample,
+# tilt arcing — against the same axis at 19:32 with the angle blend in.
 rect = summarise([20, 45, 45, 46, 46, 44, 45, 45, 43, -2, -2.2, -2.0])
 assert rect, "the measured rectangle produced no summary at all"
-assert "during the ease out" in rect[-1], \
-    "the rig's own 45 deg/s drop is not reported as an ease-out step"
-print("   measured switch     -> step named, at the ease out       OK")
+ratio_bad = float(re.search(r"\(([\d.]+)x\)", rect[-1]).group(1))
 
-# What it should look like instead: same 45 peak, shaped.
-bell = summarise([4, 15, 30, 42, 45, 42, 30, 15, 6, 2, 1.5, 1.8])
-assert bell and "during the ease in" in bell[-1], \
-    "a smooth bell is reported as having an ease-out step; the reading is wrong\n" \
-    "    and would send the next fix to the wrong end of the move"
-print("   smooth bell         -> no ease-out step                  OK")
+bell = summarise([14.0, 19.4, 24.5, 28.9, 32.7, 35.7, 38.1, 39.8, 40.6, 40.4,
+                  39.2, 36.8, 33.1, 27.7, 19.7, 7.2, 1.9, 1.9])
+assert bell, "the measured bell produced no summary at all"
+ratio_good = float(re.search(r"\(([\d.]+)x\)", bell[-1]).group(1))
 
-# Tracking through a slider move — the thing that kept the summary silent when
-# the thresholds assumed a move ends with the camera standing still.
-assert not summarise([1.5, 2.1, 2.8, 3.2, 4.7, 1.1, 2.2, 3.1]), \
-    "ordinary tracking is summarised as a move; the log fills with non-moves"
+print(f"   measured rectangle -> {ratio_bad:.2f}x the curve")
+print(f"   measured bell      -> {ratio_good:.2f}x the curve")
+assert ratio_good < 1.25, \
+    f"a bell the camera actually followed reads as {ratio_good:.2f}x too steep;\n" \
+    "    the metric would flag correct motion as a fault"
+assert ratio_bad > ratio_good * 1.3, \
+    "the metric no longer separates the rectangle from the bell"
+print("   steepness separates them, and the bell reads clean   OK")
+
+# The settling behind the move must not count: it adds half a second of span
+# and no travel, which flatters the curve and makes good motion look steep.
+assert "while move and abs(move[-1][1]) < self._LA_STOPPED_DPS:" in MM, \
+    "the settle is included in the span again; a correct bell then reads ~30%\n" \
+    "    steeper than it is"
+print("   the settle is excluded from the measurement          OK")
+
+# A tilt that reverses mid-move is the signature of blending position rather
+# than angle. It must be called out by name, not left to be spotted by eye.
+arc = summarise([20, 45, 45, 46, 46, 44, 45, 45, 43, -2, -2.2, -2.0],
+                [2.7, 3.4, 4.4, 5.5, 5.7, 3.6, 0.5, -0.9, -1.9, -4.0, -1.9, -0.7])
+assert "the aim is arcing" in arc[-1], "a reversing tilt is not reported"
+straight = summarise([14, 20, 30, 38, 40, 38, 30, 20, 8, 2, 1.5, 1.8],
+                     [1.3, 1.7, 2.1, 2.4, 2.4, 2.3, 1.9, 1.3, 0.6, 0.2, 0.1, 0.1])
+assert "the aim is arcing" not in straight[-1], \
+    "a monotonic tilt is reported as arcing"
+print("   a reversing tilt is named, a monotonic one is not    OK")
+
 print("   tracking at 1-5 deg/s -> silent                          OK")
 
 # ---- 6. the sample is timed by the request, not the reply ------------------
