@@ -48,11 +48,44 @@
       <li><strong>Look-at mode</strong> is enabled on that camera's tab.</li>
     </ol>
 
+    <h2>Set Ref — before anything else</h2>
+    <p>Pan and tilt have no end stops, so the mount has no idea which way it is
+    pointing until you tell it. <strong>Set Ref</strong> is how you tell it, and
+    everything else on this page is measured against it.</p>
+    <ol class="steps">
+      <li>Jog the head so the camera is <strong>level and square to the rail</strong>
+      — looking straight out from the rail, not tipped up or down. This is the
+      pose you are declaring to be zero, so it is worth taking care over.</li>
+      <li>Press <strong>Ref</strong> (Config → Homing &amp; Reference). The mount
+      records the current position as pan&nbsp;0°, tilt&nbsp;0°.</li>
+    </ol>
+    <p>No motion is commanded — Ref only updates the mount's internal angle
+    offset. It does not matter what the camera happens to be aimed at; Ref zeroes
+    wherever the head is standing.</p>
+
+    <div class="warn"><b>The reference is lost on every power cycle</b> It lives in
+    RAM, not in the mount's saved settings, so a reboot or a firmware flash clears
+    it — which is exactly when you are most likely to want to recalibrate. Set Ref
+    at the start of every session, and again after anyone repositions the head by
+    hand.</div>
+
+    <div class="warn"><b>Both calibrating and moving are gated on it</b> Start a
+    look-at move without a reference and the mount rejects it; every controller
+    shows the warning, and the log names the reason rather than reporting a generic
+    busy error.</div>
+
+    <div class="note"><b>Set it once, then leave it</b> Every subject you calibrate
+    is measured against this reference, and the mount aims at all of them through
+    it. Re-doing Ref moves the frame that the stored subjects were measured in, so
+    they will all be off by however far the new zero differs from the old one. If
+    you re-reference mid-session, recalibrate the subjects too.</div>
+
     <h2>Calibrating a subject</h2>
     <p>You teach the mount where a subject is in 3D by aiming at it from
     <strong>two points on the rail</strong>. Two sight-lines cross in space, and
     the mount solves for the subject's position by triangulation. Each mount holds
     up to <strong>eight named subjects</strong>, stored in its memory.</p>
+
     <div style="border:1px solid var(--border);border-radius:10px;background:var(--bg2);padding:8px;margin:20px 0;overflow-x:auto">
       <svg viewBox="0 0 760 250" width="100%" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
         <defs>
@@ -82,6 +115,12 @@
         </g>
       </svg>
     </div>
+    <div class="warn"><b>Set Ref first, or the mount refuses</b> Calibration is
+    measured from the reference, so without one there is nothing to measure
+    against. Starting Add Subject before Set Ref is rejected outright and the log
+    says why. It used to be allowed, and it would solve, report success and store a
+    subject measured from wherever the head happened to sit at boot — with no
+    symptom until the camera pointed at the wrong place.</div>
     <ol class="steps">
       <li>Start <strong>Add Subject</strong> (PC app, console or web). The slider
       moves itself to the home end of the rail.</li>
@@ -97,23 +136,16 @@
     tracking. Pick a clear feature to aim at (a presenter's eyeline, a mark on the
     set).</div>
 
-    <h2>Set Ref — once per session</h2>
-    <p>Because pan and tilt have no end stops, the mount loses its absolute angle
-    reference every time it powers off — or if someone nudges the head by hand.
-    Look-at needs that reference, so it's re-established with <strong>Set
-    Ref</strong>:</p>
-    <ol class="steps">
-      <li>Aim the camera at any already-calibrated subject.</li>
-      <li>Press <strong>Ref</strong> (Config → Homing &amp; Reference) and it zeroes
-      the angular reference at the current position.</li>
-    </ol>
-    <p>No motion is commanded — Ref only updates the mount's internal angle offset.
-    Press it at the start of a session, after repositioning the head, or any time
-    you suspect tracking has drifted. If the first try looks slightly off, re-aim
-    and press Ref again.</p>
-    <div class="warn"><b>Look-at is gated on Set Ref</b> If you start a look-at move
-    before setting the reference this session, the mount rejects it and every
-    controller shows a warning. Set Ref first.</div>
+    <div class="note"><b>Calibrating one subject does not disturb the others</b>
+    The two aims you just took are measurements, and the mount treats them as
+    fact. It will not go back and re-interpret subjects you calibrated earlier in
+    the light of this one — the reference and the drive scale both stay exactly
+    where they were.
+    <br><br>
+    If the geometry implies a pan/tilt scale noticeably different from the one
+    derived from the gear teeth, the log says so and names the constants to check.
+    That is a <em>report</em>, not a change: it is telling you a tooth count may be
+    wrong, and nothing is adjusted on the strength of it.</div>
 
     <h2>Running a move</h2>
     <p>With a subject selected, a look-at move sends the slider to one end of the
@@ -146,6 +178,38 @@
       <figcaption>Re-aiming mid-move — the shot swings to a second stored subject
       and back to the original, without ever stopping the slider.</figcaption>
     </figure>
+
+    <h2>How a subject switch is timed</h2>
+    <p>Switching subject mid-move does not snap the aim across. The mount eases
+    it, on a curve that starts and ends at rest, so the shot leaves the old
+    subject and arrives on the new one without a lurch at either end.</p>
+
+    <p>The duration comes from how far the camera actually has to turn, so a nudge
+    between two people standing together does not take as long as a sweep across
+    the room. Above about 58° it grows faster than that, because the axis has a
+    top speed and a smooth curve of a given peak covers less ground than running
+    flat out — so a big turn takes <em>longer</em> rather than going faster:</p>
+
+    <table>
+      <tr><th style="width:20%">Turn</th><th style="width:30%">Takes about</th><th>Peak rate</th></tr>
+      <tr><td>10°</td><td>0.55 s</td><td>27 °/s</td></tr>
+      <tr><td>25°</td><td>1.4 s</td><td>27 °/s</td></tr>
+      <tr><td>40°</td><td>2.2 s</td><td>27 °/s</td></tr>
+      <tr><td>90°</td><td>3.4 s</td><td>40 °/s</td></tr>
+      <tr><td>120°</td><td>4.5 s</td><td>40 °/s</td></tr>
+    </table>
+
+    <p>Pan and tilt are eased on the same clock, so they arrive together and the
+    move reads as one arc rather than two axis motions finishing at different
+    times. If you switch again while a switch is still running, the new one starts
+    from where the camera is actually pointing — it does not snap back to the
+    subject it was leaving.</p>
+
+    <div class="tip"><b>If a switch looks wrong</b> The two things worth checking
+    are the <a href="config.html">slider angle</a> — a rail that climbs but is
+    configured as level will aim increasingly wrong along its length — and whether
+    Set Ref was done this session. Both show up as tracking that is subtly off
+    rather than as an obvious failure.</div>
 
     <div class="note"><b>Look-at vs. CV tracking</b> Look-at follows a
     <em>calibrated point in space</em> — precise, repeatable, and it needs no video

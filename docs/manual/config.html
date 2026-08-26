@@ -106,7 +106,51 @@
       <tr><td><strong>Look-at mode</strong></td><td>Enables 3D triangulation
       tracking (subjects 1–8 + slider arrows). Only available when Has slider is
       on. See <a href="lookat.html">Look-at tracking</a>.</td></tr>
+      <tr><td><strong>Slider angle</strong></td><td>How far the rail climbs, in
+      degrees. <code>0</code> is level; positive means the far end is higher.
+      See below.</td></tr>
     </table>
+
+    <h3>Slider angle</h3>
+    <p>The rail is not always level. Rigged off a truss or up a raked seating bank
+    it climbs, and then travelling along it changes the camera's <em>height</em> as
+    well as its position — so the tilt needed to hold a subject changes too.</p>
+
+    <p>The mount cannot sense this. Tell it the angle and it resolves the rail into
+    along and up components, and every look-at aim accounts for the climb. Leave it
+    at <code>0</code> on a rail the mount is really climbing and the tracking is
+    correct at the end you calibrated from and drifts progressively as the camera
+    travels away from it.</p>
+
+    <table>
+      <tr><th style="width:30%">Where</th><th>How it is set</th></tr>
+      <tr><td><strong>PC app</strong></td><td>A number box on the camera's tab,
+      alongside the other hardware settings.</td></tr>
+      <tr><td><strong>Web app</strong></td><td>A number box in the extended config
+      panel, like the other numeric fields there.</td></tr>
+      <tr><td><strong>Hub display</strong></td><td>A <em>Slider Angle</em> row on
+      the config screen: <code>−</code> and <code>+</code> step by half a degree,
+      <code>0</code> levels it.</td></tr>
+    </table>
+
+    <div class="tip"><b>Measuring it</b> A phone's spirit level along the rail is
+    close enough. The tilt only has to be right to about half a degree for the
+    tracking to hold across the full length — which is why the console steps in
+    halves.</div>
+
+    <div class="note"><b>When a setting reaches the mount</b> The clients commit at
+    different moments, and it is worth knowing which you are using.
+    <ul>
+      <li><strong>PC app and web app</strong> — a number box sends when you leave
+      it: press Enter, or click elsewhere. Typing alone changes nothing, so a
+      half-typed number is never sent.</li>
+      <li><strong>Hub display</strong> — the −/0/+ buttons only change what is on
+      screen. The value is sent when you press <strong>Apply</strong>, switch
+      camera, or leave the config screen.</li>
+    </ul>
+    Until the mount has told a client what its angle currently is, that client will
+    not send one — so toggling an unrelated switch cannot accidentally level a rail
+    the client has not yet been told about.</div>
 
     <h3>Speed presets</h3>
     <p>Each preset is a max speed and an acceleration. The active preset applies to
@@ -124,10 +168,38 @@
     Tune these if homing stops early (too sensitive) or pushes into the stop (too
     coarse). Used by <a href="mounts.html">homing</a> and Find Limits.</p>
 
+    <div class="note"><b>On a climbing rail the threshold is adjusted for you</b>
+    Gravity is load. Driving <em>up</em> a tilted rail the motor is already working
+    before it touches anything, and driving <em>down</em> it is being helped — so
+    one fixed threshold either trips early going up or misses the stop coming
+    down. The mount compensates using the <strong>slider angle</strong> above, in
+    the direction it is currently travelling, so tune the threshold on a level rail
+    and it holds on a raked one.</div>
+
     <h3>Find Limits</h3>
     <p>Drives the slider and zoom to their end stops to measure the axis range in
     millimetres. <strong>Required before using look-at tracking.</strong> Hidden if
     the camera has no slider.</p>
+
+    <p>The seek runs at a deliberately gentle speed and ramp. A stall is detected
+    from motor load, and a carriage arriving fast reads as a stall slightly late —
+    so a slow approach finds the true end rather than a point past it.</p>
+
+    <div class="note"><b>The far end is inset by 30&nbsp;mm</b> A tilted rail needs
+    more motor current and a less twitchy stall threshold to stop the carriage
+    stalling part-way along a move — and a less sensitive stall detector notices
+    the end stop <em>later</em>. By the time the far end is recorded the carriage
+    has already run into it, so the stored limit sits somewhere inside the stop and
+    every later move to that limit grinds against it.
+    <br><br>
+    Pulling the usable far end back by 30&nbsp;mm costs 30&nbsp;mm of travel and
+    means a move to the limit stops short of the stop rather than against it. The
+    home end needs no margin — it <em>is</em> position 0, the home stall itself.
+    The millimetre range the app shows is the usable one.
+    <br><br>
+    This is a workaround for late detection, not a fix for it. A stall threshold
+    that trips at the stop with the current the tilt demands, or a physical switch,
+    would let it go back to a millimetre or two.</div>
 
     <div class="warn"><b>Homing and Find Limits move the axis to its physical
     limit</b> Make sure the mount is clear to move before running either.</div>

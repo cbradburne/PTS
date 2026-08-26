@@ -75,9 +75,25 @@
       <img src="../assets/img/hub-config.svg" alt="Hub Config screen"
            onerror="this.closest('figure').classList.add('missing')">
       <figcaption><strong>Config</strong> — the four pan/tilt and slider speed presets,
-      homing, Set Reference and the invert toggles, per camera
+      homing, Set Reference, the invert toggles and the slider angle, per camera
       (<a href="config.html">Configuration</a>).</figcaption>
     </figure>
+
+    <p>The <strong>Slider Angle</strong> row sets how far the rail climbs, for a
+    mount rigged on a rake or a truss. <code>−</code> and <code>+</code> step by
+    half a degree and <code>0</code> levels it — the same setting as the number box
+    in the PC and web apps, and it matters for look-at tracking. See
+    <a href="config.html">Configuration</a>.</p>
+
+    <div class="note"><b>When the console sends what you changed</b> The buttons on
+    this screen change what is on the display, not the mount. Everything is sent
+    together when you press <strong>Apply</strong>, switch to another camera, or
+    leave the config screen — so six taps on <code>+</code> are one message, not
+    six. Switching camera saves the one you are leaving first.
+    <br><br>
+    Until a mount has reported its angle, the console will not send one, so
+    changing an invert flag on a camera you have only just opened cannot level a
+    rail by accident.</div>
 
     <figure class="shot" data-file="hub-pairing.svg">
       <img src="../assets/img/hub-pairing.svg" alt="Hub Paired Mounts screen"

@@ -115,6 +115,17 @@
       <tr><td>UART</td><td>7″ touchscreen console</td><td>wired to the hub</td></tr>
     </table>
 
+    <div class="note"><b>The wired hub</b> There is a second hub build with an
+    Ethernet port, for rigs that put the mounts on a wired network alongside
+    everything else. It takes its wired address from <strong>DHCP</strong> and
+    prints the address it was given at boot, next to its Ethernet MAC — so there is
+    nothing to configure, provided the hub and satellites are registered on the
+    network.
+    <br><br>
+    Its access point stays exactly as above: <code>192.168.4.1</code> is the hub's
+    own WiFi, not its wired address, and phones and the PC app still reach it there
+    whatever the wire is doing.</div>
+
     <h3>The controllers — interchangeable windows</h3>
     <p>The PC app, a phone, the console and a Stream Deck all speak to that same
     hub, all see the same state, and any of them can <strong>hand off to any other
