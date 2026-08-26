@@ -29,7 +29,7 @@ from .protocol import (
     pkt_e_stop, pkt_get_status, pkt_ping,
     pkt_get_state, pkt_store_pos, pkt_clear_pos,
     pkt_set_active_preset, pkt_save_speeds, pkt_goto_slot, pkt_move_rel,
-    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus,
+    pkt_get_config, pkt_set_stall_threshold, pkt_cam_autofocus, pkt_get_position,
     pkt_cam_iso, pkt_cam_white_balance, decode_cam_status,
     pkt_cam_lift, pkt_cam_gamma, pkt_cam_gain, pkt_cam_offset,
     pkt_cam_contrast, pkt_cam_luma_mix, pkt_cam_hue_sat, pkt_cam_cc_reset,
@@ -73,6 +73,27 @@ HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
 # wedge only surfacing the next time the user presses a button.
 IDLE_PROBE_INTERVAL_S  = 3.0
 
+# TEMPORARY — look-at motion diagnostic.
+#
+# Switching subject mid-move reads as abrupt, and two attempts to fix it were
+# reasoned from the firmware rather than measured: the setpoint blend, then the
+# slew-cap timing.  Both were sound about what the code does and neither changed
+# what the operator sees, which is the point at which guessing stops being
+# useful.
+#
+# There is no position data anywhere in the system — CMD_POSITION is answered on
+# request and nothing asks (see docs/link_traffic.md).  This asks, at 5 Hz, ONLY
+# while a mount is actually in a look-at state, and logs pan/tilt with the
+# angular velocity between samples.  Velocity is the thing being complained
+# about; position alone would need reading off with a ruler.
+#
+# Cost: 5 requests + 5 replies per second, for the few seconds a switch lasts,
+# on a link that is otherwise one packet per 5 s at rest.  Bounded, and only
+# while the thing under study is happening.
+#
+# REMOVE once the profile has been read.  Set False to silence without deleting.
+LOOK_AT_DIAGNOSTIC     = True
+LOOK_AT_POLL_MS        = 200
 
 # Camera-parameter logging: how many changes one parameter may report in a
 # minute before it is silenced as a runaway.  Generous, because a setting
@@ -267,6 +288,20 @@ class MountManager(QObject):
         self._hb_timer.setInterval(HEARTBEAT_INTERVAL_MS)
         self._hb_timer.timeout.connect(self._heartbeat)
         self._hb_timer.start()
+
+        # TEMPORARY — see LOOK_AT_DIAGNOSTIC.  Separate from the heartbeat
+        # because 1 Hz cannot resolve a 1.6 s move, which is the whole reason
+        # the previous position logging could not answer this.
+        if LOOK_AT_DIAGNOSTIC:
+            self._la_poll_timer = QTimer(self)
+            self._la_poll_timer.setInterval(LOOK_AT_POLL_MS)
+            self._la_poll_timer.timeout.connect(self._poll_look_at_positions)
+            self._la_poll_timer.start()
+        self._la_last: dict[int, tuple] = {}   # mount -> (t, pan, tilt)
+        self._la_prev_v: dict[int, tuple] = {}  # mount -> (v_pan, v_tilt)
+        self._la_series: dict[int, list] = {}   # mount -> [(v_pan, v_tilt), ...]
+        self._la_moving: dict[int, bool] = {}
+        self._la_quiet:  dict[int, int]  = {}
 
     # ------------------------------------------------------------------
     # Public — read state
@@ -1233,6 +1268,7 @@ class MountManager(QObject):
                 prev = st.position
                 st.position = pos
                 self.position_updated.emit(mid, pos)
+                self._log_look_at_sample(mid, st, pos)
             except Exception as e:
                 log.warning(f"Bad POSITION from mount {mid}: {e}")
 
@@ -1279,6 +1315,133 @@ class MountManager(QObject):
     # Heartbeat
     # ------------------------------------------------------------------
 
+    # TEMPORARY — see LOOK_AT_DIAGNOSTIC.
+    _LOOK_AT_STATES = (MountState.LOOK_AT_MOVE, MountState.LOOK_AT_PRE_AIM)
+
+    def _log_look_at_sample(self, mid: int, st, pos) -> None:
+        """TEMPORARY — see LOOK_AT_DIAGNOSTIC.  One line per sample, with the
+        angular velocity since the last one and the CHANGE in that velocity.
+
+        Velocity rather than position because abruptness IS velocity: a
+        position series would have to be differenced by hand to say anything
+        about it, and the question is where the rate changes, not where the
+        camera is.
+
+        And the change-in-velocity column because "one speed, then the next" is
+        a statement about that column specifically.  Last time the shape had to
+        be read off a screen of position lines by eye, which is how two rounds
+        of reasoning got spent on a cap that turns out not to bind during the
+        ease out at all.  A step should be a number in the log, not an
+        impression.
+        """
+        if not LOOK_AT_DIAGNOSTIC or st.state not in self._LOOK_AT_STATES:
+            return
+        now = time.monotonic()
+        last = self._la_last.get(mid)
+        self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
+        if last is None:
+            log.warning("LA POS cam%d: tracking — pan %+.2f tilt %+.2f "
+                        "(velocity from the next sample)",
+                        mid, pos.pan_deg, pos.tilt_deg)
+            return
+        dt = now - last[0]
+        if dt <= 0.0:
+            return
+        v_pan  = (pos.pan_deg  - last[1]) / dt
+        v_tilt = (pos.tilt_deg - last[2]) / dt
+
+        # Change since the previous sample, per axis.  This is the ease.
+        prev_v = self._la_prev_v.get(mid)
+        self._la_prev_v[mid] = (v_pan, v_tilt)
+        if prev_v is None:
+            d_pan = d_tilt = 0.0
+        else:
+            d_pan, d_tilt = v_pan - prev_v[0], v_tilt - prev_v[1]
+
+        log.warning("LA POS cam%d %+.2fs  pan %+7.2f (%+7.1f deg/s, d%+6.1f)  "
+                    "tilt %+7.2f (%+7.1f deg/s, d%+6.1f)",
+                    mid, dt, pos.pan_deg, v_pan, d_pan,
+                    pos.tilt_deg, v_tilt, d_tilt)
+
+        self._la_series.setdefault(mid, []).append((v_pan, v_tilt))
+        self._la_check_settled(mid, v_pan, v_tilt)
+
+    # Speeds that count as "moving" and as "stopped", for deciding when one
+    # switch has finished.  A subject switch does not change the mount's STATE
+    # — it stays in LOOK_AT_MOVE throughout — so the end of the move has to be
+    # detected from the motion itself.
+    _LA_MOVING_DPS  = 2.0
+    _LA_STOPPED_DPS = 0.5
+
+    def _la_check_settled(self, mid: int, v_pan: float, v_tilt: float) -> None:
+        """TEMPORARY — see LOOK_AT_DIAGNOSTIC.  Print the whole move on one
+        line once it has stopped.
+
+        The rectangle was only obvious as a series; the same will be true of
+        whatever shape the ease out really has.  One line that can be pasted
+        back beats a screenful that has to be scrolled and described.
+        """
+        speed = max(abs(v_pan), abs(v_tilt))
+        if speed > self._LA_MOVING_DPS:
+            self._la_moving[mid] = True
+            self._la_quiet[mid]  = 0
+            return
+        if not self._la_moving.get(mid):
+            # Never got going — drifting tracking, not a switch.  Don't let
+            # idle samples accumulate into a meaningless summary.
+            self._la_series[mid] = self._la_series.get(mid, [])[-1:]
+            return
+        if speed > self._LA_STOPPED_DPS:
+            return
+        self._la_quiet[mid] = self._la_quiet.get(mid, 0) + 1
+        if self._la_quiet[mid] < 2:
+            return
+
+        series = self._la_series.get(mid, [])
+        self._la_moving[mid] = False
+        self._la_quiet[mid]  = 0
+        self._la_series[mid] = []
+        if len(series) < 3:
+            return
+
+        pans  = [v for v, _ in series]
+        tilts = [v for _, v in series]
+        steps = [abs(pans[i] - pans[i - 1]) for i in range(1, len(pans))]
+        worst = max(steps)
+        where = steps.index(worst) + 1
+        log.warning("LA MOVE cam%d pan:  %s", mid,
+                    " ".join(f"{v:+.1f}" for v in pans))
+        log.warning("LA MOVE cam%d tilt: %s", mid,
+                    " ".join(f"{v:+.1f}" for v in tilts))
+        log.warning("LA MOVE cam%d %d samples, peak %.1f deg/s, biggest pan "
+                    "step %.1f deg/s at sample %d of %d (%s)",
+                    mid, len(series), max(abs(v) for v in pans), worst,
+                    where, len(pans),
+                    "during the ease out" if where > len(pans) * 0.6
+                    else "during the ease in")
+
+    def _poll_look_at_positions(self) -> None:
+        """Ask for a position, 5 Hz, only from a mount that is tracking.
+
+        The mount answers one CMD_POSITION per request — the unsolicited stream
+        was removed — so the sample rate is exactly the request rate, and the
+        traffic stops the moment the look-at move does.
+        """
+        if not LOOK_AT_DIAGNOSTIC:
+            return
+        for mid, st in self._states.items():
+            if not st.connected:
+                continue
+            if st.state in self._LOOK_AT_STATES:
+                self._send(pkt_get_position(mid))
+            elif mid in self._la_last:
+                # Move over — drop the anchor so the next one starts clean
+                # rather than reporting a velocity across the gap between them.
+                del self._la_last[mid]
+                self._la_prev_v.pop(mid, None)
+                self._la_series.pop(mid, None)
+                self._la_moving.pop(mid, None)
+                self._la_quiet.pop(mid, None)
 
     def _heartbeat(self) -> None:
         if not self._bridge.connected:
