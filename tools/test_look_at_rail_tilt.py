@@ -44,17 +44,32 @@ body = body[:body.index("\n}")]
 assert "cosf(t)" in body and "sinf(t)" in body, "_railWorldPos does not resolve the tilt"
 print("   _railWorldPos resolves along/up components          OK")
 
-# ---- 2. all three sites use it ----------------------------------------------
-# Any site still reading the subject's height directly is tracking a flat rail.
+# ---- 2. every site that aims at the subject uses it -------------------------
+# This used to count three hand-written copies of the geometry and check each
+# one subtracted the camera's height. They are now a single _aimFrom(), which
+# is a stronger guarantee than counting copies: there is nowhere left for a
+# rail-unaware copy to hide. Two separate faults on this rig came from three
+# copies drifting apart, so the count going to one is the fix, not a regression.
 print("\n2. every site that aims at the subject:")
-assert "float dy = _la_subject_y;" not in CPP, \
-    "a look-at site still takes the camera height as zero"
-# The tracking site aims at the BLENDED subject (see test_look_at_subject_blend),
-# so match on the property — the camera's height on the rail is subtracted —
-# rather than on one spelling of the subject.
-n = len(re.findall(r"float dy = (?:_la_subject_y|sy_now) - w", CPP))
-assert n == 3, f"expected 3 rail-aware sites (pre-aim, aimAtSubject, tracking), found {n}"
-print(f"   {n} of 3 subtract the camera's height on the rail   OK")
+assert "void MountMotion::_aimFrom(" in CPP, \
+    "the shared aim helper is gone; the geometry has been copied out again"
+aim = CPP[CPP.index("void MountMotion::_aimFrom("):]
+aim = aim[:aim.index("\n}")]
+assert "float dy = sy - wy;" in aim, \
+    "_aimFrom takes the camera's height on the rail as zero, so a tilted rail\n" \
+    "    is tracked as a flat one"
+print("   one _aimFrom(), and it subtracts the rail height   OK")
+
+# Nothing may compute the pan angle outside it.
+import re as _re
+def _code_only(t):
+    return "\n".join(l if l.find("//") < 0 else l[:l.find("//")]
+                     for l in t.splitlines())
+n = _code_only(CPP).count("atan2f(dx, dz)")
+assert n == 1, f"the pan formula appears {n} times; it must exist exactly once"
+print("   the pan formula exists exactly once                OK")
+
+# And every caller must resolve the rail before asking.
 n = CPP.count("_railWorldPos(")
 assert n >= 4, f"_railWorldPos called {n} times; expected 3 sites + definition"
 print("   pre-aim, aimAtSubject and _updateLookAt all fixed   OK")

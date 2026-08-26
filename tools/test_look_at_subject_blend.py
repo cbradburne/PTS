@@ -26,37 +26,47 @@ CPP = (REPO / "firmware/teensy41_mount/MountMotion.cpp").read_text()
 HDR = (REPO / "firmware/teensy41_mount/MountMotion.h").read_text()
 
 # ---- 1. the blend exists and is a smoothstep --------------------------------
+# The curve now lives in _laBlendPhase() and is applied to the ANGLES rather
+# than to the subject point — see test_look_at_angle_blend.py for why. The
+# easing itself is unchanged and is still what this file is about.
 print("1. the eased setpoint:")
-assert "void MountMotion::_laSubjectNow(" in CPP, "the blend evaluator is gone"
-body = CPP[CPP.index("void MountMotion::_laSubjectNow("):]
-body = body[:body.index("\n}\n")]
+assert "float MountMotion::_laBlendPhase(" in CPP, "the blend evaluator is gone"
+body = CPP[CPP.index("float MountMotion::_laBlendPhase("):]
+body = body[:body.index("\n}")]
 assert "t * t * (3.0f - 2.0f * t)" in body, \
     "the easing is not a smoothstep — a linear ramp still starts and stops abruptly"
 print("   smoothstep: zero velocity at both ends              OK")
 
-# It must interpolate all three coordinates, or the aim travels through a
-# point that is not on the path between the two subjects.
-for i, ax in enumerate("xyz"):
-    assert f"_la_blend_from[{i}] + (_la_subject_{ax} - _la_blend_from[{i}]) * e" in body, \
-        f"the {ax} coordinate is not blended"
-print("   all three coordinates interpolated together        OK")
+# Pan and tilt must move on ONE phase, or they arrive at different times and
+# the move reads as two axis motions instead of one arc.
+aim = CPP[CPP.index("void MountMotion::_laAimNow("):]
+aim = aim[:aim.index("\n}")]
+assert aim.count("_laBlendPhase()") == 1 and "* e;" in aim, \
+    "pan and tilt no longer share one phase; they would land separately"
+assert "*pan_deg  = pan_a  + dpan * e;" in aim, "pan is not blended"
+assert "*tilt_deg = tilt_a + (tilt_b - tilt_a) * e;" in aim, "tilt is not blended"
+print("   pan and tilt share one phase, so they land together  OK")
 
-# Once the blend is over it must read exactly the subject, not an extrapolation.
-assert body.count("*sx = _la_subject_x;") == 2, \
-    "the blend does not settle exactly on the subject when it expires"
+# Once the blend is over it must read exactly the new subject's angles, not an
+# extrapolation one tick past the end of the curve.
+assert body.count("return 1.0f;") == 2, \
+    "the phase does not settle on exactly 1.0 for both 'no blend' and 'expired'"
+assert "if (e >= 1.0f) {" in aim and "*pan_deg = pan_b;  *tilt_deg = tilt_b;" in aim, \
+    "a finished blend does not short-circuit to the new subject's own angles"
 print("   settles exactly on the new subject                 OK")
 
-# ---- 2. the controller aims at the blended point ----------------------------
+# ---- 2. the controller follows the blended ANGLE ----------------------------
+# It used to follow a blended POINT and take atan2 of it, which walked the aim
+# along a chord and made the tilt arc. See test_look_at_angle_blend.py.
 print("\n2. what the controller follows:")
 la = CPP[CPP.index("void MountMotion::_updateLookAt("):]
 la = la[:la.index("\n}\n")]
-assert "_laSubjectNow(&sx_now, &sy_now, &sz_now);" in la, \
-    "the tracking loop still reads the raw subject, so the blend does nothing"
-assert "float dx = sx_now - wx;" in la and "float dy = sy_now - wy;" in la, \
-    "the camera-to-subject vector is not built from the blended point"
-assert "_la_subject_x" not in la, \
-    "the tracking loop still references the raw subject somewhere"
-print("   _updateLookAt aims at the blended point            OK")
+assert "_laAimNow(wx, wy, &pan_deg, &tilt_deg);" in la, \
+    "the tracking loop does not use the blended angles, so the blend does nothing"
+assert "atan2f" not in la, \
+    "the tracking loop computes an angle of its own again; if that is from a\n" \
+    "    blended point then the chord — and the tilt arc — are back"
+print("   _updateLookAt follows the blended angle            OK")
 
 # ---- 3. it only arms on a genuine mid-track switch --------------------------
 print("\n3. when it arms:")
@@ -79,12 +89,23 @@ print("   only when already tracking a DIFFERENT subject     OK")
 # A switch during a switch must continue from where the aim actually is.
 assert "if (switching) _laSubjectNow(&from_x, &from_y, &from_z);" in setter, \
     "a switch mid-blend restarts from the old subject — the aim would snap back"
+# _laSubjectNow now reconstructs that point from the live AIM rather than from
+# a position lerp, so it is still the place the camera is actually looking.
+now_fn = CPP[CPP.index("void MountMotion::_laSubjectNow("):]
+now_fn = now_fn[:now_fn.index("\n}")]
+assert "_laAimNow(" in now_fn, \
+    "the hand-off point is no longer derived from where the camera is pointing"
 print("   a switch mid-blend continues from the live aim     OK")
 
 assert "_la_blend_ms = 0;" in HDR, "dropping the subject does not cancel the blend"
 print("   deselecting cancels it                             OK")
 
 # ---- 4. duration scales with the turn ---------------------------------------
+# NOTE: above about 58 degrees the MAX_MS clamp no longer has the last word —
+# the duration is extended so the curve's peak fits under what the axis can
+# actually deliver. That rule and its numbers are checked in
+# test_look_at_speed_ceiling.py; this section is only about the per-degree
+# scaling below that point, so it stops at turns the clamp still governs.
 print("\n4. duration:")
 assert "travel * LOOK_AT_BLEND_MS_PER_DEG" in setter, \
     "the duration no longer scales with how far the camera must turn"
@@ -94,7 +115,7 @@ per_deg = float(re.search(r"#define LOOK_AT_BLEND_MS_PER_DEG\s+([\d.]+)f", HDR).
 lo = int(re.search(r"#define LOOK_AT_BLEND_MIN_MS\s+(\d+)", HDR).group(1))
 hi = int(re.search(r"#define LOOK_AT_BLEND_MAX_MS\s+(\d+)", HDR).group(1))
 assert lo < hi, "the duration clamp is inverted"
-for deg in (2, 10, 30, 60, 120):
+for deg in (2, 10, 30, 40, 55):
     ms = min(max(deg * per_deg, lo), hi)
     print(f"   {deg:>3}° turn -> {ms:>6.0f} ms")
 print("   scales with the turn, clamped both ends            OK")

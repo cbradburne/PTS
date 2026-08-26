@@ -542,6 +542,19 @@ private:
     // The subject position to aim at RIGHT NOW — the blend evaluated at this
     // instant, or the subject itself when no blend is running.
     void     _laSubjectNow(float *sx, float *sy, float *sz) const;
+
+    // Pan/tilt needed to look at one point from one rail position.
+    void     _aimFrom(float sx, float sy, float sz, float wx, float wy,
+                      float *pan_deg, float *tilt_deg) const;
+
+    // Where to POINT right now — the blend evaluated in angle rather than in
+    // position.  Both endpoints are re-derived at the rail position passed in,
+    // so the rail is still tracked through a switch.
+    void     _laAimNow(float wx, float wy,
+                       float *pan_deg, float *tilt_deg) const;
+
+    // Smoothstep progress through the running blend, 0..1 (1 = finished).
+    float    _laBlendPhase() const;
     // True while a subject-switch blend is still moving the aim.
     bool     _laBlendActive() const;
     uint32_t        _la_slew_until_ms;     // apply slew-accel until this timestamp (mid-move switch)

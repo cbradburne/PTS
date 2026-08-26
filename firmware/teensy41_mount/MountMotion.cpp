@@ -1864,33 +1864,114 @@ void MountMotion::_clampToLimits(int32_t &target, Axis axis) const {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// _laSubjectNow() — where to aim RIGHT NOW
+// _laAimNow() — where to POINT right now
 // ---------------------------------------------------------------------------
-// Mid-blend this is a point travelling from the old subject to the new one on a
-// smoothstep: 3t^2 - 2t^3, whose derivative is zero at both ends.  The camera
-// therefore eases out of the old aim and into the new one, and since pan and
-// tilt are both derived from this one moving point they stay coordinated and
-// arrive together without needing to be synchronised explicitly.
+// The blend runs in ANGLE, not in position.
+//
+// It used to interpolate the subject POINT from the old one to the new one and
+// take atan2 of the result.  That walks the aim along a straight chord between
+// two subjects, and a chord passes nearer the camera than either end.  Two
+// things follow, and both were measured on the rig on 2026-08-26:
+//
+//   the TILT swings out and comes back — 5.1 degrees of travel to make a 2.0
+//   degree move on one switch, because the aim point dips closer mid-move and
+//   a nearer subject at the same height needs more tilt.  Worst when the two
+//   subjects are at similar height, which is when it is most visible.
+//
+//   the PEAK RATE overshoots what the blend asked for.  Angular rate is
+//   v_perp / r, so as r falls toward the middle of the chord the rate rises —
+//   right where the smoothstep already peaks.  Measured 43-46 deg/s against a
+//   designed 39.8, sitting hard against the axis ceiling.
+//
+// Smoothstepping the angles instead makes the angular rate genuinely the
+// smoothstep the duration was computed from, and the tilt monotonic.  Both
+// endpoints are re-derived from the CURRENT rail position every tick, so the
+// rail is still tracked through the switch — which is the reason the point
+// form was there to begin with, and is not given up by doing this.
+//
+// Pan and tilt share one phase, so they still land together for free.
 bool MountMotion::_laBlendActive() const {
     return _la_blend_ms != 0 &&
            (millis() - _la_blend_start_ms) < _la_blend_ms;
 }
 
-void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
-    if (_la_blend_ms == 0) {
-        *sx = _la_subject_x;  *sy = _la_subject_y;  *sz = _la_subject_z;
-        return;
-    }
+float MountMotion::_laBlendPhase() const {
+    if (_la_blend_ms == 0) return 1.0f;
     uint32_t elapsed = millis() - _la_blend_start_ms;
-    if (elapsed >= _la_blend_ms) {
+    if (elapsed >= _la_blend_ms) return 1.0f;
+    float t = (float)elapsed / (float)_la_blend_ms;
+    return t * t * (3.0f - 2.0f * t);            // smoothstep
+}
+
+void MountMotion::_aimFrom(float sx, float sy, float sz, float wx, float wy,
+                           float *pan_deg, float *tilt_deg) const {
+    float dx = sx - wx;
+    float dy = sy - wy;
+    float dz = sz;                                // Z positive = into the room
+    *pan_deg  = atan2f(dx, dz) * (180.0f / (float)M_PI);
+    *tilt_deg = atan2f(dy, sqrtf(dx * dx + dz * dz)) * (180.0f / (float)M_PI);
+}
+
+void MountMotion::_laAimNow(float wx, float wy,
+                            float *pan_deg, float *tilt_deg) const {
+    float pan_b, tilt_b;
+    _aimFrom(_la_subject_x, _la_subject_y, _la_subject_z, wx, wy,
+             &pan_b, &tilt_b);
+
+    float e = _laBlendPhase();
+    if (e >= 1.0f) {                              // no blend, or it has finished
+        *pan_deg = pan_b;  *tilt_deg = tilt_b;
+        return;
+    }
+
+    float pan_a, tilt_a;
+    _aimFrom(_la_blend_from[0], _la_blend_from[1], _la_blend_from[2], wx, wy,
+             &pan_a, &tilt_a);
+
+    // Shortest way round.  dz is positive for anything in front of the rail so
+    // both angles land in (-90, 90) and this never fires in practice, but a
+    // wrapped difference here would be a 358 degree spin rather than a 2
+    // degree correction, and that is not a failure worth discovering on air.
+    float dpan = pan_b - pan_a;
+    while (dpan > 180.0f)  dpan -= 360.0f;
+    while (dpan < -180.0f) dpan += 360.0f;
+
+    *pan_deg  = pan_a  + dpan * e;
+    *tilt_deg = tilt_a + (tilt_b - tilt_a) * e;
+}
+
+// The aim expressed as a POINT, for the one caller that needs one: starting a
+// new switch while a switch is running.  Reconstructed from the blended ANGLE
+// at the blended range, so the next blend begins exactly where the camera is
+// pointing rather than somewhere along the old chord.
+void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
+    float e = _laBlendPhase();
+    if (e >= 1.0f) {
         *sx = _la_subject_x;  *sy = _la_subject_y;  *sz = _la_subject_z;
         return;
     }
-    float t = (float)elapsed / (float)_la_blend_ms;
-    float e = t * t * (3.0f - 2.0f * t);          // smoothstep
-    *sx = _la_blend_from[0] + (_la_subject_x - _la_blend_from[0]) * e;
-    *sy = _la_blend_from[1] + (_la_subject_y - _la_blend_from[1]) * e;
-    *sz = _la_blend_from[2] + (_la_subject_z - _la_blend_from[2]) * e;
+
+    int32_t sl_phys = _stepper[AXIS_SLIDER]->getPosition();
+    float   cx      = (float)sl_phys * _slider_mm_per_step;
+    if (_slider_invert) cx = -cx;
+    float wx, wy;
+    _railWorldPos(cx, &wx, &wy);
+
+    float pan_deg, tilt_deg;
+    _laAimNow(wx, wy, &pan_deg, &tilt_deg);
+
+    // Horizontal range, blended the same way, so a switch-during-switch does
+    // not jump the subject nearer or further as well as sideways.
+    float ax = _la_blend_from[0] - wx, az = _la_blend_from[2];
+    float bx = _la_subject_x    - wx, bz = _la_subject_z;
+    float h  = sqrtf(ax * ax + az * az) * (1.0f - e)
+             + sqrtf(bx * bx + bz * bz) * e;
+
+    float pan_r  = pan_deg  * ((float)M_PI / 180.0f);
+    float tilt_r = tilt_deg * ((float)M_PI / 180.0f);
+    *sx = wx + h * sinf(pan_r);
+    *sy = wy + h * tanf(tilt_r);
+    *sz =      h * cosf(pan_r);
 }
 
 void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id) {
@@ -1931,12 +2012,11 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     float wx, wy;
     _railWorldPos(cx, &wx, &wy);
 
-    float pan_a  = atan2f(from_x - wx, from_z) * (180.0f / (float)M_PI);
-    float pan_b  = atan2f(sx      - wx, sz)    * (180.0f / (float)M_PI);
-    float tilt_a = atan2f(from_y - wy, sqrtf((from_x-wx)*(from_x-wx) + from_z*from_z))
-                   * (180.0f / (float)M_PI);
-    float tilt_b = atan2f(sy      - wy, sqrtf((sx-wx)*(sx-wx) + sz*sz))
-                   * (180.0f / (float)M_PI);
+    // Same helper the tracker uses, so the travel this duration is computed
+    // from cannot drift away from the angles actually flown.
+    float pan_a, tilt_a, pan_b, tilt_b;
+    _aimFrom(from_x, from_y, from_z, wx, wy, &pan_a, &tilt_a);
+    _aimFrom(sx,     sy,     sz,     wx, wy, &pan_b, &tilt_b);
     float travel = fmaxf(fabsf(pan_b - pan_a), fabsf(tilt_b - tilt_a));
 
     float ms = travel * LOOK_AT_BLEND_MS_PER_DEG;
@@ -2039,12 +2119,9 @@ bool MountMotion::startLookAtMove(int32_t slider_start_steps, int32_t slider_end
 
         float wx_now, wy_now;
         _railWorldPos(cx_now, &wx_now, &wy_now);
-        float dx = _la_subject_x - wx_now;
-        float dy = _la_subject_y - wy_now;
-        float dz = _la_subject_z;
-
-        float pan_deg_now  = atan2f(dx, dz) * (180.0f / (float)M_PI);
-        float tilt_deg_now = atan2f(dy, sqrtf(dx * dx + dz * dz)) * (180.0f / (float)M_PI);
+        float pan_deg_now, tilt_deg_now;
+        _aimFrom(_la_subject_x, _la_subject_y, _la_subject_z, wx_now, wy_now,
+                 &pan_deg_now, &tilt_deg_now);
 
         int32_t pan_tgt  = (int32_t)((pan_deg_now  - _pan_ref_deg)  / _pan_deg_per_step);
         int32_t tilt_tgt = (int32_t)((tilt_deg_now - _tilt_ref_deg) / _tilt_deg_per_step);
@@ -2124,13 +2201,9 @@ bool MountMotion::aimAtSubject(uint8_t pt_preset) {
     // Vector from camera to subject, both on the real (possibly climbing) rail
     float wx, wy;
     _railWorldPos(cx, &wx, &wy);
-    float dx = _la_subject_x - wx;
-    float dy = _la_subject_y - wy;
-    float dz = _la_subject_z;
-
-    // Required world-frame angles
-    float pan_deg  = atan2f(dx, dz) * (180.0f / (float)M_PI);
-    float tilt_deg = atan2f(dy, sqrtf(dx * dx + dz * dz)) * (180.0f / (float)M_PI);
+    float pan_deg, tilt_deg;
+    _aimFrom(_la_subject_x, _la_subject_y, _la_subject_z, wx, wy,
+             &pan_deg, &tilt_deg);
 
     // Convert to LOGICAL step targets.
     // moveTo() calls _applyOrientationPos() on PAN, TILT, and SLIDER internally,
@@ -2141,8 +2214,8 @@ bool MountMotion::aimAtSubject(uint8_t pt_preset) {
 
     Serial.printf("[Aim] sl_phys=%ld cx=%.1fmm  subj=(%.1f, %.1f, %.1f)mm\n",
                   (long)sl_phys, cx, _la_subject_x, _la_subject_y, _la_subject_z);
-    Serial.printf("[Aim] dx=%.1f dy=%.1f dz=%.1f  pan=%.2f° tilt=%.2f°\n",
-                  dx, dy, dz, pan_deg, tilt_deg);
+    Serial.printf("[Aim] rail=(%.1f, %.1f)mm  pan=%.2f° tilt=%.2f°\n",
+                  wx, wy, pan_deg, tilt_deg);
     Serial.printf("[Aim] ref: pan_ref=%.4f° tilt_ref=%.4f°\n",
                   _pan_ref_deg, _tilt_ref_deg);
     Serial.printf("[Aim] target: pan=%ld  tilt=%ld  (logical steps)\n",
@@ -2251,20 +2324,16 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
     // We want world-frame mm along the rail (always positive from home).
     if (_slider_invert) cx = -cx;
 
-    // 2. Vector from camera to subject
-    float sx_now, sy_now, sz_now;
-    _laSubjectNow(&sx_now, &sy_now, &sz_now);
+    // 2. Where the camera has to point, from this rail position
     float wx, wy;
     _railWorldPos(cx, &wx, &wy);
-    float dx = sx_now - wx;
-    float dy = sy_now - wy;
-    float dz = sz_now;   // Z positive = into room (away from rail)
 
-    // 3. Required pan/tilt angles (world frame)
-    float pan_rad  = atan2f(dx, dz);
-    float tilt_rad = atan2f(dy, sqrtf(dx * dx + dz * dz));
-    float pan_deg  = pan_rad  * (180.0f / (float)M_PI);
-    float tilt_deg = tilt_rad * (180.0f / (float)M_PI);
+    // 3. Required pan/tilt angles (world frame).  During a subject switch this
+    //    is the smoothstep applied to the ANGLES rather than to the subject
+    //    point — see _laAimNow().  Both endpoints are re-derived at the rail
+    //    position just computed, so the rail is still tracked throughout.
+    float pan_deg, tilt_deg;
+    _laAimNow(wx, wy, &pan_deg, &tilt_deg);
 
     // 4. Convert world-frame angles to target step counts via session reference
     int32_t pan_target  = (int32_t)((pan_deg  - _pan_ref_deg)  / _pan_deg_per_step);
@@ -2282,11 +2351,13 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
         int32_t tilt_pos = _stepper[AXIS_TILT]->getPosition();
         float pan_err  = (float)(pan_target  - pan_pos);
         float tilt_err = (float)(tilt_target - tilt_pos);
+        float sx_now, sy_now, sz_now;
+        _laSubjectNow(&sx_now, &sy_now, &sz_now);
         Serial.printf("[LA] sl_phys=%ld  cx=%.1fmm  subj=(%.1f,%.1f,%.1f)\n",
                       (long)sl_phys, cx,
                       sx_now, sy_now, sz_now);
-        Serial.printf("[LA] dx=%.1f dz=%.1f  pan=%.3f° tilt=%.3f°\n",
-                      dx, dz, pan_deg, tilt_deg);
+        Serial.printf("[LA] rail=(%.1f,%.1f)  pan=%.3f° tilt=%.3f°  blend=%.2f\n",
+                      wx, wy, pan_deg, tilt_deg, _laBlendPhase());
         Serial.printf("[LA] ref: pan_ref=%.3f° tilt_ref=%.3f°\n",
                       _pan_ref_deg, _tilt_ref_deg);
         Serial.printf("[LA] pan_tgt=%ld pos=%ld err=%.0f | tilt_tgt=%ld pos=%ld err=%.0f\n",
