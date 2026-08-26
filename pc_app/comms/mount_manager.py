@@ -1338,8 +1338,8 @@ class MountManager(QObject):
             return
         now = time.monotonic()
         last = self._la_last.get(mid)
-        self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
         if last is None:
+            self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
             log.warning("LA POS cam%d: tracking — pan %+.2f tilt %+.2f "
                         "(velocity from the next sample)",
                         mid, pos.pan_deg, pos.tilt_deg)
@@ -1347,6 +1347,22 @@ class MountManager(QObject):
         dt = now - last[0]
         if dt <= 0.0:
             return
+
+        # Replies arrive bunched when the link stutters: a delayed one and the
+        # one behind it land together, so the second is TIMED over a fraction
+        # of the poll interval while CARRYING a whole interval of movement.
+        # That reads as a spike to double speed for exactly one sample.
+        #
+        # In the 2026-08-26 log every switch had one — +88, -92, +66 against
+        # plateaus of 45 — and every one of them had dt 0.10 against a 0.21
+        # nominal. None was real motion, and a fake 45 deg/s step is precisely
+        # the shape being hunted, so it cannot be left in.
+        #
+        # Hold the anchor rather than logging it: the next sample then measures
+        # across the whole span and comes out right.
+        if dt < (LOOK_AT_POLL_MS / 1000.0) * 0.6:
+            return
+        self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
         v_pan  = (pos.pan_deg  - last[1]) / dt
         v_tilt = (pos.tilt_deg - last[2]) / dt
 
@@ -1370,8 +1386,17 @@ class MountManager(QObject):
     # switch has finished.  A subject switch does not change the mount's STATE
     # — it stays in LOOK_AT_MOVE throughout — so the end of the move has to be
     # detected from the motion itself.
-    _LA_MOVING_DPS  = 2.0
-    _LA_STOPPED_DPS = 0.5
+    #
+    # These were 2.0 and 0.5 and no summary ever printed.  The assumption was
+    # that a move ends with the camera stationary; on this rig it does not.
+    # The mount goes on tracking the subject through the slider move at 1–5
+    # deg/s indefinitely, so the speed never fell below 0.5 and the summary sat
+    # waiting for a stillness that was never coming.
+    #
+    # Set from the 2026-08-26 log: baseline tracking 1–5 deg/s, switches 45.
+    # There is a wide gap between those and nothing lives in it.
+    _LA_MOVING_DPS  = 15.0
+    _LA_STOPPED_DPS = 5.0
 
     def _la_check_settled(self, mid: int, v_pan: float, v_tilt: float) -> None:
         """TEMPORARY — see LOOK_AT_DIAGNOSTIC.  Print the whole move on one

@@ -145,34 +145,46 @@ def summarise(pans):
         _mmmod.log.removeHandler(grab)
     return [l for l in grab.lines if l.startswith("LA MOVE")]
 
-# The rig's own measurement from 2026-08-24: flat, then a cliff at the end.
-rect = summarise([8.7, 12.6, 12.8, 12.7, 14.2, 11.9, 13.9, 13.0, 12.6, 11.9,
-                  0.4, 0.1])
+# Switch 3 exactly as the rig produced it on 2026-08-26, spike removed: flat
+# out at 45, then stopped inside one sample.
+rect = summarise([20, 45, 45, 46, 46, 44, 45, 45, 43, -2, -2.2, -2.0])
 assert rect, "the measured rectangle produced no summary at all"
 assert "during the ease out" in rect[-1], \
-    "the rectangle's 11.5 deg/s drop is not reported as an ease-out step"
-print("   rectangle           -> step named, at the ease out       OK")
+    "the rig's own 45 deg/s drop is not reported as an ease-out step"
+print("   measured switch     -> step named, at the ease out       OK")
 
-# A clean bell: the biggest change should be modest and NOT at the end.
-bell = summarise([2, 6, 11, 15, 17, 16, 13, 9, 5, 2.5, 1.0, 0.3, 0.1])
+# What it should look like instead: same 45 peak, shaped.
+bell = summarise([4, 15, 30, 42, 45, 42, 30, 15, 6, 2, 1.5, 1.8])
 assert bell and "during the ease in" in bell[-1], \
     "a smooth bell is reported as having an ease-out step; the reading is wrong\n" \
     "    and would send the next fix to the wrong end of the move"
 print("   smooth bell         -> no ease-out step                  OK")
 
-# A bell that falls off a cliff — the symptom being chased.
-cliff = summarise([2, 6, 11, 15, 17, 16, 14, 13, 12, 0.3, 0.1])
-assert cliff and "during the ease out" in cliff[-1], \
-    "a cliff at the end is not reported as one"
-print("   bell + cliff        -> step named, at the ease out       OK")
+# Tracking through a slider move — the thing that kept the summary silent when
+# the thresholds assumed a move ends with the camera standing still.
+assert not summarise([1.5, 2.1, 2.8, 3.2, 4.7, 1.1, 2.2, 3.1]), \
+    "ordinary tracking is summarised as a move; the log fills with non-moves"
+print("   tracking at 1-5 deg/s -> silent                          OK")
 
-# Idle tracking drift must not accumulate into a summary of nothing.
-assert not summarise([0.2, 0.1, 0.3, 0.2, 0.1, 0.2]), \
-    "idle drift produces a move summary; the log would fill with non-moves"
-print("   idle drift          -> silent                            OK")
+# ---- 6. the bunched-reply artifact ------------------------------------------
+# Every switch in the 2026-08-26 log carried one spike to double speed, and
+# every one had dt 0.10 against a 0.21 nominal: two replies landing together,
+# not motion. A fake 45 deg/s step is exactly the shape being hunted.
+print("\n5. bunched replies:")
+log_src = MM[MM.index("def _log_look_at_sample"):]
+log_src = log_src[:log_src.index("\n    # Speeds that count")]
+assert "LOOK_AT_POLL_MS / 1000.0) * 0.6" in log_src, \
+    "a sample timed over a fraction of the poll interval is still logged, and\n" \
+    "    it reads as a spike to double speed"
+anchor = log_src.index("self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)",
+                       log_src.index("dt = now - last[0]"))
+assert log_src.index("if dt < (LOOK_AT_POLL_MS") < anchor, \
+    "the anchor is advanced before the short sample is rejected, so the NEXT\n" \
+    "    sample measures from it too and the artifact survives anyway"
+print("   short sample dropped, anchor held for the next one       OK")
 
-# ---- 6. one flag away from silence -----------------------------------------
-print("\n5. removing it:")
+# ---- 7. one flag away from silence -----------------------------------------
+print("\n6. removing it:")
 assert MM.count("LOOK_AT_DIAGNOSTIC") >= 4, \
     "the flag no longer guards every entry point"
 for guard in ("if not LOOK_AT_DIAGNOSTIC:", "if LOOK_AT_DIAGNOSTIC:"):
