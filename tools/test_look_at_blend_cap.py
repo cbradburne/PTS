@@ -38,6 +38,18 @@ def define(name):
     return float(m.group(1))
 
 
+
+def clear_la_body(hdr: str) -> str:
+    """The body of clearLaSubject(), whatever fields it happens to clear.
+
+    This used to be matched as the literal "_la_blend_brake = 0.0f; }" — which
+    broke the moment another field was added before the brace. Every piece of
+    state a switch sets has to be dropped here, and the test should say that
+    rather than pin the punctuation."""
+    s = hdr[hdr.index("void    clearLaSubject()"):]
+    return s[:s.index("}") + 1]
+
+
 PER_DEG = define("LOOK_AT_BLEND_MS_PER_DEG")
 LO, HI  = define("LOOK_AT_BLEND_MIN_MS"), define("LOOK_AT_BLEND_MAX_MS")
 HEAD    = define("LOOK_AT_BLEND_HEADROOM")
@@ -179,7 +191,7 @@ print("   ramps up as readily as down                         OK")
 print("\n5. when no blend is running:")
 assert "_la_blend_brake = 0.0f;      // and the fixed caps govern again" in setter, \
     "a first selection leaves the previous switch's cap in place"
-assert "_la_blend_brake = 0.0f; }" in HDR, \
+assert "_la_blend_brake = 0.0f;" in clear_la_body(HDR), \
     "dropping the subject leaves the cap behind"
 print("   cleared on a first selection and on deselect       OK")
 

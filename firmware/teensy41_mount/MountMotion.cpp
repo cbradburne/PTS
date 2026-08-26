@@ -1996,6 +1996,7 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     if (!switching) {
         _la_blend_ms    = 0;         // first selection — aim straight at it
         _la_blend_brake = 0.0f;      // and the fixed caps govern again
+        _la_blend_accel = 0.0f;
         // No blend to cover, so the grace keeps its original fixed length.
         if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
             _la_slew_until_ms = millis() + LOOK_AT_SLEW_DURATION_MS;
@@ -2062,6 +2063,13 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
                       ? constrain((peak_dps * LOOK_AT_BLEND_HEADROOM) / max_dps,
                                   0.0f, 1.0f)
                       : 0.0f;
+
+    // What the curve itself asks for, which is what bounds the motor's
+    // acceleration while it runs.  A smoothstep peaks at 6 x travel /
+    // duration^2 — small turns demand the most, because their duration is
+    // short, which is why this cannot be a fixed number.
+    _la_blend_accel = LOOK_AT_ACCEL_HEADROOM * 6.0f * travel
+                    / ((ms / 1000.0f) * (ms / 1000.0f));
 
     // Hold the gentle slew cap for the whole blend AND the settling after it.
     // The cap comes off in a step, so it has to come off when the camera is
@@ -2592,6 +2600,38 @@ void MountMotion::_driveTowardTarget(int axis, int32_t target, float max_steps_s
     // is given a boosted acceleration so it reaches v_max_braking faster, while
     // the braking profile (and therefore stopping accuracy) is unchanged.
     float acc        = (v_max_braking * max_steps_s) / (2.0f * LOOK_AT_KP_STEPS);
+
+    // Bounded by what the CURVE needs, while a curve is running.
+    //
+    // acc above comes from the braking geometry alone and knows nothing about
+    // the trajectory: it is 469 deg/s^2, and x3 for the slew boost, 1406.  A
+    // 90 degree switch's smoothstep peaks at 47.  So the motor is allowed to
+    // change speed thirty times faster than anything is asking it to, and at
+    // 1406 deg/s^2 one 20 ms control tick permits a 28 deg/s step — the whole
+    // plateau, between two ticks.
+    //
+    // A FLAT limit was the obvious fix and is the wrong one.  What a smoothstep
+    // demands is 6 x travel / duration^2, and small turns are the greedy ones
+    // because their duration is short: a 5 degree switch needs 333 deg/s^2
+    // where a 90 degree one needs 47.  Any flat number low enough to help the
+    // big turns clips the small ones — reintroducing at the small end exactly
+    // the clipping just removed at the large end.
+    //
+    // So it is derived per switch from that curve, with headroom, and only ever
+    // taken when it is the SMALLER of the two.  It cannot clip: it is computed
+    // from the very trajectory it is bounding.
+    //
+    // The limit applies to the braking curve as well as the stepper, because
+    // v_sqrt assumes deceleration == acc; hold the motor to less than the curve
+    // assumed and it overshoots the target instead of stopping on it.  That is
+    // also where the benefit shows up — a gentler acc means braking starts
+    // further out, which is a longer, softer arrival.
+    float dps_axis = (axis == AXIS_PAN) ? _pan_deg_per_step : _tilt_deg_per_step;
+    if (_la_blend_accel > 0.0f && dps_axis > 0.0f) {
+        float acc_limit = _la_blend_accel / dps_axis;      // deg/s^2 -> steps/s^2
+        if (acc > acc_limit) acc = acc_limit;
+    }
+
     float stepper_acc = in_slew ? (acc * LOOK_AT_SLEW_ACCEL_BOOST) : acc;
 
     float v_sqrt = sqrtf(2.0f * acc * abs_err);

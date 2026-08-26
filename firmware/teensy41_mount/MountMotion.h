@@ -134,6 +134,13 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 // deg-per-step becomes known.)
 #define AXIS_MAX_STEPS_S          100000.0f      // TeensyStep4 vMaxMax
 
+// How much more acceleration the motor may use than the blend's own curve
+// demands.  A smoothstep's peak acceleration is 6 x travel / duration^2; the
+// controller is otherwise free to change speed thirty times faster than that,
+// which is what turns its 50 Hz output into a staircase the motor has to slam
+// through.  2.0 leaves the controller room to correct without letting it slam.
+#define LOOK_AT_ACCEL_HEADROOM      2.0f
+
 // How much of that ceiling the blend's own peak is allowed to use.  A
 // smoothstep peaks at 1.5x its average, and if that peak is at the ceiling the
 // controller has nothing left to catch up with — it saturates and the curve is
@@ -419,7 +426,7 @@ public:
     // Dropping the subject cancels any blend with it — otherwise a half-finished
     // ease would still be running when the next subject is chosen.
     void    clearLaSubject()       { _la_subject_id = 0xFF; _la_blend_ms = 0;
-                                     _la_blend_brake = 0.0f; }
+                                     _la_blend_brake = 0.0f; _la_blend_accel = 0.0f; }
     // Look-at mode itself, not merely "a subject id is set".  The subject id
     // persists across a mode change, so it cannot stand in for the mode: a
     // subject selected before look-at was switched off would otherwise still
@@ -538,6 +545,9 @@ private:
     // derived from the blend's own peak rate so the camera can actually follow
     // the curve.  0 when no blend is running.
     float           _la_blend_brake    = 0.0f;
+    // Peak acceleration this switch's curve actually asks for, deg/s^2,
+    // with headroom.  0 = no switch running, so the fixed geometry governs.
+    float           _la_blend_accel    = 0.0f;
 
     // The subject position to aim at RIGHT NOW — the blend evaluated at this
     // instant, or the subject itself when no blend is running.
