@@ -49,13 +49,14 @@ SLOW = float(re.search(r"LOOK_AT_SLEW_BRAKE_FACTOR\s*=\s*([\d.]+)f", drive).grou
 
 # ---- 1. the blend overrides the fixed cap ----------------------------------
 print("1. which cap applies:")
-assert "if (_laBlendActive() && _la_blend_brake > 0.0f) {" in drive, \
+assert "if (_la_blend_ms != 0 && _la_blend_brake > 0.0f) {" in drive, \
     "the fixed slew cap still governs during a blend — the curve gets flattened"
-assert "effective_brake = _la_blend_brake;" in drive, "the blend's cap is not used"
+assert "effective_brake = _la_blend_brake;                  // still blending" in drive, \
+    "the blend's cap is not used while the blend runs"
 assert "in_slew ? LOOK_AT_SLEW_BRAKE_FACTOR : LOOK_AT_BRAKE_FACTOR" in drive, \
     "the fixed caps are gone entirely — a step input has nothing limiting it"
 print("   blend running -> the blend's cap                   OK")
-print("   otherwise     -> the fixed caps, as before         OK")
+print("   no blend      -> the fixed caps, as before         OK")
 
 # ---- 2. it is derived from the curve, with headroom ------------------------
 print("\n2. where the blend's cap comes from:")
@@ -103,6 +104,53 @@ big = 1.5 * 90 / (HI / 1000.0)
 assert big > 1.5 * 40 / (HI / 1000.0), "large turns no longer speed up"
 print(f"   note: past {HI/PER_DEG:.0f}° the blend is capped at {HI:.0f} ms, so")
 print(f"         bigger turns get faster — 90° peaks at {big:.0f} deg/s")
+
+# ---- 4b. and it hands back gradually, not on a cliff -----------------------
+# Capping the blend correctly is only half of it. Reverting to the fixed cap the
+# instant the blend ends was a 62% drop in one control tick, at exactly the
+# moment the setpoint stopped and while the camera was still closing its
+# following error — the same step, moved to the other end of the move.
+print("\n4b. the handover at the end of the blend:")
+drive_all = CPP[CPP.index("void MountMotion::_driveTowardTarget("):]
+drive_all = drive_all[:drive_all.index("\n}\n")]
+assert "u * u * (3.0f - 2.0f * u)" in drive_all, \
+    "the cap no longer ramps on a smoothstep; it steps back to the fixed value"
+assert "LOOK_AT_SLEW_SETTLE_MS" in drive_all, \
+    "the handover is not spread over the settle window"
+assert "_laBlendActive()" not in drive_all, \
+    "the cap is gated on the blend WINDOW again — that reverts it on the instant\n" \
+    "    the blend ends, which is the cliff"
+assert "(int32_t)(now_ms - blend_end) < 0" in drive_all, \
+    "the blend/settle boundary is not compared in a wrap-safe way"
+print("   smoothstepped across the settle window              OK")
+
+# Worst single-tick change in the ALLOWED speed, at the 50 Hz control rate.
+TICK = 20
+def cap_at(ms, blend, fixed, settle):
+    if ms < 0:      return blend
+    if ms >= settle: return fixed
+    u = ms / settle
+    return blend + (fixed - blend) * (u * u * (3 - 2 * u))
+
+SETTLE = define("LOOK_AT_SLEW_SETTLE_MS")
+blend_frac = min((1.5 * 25.6 / (min(max(25.6*PER_DEG, LO), HI)/1000.0) * HEAD) / MAX_DPS, 1.0)
+step_before = abs(blend_frac - SLOW) * MAX_DPS
+step_after  = max(abs(cap_at(t + TICK, blend_frac, SLOW, SETTLE)
+                      - cap_at(t, blend_frac, SLOW, SETTLE)) * MAX_DPS
+                  for t in range(0, int(SETTLE), TICK))
+print(f"   one-tick change: {step_before:.1f} deg/s -> {step_after:.2f} deg/s")
+assert step_after < 2.0, \
+    f"the cap still moves {step_after:.1f} deg/s in a single tick"
+assert step_after < step_before / 10, "the handover is barely gentler than the cliff"
+print("   no cliff left in the allowed speed                  OK")
+
+# It must work in BOTH directions: a very small turn blends slowly enough that
+# its cap sits BELOW the fixed one, and the ramp then goes up.
+tiny = min((1.5 * 1.0 / (LO/1000.0) * HEAD) / MAX_DPS, 1.0)
+assert tiny < SLOW, "a 1 degree turn no longer caps below the fixed slew value"
+up = [cap_at(t, tiny, SLOW, SETTLE) for t in (0, int(SETTLE//2), int(SETTLE))]
+assert up[0] < up[1] < up[2], "the ramp does not rise when the blend cap is lower"
+print("   ramps up as readily as down                         OK")
 
 # ---- 5. it is cleared with the blend ---------------------------------------
 print("\n5. when no blend is running:")

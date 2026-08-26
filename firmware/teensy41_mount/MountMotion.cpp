@@ -2443,11 +2443,39 @@ void MountMotion::_driveTowardTarget(int axis, int32_t target, float max_steps_s
     // saturating against a flat limit and turning it back into a rectangle.
     // The fixed caps still apply everywhere else, where a step input is still
     // possible and there is a lurch to prevent.
-    float effective_brake;
-    if (_laBlendActive() && _la_blend_brake > 0.0f) {
-        effective_brake = _la_blend_brake;
-    } else {
-        effective_brake = in_slew ? LOOK_AT_SLEW_BRAKE_FACTOR : LOOK_AT_BRAKE_FACTOR;
+    float fixed_brake = in_slew ? LOOK_AT_SLEW_BRAKE_FACTOR : LOOK_AT_BRAKE_FACTOR;
+    float effective_brake = fixed_brake;
+
+    // The blend's cap does not simply STOP when the blend does.
+    //
+    // Letting it revert on the instant was a cliff: for a 25 degree switch the
+    // cap went from 0.394 to 0.15 in one tick — 35.5 deg/s to 13.5 — at exactly
+    // the moment the setpoint stopped moving and while the camera was still
+    // running to close its following error.  The camera was clamped from full
+    // speed to a third of it between two control ticks.  One speed, then the
+    // next, with nothing in between: which is what an operator sees as a sharp
+    // ease OUT, and is the same fault as the step it replaced, moved to the
+    // other end of the move.
+    //
+    // So it hands back gradually, on the same smoothstep the aim itself uses,
+    // across the settle window.  By the time the fixed cap is fully in force the
+    // camera has arrived and the cap does not bind, so the handover is invisible
+    // whichever way it goes — and it does go both ways: a very small turn blends
+    // slowly enough that its cap is BELOW the fixed one, and then this ramps up.
+    if (_la_blend_ms != 0 && _la_blend_brake > 0.0f) {
+        uint32_t now_ms    = millis();
+        uint32_t blend_end = _la_blend_start_ms + _la_blend_ms;
+        if ((int32_t)(now_ms - blend_end) < 0) {
+            effective_brake = _la_blend_brake;                  // still blending
+        } else {
+            uint32_t since = now_ms - blend_end;
+            if (since < LOOK_AT_SLEW_SETTLE_MS) {
+                float u = (float)since / (float)LOOK_AT_SLEW_SETTLE_MS;
+                float e = u * u * (3.0f - 2.0f * u);            // smoothstep
+                effective_brake = _la_blend_brake
+                                + (fixed_brake - _la_blend_brake) * e;
+            }
+        }
     }
     float v_max_braking   = max_steps_s * effective_brake;
 
