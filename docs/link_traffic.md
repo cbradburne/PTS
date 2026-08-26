@@ -163,3 +163,28 @@ question they were added for:
 If either is ever needed again, the shape to copy is this: report what the
 firmware DECIDED, not just what it did. Position samples alone could not
 distinguish an axis overshooting from an axis being commanded somewhere new.
+
+- **`LOOK_AT_DIAGNOSTIC`** (PC app only) — asked each tracking mount for its
+  position at 5 Hz and logged pan and tilt with the velocity between samples,
+  a summary of the whole switch on one line, and whether the tilt reversed.
+  It is what settled the subject-switch work of 2026-08-26 after three fixes
+  reasoned from the firmware had changed nothing an operator could see. It
+  found: the plateau was the axis pinned at TeensyStep4's `vMaxMax`; the ease
+  out was 15–19 ms, less than one control tick; and the tilt arced on every
+  switch. Removed once the motion was right.
+
+  It lives complete at **`bd1604f`**, with its own test:
+
+  ```
+  git show bd1604f:tools/test_look_at_motion_probe.py
+  git show bd1604f:pc_app/comms/mount_manager.py
+  ```
+
+  Two things in it cost a measurement round each and are worth keeping if it
+  comes back. Time each sample by when the REQUEST went out, never by when the
+  reply arrived — transport jitter lands entirely in dt while the position
+  delta stays honest, and every "spike" in the early logs was that, not the
+  mount. And score the motion against the curve it is meant to be following
+  (`6 × travel / duration²`) rather than reporting where the biggest velocity
+  step fell: a smoothstep peaks in acceleration at both ends, so once the shape
+  is right, "biggest step at the ease out" is the curve, not a fault.

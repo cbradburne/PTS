@@ -57,7 +57,6 @@ from .protocol import (
 )
 
 
-
 from .bridge import Bridge
 
 log = logging.getLogger(__name__)
@@ -73,27 +72,6 @@ HEARTBEAT_TIMEOUT_MS   = 3000   # mark disconnected after this
 # wedge only surfacing the next time the user presses a button.
 IDLE_PROBE_INTERVAL_S  = 3.0
 
-# TEMPORARY — look-at motion diagnostic.
-#
-# Switching subject mid-move reads as abrupt, and two attempts to fix it were
-# reasoned from the firmware rather than measured: the setpoint blend, then the
-# slew-cap timing.  Both were sound about what the code does and neither changed
-# what the operator sees, which is the point at which guessing stops being
-# useful.
-#
-# There is no position data anywhere in the system — CMD_POSITION is answered on
-# request and nothing asks (see docs/link_traffic.md).  This asks, at 5 Hz, ONLY
-# while a mount is actually in a look-at state, and logs pan/tilt with the
-# angular velocity between samples.  Velocity is the thing being complained
-# about; position alone would need reading off with a ruler.
-#
-# Cost: 5 requests + 5 replies per second, for the few seconds a switch lasts,
-# on a link that is otherwise one packet per 5 s at rest.  Bounded, and only
-# while the thing under study is happening.
-#
-# REMOVE once the profile has been read.  Set False to silence without deleting.
-LOOK_AT_DIAGNOSTIC     = True
-LOOK_AT_POLL_MS        = 200
 
 # Camera-parameter logging: how many changes one parameter may report in a
 # minute before it is silenced as a runaway.  Generous, because a setting
@@ -288,21 +266,6 @@ class MountManager(QObject):
         self._hb_timer.setInterval(HEARTBEAT_INTERVAL_MS)
         self._hb_timer.timeout.connect(self._heartbeat)
         self._hb_timer.start()
-
-        # TEMPORARY — see LOOK_AT_DIAGNOSTIC.  Separate from the heartbeat
-        # because 1 Hz cannot resolve a 1.6 s move, which is the whole reason
-        # the previous position logging could not answer this.
-        if LOOK_AT_DIAGNOSTIC:
-            self._la_poll_timer = QTimer(self)
-            self._la_poll_timer.setInterval(LOOK_AT_POLL_MS)
-            self._la_poll_timer.timeout.connect(self._poll_look_at_positions)
-            self._la_poll_timer.start()
-        self._la_last: dict[int, tuple] = {}   # mount -> (t, pan, tilt)
-        self._la_prev_v: dict[int, tuple] = {}  # mount -> (v_pan, v_tilt)
-        self._la_series: dict[int, list] = {}   # mount -> [(v_pan, v_tilt), ...]
-        self._la_moving: dict[int, bool] = {}
-        self._la_quiet:  dict[int, int]  = {}
-        self._la_req_t:  dict[int, float] = {}   # mount -> when we asked
 
     # ------------------------------------------------------------------
     # Public — read state
@@ -1269,7 +1232,6 @@ class MountManager(QObject):
                 prev = st.position
                 st.position = pos
                 self.position_updated.emit(mid, pos)
-                self._log_look_at_sample(mid, st, pos)
             except Exception as e:
                 log.warning(f"Bad POSITION from mount {mid}: {e}")
 
@@ -1315,202 +1277,6 @@ class MountManager(QObject):
     # ------------------------------------------------------------------
     # Heartbeat
     # ------------------------------------------------------------------
-
-    # TEMPORARY — see LOOK_AT_DIAGNOSTIC.
-    _LOOK_AT_STATES = (MountState.LOOK_AT_MOVE, MountState.LOOK_AT_PRE_AIM)
-
-    def _log_look_at_sample(self, mid: int, st, pos) -> None:
-        """TEMPORARY — see LOOK_AT_DIAGNOSTIC.  One line per sample, with the
-        angular velocity since the last one and the CHANGE in that velocity.
-
-        Velocity rather than position because abruptness IS velocity: a
-        position series would have to be differenced by hand to say anything
-        about it, and the question is where the rate changes, not where the
-        camera is.
-
-        And the change-in-velocity column because "one speed, then the next" is
-        a statement about that column specifically.  Last time the shape had to
-        be read off a screen of position lines by eye, which is how two rounds
-        of reasoning got spent on a cap that turns out not to bind during the
-        ease out at all.  A step should be a number in the log, not an
-        impression.
-        """
-        if not LOOK_AT_DIAGNOSTIC or st.state not in self._LOOK_AT_STATES:
-            return
-
-        # Time the sample by when the REQUEST went out, not when the reply came
-        # back.  The mount samples its position when it processes the request;
-        # everything after that is transport, and transport jitter lands
-        # entirely in dt while the position delta stays honest.  A reply 100 ms
-        # late reads as 68% of the true speed, and the one behind it as 190%.
-        #
-        # That is what produced every "spike" in the 2026-08-26 logs, and the
-        # first attempt at fixing it — dropping short samples, holding the
-        # anchor — only moved the error: the next sample then measured 420 ms
-        # of movement against a 310 ms arrival gap and read 30% high instead.
-        # All four spikes in the 18:50 log sat at dt 0.31 against a 0.21
-        # nominal, which is that fix's own signature, not the mount's motion.
-        #
-        # The poll timer is the one clock in this path with no jitter in it, so
-        # the request times ARE the sample times, and a lost reply shows up as
-        # a longer interval rather than as two wrong velocities.
-        now = self._la_req_t.pop(mid, None)
-        if now is None:
-            return                      # unsolicited or duplicate — not ours to time
-        last = self._la_last.get(mid)
-        if last is None:
-            self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
-            log.warning("LA POS cam%d: tracking — pan %+.2f tilt %+.2f "
-                        "(velocity from the next sample)",
-                        mid, pos.pan_deg, pos.tilt_deg)
-            return
-        dt = now - last[0]
-        if dt <= 0.0:
-            return
-
-        self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
-        v_pan  = (pos.pan_deg  - last[1]) / dt
-        v_tilt = (pos.tilt_deg - last[2]) / dt
-
-        # Change since the previous sample, per axis.  This is the ease.
-        prev_v = self._la_prev_v.get(mid)
-        self._la_prev_v[mid] = (v_pan, v_tilt)
-        if prev_v is None:
-            d_pan = d_tilt = 0.0
-        else:
-            d_pan, d_tilt = v_pan - prev_v[0], v_tilt - prev_v[1]
-
-        log.warning("LA POS cam%d %+.2fs  pan %+7.2f (%+7.1f deg/s, d%+6.1f)  "
-                    "tilt %+7.2f (%+7.1f deg/s, d%+6.1f)",
-                    mid, dt, pos.pan_deg, v_pan, d_pan,
-                    pos.tilt_deg, v_tilt, d_tilt)
-
-        self._la_series.setdefault(mid, []).append((dt, v_pan, v_tilt))
-        self._la_check_settled(mid, v_pan, v_tilt)
-
-    # Speeds that count as "moving" and as "stopped", for deciding when one
-    # switch has finished.  A subject switch does not change the mount's STATE
-    # — it stays in LOOK_AT_MOVE throughout — so the end of the move has to be
-    # detected from the motion itself.
-    #
-    # These were 2.0 and 0.5 and no summary ever printed.  The assumption was
-    # that a move ends with the camera stationary; on this rig it does not.
-    # The mount goes on tracking the subject through the slider move at 1–5
-    # deg/s indefinitely, so the speed never fell below 0.5 and the summary sat
-    # waiting for a stillness that was never coming.
-    #
-    # Set from the 2026-08-26 log: baseline tracking 1–5 deg/s, switches 45.
-    # There is a wide gap between those and nothing lives in it.
-    _LA_MOVING_DPS  = 15.0
-    _LA_STOPPED_DPS = 5.0
-
-    def _la_check_settled(self, mid: int, v_pan: float, v_tilt: float) -> None:
-        """TEMPORARY — see LOOK_AT_DIAGNOSTIC.  Print the whole move on one
-        line once it has stopped.
-
-        The rectangle was only obvious as a series; the same will be true of
-        whatever shape the ease out really has.  One line that can be pasted
-        back beats a screenful that has to be scrolled and described.
-        """
-        speed = max(abs(v_pan), abs(v_tilt))
-        if speed > self._LA_MOVING_DPS:
-            self._la_moving[mid] = True
-            self._la_quiet[mid]  = 0
-            return
-        if not self._la_moving.get(mid):
-            # Never got going — drifting tracking, not a switch.  Don't let
-            # idle samples accumulate into a meaningless summary.
-            self._la_series[mid] = self._la_series.get(mid, [])[-1:]
-            return
-        if speed > self._LA_STOPPED_DPS:
-            return
-        self._la_quiet[mid] = self._la_quiet.get(mid, 0) + 1
-        if self._la_quiet[mid] < 2:
-            return
-
-        series = self._la_series.get(mid, [])
-        self._la_moving[mid] = False
-        self._la_quiet[mid]  = 0
-        self._la_series[mid] = []
-        if len(series) < 3:
-            return
-
-        dts   = [d for d, _, _ in series]
-        pans  = [v for _, v, _ in series]
-        tilts = [v for _, _, v in series]
-
-        # Is the motion steeper than the curve it is meant to be following?
-        #
-        # This used to print WHERE the biggest velocity step fell, which was
-        # the right question when the shape was a rectangle with a cliff on the
-        # end.  It is the wrong question now: a smoothstep's acceleration peaks
-        # at BOTH ends by definition, so once the shape is correct the biggest
-        # step lands near an end every time and reporting it reads as a fault
-        # that is not there.
-        #
-        # So compare it to what a smoothstep of this size and length actually
-        # demands, 6 x travel / duration^2.  Around 1.0 means the camera is
-        # following the curve; well above it means something is still stepping.
-        # Measure the MOVE, not the settling behind it.  The two quiet samples
-        # that triggered this summary add most of half a second of span and
-        # almost no travel, which flatters the curve estimate and makes a
-        # perfectly good bell look 30% too steep.
-        move = list(series)
-        while move and abs(move[-1][1]) < self._LA_STOPPED_DPS:
-            move.pop()
-        if len(move) < 3:
-            move = list(series)
-        span   = sum(d for d, _, _ in move)
-        travel = sum(abs(v) * d for d, v, _ in move)
-        curve  = (6.0 * travel / (span * span)) if span > 0 else 0.0
-        worst  = max((abs(pans[i] - pans[i - 1]) / dts[i]
-                      for i in range(1, len(pans)) if dts[i] > 0), default=0.0)
-
-        # Tilt should move one way through a switch.  A reversal means the aim
-        # is arcing — the signature of blending position instead of angle.
-        core = [v for _, p, v in series if abs(p) > self._LA_STOPPED_DPS]
-        revs = sum(1 for i in range(1, len(core))
-                   if core[i - 1] * core[i] < 0 and abs(core[i]) > 0.4)
-
-        log.warning("LA MOVE cam%d pan:  %s", mid,
-                    " ".join(f"{v:+.1f}" for v in pans))
-        log.warning("LA MOVE cam%d tilt: %s", mid,
-                    " ".join(f"{v:+.1f}" for v in tilts))
-        log.warning("LA MOVE cam%d %.1f deg in %.2fs, peak %.1f deg/s, "
-                    "steepest %.0f deg/s2 vs %.0f the curve asks (%.2fx), "
-                    "tilt reversals %d%s",
-                    mid, travel, span, max(abs(v) for v in pans),
-                    worst, curve, (worst / curve) if curve > 0 else 0.0, revs,
-                    "" if revs == 0 else "  <-- the aim is arcing")
-
-    def _poll_look_at_positions(self) -> None:
-        """Ask for a position, 5 Hz, only from a mount that is tracking.
-
-        The mount answers one CMD_POSITION per request — the unsolicited stream
-        was removed — so the sample rate is exactly the request rate, and the
-        traffic stops the moment the look-at move does.
-        """
-        if not LOOK_AT_DIAGNOSTIC:
-            return
-        for mid, st in self._states.items():
-            if not st.connected:
-                continue
-            if st.state in self._LOOK_AT_STATES:
-                # Stamp the request, not the reply.  See _log_look_at_sample.
-                # Overwriting a pending stamp is correct: it means the previous
-                # request went unanswered, and the next reply is then timed
-                # from this one, so the gap is measured rather than guessed.
-                self._la_req_t[mid] = time.monotonic()
-                self._send(pkt_get_position(mid))
-            elif mid in self._la_last:
-                # Move over — drop the anchor so the next one starts clean
-                # rather than reporting a velocity across the gap between them.
-                del self._la_last[mid]
-                self._la_prev_v.pop(mid, None)
-                self._la_series.pop(mid, None)
-                self._la_moving.pop(mid, None)
-                self._la_quiet.pop(mid, None)
-                self._la_req_t.pop(mid, None)
 
     def _heartbeat(self) -> None:
         if not self._bridge.connected:
