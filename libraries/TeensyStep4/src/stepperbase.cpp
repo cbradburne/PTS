@@ -8,6 +8,27 @@
 
 namespace TS4
 {
+    // STEP pulse width, microseconds.
+    //
+    // Was 8, which is enormous — a TMC2209 needs about 100 ns of STEP high
+    // time.  The cost is not the pulse itself, it is what the pulse leaves
+    // behind.  At the top rate this library allows (vMaxMax = 100,000 steps/s)
+    // the period is 10 µs, so an 8.11 µs pulse left 1.89 µs of LOW time, and
+    // that 1.89 µs is the entire budget for everything the step ISR does: a
+    // sqrtf, an updateFrequency division and doStep(), with up to three other
+    // motors' ISRs competing for the same core.  The STEP line was high 81% of
+    // the time.
+    //
+    // Anything that overran the window cost a step, audibly, and with no
+    // encoder on these axes nothing afterwards knows the mount's idea of its
+    // own position has moved.  The delayMicroseconds(5) in rotISR() on a
+    // direction change is 2.6x the whole window by itself.
+    //
+    // 1 µs is still 10x what the driver needs and leaves 8.89 µs of slack at
+    // the same step rate — 4.7x more — without slowing any axis down.  It
+    // helps every axis at every speed, not just the one that exposed it.
+    static constexpr float STEP_PULSE_US = 1.0f;
+
     StepperBase::StepperBase(int _stepPin, int _dirPin)
         : s(0), v(0), v_sqr(0), stepPin(_stepPin), dirPin(_dirPin),
           stpTimer(nullptr)   // must be explicit: new startRotate() guards on (stpTimer == nullptr)
@@ -55,7 +76,7 @@ namespace TS4
         if (stpTimer == nullptr) {
             stpTimer = TimerFactory::makeTimer();
             if (stpTimer != nullptr) {
-                stpTimer->setPulseParams(8, stepPin);
+                stpTimer->setPulseParams(STEP_PULSE_US, stepPin);
                 stpTimer->attachCallbacks([this] { rotISR(); }, [this] { resetISR(); });
                 v_sqr = vDir * 200 * 200;
                 mode = mode_t::rotate;
@@ -77,7 +98,7 @@ namespace TS4
 
         dir = signum(_s_tgt - pos);
         digitalWriteFast(dirPin, dir > 0 ? HIGH : LOW);
-        delayMicroseconds(5);
+        delayMicroseconds(DIR_SETTLE_US);
 
         twoA = 2 * a;
         // v_sqr      = (int64_t) v * v;
@@ -109,7 +130,7 @@ namespace TS4
             stpTimer = TimerFactory::makeTimer();
             if (stpTimer != nullptr) {
                 stpTimer->attachCallbacks([this] { stepISR(); }, [this] { resetISR(); });
-                stpTimer->setPulseParams(8, stepPin);
+                stpTimer->setPulseParams(STEP_PULSE_US, stepPin);
                 isMoving = true;
                 v_sqr    = 200 * 200;
                 mode     = mode_t::target;

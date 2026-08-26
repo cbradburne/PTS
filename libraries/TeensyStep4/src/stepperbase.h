@@ -149,6 +149,17 @@ namespace TS4
         //}
     }
 
+    // DIR-to-STEP setup time, microseconds.
+    //
+    // Was 5.  A TMC2209 needs about 20 ns, so this is 250x the requirement —
+    // and it is spent inside the step ISR with all interrupts blocked.  See
+    // STEP_PULSE_US in stepperbase.cpp: at the top step rate the ISR's whole
+    // budget between one pulse falling and the next rising is 8.89 µs, and a
+    // 5 µs busy-wait is 56% of it in one go.
+    //
+    // 1 µs is still 50x what the driver asks for and costs 11% instead.
+    static constexpr unsigned DIR_SETTLE_US = 1;
+
     void StepperBase::rotISR() {
         if (v_tgt == 0) {
             // Full cleanup inline.  returnTimer() only sets isFree=true —
@@ -185,7 +196,7 @@ namespace TS4
             if (new_dir != dir) {
                 dir = new_dir;
                 digitalWriteFast(dirPin, dir > 0 ? HIGH : LOW);
-                delayMicroseconds(5);
+                delayMicroseconds(DIR_SETTLE_US);
             }
 
             v_abs = sqrtf(std::abs(v_sqr));
@@ -236,7 +247,7 @@ namespace TS4
         //         v_sqr += vDir * twoA;
 
         //         digitalWriteFast(dirPin, signum(v_sqr) > 0 ? HIGH : LOW);
-        //         delayMicroseconds(5);
+        //         delayMicroseconds(DIR_SETTLE_US);
 
         //         v_abs = sqrtf(std::abs(v_sqr));
         //         stpTimer->updateFrequency(v_abs);

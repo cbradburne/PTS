@@ -52,8 +52,9 @@ def define(name, text=HDR):
 # ---- 1. the clamp is real, and is what the header claims -------------------
 print("1. the library's ceiling:")
 VMAXMAX = define("AXIS_MAX_STEPS_S")
-lib = (pathlib.Path.home() /
-       "Documents/Arduino/libraries/TeensyStep4/src/stepper.h")
+# libraries/, not the installed Arduino copy: build.sh compiles against the
+# vendored one, so that is the only copy whose value reaches the rig.
+lib = REPO / "libraries/TeensyStep4/src/stepper.h"
 if lib.exists():
     src = lib.read_text()
     m = re.search(r"vMaxMax\s*=\s*([\d']+)", src)
@@ -66,7 +67,7 @@ if lib.exists():
         "setMaxSpeed no longer clamps — the premise of this whole file changed"
     print(f"   TeensyStep4 clamps at {actual:,.0f} steps/s, silently    OK")
 else:
-    print("   (TeensyStep4 not installed here — taken from the header)")
+    raise AssertionError("libraries/TeensyStep4 is missing — the build would fail too")
 
 # ---- 2. the controller is told that, not 90 --------------------------------
 print("\n2. what the controller is told:")
