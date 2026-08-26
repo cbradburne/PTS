@@ -41,7 +41,11 @@ def define(name):
 PER_DEG = define("LOOK_AT_BLEND_MS_PER_DEG")
 LO, HI  = define("LOOK_AT_BLEND_MIN_MS"), define("LOOK_AT_BLEND_MAX_MS")
 HEAD    = define("LOOK_AT_BLEND_HEADROOM")
-MAX_DPS = 90.0          # max_pt_deg_s, as startLookAtMove passes it
+MAX_DPS = 100000.0 * (0.9 / (256 * (270 / 36)))   # what the axis can reach:
+# AXIS_MAX_STEPS_S x deg/step = 46.875.  This was 90 -- the value the .ino
+# used to pass -- and 90 is a speed TeensyStep4 clamps away silently, so every
+# number below was being checked against a fiction.  See
+# test_look_at_speed_ceiling.py.
 
 drive = CPP[CPP.index("void MountMotion::_driveTowardTarget("):]
 drive = drive[:drive.index("\n}\n")]
@@ -84,26 +88,45 @@ print(f"   old cap {old:.1f} deg/s  -> measured plateau 12.4, pinned")
 print(f"   new cap {new:.1f} deg/s  -> the curve fits underneath")
 assert old < peak, "the old cap no longer clamps the curve; the fault has moved"
 assert new > peak, "the new cap still clamps the curve — it would stay a rectangle"
-assert abs(old - 13.5) < 0.1, "the old cap is not the 13.5 that was measured"
+assert abs(old - 13.5) < 0.2, \
+    "the slew cap is no longer the 13.5 deg/s the 2026-08-24 plateau matched;\n"\
+    "    the brake FRACTIONS must move whenever max_pt_deg_s does, or the\n"\
+    "    absolute speed they have always meant changes underneath them"
 print("   the measured plateau matches the old cap           OK")
 
 # ---- 4. and it holds across the range --------------------------------------
 print("\n4. across the range of turns:")
-for d in (5, 10, 25.6, 40, 60, 90):
-    m = min(max(d * PER_DEG, LO), HI)
-    p = 1.5 * d / (m / 1000.0)
-    c = min((p * HEAD) / MAX_DPS, 1.0) * MAX_DPS
-    assert c >= p, f"{d}°: cap {c:.1f} below peak {p:.1f}"
-    print(f"   {d:>5}° -> blend {m:>4.0f} ms, peak {p:>5.1f} deg/s, cap {c:>5.1f}")
-print("   the cap is never below the curve                   OK")
+FILL = define("LOOK_AT_BLEND_FILL")
 
-# Beyond the duration ceiling a bigger turn gets FASTER, not longer. That is a
-# real consequence of LOOK_AT_BLEND_MAX_MS and worth knowing before someone
-# wonders why a large switch feels brisk.
-big = 1.5 * 90 / (HI / 1000.0)
-assert big > 1.5 * 40 / (HI / 1000.0), "large turns no longer speed up"
-print(f"   note: past {HI/PER_DEG:.0f}° the blend is capped at {HI:.0f} ms, so")
-print(f"         bigger turns get faster — 90° peaks at {big:.0f} deg/s")
+
+def blend_ms(d):
+    """The duration the firmware actually picks, including the fit under the
+    ceiling. Without the fit this loop checks a rule the code stopped using."""
+    return max(min(max(d * PER_DEG, LO), HI),
+               1.5 * d * 1000.0 / (MAX_DPS * FILL))
+
+
+for d in (5, 10, 25.6, 40, 60, 90, 120):
+    m = blend_ms(d)
+    p = 1.5 * d / (m / 1000)
+    c = min((p * HEAD) / MAX_DPS, 1.0) * MAX_DPS
+    assert c >= p, f"{d}\u00b0: cap {c:.1f} below peak {p:.1f}"
+    assert p <= MAX_DPS, \
+        f"{d}\u00b0 asks {p:.1f} deg/s of an axis that tops out at {MAX_DPS:.1f};\n" \
+        "    the curve is clipped, not slowed, and comes back as a rectangle"
+    print(f"   {d:>5}\u00b0 -> blend {m:>4.0f} ms, peak {p:>5.1f} deg/s, cap {c:>5.1f}")
+print("   the cap is never below the curve                   OK")
+print("   and no turn asks for more than the axis can give   OK")
+
+# Past the MAX_MS ceiling a bigger turn now takes LONGER. It used to get
+# faster, which is precisely how the rectangle came back for large switches:
+# the duration was capped, so the curve's peak rose until it was above what
+# the axis could deliver and got clipped flat.
+big, mid = blend_ms(90), blend_ms(40)
+assert big > mid, "large turns no longer take longer"
+assert 1.5 * 90 / (big / 1000) <= MAX_DPS, "a 90\u00b0 turn still over-asks"
+print(f"   note: past {HI * MAX_DPS * FILL / 1500:.0f}\u00b0 the blend grows with the turn,")
+print(f"         so the peak stays at {1.5 * 90 / (big / 1000):.0f} deg/s instead of climbing")
 
 # ---- 4b. and it hands back gradually, not on a cliff -----------------------
 # Capping the blend correctly is only half of it. Reverting to the fixed cap the

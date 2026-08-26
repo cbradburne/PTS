@@ -109,6 +109,39 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 #define LOOK_AT_BLEND_MAX_MS       2200
 
 // ---------------------------------------------------------------------------
+// What the axis can ACTUALLY do
+// ---------------------------------------------------------------------------
+// TeensyStep4 clamps every setMaxSpeed() to vMaxMax (stepper.h):
+//
+//     vMax = constrain(speed, -vMaxMax, vMaxMax);   // vMaxMax = 100'000
+//
+// It does not fail or report; a larger request silently becomes this.  The
+// look-at controller was being told the axis could do 90 deg/s, which is
+// 192,000 steps/s — a number the library will never issue.
+//
+// Everything downstream was therefore computed against a speed that cannot
+// happen.  Measured on the rig on 2026-08-26, three switches of 72, 92 and 81
+// degrees computed speed caps of 64, 81 and 71 deg/s and every one of them
+// plateaued at 45: no cap had ever bound on a large switch, because all of
+// them sat above the real ceiling.  The motion was flat out until arrival.
+//
+// Worse, the sqrt braking curve derives its deceleration from the same
+// fiction, so the camera held the clamp until it was under a degree from
+// target and then stopped inside 15–19 ms — less than one 20 ms control tick.
+// That is the "one speed, then the next" the operator reported, and no amount
+// of cap tuning could reach it.
+// (LOOK_AT_MAX_DEG_S is defined with the drive geometry below, which is where
+// deg-per-step becomes known.)
+#define AXIS_MAX_STEPS_S          100000.0f      // TeensyStep4 vMaxMax
+
+// How much of that ceiling the blend's own peak is allowed to use.  A
+// smoothstep peaks at 1.5x its average, and if that peak is at the ceiling the
+// controller has nothing left to catch up with — it saturates and the curve is
+// clipped back into the rectangle this is all meant to remove.  0.85 leaves
+// room to follow the shape rather than chase it.
+#define LOOK_AT_BLEND_FILL          0.85f
+
+// ---------------------------------------------------------------------------
 // DRIVE GEOMETRY — change these when the hardware changes, nothing else
 // ---------------------------------------------------------------------------
 // Every ratio in the firmware derives from the numbers in this block.
@@ -158,6 +191,13 @@ constexpr float NOMINAL_TILT_DEG_PER_STEP =
         MOTOR_DEG_PER_STEP_PT / (MICROSTEPS_TILT * GEAR_RATIO_TILT);    // ≈ 0.000468750
 constexpr float NOMINAL_SLIDER_MM_PER_STEP =
         SLIDER_MM_PER_REV / (MICROSTEPS_SLIDER * SLIDER_FULL_STEPS_PER_REV);  // ≈ 0.00625
+
+// The fastest the pan/tilt axes can be driven, as opposed to the fastest they
+// can be ASKED for.  See AXIS_MAX_STEPS_S above: the library clamps silently,
+// so this is the number the look-at controller must be given if any of its
+// speed arithmetic is to mean anything.
+constexpr float LOOK_AT_MAX_DEG_S =
+        AXIS_MAX_STEPS_S * NOMINAL_PAN_DEG_PER_STEP;          // ≈ 46.875 deg/s
 
 // ---------------------------------------------------------------------------
 // Speed preset (per axis group, 4 presets each)

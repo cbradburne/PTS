@@ -1800,7 +1800,11 @@ static void dispatch(const ParsedPacket &pkt) {
                           (long)cur_phys, (long)phys_dest, (long)cur_log, (long)dest_log);
 
             _la_last_direction = (int8_t)direction;   // remember which end we're heading to
-            bool started = mount.startLookAtMove(cur_log, dest_log, preset, 90.0f);
+            // Not 90: the library clamps at LOOK_AT_MAX_DEG_S and asking for
+            // more only makes every cap and braking distance downstream a
+            // fiction.  See AXIS_MAX_STEPS_S in MountMotion.h.
+            bool started = mount.startLookAtMove(cur_log, dest_log, preset,
+                                                 LOOK_AT_MAX_DEG_S);
             if (!started) {
                 Serial.printf("[LookAt] FAILED to start (ref_set=%d limits_set=%d)\n",
                               (int)mount.isRefSet(), (int)mount.hasLimits(AXIS_SLIDER));

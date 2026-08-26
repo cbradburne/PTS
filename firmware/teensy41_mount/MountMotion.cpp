@@ -1943,6 +1943,27 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     if (ms < (float)LOOK_AT_BLEND_MIN_MS) ms = (float)LOOK_AT_BLEND_MIN_MS;
     if (ms > (float)LOOK_AT_BLEND_MAX_MS) ms = (float)LOOK_AT_BLEND_MAX_MS;
 
+    // The ceiling sets a FLOOR on how long the turn takes.
+    //
+    // A smoothstep peaks at 1.5x its average rate.  Ask for a peak the axis
+    // cannot deliver and the curve is not slowed, it is CLIPPED: the camera
+    // saturates at the clamp, runs flat, and stops dead on arrival.  That is
+    // what LOOK_AT_BLEND_MAX_MS was doing to every turn over about 58 degrees
+    // — the 2200 ms ceiling demanded 49–63 deg/s from an axis that gives
+    // 46.9, and all three switches measured on 2026-08-26 came back as
+    // rectangles because of it.
+    //
+    // So a big turn takes LONGER rather than going faster.  It has to: a bell
+    // covers two thirds the ground of a rectangle at the same peak speed, so
+    // keeping the peak means spending the time.  Turns small enough to already
+    // fit are not touched.
+    float ceiling_dps = _la_max_steps_s[0] * _pan_deg_per_step;
+    if (ceiling_dps > 0.0f) {
+        float fit_ms = 1.5f * travel * 1000.0f
+                     / (ceiling_dps * LOOK_AT_BLEND_FILL);
+        if (ms < fit_ms) ms = fit_ms;
+    }
+
     _la_blend_from[0] = from_x;
     _la_blend_from[1] = from_y;
     _la_blend_from[2] = from_z;
@@ -2419,9 +2440,24 @@ void MountMotion::_driveTowardTarget(int axis, int32_t target, float max_steps_s
     //   2. millis() < _la_slew_until_ms — 2 s grace period armed when a new
     //      subject is selected mid-move, keeps motion gentle as error shrinks
     //      into the P-control region.
-    constexpr float LOOK_AT_BRAKE_FACTOR       = 0.25f;
-    constexpr float LOOK_AT_SLEW_BRAKE_FACTOR  = 0.15f;
-    constexpr float LOOK_AT_SLEW_ERR_THRESHOLD = LOOK_AT_KP_STEPS * LOOK_AT_BRAKE_FACTOR;
+    // These are FRACTIONS of max_pt_deg_s, and max_pt_deg_s just halved: the
+    // controller used to be handed 90 deg/s, a speed the library silently
+    // clamps away (see AXIS_MAX_STEPS_S), and is now handed the 46.875 it can
+    // actually reach.  Left at 0.25 and 0.15 the absolute caps would have
+    // halved with it — 22.5 -> 11.7 deg/s for ordinary tracking, which is
+    // below what an 80 mm/s slider needs and would have shown up as the camera
+    // falling behind the rail rather than as anything to do with switching.
+    //
+    // Re-expressed to keep the same deg/s they have always meant:
+    //     0.48  x 46.875 = 22.5 deg/s   (was 0.25 x 90)
+    //     0.288 x 46.875 = 13.5 deg/s   (was 0.15 x 90)
+    constexpr float LOOK_AT_BRAKE_FACTOR       = 0.48f;
+    constexpr float LOOK_AT_SLEW_BRAKE_FACTOR  = 0.288f;
+
+    // 1250 steps, stated outright.  It used to be KP x BRAKE_FACTOR, which
+    // silently rode along with any change to the cap above — the threshold is
+    // a distance and has no reason to move when a speed does.
+    constexpr float LOOK_AT_SLEW_ERR_THRESHOLD = 1250.0f;
 
     // How much faster the motor ramps UP to peak speed compared to the braking
     // curve's deceleration rate.  The braking curve (v_sqrt) is computed from acc
