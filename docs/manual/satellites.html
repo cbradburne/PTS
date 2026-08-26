@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wired hub &amp; satellites — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Wired hub &amp; satellites</h1>
+    <p class="subtitle">Putting an ESP-NOW cell on the end of an Ethernet cable,
+    for mounts too far away to hear the hub.</p>
+
+    <p>ESP-NOW is short-range radio. In one room with five mounts it is ideal — no
+    infrastructure, no association, low latency. Spread the same five across a
+    venue and the far one starts to struggle: a mount 50&nbsp;m from the hub sat at
+    <strong>−85&nbsp;dBm</strong> and spent a week dropping out. A satellite in the
+    same room as that mount put it at <strong>−40</strong>.</p>
+
+    <p>A <strong>satellite</strong> is that fix. It is the same Waveshare
+    ESP32-S3-ETH board as the wired hub, running near the mount, relaying its
+    traffic back over Ethernet:</p>
+
+    <div style="border:1px solid var(--border);border-radius:10px;background:var(--bg2);padding:8px;margin:20px 0;overflow-x:auto">
+      <svg viewBox="0 0 760 190" width="100%" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+        <defs>
+          <marker id="sa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="#4f9ce8"/>
+          </marker>
+        </defs>
+        <rect x="30" y="30" width="120" height="44" rx="8" fill="#1565C0" opacity=".85"/>
+        <text x="90" y="57" fill="#fff" font-size="13" text-anchor="middle">near mount</text>
+        <rect x="30" y="110" width="120" height="44" rx="8" fill="#1565C0" opacity=".55"/>
+        <text x="90" y="137" fill="#fff" font-size="13" text-anchor="middle">distant mount</text>
+
+        <rect x="250" y="110" width="130" height="44" rx="8" fill="#4f6b8f"/>
+        <text x="315" y="131" fill="#fff" font-size="12.5" text-anchor="middle">satellite</text>
+        <text x="315" y="147" fill="#cfe2f7" font-size="10.5" text-anchor="middle">"PTS-Foyer"</text>
+
+        <rect x="470" y="66" width="140" height="58" rx="8" fill="#2b7a4b"/>
+        <text x="540" y="90" fill="#fff" font-size="13" text-anchor="middle">wired hub</text>
+        <text x="540" y="107" fill="#cfe2f7" font-size="10.5" text-anchor="middle">pts-hub.local</text>
+
+        <rect x="655" y="66" width="80" height="58" rx="8" fill="#4f6b8f" opacity=".6"/>
+        <text x="695" y="90" fill="#fff" font-size="11.5" text-anchor="middle">PC, web,</text>
+        <text x="695" y="106" fill="#fff" font-size="11.5" text-anchor="middle">console</text>
+
+        <g stroke="#4f9ce8" stroke-width="2" fill="none">
+          <path d="M 155 52 L 465 84" marker-end="url(#sa)"/>
+          <path d="M 155 132 L 245 132" marker-end="url(#sa)"/>
+          <path d="M 385 128 L 465 106" marker-end="url(#sa)"/>
+          <path d="M 615 95 L 650 95" marker-end="url(#sa)"/>
+        </g>
+        <text x="300" y="58" fill="#8fb3dd" font-size="11">ESP-NOW, direct</text>
+        <text x="175" y="122" fill="#8fb3dd" font-size="11">ESP-NOW</text>
+        <text x="393" y="108" fill="#7fbf72" font-size="11">Ethernet</text>
+      </svg>
+    </div>
+
+    <p>Nothing else in the system changes. A satellite-attached mount pairs the
+    same way, appears in the same place, and behaves identically to one the hub
+    hears directly — conflicts and all.</p>
+
+    <h2>Addressing</h2>
+    <p>The hub and every satellite take their wired address from
+    <strong>DHCP</strong>. Each prints the address it was given at boot, next to
+    its Ethernet MAC, so there is nothing to configure per unit.</p>
+
+    <p>Satellites find the hub by name — <code>pts-hub.local</code>, resolved by
+    mDNS multicast rather than by asking a server — so a lease change on either
+    end does not need anyone to go and edit anything.</p>
+
+    <div class="tip"><b>If the network only serves registered MACs</b> There is a
+    chicken-and-egg: you need the lease to find the board, and the board to find
+    its MAC. A static address can be pinned in the firmware to break it, but that
+    leaves a second place the network is configured — so register the MAC and go
+    back to DHCP once the board is on the list.</div>
+
+    <h2>Naming a satellite</h2>
+    <p>A satellite raises its own WiFi access point called
+    <strong>PTS-&lt;name&gt;</strong>, and that name is the <em>only</em> thing on
+    screen when someone is choosing which cell a mount should join. Name it after
+    the room:</p>
+
+    <pre><code>SAT_NAME="Concert_Hall" tools/build.sh flash sat</code></pre>
+
+    <p>Maximum 12 characters; use <code>_</code> for spaces. An over-long name
+    fails the build rather than being quietly cut short once the unit is up a
+    pole. Unnamed, a satellite calls itself <code>PTS-Sat-A3F2</code> from its own
+    MAC — unique, so two never collide in a scan list, and honest about not having
+    been named yet.</p>
+
+    <div class="tip"><b>"Foyer" beats any serial number</b> The person picking a
+    satellite is standing next to the mount, looking at a list. A room name tells
+    them which entry is the one in the room with them; an identifier does not.</div>
+
+    <h2>How a mount picks its satellite</h2>
+    <p>The mount chooses, not the hub. Each satellite's access point appears in the
+    mount's normal setup scan alongside the hub's, and the mount joins the
+    strongest one it recognises. Follow the usual
+    <a href="pairing.html">pairing</a> procedure — the satellite simply serves
+    whoever turns up.</p>
+
+    <p>The hub learns the route by seeing which satellite a mount's traffic arrives
+    on. Nothing is configured, nothing has to be kept in step by hand, and a mount
+    moved to a different cell takes its route with it.</p>
+
+    <div class="note"><b>Signal strength means something different here</b> The
+    RSSI reported for a satellite-attached mount is its signal <em>at the
+    satellite</em>, not at the hub — which is the number worth having, because it
+    says whether that mount is well placed for the cell serving it. A mount at
+    −40&nbsp;dBm through a satellite is healthy no matter how far the hub is.</div>
+
+    <p>Up to <strong>six satellites</strong> can be connected at once. Each raises
+    its own access point on its own channel, so neighbouring cells need not share
+    one and a distant mount stops competing for airtime with the mounts near the
+    hub.</p>
+
+    <h2>What a satellite does not do</h2>
+    <p>It is deliberately close to a dumb pipe. It reads exactly one field — which
+    mount a message is for — and never looks at a payload. Everything else stays
+    in the hub.</p>
+
+    <p>That is why a satellite needs no firmware update when the protocol grows,
+    and why exactly one device ever transmits to a given mount, so there is no
+    duplicate-command handling to go wrong.</p>
+
+    <div class="note"><b>The hub's own WiFi is unchanged</b> Adding satellites
+    changes nothing for controllers. The PC app, phones and the console still reach
+    the hub at <code>192.168.4.1</code> on its own access point — that is the hub's
+    WiFi, not its wired address, and it works whatever the wire is doing.</div>
+
+    <p>Next: <a href="pairing.html">Pairing &amp; identity</a>, or the
+    <a href="troubleshooting.html">troubleshooting</a> page for health telemetry.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>
