@@ -79,6 +79,7 @@ print("\n3. driven directly:")
 mm = MountManager.__new__(MountManager)
 mm._la_last = {}
 mm._la_prev_v, mm._la_series, mm._la_moving, mm._la_quiet = {}, {}, {}, {}
+mm._la_req_t = {}
 sent: list[int] = []
 mm._send = lambda pkt: sent.append(1)
 
@@ -114,9 +115,11 @@ mm._la_prev_v[5] = (0.0, 0.0)
 mm._la_series[5] = [(1.0, 1.0)]
 mm._la_moving[5] = True
 mm._la_quiet[5]  = 1
+mm._la_req_t[5]  = 0.0
 mm._states = {5: St(MountState.IDLE)}
 mm._poll_look_at_positions()
-for name in ("_la_last", "_la_prev_v", "_la_series", "_la_moving", "_la_quiet"):
+for name in ("_la_last", "_la_prev_v", "_la_series", "_la_moving",
+             "_la_quiet", "_la_req_t"):
     assert 5 not in getattr(mm, name), f"{name} survives the end of a move"
 print("   every per-mount dict cleared, without raising            OK")
 
@@ -166,22 +169,44 @@ assert not summarise([1.5, 2.1, 2.8, 3.2, 4.7, 1.1, 2.2, 3.1]), \
     "ordinary tracking is summarised as a move; the log fills with non-moves"
 print("   tracking at 1-5 deg/s -> silent                          OK")
 
-# ---- 6. the bunched-reply artifact ------------------------------------------
-# Every switch in the 2026-08-26 log carried one spike to double speed, and
-# every one had dt 0.10 against a 0.21 nominal: two replies landing together,
-# not motion. A fake 45 deg/s step is exactly the shape being hunted.
-print("\n5. bunched replies:")
+# ---- 6. the sample is timed by the request, not the reply ------------------
+# Arrival time is not sample time. The mount reads its position when it
+# processes the request; everything after is transport, and transport jitter
+# lands entirely in dt while the position delta stays honest. A reply 100 ms
+# late reads 68% of true speed and the one behind it 190%.
+#
+# The first attempt at this dropped short samples and held the anchor, which
+# only relocated the error: the next sample measured 420 ms of movement against
+# a 310 ms gap. All four spikes in the 2026-08-26 18:50 log sat at dt 0.31
+# against a 0.21 nominal -- that fix's signature, not the mount's motion.
+print("\n5. how a sample is timed:")
 log_src = MM[MM.index("def _log_look_at_sample"):]
 log_src = log_src[:log_src.index("\n    # Speeds that count")]
-assert "LOOK_AT_POLL_MS / 1000.0) * 0.6" in log_src, \
-    "a sample timed over a fraction of the poll interval is still logged, and\n" \
-    "    it reads as a spike to double speed"
-anchor = log_src.index("self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)",
-                       log_src.index("dt = now - last[0]"))
-assert log_src.index("if dt < (LOOK_AT_POLL_MS") < anchor, \
-    "the anchor is advanced before the short sample is rejected, so the NEXT\n" \
-    "    sample measures from it too and the artifact survives anyway"
-print("   short sample dropped, anchor held for the next one       OK")
+assert "self._la_req_t.pop(mid, None)" in log_src, \
+    "the sample is timed by arrival again; link jitter goes straight into the\n" \
+    "    velocity and reads as spikes that were never real motion"
+assert "time.monotonic()" not in log_src, \
+    "arrival time is still being taken inside the logger"
+
+poll_src = MM[MM.index("def _poll_look_at_positions"):]
+poll_src = poll_src[:poll_src.index("\n    def ", 1)]
+assert poll_src.index("self._la_req_t[mid] = time.monotonic()") \
+     < poll_src.index("self._send(pkt_get_position(mid))"), \
+    "the request is stamped after it is sent, which puts the send back in dt"
+print("   timed from the request, where the clock has no jitter    OK")
+
+# A reply with no outstanding request must not be timed at all, or a duplicate
+# would be differenced against whatever anchor happened to be lying around.
+assert "if now is None:" in log_src, \
+    "an unsolicited or duplicate POSITION is still given a velocity"
+print("   an unmatched reply is ignored rather than guessed        OK")
+
+# The old drop-short-samples heuristic must be gone: it is what produced the
+# dt 0.31 artifact, and leaving it in would fight the request timestamps.
+assert "* 0.6" not in log_src, \
+    "the short-sample drop is back; with request timestamps it is not only\n" \
+    "    unnecessary but is itself what skewed the sample after each drop"
+print("   the drop-short heuristic that caused it is gone          OK")
 
 # ---- 7. one flag away from silence -----------------------------------------
 print("\n6. removing it:")

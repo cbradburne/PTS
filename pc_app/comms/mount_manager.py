@@ -302,6 +302,7 @@ class MountManager(QObject):
         self._la_series: dict[int, list] = {}   # mount -> [(v_pan, v_tilt), ...]
         self._la_moving: dict[int, bool] = {}
         self._la_quiet:  dict[int, int]  = {}
+        self._la_req_t:  dict[int, float] = {}   # mount -> when we asked
 
     # ------------------------------------------------------------------
     # Public — read state
@@ -1336,7 +1337,26 @@ class MountManager(QObject):
         """
         if not LOOK_AT_DIAGNOSTIC or st.state not in self._LOOK_AT_STATES:
             return
-        now = time.monotonic()
+
+        # Time the sample by when the REQUEST went out, not when the reply came
+        # back.  The mount samples its position when it processes the request;
+        # everything after that is transport, and transport jitter lands
+        # entirely in dt while the position delta stays honest.  A reply 100 ms
+        # late reads as 68% of the true speed, and the one behind it as 190%.
+        #
+        # That is what produced every "spike" in the 2026-08-26 logs, and the
+        # first attempt at fixing it — dropping short samples, holding the
+        # anchor — only moved the error: the next sample then measured 420 ms
+        # of movement against a 310 ms arrival gap and read 30% high instead.
+        # All four spikes in the 18:50 log sat at dt 0.31 against a 0.21
+        # nominal, which is that fix's own signature, not the mount's motion.
+        #
+        # The poll timer is the one clock in this path with no jitter in it, so
+        # the request times ARE the sample times, and a lost reply shows up as
+        # a longer interval rather than as two wrong velocities.
+        now = self._la_req_t.pop(mid, None)
+        if now is None:
+            return                      # unsolicited or duplicate — not ours to time
         last = self._la_last.get(mid)
         if last is None:
             self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
@@ -1348,20 +1368,6 @@ class MountManager(QObject):
         if dt <= 0.0:
             return
 
-        # Replies arrive bunched when the link stutters: a delayed one and the
-        # one behind it land together, so the second is TIMED over a fraction
-        # of the poll interval while CARRYING a whole interval of movement.
-        # That reads as a spike to double speed for exactly one sample.
-        #
-        # In the 2026-08-26 log every switch had one — +88, -92, +66 against
-        # plateaus of 45 — and every one of them had dt 0.10 against a 0.21
-        # nominal. None was real motion, and a fake 45 deg/s step is precisely
-        # the shape being hunted, so it cannot be left in.
-        #
-        # Hold the anchor rather than logging it: the next sample then measures
-        # across the whole span and comes out right.
-        if dt < (LOOK_AT_POLL_MS / 1000.0) * 0.6:
-            return
         self._la_last[mid] = (now, pos.pan_deg, pos.tilt_deg)
         v_pan  = (pos.pan_deg  - last[1]) / dt
         v_tilt = (pos.tilt_deg - last[2]) / dt
@@ -1458,6 +1464,11 @@ class MountManager(QObject):
             if not st.connected:
                 continue
             if st.state in self._LOOK_AT_STATES:
+                # Stamp the request, not the reply.  See _log_look_at_sample.
+                # Overwriting a pending stamp is correct: it means the previous
+                # request went unanswered, and the next reply is then timed
+                # from this one, so the gap is measured rather than guessed.
+                self._la_req_t[mid] = time.monotonic()
                 self._send(pkt_get_position(mid))
             elif mid in self._la_last:
                 # Move over — drop the anchor so the next one starts clean
@@ -1467,6 +1478,7 @@ class MountManager(QObject):
                 self._la_series.pop(mid, None)
                 self._la_moving.pop(mid, None)
                 self._la_quiet.pop(mid, None)
+                self._la_req_t.pop(mid, None)
 
     def _heartbeat(self) -> None:
         if not self._bridge.connected:
