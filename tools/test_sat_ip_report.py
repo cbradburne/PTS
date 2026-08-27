@@ -100,7 +100,7 @@ class _Grab(logging.Handler):
     def emit(self, r): self.lines.append(r.getMessage())
 
 mm = _mm.MountManager.__new__(_mm.MountManager)
-mm._sat_table = {}
+mm._sat_table = None
 grab = _Grab()
 _mm.log.addHandler(grab)
 # The line is log.INFO, and the module logger inherits WARNING from an
@@ -140,6 +140,31 @@ assert "SAT 3" in lines[3], \
 assert "none connected" in lines[4], \
     "the satellites going away is indistinguishable from nothing having changed"
 print("   unknown address, unnamed slot and 'none' all covered   OK")
+
+# ---- 5. it says something at startup, even when there is nothing to say ----
+# Someone reading the log to FIND a satellite has to be able to tell "this hub
+# has none" from "the hub is too old to report", "the app never asked" and
+# "this is broken". An absent line cannot distinguish any of those.
+print("\n5. an empty table at startup:")
+fresh = _mm.MountManager.__new__(_mm.MountManager)
+fresh._sat_table = None
+grab2 = _Grab(); _mm.log.addHandler(grab2); _mm.log.setLevel(logging.INFO)
+try:
+    fresh._log_satellites({}, {})       # first report — must speak
+    fresh._log_satellites({}, {})       # unchanged — must not
+finally:
+    _mm.log.removeHandler(grab2)
+    _mm.log.setLevel(_prev_level)
+empty = [l for l in grab2.lines if l.startswith("SATELLITES")]
+assert empty == ["SATELLITES: none connected"], \
+    f"a hub with no satellites reports {empty!r} at startup; it must say so once\n" \
+    "    and then stay quiet, or silence gets read as a fault"
+print("   says 'none connected' once, then stays quiet          OK")
+
+assert "self._sat_table: dict | None = None" in MM, \
+    "the table no longer starts as None, so an empty first report compares equal\n" \
+    "    to the initial value and is swallowed"
+print("   starts as None so the first report always happens     OK")
 
 # It must be its own line, not folded into the route: a satellite serving no
 # mounts appears in no route, and that is the one someone is hunting for.

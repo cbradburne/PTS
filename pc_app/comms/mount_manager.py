@@ -253,7 +253,10 @@ class MountManager(QObject):
         self._route_logged = False
         self._asked_for_table = False
         self._sat_names: dict[int, str] = {}
-        self._sat_table: dict[int, tuple] = {}   # slot -> (name, ip), as last logged
+        # slot -> (name, ip), as last logged.  None until the first report, so
+        # that report happens even when there is nothing to report — see
+        # _log_satellites.
+        self._sat_table: dict | None = None
         # (mount, category, parameter) -> the value last logged for it.
         self._cam_params_seen: dict[tuple[int, int, int], object] = {}
         # key -> (window start, changes this window, gone quiet)
@@ -378,7 +381,13 @@ class MountManager(QObject):
         somebody is trying to find.
         """
         table = {s: (names.get(s, ""), ips.get(s, "")) for s in set(names) | set(ips)}
-        if table == self._sat_table:
+        # Report the FIRST one whatever it says, then only on change.  An empty
+        # table is a real answer — "this hub has no satellites on it" — and
+        # staying silent for it is indistinguishable from the hub being too old
+        # to report, the app never having asked, or this being broken.  Someone
+        # reading the log to find a satellite needs to be able to tell those
+        # apart, and an absent line cannot.
+        if self._sat_table is not None and table == self._sat_table:
             return
         self._sat_table = table
         if not table:
