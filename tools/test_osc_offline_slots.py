@@ -53,9 +53,16 @@ print("   every slot falls through to EMPTY                  OK")
 
 # ---- 2. "offline" is the hub's own liveness, not a new idea -----------------
 print("\n2. what counts as offline:")
-m = re.search(r"uint8_t\s+act\s*=\s*\(_mount_last_seen\[i\] &&\s*\n\s*"
-              r"\(millis\(\) - _mount_last_seen\[i\] < SELF_WEDGE_ALIVE_MS\)\) \? 1 : 0;", fb)
-assert m, "the liveness test changed shape"
+# This used to pin the exact inline expression. It is now one helper shared by
+# every place that asks — the point was always that "offline" here is the hub's
+# own liveness and not a second idea of it, so check THAT.
+assert "act = mount_is_active(i, millis())" in fb, \
+    "the feedback no longer decides activity with the shared mount_is_active()"
+helper = HUB[HUB.index("static inline bool mount_is_active("):]
+helper = helper[:helper.index("\n}")]
+assert "SELF_WEDGE_ALIVE_MS" in helper and "_mount_last_seen[i] &&" in helper, \
+    "mount_is_active() no longer uses the shared window, or has lost the\n" \
+    "    never-seen check that stops _mount_last_seen == 0 reading as alive"
 assert "#define SELF_WEDGE_ALIVE_MS     MOUNT_PRESENCE_TIMEOUT_MS" in HUB, \
     "the hub's liveness window is no longer the shared presence timeout"
 print("   the same last-seen window the rest of the hub uses OK")

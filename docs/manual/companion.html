@@ -143,11 +143,23 @@
       <tr><td><code>/pts/cam/N/active</code></td><td>0 / 1</td><td>Mount is online</td></tr>
       <tr><td><code>/pts/cam/N/state</code></td><td>int</td><td>Mount state — 0 is idle</td></tr>
       <tr><td><code>/pts/cam/N/target</code></td><td>0–10</td><td>Slot being moved to, 0 = not moving to one</td></tr>
-      <tr><td><code>/pts/cam/N/speed/pt</code></td><td>1–4</td><td>Active pan/tilt preset</td></tr>
-      <tr><td><code>/pts/cam/N/speed/sl</code></td><td>0–4</td><td>Active slider preset — <strong>0 means this mount has no rail</strong></td></tr>
+      <tr><td><code>/pts/cam/N/speed/pt</code></td><td>0–4</td><td>Active pan/tilt preset — <strong>0 means this mount is not there</strong></td></tr>
+      <tr><td><code>/pts/cam/N/speed/sl</code></td><td>0–4</td><td>Active slider preset — <strong>0 means no rail, or the mount is not there</strong></td></tr>
       <tr><td><code>/pts/cam/N/slot/M/state</code></td><td>0–3</td><td>Slot M — see below</td></tr>
       <tr><td><code>/pts/cam/N/recording</code></td><td>0/1</td><td>That camera is <strong>rolling</strong> — the camera's own report, not an echo of the command</td></tr>
     </table>
+    <div class="note"><b>A mount that is off reports nothing to act on</b> After
+    16 seconds without hearing from a mount, every one of its slots reads empty
+    and both speed presets read <code>0</code>. A speed button pressed at it does
+    nothing — not even to the reported number, because the hub cannot pass the
+    command on and walking its own copy would mislead the desk the moment the
+    mount came back.
+    <br><br>
+    The stored positions and presets are safe in the mount's own memory and
+    return with it. What goes away is the desk claiming they are there to press.
+    <code>/pts/cam/N/active</code> says <code>0</code> alongside, for a page that
+    wants to grey the whole camera rather than just unlight its buttons.</div>
+
     <p>Slot state is one address per slot carrying one value, so a shot button can
     colour itself from a single feedback with nothing to combine:</p>
     <table>

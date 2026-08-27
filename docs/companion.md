@@ -155,8 +155,8 @@ All arguments are a single int.
 | `/pts/cam/N/active`              | 0/1   | Mount is online (STATUS seen recently) |
 | `/pts/cam/N/state`               | int   | Mount state — 0 IDLE, others per `MountState` |
 | `/pts/cam/N/target`              | 0-10  | Slot being moved to, 0 = not moving to one |
-| `/pts/cam/N/speed/pt`            | 1-4   | Active pan/tilt speed preset |
-| `/pts/cam/N/speed/sl`            | 0-4   | Active slider speed preset — **0 = this mount has no rail** |
+| `/pts/cam/N/speed/pt`            | 0-4   | Active pan/tilt speed preset — **0 = this mount is not there** |
+| `/pts/cam/N/speed/sl`            | 0-4   | Active slider speed preset — **0 = no rail, or mount not there** |
 | `/pts/cam/N/slot/M/state`        | 0-3   | Slot M — see below |
 | `/pts/cam/N/recording`           | 0/1   | That camera is **rolling** — see below |
 | `/pts/cam/N/lookat/mode`         | 0/1   | 1 = look-at mode — **buttons 9 and 10 are the ◀/▶ rail ends, not slots** |
@@ -277,9 +277,16 @@ one of its slots then reports `0` (empty) — the same as a slot with nothing
 stored.  `/pts/cam/N/active` says `0` alongside, so a page that wants to grey
 the whole camera rather than just unlight its buttons can.
 
-The point is that a powered-off mount stops advertising locations to recall.
-Its stored positions survive in the mount's own memory and come back when it
-does; what goes away is the desk claiming they are there to press.
+Both speed presets read `0` for the same mount, and a speed button pressed at
+it does nothing — not even to the reported number.  The hub cannot pass the
+command on, so accepting it would walk its own copy of a preset the mount was
+never told about, and the desk would show that walked number the moment the
+mount came back.
+
+The point is that a powered-off mount stops advertising anything a desk can
+act on: no locations to recall, no speed to step.  Its stored positions and
+presets survive in the mount's own memory and come back when it does; what
+goes away is the desk claiming they are there to press.
 
 ### After the hub restarts
 

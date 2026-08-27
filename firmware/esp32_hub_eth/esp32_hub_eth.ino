@@ -567,6 +567,15 @@ static uint16_t  _la_dir_seq = 0;       // sequence counter for hub-injected CMD
 // wedge detector, its reinit ladder and its own restart.  16 s tolerates three
 // consecutive misses and is still far inside any real outage.
 #define SELF_WEDGE_ALIVE_MS     MOUNT_PRESENCE_TIMEOUT_MS  // see shared/protocol.h
+
+// Is this mount being heard?  Written out six times before this existed, and
+// everything an offline mount must NOT do — advertise its locations, report a
+// speed, accept a speed change — depends on getting the same answer in each
+// place.  The zero check matters: a mount never seen has _mount_last_seen 0,
+// and millis() - 0 is simply a large number.
+static inline bool mount_is_active(int i, uint32_t now) {
+    return _mount_last_seen[i] && (now - _mount_last_seen[i]) < SELF_WEDGE_ALIVE_MS;
+}
 #define SELF_WEDGE_MIN_FAILS     2        // uninterrupted send fails before the wedge clock starts
 #define SELF_REINIT_AFTER_MS     6000UL   // wedge age → full ESP-NOW reinit
 #define SELF_WIFI_REINIT_AFTER_MS 14000UL // wedge age → bounce WiFi (below ESP-NOW)
@@ -2045,7 +2054,7 @@ static void send_own_health(bool anomaly) {
 static void health_check(uint32_t now) {
     uint32_t fail_live = 0;
     for (int i = 0; i < NUM_MOUNTS; i++)
-        if (_mount_last_seen[i] && (now - _mount_last_seen[i]) < SELF_WEDGE_ALIVE_MS)
+        if (mount_is_active(i, now))
             fail_live += _espnow_fail_cum[i];
     // fail_live sums only the mounts currently alive, so it FALLS when one ages
     // out and rises when it returns — it is not monotonic, and both operands are
@@ -2344,8 +2353,7 @@ static void osc_feedback_mount(int i, bool force) {
     uint8_t  tgt = (_mount_target[i] == 0xFF) ? 0 : (uint8_t)(_mount_target[i] + 1);
     uint16_t occ = _mount_slot_occ[i];
     uint16_t at  = _mount_slot_at[i];
-    uint8_t  act = (_mount_last_seen[i] &&
-                    (millis() - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS)) ? 1 : 0;
+    uint8_t  act = mount_is_active(i, millis()) ? 1 : 0;
     uint8_t  pt  = _mount_pt_preset[i];
     uint8_t  sl  = _mount_sl_preset[i];
 
@@ -2361,6 +2369,15 @@ static void osc_feedback_mount(int i, bool force) {
     // cleared. /active already says 0 alongside it for a surface that wants to
     // tell those apart.
     if (!act) { occ = 0; at = 0; tgt = 0; }
+    // The presets go the same way, and for the same reason: a speed is a
+    // property of something present.  These are the hub's last-known values and
+    // they survive the mount being powered off, so a dark mount went on
+    // displaying a live-looking preset.  0 already meant "no rail" on the
+    // slider address — "nothing to set the speed of" — which is what this is.
+    //
+    // It has to be here rather than beside the slider's own rail check further
+    // down: pt is sent BEFORE that point, so zeroing it there changed nothing.
+    if (!act) { pt = 0; sl = 0; }
 
     bool all = force || !_fb_valid[i];
 
@@ -2704,6 +2721,15 @@ static void osc_dispatch(const char *addr, const int32_t *a, const float *af,
         // the surface tracking which one is current — and the clamp means a
         // button held at either end is simply inert rather than wrapping round
         // to the opposite speed mid-shot.
+        // Nothing to change the speed OF.  Ignored rather than clamped, the
+        // same as a rail-less mount below: the command cannot reach the mount,
+        // so accepting it would walk the hub's shadow copy while the real
+        // preset stayed where it was — and the desk would show that walked
+        // number the moment the mount came back, until its next status put it
+        // right.  A button pressed at an absent mount should do nothing, and
+        // should look like it did nothing.
+        if (!mount_is_active(idx, millis())) return;
+
         uint8_t  grp;
         uint8_t *cur;
         if      (strcmp(tok[4], "pt") == 0) { grp = GROUP_PAN_TILT;    cur = &_mount_pt_preset[idx]; }
@@ -3261,8 +3287,7 @@ static void check_self_recovery(uint32_t now) {
         // exist.  Each restart then dropped the satellite link and took that
         // mount down for real.
         if (_mount_sat[i] >= 0) { _tx_wedge_since_ms[i] = 0; continue; }
-        bool alive   = _mount_last_seen[i] &&
-                       (now - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS);
+        bool alive   = mount_is_active(i, now);
         bool failing = _espnow_fail_run[i] >= SELF_WEDGE_MIN_FAILS;
         if (alive && failing) {
             if (!_tx_wedge_since_ms[i]) {
@@ -3297,8 +3322,7 @@ static void check_self_recovery(uint32_t now) {
     bool tx_proven_ok = false;
     for (int k = 0; k < NUM_MOUNTS; k++) {
         if (k == worst_i) continue;
-        bool k_alive = _mount_last_seen[k] &&
-                       (now - _mount_last_seen[k] < SELF_WEDGE_ALIVE_MS);
+        bool k_alive = mount_is_active(k, now);
         if (k_alive && _espnow_fail_run[k] == 0) { tx_proven_ok = true; break; }
     }
     if (tx_proven_ok) {
@@ -3375,8 +3399,7 @@ static void check_maintenance_restart(uint32_t now) {
     if (now < MAINT_RESTART_UPTIME_MS) return;
     if (_last_client_cmd_ms && (now - _last_client_cmd_ms) < MAINT_RESTART_IDLE_MS) return;
     for (int i = 0; i < NUM_MOUNTS; i++) {
-        bool connected = _mount_last_seen[i] &&
-                         (now - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS);
+        bool connected = mount_is_active(i, now);
         if (connected && _mount_last_state[i] != STATE_IDLE) return;   // something's moving
     }
     Serial.printf("[SELF] Maintenance restart at %lu h uptime (system idle) — "
@@ -3455,8 +3478,7 @@ void loop() {
     for (int i = 0; i < NUM_MOUNTS; i++) {
         if (!_espnow_need_refresh[i]) continue;
         _espnow_need_refresh[i] = false;
-        bool alive = _mount_last_seen[i] &&
-                     (now - _mount_last_seen[i] < SELF_WEDGE_ALIVE_MS);
+        bool alive = mount_is_active(i, now);
         if (!alive) continue;   // absent mount — failures are expected, don't churn
         Serial.printf("ESP-NOW: refreshing peer %d after %d consecutive send failures\n",
                       i + 1, ESPNOW_MAX_CONSEC_FAILS);
