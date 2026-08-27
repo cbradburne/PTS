@@ -49,7 +49,7 @@ from .protocol import (
     MAX_SUBJECTS,
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
-    decode_mount_table, decode_mount_route, decode_sat_names,
+    decode_mount_table, decode_mount_route, decode_sat_names, decode_sat_ips,
     MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, MOUNT_EVENT_TX_WEDGE,
     MOUNT_EVENT_TX_WEDGE_REBOOT,
     RF_REPORT_PAYLOAD_LEN,
@@ -253,6 +253,7 @@ class MountManager(QObject):
         self._route_logged = False
         self._asked_for_table = False
         self._sat_names: dict[int, str] = {}
+        self._sat_table: dict[int, tuple] = {}   # slot -> (name, ip), as last logged
         # (mount, category, parameter) -> the value last logged for it.
         self._cam_params_seen: dict[tuple[int, int, int], object] = {}
         # key -> (window start, changes this window, gone quiet)
@@ -361,6 +362,31 @@ class MountManager(QObject):
         log.info("MOUNT ROUTE: %s", ", ".join(
             "cam%d %s" % (i + 1, "direct" if s == 0 else "via " + self.sat_label(s))
             for i, s in enumerate(self._mount_route)))
+
+    def _log_satellites(self, names: dict, ips: dict) -> None:
+        """One line naming every connected satellite and where it lives.
+
+        A satellite prints the DHCP lease it was given at boot, but only to its
+        own USB serial — which is no use once the unit is rigged, and finding
+        one meant getting a laptop to it. The hub already knew the address each
+        satellite connected FROM; this is that, written down where the operator
+        is already looking.
+
+        Separate from the route line rather than folded into it, because a
+        satellite serving no mounts does not appear in a route at all, and one
+        that has just come up with nothing attached yet is exactly the one
+        somebody is trying to find.
+        """
+        table = {s: (names.get(s, ""), ips.get(s, "")) for s in set(names) | set(ips)}
+        if table == self._sat_table:
+            return
+        self._sat_table = table
+        if not table:
+            log.info("SATELLITES: none connected")
+            return
+        log.info("SATELLITES: %s", ",  ".join(
+            "%s %s" % (name or f"SAT {slot}", ip or "address unknown")
+            for slot, (name, ip) in sorted(table.items())))
 
     def sat_label(self, slot: int) -> str:
         """How to refer to satellite `slot` (1-based, as mount_route reports).
@@ -851,6 +877,7 @@ class MountManager(QObject):
         if pkt.cmd == Cmd.SAT_NAMES:
             try:
                 names = decode_sat_names(pkt.payload)
+                self._log_satellites(names, decode_sat_ips(pkt.payload))
                 if names != self._sat_names:
                     self._sat_names = names
                     self.sat_names_updated.emit(dict(names))

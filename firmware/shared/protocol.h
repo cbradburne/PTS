@@ -218,6 +218,13 @@
 #define SAT_DOWNLINK_TOP_CMDS       3
 #define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
 #define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients
+// The same packet, with each slot's IPv4 address appended after the names
+// block.  Kept as a separate length rather than growing the one above, because
+// both lengths have to stay meaningful: the hub sends the long form and a
+// client accepts either, so a hub and a PC app updated at different times
+// still talk.  Same trick as the 75/77-byte CONFIG_REPORT.
+#define SAT_IP_LEN                  4                          // IPv4, network order
+#define SAT_TABLE_PAYLOAD_LEN      (SAT_NAMES_PAYLOAD_LEN + SAT_SLOTS * SAT_IP_LEN)
 // Longest BMD camera-control command we will relay.  Theirs are a 4-byte header
 // plus payload padded to a 4-byte boundary; 40 covers everything in the
 // published protocol with room to spare, and bounds the mount's buffer.
@@ -390,10 +397,20 @@ typedef enum : uint8_t {
     // up in the mount table — a satellite's own MAC is not a mount's, and an
     // unrecognised MAC otherwise walks straight into the pairing rules.
     CMD_SAT_HELLO         = 0xA3,
-    // Hub → clients, SAT_NAMES_PAYLOAD_LEN: SAT_SLOTS × SAT_NAME_LEN, indexed
-    // by the same slot number CMD_MOUNT_ROUTE reports.  An empty string means
-    // that slot is unoccupied, or is a satellite too old to introduce itself —
-    // in both cases a client should fall back to showing the slot number.
+    // Hub → clients, SAT_TABLE_PAYLOAD_LEN: SAT_SLOTS × SAT_NAME_LEN, then
+    // SAT_SLOTS × SAT_IP_LEN, both indexed by the same slot number
+    // CMD_MOUNT_ROUTE reports.  An empty string means that slot is unoccupied,
+    // or is a satellite too old to introduce itself — in both cases a client
+    // should fall back to showing the slot number.
+    //
+    // The IP block is the address the satellite's TCP connection came FROM, so
+    // the hub needs nothing from the satellite to fill it in and no satellite
+    // has to be reflashed to be findable.  A satellite prints the DHCP lease it
+    // was given at boot, but only to its own USB serial — which is no use once
+    // the unit is up a pole, and finding it was the reason this exists.
+    //
+    // Read the IPs only if the payload is long enough for them: a hub from
+    // before this sends SAT_NAMES_PAYLOAD_LEN and the names still parse.
     CMD_SAT_NAMES         = 0xA4,
     // Hub → all mounts, no payload: "a satellite just came up — look again".
     //

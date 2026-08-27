@@ -843,6 +843,11 @@ struct SatSlot {
     // do so — clients fall back to the slot number, which is what they showed
     // before names existed.
     char         name[SAT_NAME_LEN];
+    // The address its TCP connection came from.  A satellite prints the DHCP
+    // lease it was given at boot, but only to its own USB serial, which is no
+    // use once the unit is rigged.  Taken here instead, so nothing has to be
+    // asked of the satellite and no satellite needs reflashing to be findable.
+    uint32_t     ip;
 };
 static SatSlot   _sat[MAX_SATELLITES];
 static WiFiServer _sat_server(SAT_LINK_PORT);
@@ -1258,10 +1263,18 @@ static void bcast_mount_table() {
 // itself) and alongside the mount table, so a client connecting after the fact
 // is not left with numbers until the next change.
 static void send_sat_names() {
-    uint8_t buf[SAT_NAMES_PAYLOAD_LEN] = {};
-    for (int i = 0; i < MAX_SATELLITES; i++)
-        if (_sat[i].active)
-            memcpy(buf + i * SAT_NAME_LEN, _sat[i].name, SAT_NAME_LEN);
+    // Names first, then the addresses, so a client from before the addresses
+    // existed reads the names it expects and stops.  See CMD_SAT_NAMES.
+    uint8_t buf[SAT_TABLE_PAYLOAD_LEN] = {};
+    for (int i = 0; i < MAX_SATELLITES; i++) {
+        if (!_sat[i].active) continue;
+        memcpy(buf + i * SAT_NAME_LEN, _sat[i].name, SAT_NAME_LEN);
+        uint8_t *ip = buf + SAT_NAMES_PAYLOAD_LEN + i * SAT_IP_LEN;
+        ip[0] = (uint8_t)( _sat[i].ip        & 0xFF);   // IPAddress packs
+        ip[1] = (uint8_t)((_sat[i].ip >>  8) & 0xFF);   // octets low-first
+        ip[2] = (uint8_t)((_sat[i].ip >> 16) & 0xFF);
+        ip[3] = (uint8_t)((_sat[i].ip >> 24) & 0xFF);
+    }
     uint8_t raw[PKT_BUF_SIZE + 4];
     uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_SAT_NAMES, buf, sizeof(buf));
     broadcast_to_all(raw, n);
@@ -3487,6 +3500,7 @@ void loop() {
                 // the raw fd.
                 sat_env_init(&_sat[i].parser);
                 _sat[i].name[0] = '\0';   // until it introduces itself
+                _sat[i].ip     = (uint32_t)in.remoteIP();
                 _sat[i].active = true;
                 placed = true;
                 Serial.printf("[SAT] satellite %d connected from %s\n",
@@ -3503,6 +3517,7 @@ void loop() {
                 _sat[i].name[0] = '\0';
                 sat_release_mounts(i);
                 Serial.printf("[SAT] satellite %d disconnected\n", i + 1);
+                _sat[i].ip = 0;
                 send_sat_names();
                 continue;
             }

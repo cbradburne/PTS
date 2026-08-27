@@ -1710,6 +1710,8 @@ MOUNT_OUTAGE_FLAG_NOW     = 0x01
 SAT_NAME_LEN              = 13   # 12 characters + NUL, as in the AP SSID
 SAT_SLOTS                 = 6
 SAT_NAMES_PAYLOAD_LEN     = SAT_SLOTS * SAT_NAME_LEN
+SAT_IP_LEN                = 4    # IPv4, one per slot, appended after the names
+SAT_TABLE_PAYLOAD_LEN     = SAT_NAMES_PAYLOAD_LEN + SAT_SLOTS * SAT_IP_LEN
 MOUNT_EVENT_PAYLOAD_LEN   = 14
 # Satellite health arrives addressed SAT_ADDR_BASE + slot (1-based): the
 # satellite cannot know its own slot, so the hub stamps it on the way past.
@@ -1824,6 +1826,30 @@ def decode_sat_names(payload: bytes) -> dict[int, str]:
         name = raw.split(b"\x00", 1)[0].decode("utf-8", "replace").strip()
         if name:
             out[i + 1] = name
+    return out
+
+
+def decode_sat_ips(payload: bytes) -> dict[int, str]:
+    """CMD_SAT_NAMES → {slot number (1-based): dotted-quad address}.
+
+    The addresses are appended after the names block, so a hub from before they
+    existed sends a short payload and this returns nothing rather than raising —
+    the names still decode either way. Slots with no satellite read 0.0.0.0 and
+    are left out, the same way an unnamed slot is left out of the names.
+
+    Why this exists: a satellite prints the DHCP lease it was given at boot, but
+    only to its own USB serial, which is no use once the unit is rigged. The hub
+    reports the address each satellite's TCP connection came from instead, so
+    nothing has to be asked of the satellite and none has to be reflashed.
+    """
+    if len(payload) < SAT_TABLE_PAYLOAD_LEN:
+        return {}
+    out: dict[int, str] = {}
+    for i in range(SAT_SLOTS):
+        off = SAT_NAMES_PAYLOAD_LEN + i * SAT_IP_LEN
+        quad = tuple(payload[off:off + SAT_IP_LEN])
+        if any(quad):
+            out[i + 1] = ".".join(str(b) for b in quad)
     return out
 
 

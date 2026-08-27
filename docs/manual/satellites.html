@@ -79,6 +79,23 @@
     mDNS multicast rather than by asking a server — so a lease change on either
     end does not need anyone to go and edit anything.</p>
 
+    <h3>Finding a satellite's address</h3>
+    <p>The PC app logs the whole table whenever it changes, so the addresses are
+    in <code>comms.log</code> without anyone going to look for them:</p>
+
+    <pre><code>SATELLITES: Foyer 192.168.1.57,  Stage 192.168.1.58</code></pre>
+
+    <p>The hub reports the address each satellite's TCP connection came
+    <em>from</em>, so nothing has to be asked of the satellite. A satellite that
+    has not named itself shows as <code>SAT 3</code> with its address, and if the
+    hub is too old to report addresses at all you get <code>address unknown</code>
+    rather than a missing entry.</p>
+
+    <div class="note"><b>Why not just read it off the satellite?</b> It does print
+    the DHCP lease it was given at boot — to its own USB serial. That is fine on a
+    bench and no use at all once the unit is rigged, which is the only time anyone
+    needs it.</div>
+
     <div class="tip"><b>If the network only serves registered MACs</b> There is a
     chicken-and-egg: you need the lease to find the board, and the board to find
     its MAC. A static address can be pinned in the firmware to break it, but that
