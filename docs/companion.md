@@ -270,6 +270,29 @@ startup trigger, or to a button, for the case the automatic paths do not cover:
 a Companion that restarts on the same port is not a new peer, so without asking
 it would show stale buttons until the next 5 s resend.
 
+### A mount that is off
+
+A mount the hub has not heard from for 16 seconds reads as inactive, and every
+one of its slots then reports `0` (empty) — the same as a slot with nothing
+stored.  `/pts/cam/N/active` says `0` alongside, so a page that wants to grey
+the whole camera rather than just unlight its buttons can.
+
+The point is that a powered-off mount stops advertising locations to recall.
+Its stored positions survive in the mount's own memory and come back when it
+does; what goes away is the desk claiming they are there to press.
+
+### After the hub restarts
+
+The hub learns where to send feedback from the source address of whatever a
+surface sends it, so it has nowhere to send until spoken to.  That address is
+now remembered across a restart, and a remembered peer gets the same full send
+a newly-met one does — so the desk is brought up to date on its own rather than
+holding whatever it last received.
+
+If the desk has moved to a different address in the meantime, the remembered
+one costs a few UDP packets into nothing and is corrected the moment the real
+one talks.
+
 ## Safety notes
 
 - Jogs started over OSC are re-streamed at 20 Hz by whichever server received

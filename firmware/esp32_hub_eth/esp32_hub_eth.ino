@@ -2224,6 +2224,40 @@ static int8_t   _osc_subject_sel[NUM_MOUNTS] = {-1, -1, -1, -1, -1};
 static IPAddress _osc_peer_ip;
 static uint16_t  _osc_peer_port = 0;
 
+// The peer survives a reboot.
+//
+// Feedback goes nowhere until a surface has sent us something, because that is
+// the only way we learn where to send it.  That is fine while the hub stays up
+// — but restart it and the desk keeps displaying whatever it last received,
+// with nothing arriving to correct it.  A mount powered off in the meantime
+// goes on showing its stored locations as though they were there to recall,
+// and the first thing anyone presses fixes the whole surface at once, which is
+// exactly the confusing part: it looks like the press did it.
+//
+// So the address is remembered and restored, and a restored peer queues a full
+// send the same way a newly-met one does.  If the desk has moved, the stale
+// address costs a few UDP packets into nothing and is corrected the moment the
+// real one talks.
+static void osc_peer_save() {
+    _prefs.begin("osc", false);
+    _prefs.putUInt("ip",   (uint32_t)_osc_peer_ip);
+    _prefs.putUShort("port", _osc_peer_port);
+    _prefs.end();
+}
+
+static void osc_peer_load() {
+    _prefs.begin("osc", false);       // r/w so a missing namespace is created quietly
+    uint32_t ip   = _prefs.getUInt("ip", 0);
+    uint16_t port = _prefs.getUShort("port", 0);
+    _prefs.end();
+    if (!ip || !port) return;         // never had one
+    _osc_peer_ip   = IPAddress(ip);
+    _osc_peer_port = port;
+    Serial.printf("[OSC] feedback -> %s:%d (remembered)\n",
+                  _osc_peer_ip.toString().c_str(),
+                  OSC_REPLY_PORT ? OSC_REPLY_PORT : port);
+}
+
 // Where OSC feedback is being sent, and how much of it — reported through the
 // client channel because the hub's USB serial carries the binary packet stream
 // and is not humanly readable.  Feedback failing silently is the failure mode
@@ -2906,6 +2940,7 @@ static void osc_poll() {
                               from_ip.toString().c_str(),
                               OSC_REPLY_PORT ? OSC_REPLY_PORT : from_port);
                 osc_report_peer();          // and to comms.log, which is readable
+                osc_peer_save();            // so a restart resumes without being asked
                 // A surface we have not seen before knows nothing; queue the
                 // lot, paced one mount per pass by osc_feedback_poll().
                 for (int i = 0; i < NUM_MOUNTS; i++) _fb_valid[i] = false;
@@ -3036,6 +3071,10 @@ void setup() {
     // Load the paired-mount table from NVS and register a peer per bound slot.
     // Unbound slots pair automatically on first contact (mount_table_observe).
     mount_table_load();
+    // Before the first loop pass, so the first osc_feedback_poll() already has
+    // somewhere to send.  _fb_valid[] starts false, so the restored peer gets
+    // the same paced full send a newly-met one does.
+    osc_peer_load();
     Serial.println("Paired mounts (NVS):");
     for (int i = 0; i < NUM_MOUNTS; i++) {
         if (!mount_mac_valid(i)) {
