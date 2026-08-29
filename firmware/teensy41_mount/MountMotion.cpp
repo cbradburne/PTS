@@ -2236,10 +2236,25 @@ bool MountMotion::aimAtSubject(uint8_t pt_preset) {
     int32_t sl_log   = _slider_invert ? -sl_phys : sl_phys;
     int32_t zoom_phys = _stepper[AXIS_ZOOM]->getPosition();
 
-    // sync=false: each axis runs at full preset speed.  Syncing pan to tilt
-    // (or vice versa) for a large/small distance ratio would make one axis
-    // crawl — for a quick look-at re-aim we want both axes as fast as possible.
-    moveTo(pan_target, tilt_target, sl_log, zoom_phys, pt_preset, pt_preset, /*sync=*/false);
+    // sync=true, so pan and tilt arrive together.
+    //
+    // This used to pass false, reasoning that syncing "would make one axis
+    // crawl".  It is the wrong way round: sync scales the axis that would
+    // arrive EARLY down to match the one that takes longest, and leaves the
+    // dominant axis at full preset speed.  The move therefore takes exactly as
+    // long either way — the only difference is whether the short axis spends
+    // that time moving or spends it stopped.
+    //
+    // Unsynced it spent it stopped, and visibly: at preset 4 (15 deg/s) a 90
+    // degree pan with 3 degrees of tilt had the tilt finish 5.8 seconds before
+    // the pan, so the shot swung in two separate movements.  Reported from the
+    // rig on 2026-08-27, and only when parked — during a slider move the
+    // subject-switch blend drives both axes off one phase and this path is
+    // never taken, which is why it looked correct there.
+    //
+    // Slot recalls have always synced. This is the same expectation applied to
+    // the same kind of move.
+    moveTo(pan_target, tilt_target, sl_log, zoom_phys, pt_preset, pt_preset, /*sync=*/true);
     return true;
 }
 

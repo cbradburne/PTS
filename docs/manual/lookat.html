@@ -201,7 +201,10 @@
 
     <p>Pan and tilt are eased on the same clock, so they arrive together and the
     move reads as one arc rather than two axis motions finishing at different
-    times. If you switch again while a switch is still running, the new one starts
+    times. Switching with the <strong>slider parked</strong> is a different move
+    — there is no travel to ease across, so the camera simply re-aims at the
+    active pan/tilt speed — but both axes are still timed to land together, the
+    same way a recalled position is. If you switch again while a switch is still running, the new one starts
     from where the camera is actually pointing — it does not snap back to the
     subject it was leaving.</p>
 
