@@ -2114,6 +2114,7 @@ bool MountMotion::startLookAtMove(int32_t slider_start_steps, int32_t slider_end
     _la_max_steps_s[1] = max_pt_deg_s / _tilt_deg_per_step;  // tilt
     _la_pt_dir[0] = 0;
     _la_pt_dir[1] = 0;
+    _la_sl_arrived_ms = 0;
 
     // ── PRE-AIM PHASE ────────────────────────────────────────────────────────
     // Compute the correct pan/tilt angles for the current slider position and
@@ -2264,6 +2265,7 @@ bool MountMotion::aimAtSubject(uint8_t pt_preset) {
 
 void MountMotion::stopLookAtMove() {
     if (_state != STATE_LOOK_AT_MOVE && _state != STATE_LOOK_AT_PRE_AIM) return;
+    _la_sl_arrived_ms = 0;   // or the next move inherits this one's clock
     noInterrupts();
     for (int i = 0; i < 4; i++) {
         _stepper[i]->stopAsync();
@@ -2448,9 +2450,42 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
         int32_t sl_pos = _stepper[AXIS_SLIDER]->getPosition();
         int32_t sl_err = labs(sl_pos - _goto_target[AXIS_SLIDER]);
         if (!_stepper[AXIS_SLIDER]->isMoving && sl_err <= GOTO_ARRIVE_STEPS) {
-            Serial.printf("[LA] Slider arrived at phys=%ld (dest=%ld err=%ld) — ending look-at\n",
-                          (long)sl_pos, (long)_goto_target[AXIS_SLIDER], (long)sl_err);
-            stopLookAtMove();
+            // The slider arriving does not mean the SHOT has arrived.
+            //
+            // stopLookAtMove() stops all four steppers, so ending here cut pan
+            // and tilt off wherever they happened to be.  Switch subject near
+            // the end of a rail move and the slider would reach the limit
+            // part-way through the turn, leaving the camera pointing between
+            // two people — which on a panel is a shot of nobody.
+            //
+            // So the move ends when the AIM has arrived, not when the rail has.
+            // The slider is stationary by now, so the target angles are static
+            // apart from the blend, and pan/tilt close on them in their own
+            // time.  In ordinary use the aim is already there — the camera has
+            // been tracking all the way along — so this changes nothing about a
+            // move that had no switch in it.
+            const int32_t aim_tol =
+                (int32_t)(LOOK_AT_AIM_ARRIVE_DEG / _pan_deg_per_step);
+            int32_t pan_err  = labs(pan_target  - _stepper[AXIS_PAN ]->getPosition());
+            int32_t tilt_err = labs(tilt_target - _stepper[AXIS_TILT]->getPosition());
+            bool blending    = _laBlendPhase() < 1.0f;
+            bool aim_there   = (pan_err <= aim_tol && tilt_err <= aim_tol);
+
+            if (_la_sl_arrived_ms == 0) _la_sl_arrived_ms = now;
+            bool waited_long_enough =
+                (now - _la_sl_arrived_ms) >= LOOK_AT_AIM_FINISH_MAX_MS;
+
+            if ((!blending && aim_there) || waited_long_enough) {
+                Serial.printf("[LA] Slider arrived at phys=%ld (dest=%ld err=%ld); "
+                              "aim pan_err=%ld tilt_err=%ld after %lums%s — ending look-at\n",
+                              (long)sl_pos, (long)_goto_target[AXIS_SLIDER], (long)sl_err,
+                              (long)pan_err, (long)tilt_err,
+                              (unsigned long)(now - _la_sl_arrived_ms),
+                              waited_long_enough && !aim_there ? " (TIMED OUT)" : "");
+                stopLookAtMove();
+            }
+        } else {
+            _la_sl_arrived_ms = 0;   // still travelling; the clock starts on arrival
         }
     }
 }

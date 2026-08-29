@@ -141,6 +141,24 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 // through.  2.0 leaves the controller room to correct without letting it slam.
 #define LOOK_AT_ACCEL_HEADROOM      2.0f
 
+// How close the aim must be to the subject before a look-at move is allowed to
+// end, and how long it may wait for that.
+//
+// The slider reaching the end of the rail does not mean the shot has arrived.
+// Switch subject near the end of a move and the rail runs out part-way through
+// the turn; ending there left the camera pointing between two people, which on
+// a panel is a shot of nobody.
+//
+// 0.05 degrees is far inside anything visible and is comfortably reachable —
+// the controller's own deadband stops it within half a microstep.  The timeout
+// is the backstop: the clock starts when the SLIDER arrives, so in the worst
+// case a switch begins the instant before that and the whole blend is still to
+// run — 6.8 s at 180 degrees, plus its settle.  12 s leaves half again on top,
+// so it only ever fires if the aim genuinely cannot converge, and it says so in
+// the log when it does.
+#define LOOK_AT_AIM_ARRIVE_DEG      0.05f
+#define LOOK_AT_AIM_FINISH_MAX_MS  12000UL
+
 // How much of that ceiling the blend's own peak is allowed to use.  A
 // smoothstep peaks at 1.5x its average, and if that peak is at the ceiling the
 // controller has nothing left to catch up with — it saturates and the curve is
@@ -567,6 +585,9 @@ private:
     float    _laBlendPhase() const;
     // True while a subject-switch blend is still moving the aim.
     bool     _laBlendActive() const;
+    // When the slider arrived, so the aim gets a bounded chance to catch up.
+    // 0 = the slider is still travelling.
+    uint32_t        _la_sl_arrived_ms = 0;
     uint32_t        _la_slew_until_ms;     // apply slew-accel until this timestamp (mid-move switch)
 
     // Pre-aim phase: pan/tilt settle to start position before slider moves
