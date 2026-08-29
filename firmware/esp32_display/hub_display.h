@@ -30,6 +30,7 @@ struct CamStatus {
     uint8_t  pt_preset    = 0;   // active PT preset 1-4, 0 = disconnected
     uint8_t  sl_preset    = 0;   // active SL preset 1-4, 0 = disconnected
     uint32_t last_seen_ms = 0;   // millis() of last UPDATE_CAM — staleness sweep
+    bool     cam_linked   = false;  // a camera is paired and connected (DISP_CAM_*)
 };
 
 // ---- Per-tile slot state ----
@@ -43,8 +44,11 @@ struct TileSlots {
 // ---- Public API ----
 void hub_display_init(hub_send_fn_t send_cb);
 void hub_ui_tick();
+// cam_flags defaults to 0 so a hub too old to send the fifth byte simply
+// reports "no camera" rather than failing to build.
 void hub_ui_update_cam(uint8_t mount_id,
-                       uint8_t state, uint8_t flags, int8_t rssi);
+                       uint8_t state, uint8_t flags, int8_t rssi,
+                       uint8_t cam_flags = 0);
 void hub_ui_set_disconnected(uint8_t mount_id);
 void hub_ui_update_clients(uint8_t tcp_count, uint8_t ws_count);
 void hub_ui_update_preset(uint8_t mount_id, uint8_t pt_preset, uint8_t sz_preset);

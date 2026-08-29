@@ -262,6 +262,8 @@ static int8_t  _la_arrow_state[5]   = { -1, -1, -1, -1, -1 };
 static bool    _la_flash_on         = false;
 static HSlider     _hsl_sl;   // left: Slider axis (horizontal drag)
 static HSlider     _hsl_zoom; // left: Zoom axis   (horizontal drag)
+static lv_obj_t   *_det_focus_btn = nullptr;   // shown only with a camera paired
+static void        _detail_refresh_focus();    // defined with the detail events
 static Joystick    _joy_pt;   // right hand: Pan   / Tilt
 static int16_t     _jog_pan   = 0;
 static int16_t     _jog_tilt  = 0;
@@ -1574,6 +1576,8 @@ static void det_switch_cam(uint8_t idx) {
     lv_obj_set_style_bg_color(_det_sl_dial.arc,  lv_color_hex(C_CAM_BG[idx]), 0);
     lv_obj_set_style_bg_color(_det_pt_dial.arc,  lv_color_hex(C_CAM_BG[idx]), 0);
 
+    _detail_refresh_focus();   // the new camera may not have one paired
+
     // Highlight active camera button; reset all others.
     for (int i = 0; i < 5; i++) {
         if (!_det_cam_btns[i]) continue;
@@ -1807,6 +1811,28 @@ static void ev_detail_set(lv_event_t *e) {
 }
 
 static void clear_timer_cb(lv_timer_t *) { det_cancel_clear(); }
+
+// Instantaneous autofocus.  The twelve bytes ARE the Blackmagic command and
+// nothing between here and the camera reinterprets them — CMD_CAM_CONTROL is a
+// verbatim pipe, which is the whole reason a display can drive a camera at all
+// without knowing anything about cameras.  Same sequence the PC app and the
+// hub's OSC handler send; see the note by CMD_CAM_CONTROL in protocol.h.
+static void ev_detail_focus(lv_event_t *) {
+    if (!_send_cb || _detail_cam >= 5) return;
+    if (!_cam[_detail_cam].cam_linked) return;   // no camera: nothing to focus
+    static const uint8_t AF[12] = { 0xFF, 0x04, 0x00, 0x00,
+                                    0x00, 0x01, 0x01, 0x00,
+                                    0x00, 0x00, 0x00, 0x00 };
+    _send_cb((uint8_t)(_detail_cam + 1), CMD_CAM_CONTROL, AF, sizeof(AF));
+}
+
+// Show or hide the Focus button for whichever camera the detail screen is on.
+static void _detail_refresh_focus() {
+    if (!_det_focus_btn || _detail_cam >= 5) return;
+    bool show = _cam[_detail_cam].cam_linked;
+    if (show) lv_obj_remove_flag(_det_focus_btn, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_add_flag(_det_focus_btn,    LV_OBJ_FLAG_HIDDEN);
+}
 
 static void ev_detail_clear(lv_event_t *e) {
     if (_calib_state != 0) return;   // CLEAR is inactive during subject calibration
@@ -2478,6 +2504,16 @@ static void build_detail_screen() {
     // JOY_SIZE=180 → joy ends at y=266+180=446, within 480px screen ✓
     build_joystick_widget(_scr_detail, 590, 266, &_joy_pt,
                           ev_joy_pt_pressing, ev_joy_pt_release);
+
+    // ── FOCUS — only with a camera paired ────────────────────────
+    // Above the ZOOM label, in the empty band between the slot buttons and the
+    // left-hand sliders.  Hidden rather than greyed when no camera is paired:
+    // there is nothing to focus, and a disabled button invites a press and a
+    // question about why nothing happened.
+    _det_focus_btn = make_button(_scr_detail, "FOCUS", C_SURF2, ev_detail_focus);
+    lv_obj_set_size(_det_focus_btn, HSL_W, 44);
+    lv_obj_set_pos(_det_focus_btn, 10, 210);
+    lv_obj_add_flag(_det_focus_btn, LV_OBJ_FLAG_HIDDEN);
 
     // ── Left horizontal sliders (ZOOM top, SLIDER bottom) ────────
     // Each 230×64 px, x=10; bottom of last slider = 382+64 = 446 ✓
@@ -3267,7 +3303,8 @@ void hub_ui_tick() {
 }
 
 void hub_ui_update_cam(uint8_t mount_id,
-                       uint8_t state, uint8_t flags, int8_t rssi) {
+                       uint8_t state, uint8_t flags, int8_t rssi,
+                       uint8_t cam_flags) {
     if (mount_id < 1 || mount_id > 5) return;
     int i = mount_id - 1;
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
@@ -3275,6 +3312,7 @@ void hub_ui_update_cam(uint8_t mount_id,
     // Snapshot old values before overwriting — used to gate LVGL calls so we
     // only touch the render tree when something actually changed.  When the
     // mount is idle for hours this drops from ~10 LVGL calls/STATUS to zero.
+    bool    was_linked      = _cam[i].cam_linked;
     bool    was_connected   = _cam[i].connected;
     uint8_t old_state       = _cam[i].state;
     uint8_t old_flags       = _cam[i].flags;
@@ -3285,7 +3323,13 @@ void hub_ui_update_cam(uint8_t mount_id,
     _cam[i].state        = state;
     _cam[i].flags        = flags;
     _cam[i].rssi         = rssi;
+    _cam[i].cam_linked   = (cam_flags & DISP_CAM_BLE_LINKED) != 0;
     _cam[i].last_seen_ms = millis();   // feeds the staleness sweep in hub_ui_tick()
+
+    // A camera pairing or dropping is the only thing that changes whether the
+    // Focus button belongs on screen, and it only matters for the camera whose
+    // detail screen is open.
+    if (_cam[i].cam_linked != was_linked && _detail_cam == i) _detail_refresh_focus();
 
     bool state_changed = !was_connected || (old_state != state) || (old_flags != flags);
     bool rssi_changed  = !was_connected || (old_rssi  != rssi);

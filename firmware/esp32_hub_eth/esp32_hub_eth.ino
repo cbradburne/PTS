@@ -302,12 +302,25 @@ static SemaphoreHandle_t _disp_mux = nullptr;
 static inline void disp_lock()   { if (_disp_mux) xSemaphoreTake(_disp_mux, portMAX_DELAY); }
 static inline void disp_unlock() { if (_disp_mux) xSemaphoreGive(_disp_mux); }
 
+// Whether each mount currently has a camera paired and connected, from the
+// BLE_LINK bit of its own health report.  The hub had no use for mount health
+// before this and only relayed it; the display needs this one bit to decide
+// whether a Focus button means anything, and a button that does nothing is
+// worse than no button.  Declared here because disp_update_cam() below reads it.
+static bool _cam_linked[NUM_MOUNTS] = {};
+
 // ---------------------------------------------------------------------------
 // Display send helpers
 // ---------------------------------------------------------------------------
 
 static void disp_update_cam(uint8_t mount_id, uint8_t state, uint8_t flags, int8_t rssi) {
-    uint8_t buf[4] = { mount_id, state, flags, (uint8_t)rssi };
+    // Rides along with the status the display already gets, rather than being
+    // its own message: it then needs no change-tracking of its own and cannot
+    // be missed, and a camera pairing shows up within one status refresh.
+    uint8_t cf = 0;
+    if (mount_id >= 1 && mount_id <= NUM_MOUNTS && _cam_linked[mount_id - 1])
+        cf |= DISP_CAM_BLE_LINKED;
+    uint8_t buf[5] = { mount_id, state, flags, (uint8_t)rssi, cf };
     disp_lock();
     disp_uart_send(Serial1, DISP_MSG_UPDATE_CAM, buf, sizeof(buf));
     disp_unlock();
@@ -3893,6 +3906,22 @@ void loop() {
                             _cam_recording[msg.src_idx] = rec;
                             Serial.printf("[CAM] mount %d %s\n", msg.src_idx + 1,
                                           rec ? "RECORDING" : "stopped recording");
+                        }
+                    }
+                    // The bridge's own health carries whether its camera is
+                    // connected.  Offset 19 of the 24-byte PayloadHealth —
+                    // node_type(1) reset(1) uptime(4) heap(4) minheap(4)
+                    // loop(2) txfail(2) rssi(1) then flags.
+                    if (pkt.cmd == CMD_HEALTH
+                            && pkt.payload_len >= 24
+                            && pkt.payload[0] == HEALTH_NODE_BRIDGE
+                            && msg.src_idx < NUM_MOUNTS) {
+                        bool linked = (pkt.payload[19] & HEALTH_FLAG_BLE_LINK) != 0;
+                        if (linked != _cam_linked[msg.src_idx]) {
+                            _cam_linked[msg.src_idx] = linked;
+                            Serial.printf("[CAM] mount %d camera %s\n",
+                                          msg.src_idx + 1,
+                                          linked ? "linked" : "not linked");
                         }
                     }
                     // Forward limits-found notification to display

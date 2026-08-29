@@ -5,7 +5,10 @@
  * Packet format:  [0xDD][type:1][len:1][payload:len][xor_checksum:1]
  *
  * Hub → Display:
- *   DISP_MSG_UPDATE_CAM        (4 bytes: mount_id, state, flags, rssi)
+ *   DISP_MSG_UPDATE_CAM        (5 bytes: mount_id, state, flags, rssi, cam_flags)
+ *       cam_flags is appended, not squeezed in: the mount status flags byte
+ *       has all eight bits spoken for.  A display from before this reads the
+ *       first four and stops, so the two can be flashed independently.
  *   DISP_MSG_SET_DISCONNECTED  (1 byte)
  *   DISP_MSG_UPDATE_PRESET     (3 bytes)
  *   DISP_MSG_UPDATE_CLIENTS    (2 bytes)
@@ -23,6 +26,10 @@
 
 // Hub → Display
 #define DISP_MSG_UPDATE_CAM        0x01
+// Byte 5 of DISP_MSG_UPDATE_CAM.  Only what the DISPLAY needs to draw with —
+// the full HEALTH_FLAG_* set stays on the wire to the clients, where it is read
+// by people diagnosing a link rather than by a screen deciding on a button.
+#define DISP_CAM_BLE_LINKED        0x01   // a camera is paired and connected
 #define DISP_MSG_SET_DISCONNECTED  0x02
 #define DISP_MSG_UPDATE_PRESET     0x03
 #define DISP_MSG_UPDATE_CLIENTS    0x04

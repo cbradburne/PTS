@@ -134,7 +134,11 @@ static void dispatch_msg(uint8_t type, uint8_t len, const uint8_t *d) {
 
         case DISP_MSG_UPDATE_CAM:
             if (len < 3) break;
-            hub_ui_update_cam(d[0], d[1], d[2], (len >= 4) ? (int8_t)d[3] : 0);
+            // Fifth byte is optional: a hub from before the camera flag sends
+            // four, and the display then simply never shows a Focus button.
+            hub_ui_update_cam(d[0], d[1], d[2],
+                              (len >= 4) ? (int8_t)d[3] : 0,
+                              (len >= 5) ? d[4] : 0);
             break;
 
         case DISP_MSG_SET_DISCONNECTED:
