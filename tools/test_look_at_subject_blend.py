@@ -87,7 +87,10 @@ assert re.search(r"_la_blend_brake\s*=\s*0\.0f;", setter), \
 print("   only when already tracking a DIFFERENT subject     OK")
 
 # A switch during a switch must continue from where the aim actually is.
-assert "if (switching) _laSubjectNow(&from_x, &from_y, &from_z);" in setter, \
+# Written as an if/else since re-acquisition joined it, so match the call
+# rather than the one-line form it used to have.
+assert "_laSubjectNow(&from_x, &from_y, &from_z);" in setter and \
+       "if (switching) {" in setter, \
     "a switch mid-blend restarts from the old subject — the aim would snap back"
 # _laSubjectNow now reconstructs that point from the live AIM rather than from
 # a position lerp, so it is still the place the camera is actually looking.

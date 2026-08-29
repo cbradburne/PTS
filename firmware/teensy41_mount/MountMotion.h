@@ -583,6 +583,16 @@ private:
 
     // Smoothstep progress through the running blend, 0..1 (1 = finished).
     float    _laBlendPhase() const;
+
+    // Where the head is actually pointing right now, world frame.  The inverse
+    // of the target arithmetic in _updateLookAt().
+    void     _headAimAngles(float *pan_deg, float *tilt_deg) const;
+
+    // A point that would be looked at from (wx,wy) at these angles and this
+    // horizontal range.  One copy, because two callers need it and a third
+    // hand-rolled projection is how the aim geometry drifted apart before.
+    void     _pointFromAim(float wx, float wy, float pan_deg, float tilt_deg,
+                           float h, float *sx, float *sy, float *sz) const;
     // True while a subject-switch blend is still moving the aim.
     bool     _laBlendActive() const;
     // When the slider arrived, so the aim gets a bounded chance to catch up.

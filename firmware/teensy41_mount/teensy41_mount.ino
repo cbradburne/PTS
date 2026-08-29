@@ -949,10 +949,13 @@ static void dispatch(const ParsedPacket &pkt) {
             // framed, which is the point of look-at mode.  The slider used to
             // be in this list, so a manual slide both deselected the subject
             // and left pan/tilt where they were.
-            if (_cfg.look_at_mode &&
-                    mount.getState() != STATE_LOOK_AT_MOVE &&
-                    mount.getState() != STATE_LOOK_AT_PRE_AIM &&
-                    (pan != 0 || tilt != 0)) {
+            // Applies DURING a look-at move too.  It used to be excluded there,
+            // so a joystick did nothing while the slider was travelling; now
+            // taking pan/tilt drops the subject and the rail carries on to the
+            // end on its own.  jogPanTilt() does the clearing, but the status
+            // has to go out from here or every client keeps its green border on
+            // a subject the camera is no longer pointing at.
+            if (_cfg.look_at_mode && (pan != 0 || tilt != 0)) {
                 mount.clearLaSubject();
                 send_look_at_status();
             }
@@ -989,10 +992,9 @@ static void dispatch(const ParsedPacket &pkt) {
             // border stayed green after the camera had been moved away — the
             // operator had no way to see that pressing the slot would re-aim.
             // Slider deliberately absent — see the CMD_JOG note above.
-            if (_cfg.look_at_mode &&
-                    mount.getState() != STATE_LOOK_AT_MOVE &&
-                    mount.getState() != STATE_LOOK_AT_PRE_AIM &&
-                    (d_pan != 0 || d_tilt != 0)) {
+            // As with CMD_JOG: this now applies during a look-at move as well,
+            // so the nudge arrows deselect mid-move exactly as the joystick does.
+            if (_cfg.look_at_mode && (d_pan != 0 || d_tilt != 0)) {
                 mount.clearLaSubject();
                 send_look_at_status();
             }

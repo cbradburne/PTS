@@ -34,19 +34,29 @@ CPP = (REPO / "firmware/teensy41_mount/MountMotion.cpp").read_text()
 HDR = (REPO / "firmware/teensy41_mount/MountMotion.h").read_text()
 
 # ---- 1. only pan or tilt deselects ------------------------------------------
+# The state exclusions this used to match on are gone: on 2026-08-27 the rule was
+# extended to apply DURING a look-at move too, so taking the joystick mid-move
+# hands pan/tilt to the operator and drops the subject while the rail carries on.
+# What this file is about is unchanged and is the part still checked here — the
+# SLIDER must never be a deselect trigger, because sliding by hand is the one
+# manual input that means "keep holding the subject".
 print("1. what drops the selected subject:")
-conds = re.findall(r"if \(_cfg\.look_at_mode &&\s*\n\s*mount\.getState\(\) != STATE_LOOK_AT_MOVE &&\s*\n"
-                   r"\s*mount\.getState\(\) != STATE_LOOK_AT_PRE_AIM &&\s*\n\s*\(([^)]*)\)\) \{", INO)
-assert len(conds) == 2, f"expected the CMD_JOG and CMD_MOVE_REL deselect sites, found {len(conds)}"
+conds = re.findall(r"if \(_cfg\.look_at_mode && \(([^)]*)\)\) \{", INO)
+assert len(conds) == 2, \
+    f"expected the CMD_JOG and CMD_MOVE_REL deselect sites, found {len(conds)}"
 for c in conds:
-    assert "slider" not in c, f"the slider is still a deselect trigger: ({c.strip()})"
+    assert "slider" not in c, f"the slider is a deselect trigger again: ({c.strip()})"
     assert "pan" in c and "tilt" in c, f"pan/tilt no longer deselect: ({c.strip()})"
-print(f"   both sites drop on pan/tilt only                   OK")
+print("   both sites drop on pan/tilt only                   OK")
 
-# The subject must still be dropped by a manual pan/tilt — that half is the
-# operator saying they are aiming elsewhere, and it is what turns the UI red.
-assert INO.count("mount.clearLaSubject();") >= 2, \
-    "the deselect on manual pan/tilt has gone entirely"
+# And no state test may creep back in: excluding a look-at move is what made a
+# joystick do nothing at all while the slider was travelling.
+for c in conds:
+    assert "getState" not in c, \
+        "a state test is back in the deselect condition — if it excludes a\n" \
+        "    look-at move again, the joystick stops working during one"
+print("   and during a look-at move as well as outside one    OK")
+
 print("   a manual pan or tilt still drops it                OK")
 
 # ---- 2. pan/tilt actually track during a hand-driven slide ------------------

@@ -794,8 +794,34 @@ void MountMotion::_updateJog() {
 
 void MountMotion::jogPanTilt(int16_t pan, int16_t tilt, uint8_t pt_preset) {
     if (_state == STATE_FINDING_LIMITS)  return;
-    if (_state == STATE_LOOK_AT_MOVE ||
-        _state == STATE_LOOK_AT_PRE_AIM) return;   // look-at owns pan/tilt
+
+    // Taking the joystick during a look-at move hands pan and tilt to the
+    // operator and DROPS the subject — the slider carries on to the end of its
+    // travel regardless.
+    //
+    // This used to return here, so a joystick did nothing at all while a move
+    // was running.  Everywhere else in the system a pan/tilt input already
+    // means "aim somewhere else" and deselects (see CMD_JOG and CMD_MOVE_REL
+    // in the .ino, and the manual-slide branch in update()); the commanded move
+    // was the one place that did not honour it.
+    //
+    // The STATE stays LOOK_AT_MOVE.  That is what keeps the slider travelling
+    // and keeps _updateLookAt() running to notice it arriving — the move is
+    // still in progress, it has simply stopped aiming.  Reselecting a subject
+    // picks tracking straight back up.
+    bool in_la_move = (_state == STATE_LOOK_AT_MOVE ||
+                       _state == STATE_LOOK_AT_PRE_AIM);
+    if (in_la_move) {
+        if (pan != 0 || tilt != 0) {
+            clearLaSubject();          // aiming somewhere else — let the subject go
+        } else if (_la_subject_id != 0xFF) {
+            // Still tracking and the stick is centred: nothing to hand over, and
+            // running the stop code below would fight the tracker for the axes.
+            return;
+        }
+        // Falling through with a centred stick and no subject is deliberate: it
+        // is the operator RELEASING, and the axes have to be told to stop.
+    }
 
     pt_preset = constrain(pt_preset, 1, 4);
 
@@ -803,7 +829,7 @@ void MountMotion::jogPanTilt(int16_t pan, int16_t tilt, uint8_t pt_preset) {
     _jog_vel[AXIS_TILT] = _applyOrientation(AXIS_TILT, tilt);
     _jog_last_ms        = millis();
     _jogging            = (_jog_vel[AXIS_PAN] != 0 || _jog_vel[AXIS_TILT] != 0);
-    _state              = STATE_JOGGING;
+    if (!in_la_move) _state = STATE_JOGGING;
 
     for (int i = 0; i < 2; i++) {   // 0=PAN, 1=TILT only
         const SpeedPreset &spd = _pt_presets[pt_preset];
@@ -1912,6 +1938,31 @@ void MountMotion::_aimFrom(float sx, float sy, float sz, float wx, float wy,
     *tilt_deg = atan2f(dy, sqrtf(dx * dx + dz * dz)) * (180.0f / (float)M_PI);
 }
 
+// Where the head is actually pointing — the inverse of the target arithmetic
+// in _updateLookAt().  Needed when tracking resumes after the operator has had
+// the joystick: the blend has to start from where they left the camera, not
+// from a subject that was dropped some time ago.
+void MountMotion::_headAimAngles(float *pan_deg, float *tilt_deg) const {
+    int32_t pan_log  = _stepper[AXIS_PAN ]->getPosition();
+    int32_t tilt_log = _stepper[AXIS_TILT]->getPosition();
+    if (_pan_invert)  pan_log  = -pan_log;
+    if (_tilt_invert) tilt_log = -tilt_log;
+    *pan_deg  = (float)pan_log  * _pan_deg_per_step  + _pan_ref_deg;
+    *tilt_deg = (float)tilt_log * _tilt_deg_per_step + _tilt_ref_deg;
+}
+
+// One copy of "a point looked at from here, at these angles, this far away".
+// Two callers need it, and a third hand-rolled projection is exactly how the
+// aim geometry drifted apart before.
+void MountMotion::_pointFromAim(float wx, float wy, float pan_deg, float tilt_deg,
+                                float h, float *sx, float *sy, float *sz) const {
+    float pan_r  = pan_deg  * ((float)M_PI / 180.0f);
+    float tilt_r = tilt_deg * ((float)M_PI / 180.0f);
+    *sx = wx + h * sinf(pan_r);
+    *sy = wy + h * tanf(tilt_r);
+    *sz =      h * cosf(pan_r);
+}
+
 void MountMotion::_laAimNow(float wx, float wy,
                             float *pan_deg, float *tilt_deg) const {
     float pan_b, tilt_b;
@@ -1967,11 +2018,7 @@ void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
     float h  = sqrtf(ax * ax + az * az) * (1.0f - e)
              + sqrtf(bx * bx + bz * bz) * e;
 
-    float pan_r  = pan_deg  * ((float)M_PI / 180.0f);
-    float tilt_r = tilt_deg * ((float)M_PI / 180.0f);
-    *sx = wx + h * sinf(pan_r);
-    *sy = wy + h * tanf(tilt_r);
-    *sz =      h * cosf(pan_r);
+    _pointFromAim(wx, wy, pan_deg, tilt_deg, h, sx, sy, sz);
 }
 
 void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id) {
@@ -1979,13 +2026,49 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     // instead of stepping it.  Start from where we are aiming NOW, which may
     // itself be part-way through an earlier blend, so a switch during a switch
     // stays continuous rather than snapping back to the previous subject.
-    bool switching = (_look_at_mode && _la_subject_id != 0xFF &&
-                      subject_id != _la_subject_id &&
-                      (_state == STATE_LOOK_AT_MOVE ||
-                       _state == STATE_LOOK_AT_PRE_AIM ||
-                       _state == STATE_JOGGING));
+    bool tracking_now = (_look_at_mode &&
+                         (_state == STATE_LOOK_AT_MOVE ||
+                          _state == STATE_LOOK_AT_PRE_AIM ||
+                          _state == STATE_JOGGING));
+    bool switching = (tracking_now && _la_subject_id != 0xFF &&
+                      subject_id != _la_subject_id);
+
+    // Re-acquiring after the operator has had the joystick.  There is no
+    // previous subject to blend FROM — they dropped it by taking pan/tilt — but
+    // the camera is pointing somewhere definite, and easing from there is
+    // exactly the same problem as a switch.  Without this the target jumps to
+    // the subject and the controller chases a step, which is the lurch the
+    // blend exists to remove.
+    bool reacquiring = (tracking_now && _la_subject_id == 0xFF && _ref_set);
+
     float from_x = 0.f, from_y = 0.f, from_z = 0.f;
-    if (switching) _laSubjectNow(&from_x, &from_y, &from_z);
+    if (switching) {
+        _laSubjectNow(&from_x, &from_y, &from_z);
+    } else if (reacquiring) {
+        int32_t sl_phys = _stepper[AXIS_SLIDER]->getPosition();
+        float   cx      = (float)sl_phys * _slider_mm_per_step;
+        if (_slider_invert) cx = -cx;
+        float wx, wy;
+        _railWorldPos(cx, &wx, &wy);
+        float hpan, htilt;
+        _headAimAngles(&hpan, &htilt);
+        // At the NEW subject's range: the blend interpolates angles, so the
+        // range only has to be sane, and matching the destination keeps the
+        // start and end of the turn the same distance away.
+        float bx = sx - wx, bz = sz;
+        _pointFromAim(wx, wy, hpan, htilt, sqrtf(bx * bx + bz * bz),
+                      &from_x, &from_y, &from_z);
+        switching = true;            // from here on it IS a switch
+    }
+
+    // Whatever the operator was doing with pan/tilt, the tracker owns them
+    // again from this moment.  Leaving the jog bookkeeping set would have
+    // _driveTowardTarget() and the jog both believing they hold the axes.
+    if (tracking_now && _la_subject_id == 0xFF) {
+        _jog_vel[AXIS_PAN] = _jog_vel[AXIS_TILT] = 0;
+        _jog_dir[AXIS_PAN] = _jog_dir[AXIS_TILT] = 0;
+        _pending_dir[AXIS_PAN] = _pending_dir[AXIS_TILT] = 0;
+    }
 
     // Atomic write — update atomically enough for Teensy (no ISR touches these)
     _la_subject_x  = sx;
@@ -2349,6 +2432,12 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
     // We want world-frame mm along the rail (always positive from home).
     if (_slider_invert) cx = -cx;
 
+    // No subject: the operator has the joystick and owns pan/tilt.  Everything
+    // between here and the slider-arrival check is about aiming, and aiming at
+    // nothing would fight the jog for the axes — so skip it and let the move
+    // run on as a slider move that happens to have started as a look-at.
+    bool aiming = (_la_subject_id != 0xFF);
+
     // 2. Where the camera has to point, from this rail position
     float wx, wy;
     _railWorldPos(cx, &wx, &wy);
@@ -2437,8 +2526,10 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
         }
     }
 
-    _driveTowardTarget(AXIS_PAN,  pan_target,  pan_speed_limit);
-    _driveTowardTarget(AXIS_TILT, tilt_target, tilt_speed_limit);
+    if (aiming) {
+        _driveTowardTarget(AXIS_PAN,  pan_target,  pan_speed_limit);
+        _driveTowardTarget(AXIS_TILT, tilt_target, tilt_speed_limit);
+    }
 
     // 7. Detect slider arrival — transition to IDLE when slider finishes.
     // Guard: require BOTH !isMoving AND proximity to the stored destination.
@@ -2468,8 +2559,12 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
                 (int32_t)(LOOK_AT_AIM_ARRIVE_DEG / _pan_deg_per_step);
             int32_t pan_err  = labs(pan_target  - _stepper[AXIS_PAN ]->getPosition());
             int32_t tilt_err = labs(tilt_target - _stepper[AXIS_TILT]->getPosition());
-            bool blending    = _laBlendPhase() < 1.0f;
-            bool aim_there   = (pan_err <= aim_tol && tilt_err <= aim_tol);
+            bool blending    = aiming && _laBlendPhase() < 1.0f;
+            // With no subject there is nothing for the aim to arrive AT, so the
+            // move ends on the rail alone — waiting would hang until the
+            // timeout while the operator held a perfectly deliberate frame.
+            bool aim_there   = !aiming ||
+                               (pan_err <= aim_tol && tilt_err <= aim_tol);
 
             if (_la_sl_arrived_ms == 0) _la_sl_arrived_ms = now;
             bool waited_long_enough =

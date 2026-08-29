@@ -155,8 +155,15 @@ print("\n5. starting a switch during a switch:")
 now = code_only(body("void MountMotion::_laSubjectNow("))
 assert "_laAimNow(wx, wy, &pan_deg, &tilt_deg)" in now, \
     "the point handed to the next blend is not derived from the current aim"
-assert "sinf(pan_r)" in now and "cosf(pan_r)" in now and "tanf(tilt_r)" in now, \
+# The projection itself now lives in _pointFromAim(), shared with the
+# re-acquisition path. Check the property — that the aim is turned back into a
+# point — not which function body the trigonometry sits in.
+assert "_pointFromAim(wx, wy, pan_deg, tilt_deg, h, sx, sy, sz)" in now, \
     "the aim is not projected back out to a point"
+proj = CPP[CPP.index("void MountMotion::_pointFromAim("):]
+proj = proj[:proj.index("\n}")]
+assert "sinf(pan_r)" in proj and "cosf(pan_r)" in proj and "tanf(tilt_r)" in proj, \
+    "_pointFromAim no longer projects angles and a range into a point"
 assert "(1.0f - e)" in now and "* e" in now, \
     "the range is not blended, so a switch during a switch would jump the\n" \
     "    subject nearer or further as well as sideways"
