@@ -88,14 +88,31 @@ MODE_SET        = "set"
 MODE_CLEAR      = "clear"
 
 
-def _btn_stylesheet(bg: str, text: str, border: str, border_w: int = 8) -> str:
+# Metrics scale with the button, so the grid looks the same on any screen.
+#
+# These were fixed at 22px radius / 24px font against a 130x120 button, which
+# is right on a 1920x1080 screen and wrong on every other one: the app runs
+# full screen, so a display with more logical pixels got the same size grid in
+# a bigger space and it read as small and over-spaced.  Set from the height the
+# row actually gets — see PositionGrid._relayout().
+# The button is not the whole row: it floats in the camera's coloured band,
+# and that band is as much of the look as the button is.  120 in a 178px row on
+# the screen this was designed against.
+_BTN_H_FRAC      = 120.0 / 178.0
+_BTN_RADIUS_FRAC = 22.0 / 120.0    # of the BUTTON height, as originally tuned
+_BTN_FONT_FRAC   = 24.0 / 120.0
+_BTN_BORDER_FRAC =  8.0 / 120.0
+
+
+def _btn_stylesheet(bg: str, text: str, border: str, border_w: int = 8,
+                    radius: int = 22, font_px: int = 24) -> str:
     return f"""
         QPushButton {{
             background: {bg};
             color: {text};
             border: {border_w}px solid {border};
-            border-radius: 22px;
-            font-size: 24px;
+            border-radius: {radius}px;
+            font-size: {font_px}px;
             font-weight: bold;
             padding: 2px;
         }}
@@ -186,6 +203,14 @@ class PositionGrid(QWidget):
         self._store  = position_store
         self._mode   = MODE_MOVE
         self._active = 1
+
+        # Live layout metrics.  Seeded with the values the grid was designed at
+        # so the very first paint is right even before any resize arrives, then
+        # recomputed from the height actually granted — see _relayout().
+        self._row_h   = self._REF_ROW_H
+        self._radius  = round(self._REF_ROW_H * _BTN_RADIUS_FRAC)
+        self._font_px = round(self._REF_ROW_H * _BTN_FONT_FRAC)
+        self._border  = round(self._REF_ROW_H * _BTN_BORDER_FRAC)
 
         # Slot state from mount (bitmasks, bits 0-9)
         self._slot_occupied: dict[int, int] = {mid: 0 for mid in range(1, 6)}
@@ -437,6 +462,53 @@ class PositionGrid(QWidget):
             self._row_containers[mid] = container
             root.addWidget(container)
 
+    # Never narrower than this, whatever the screen: below it the two-digit
+    # labels start to crowd their border radius.
+    _BTN_MIN_W = 64
+    # The proportions the layout was designed at, and the size the row is given
+    # on the 1920x1080 screen it was tuned on.  _relayout() scales from these,
+    # so that screen is unchanged by construction and every other one matches it.
+    _REF_ROW_H = 120
+
+    def _relayout(self) -> None:
+        """Size the rows, and the type inside them, from the height available.
+
+        The app runs full screen, so the height it gets is the screen's. Fixed
+        pixel sizes therefore meant the grid occupied a different FRACTION of
+        the screen on every machine: right on the display it was tuned on,
+        small and over-spaced on a larger one. Everything here is derived from
+        one number instead, so the proportions hold everywhere.
+        """
+        if not self._row_containers:
+            return
+        m = self.layout().contentsMargins()
+        avail = self.height() - m.top() - m.bottom() \
+                - self.layout().spacing() * (len(self._row_containers) - 1)
+        row_h = max(self._MIN_ROW_H, avail // len(self._row_containers))
+        if row_h == self._row_h:
+            return                      # nothing moved; don't churn stylesheets
+        self._row_h   = row_h
+        btn_h         = max(self._MIN_BTN_H, round(row_h * _BTN_H_FRAC))
+        self._radius  = max(4, round(btn_h * _BTN_RADIUS_FRAC))
+        self._font_px = max(9, round(btn_h * _BTN_FONT_FRAC))
+        self._border  = max(2, round(btn_h * _BTN_BORDER_FRAC))
+
+        # A MAXIMUM, not a fixed height.  The minimum stays small, so the grid
+        # can still shrink; the maximum stops the button swelling to fill the
+        # band it is supposed to float in.
+        for btn in self._buttons.values():
+            btn.setMaximumHeight(btn_h)
+
+        for mid in list(self._row_containers):
+            self._refresh_row_borders(mid)
+
+    _MIN_ROW_H = 56     # below this the digits stop being readable across a room
+    _MIN_BTN_H = 38
+
+    def resizeEvent(self, event):        # type: ignore[override]
+        super().resizeEvent(event)
+        self._relayout()
+
     def _btn_target_width(self) -> int:
         return 130
 
@@ -450,9 +522,15 @@ class PositionGrid(QWidget):
 
         for slot in range(10):
             btn = WrappingButton(str(slot + 1))
-            btn.setFixedWidth(self._btn_target_width())
-            btn.setFixedHeight(120)
-            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            # Expanding, not fixed: the ten buttons and the two dials divide
+            # whatever width the row has, so the grid fills the screen the same
+            # way whatever its resolution.  A fixed width left the surplus as
+            # gaps, which is why a bigger display looked sparse rather than
+            # bigger.  The minimum keeps the digits legible on a small one.
+            btn.setMinimumSize(self._BTN_MIN_W, self._MIN_BTN_H)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding,
+                              QSizePolicy.Policy.Expanding)
+            hl.setAlignment(btn, Qt.AlignmentFlag.AlignVCenter)
             self._apply_border(btn, mount_id, slot)
             btn.clicked.connect(self._make_click_handler(mount_id, slot))
             btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -500,7 +578,8 @@ class PositionGrid(QWidget):
         # waits.  set_mount_connected(True) repaints from them immediately.
         if not self._connected.get(mount_id, False):
             btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"],
-                                              BORDER_EMPTY))
+                                              BORDER_EMPTY,
+                                          radius=self._radius, font_px=self._font_px))
             return
 
         # Arrow buttons (slots 8-9 on look-at mounts) — state-driven border
@@ -521,7 +600,8 @@ class PositionGrid(QWidget):
                     border = BORDER_AT
                 else:
                     border = "#37474F"
-            btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border, border_w=4))
+            btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border, border_w=4,
+                                          radius=self._radius, font_px=self._font_px))
             return
 
         # Subject buttons (slots 0-7 on look-at mounts)
@@ -536,7 +616,8 @@ class PositionGrid(QWidget):
                 border = BORDER_NOT_AT    # red   — stored + camera not looking at
             else:
                 border = BORDER_EMPTY     # grey  — no subject stored
-            btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border))
+            btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border,
+                                          radius=self._radius, font_px=self._font_px))
             return
 
         # Normal position-slot buttons
@@ -554,7 +635,8 @@ class PositionGrid(QWidget):
         else:
             border = BORDER_NOT_AT
 
-        btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border))
+        btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border,
+                                          radius=self._radius, font_px=self._font_px))
 
     def _refresh_row_borders(self, mount_id: int) -> None:
         for slot in range(10):
