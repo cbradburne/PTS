@@ -22,7 +22,9 @@ MODE — EDIT:  position buttons store current camera position to that slot
 """
 from __future__ import annotations
 
+import functools
 import logging
+import re
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QSizePolicy, QFrame, QInputDialog,
@@ -55,9 +57,62 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# UI scale — one number, so the chrome matches the grid on any screen
+# ---------------------------------------------------------------------------
+# The bars were 60px buttons with 28px type, which is right on the 1920x1080
+# display they were drawn against and progressively smaller on anything with
+# more logical pixels.  The app runs full screen, so the screen's height IS the
+# window's; everything here is expressed against 1080 and scaled from it, the
+# same way PositionGrid scales from the height it is given.
+#
+# Read once at build time rather than on resize: a full-screen window does not
+# change size, and re-applying forty stylesheets to handle a case that cannot
+# happen is cost without benefit.
+_UI_REF_H = 1080.0
+_UI_SCALE = 1.0
+
+
+def _init_ui_scale(height: int | None = None) -> float:
+    """Set the scale from the screen, or from an explicit height for tests."""
+    global _UI_SCALE
+    if height is None:
+        scr = QApplication.primaryScreen()
+        if scr is None:
+            return _UI_SCALE
+        height = scr.geometry().height()
+    # Clamped: a phone-sized or wall-sized display should still be usable
+    # rather than faithfully proportioned into uselessness.
+    _UI_SCALE = max(0.65, min(3.0, height / _UI_REF_H))
+    return _UI_SCALE
+
+
+def _px(n: float) -> int:
+    return max(1, round(n * _UI_SCALE))
+
+
+def _qss(sheet: str) -> str:
+    """Scale every pixel length in a stylesheet.
+
+    Applied to the style helpers below rather than at each of the forty
+    setStyleSheet() calls, because those run again on every state change —
+    active/inactive, armed/idle — and one of them missing the transform would
+    resize a button the moment it was pressed.
+    """
+    return re.sub(r"(\d+)px", lambda m: f"{_px(int(m.group(1)))}px", sheet)
+
+
+def _scaled_style(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return _qss(fn(*args, **kwargs))
+    return wrapper
+
+
 def _accent_hex(mount_id: int) -> str:
     return CAM_COLORS[mount_id]["accent"].name()
 
+@_scaled_style
 def _cam_btn_style(mount_id: int, active: bool) -> str:
     accent = _accent_hex(mount_id)
     bg     = CAM_COLORS[mount_id]["btn_bg"]
@@ -73,6 +128,7 @@ def _cam_btn_style(mount_id: int, active: bool) -> str:
         }}
     """
 
+@_scaled_style
 def _clear_btn_style(mount_id: int) -> str:
     accent = _accent_hex(mount_id)
     bg     = CAM_COLORS[mount_id]["btn_bg"]
@@ -87,6 +143,7 @@ def _clear_btn_style(mount_id: int) -> str:
         QPushButton:pressed {{ background: #111; }}
     """
 
+@_scaled_style
 def _action_btn_style() -> str:
     return """
         QPushButton {
@@ -97,6 +154,7 @@ def _action_btn_style() -> str:
         QPushButton:pressed { background: #131C24; }
     """
 
+@_scaled_style
 def _edit_btn_style(active: bool) -> str:
     """Edit button: RED when active (label-edit mode), neutral when inactive."""
     if active:
@@ -113,6 +171,7 @@ def _edit_btn_style(active: bool) -> str:
     }
     QPushButton:pressed { background: #0D1A2B; }"""
 
+@_scaled_style
 def _move_btn_style(active: bool) -> str:
     """Style for the Move (nudge overlay) button."""
     if active:
@@ -127,6 +186,7 @@ def _move_btn_style(active: bool) -> str:
         font-size: 28px; font-weight: bold; padding: 6px 18px;
     }"""
 
+@_scaled_style
 def _run_btn_style(active: bool) -> str:
     """Run toggle button: green when run mode is active."""
     if active:
@@ -143,6 +203,7 @@ def _run_btn_style(active: bool) -> str:
     }
     QPushButton:pressed { background: #131C24; }"""
 
+@_scaled_style
 def _run_cam_active_style(mount_id: int) -> str:
     """Camera button style when that camera's run sequence is active (amber border)."""
     bg = CAM_COLORS[mount_id]["btn_bg"]
@@ -156,6 +217,7 @@ def _run_cam_active_style(mount_id: int) -> str:
         QPushButton:pressed {{ background: #111; }}
     """
 
+@_scaled_style
 def _clear_mode_btn_style(active: bool) -> str:
     """Clear toggle button: orange when active."""
     if active:
@@ -172,6 +234,7 @@ def _clear_mode_btn_style(active: bool) -> str:
     }
     QPushButton:pressed { background: #1A1A1A; }"""
 
+@_scaled_style
 def _clear_cam_btn_style(mount_id: int) -> str:
     """Cam button style when clear mode is active — orange tint."""
     bg = CAM_COLORS[mount_id]["btn_bg"]
@@ -185,6 +248,7 @@ def _clear_cam_btn_style(mount_id: int) -> str:
         QPushButton:pressed {{ background: #111; }}
     """
 
+@_scaled_style
 def _set_btn_style(armed: bool) -> str:
     """SET button: bright amber/pulsing when armed (waiting for position tap)."""
     if armed:
@@ -231,8 +295,8 @@ class _CamBtnContainer(QWidget):
     def __init__(self, btn: QPushButton, parent=None) -> None:
         super().__init__(parent)
         vl = QVBoxLayout(self)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(0)
+        vl.setContentsMargins(_px(0), _px(0), _px(0), _px(0))
+        vl.setSpacing(_px(0))
         vl.addWidget(btn)
         self._overlay = _CamBtnOverlay(self)
         self._overlay.raise_()
@@ -288,11 +352,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build(self) -> None:
+        # Before any widget is made: every size below is expressed against the
+        # 1920x1080 screen this was drawn on and scaled from here.
+        _init_ui_scale()
+
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(4)
+        root.setContentsMargins(_px(6), _px(6), _px(6), _px(6))
+        root.setSpacing(_px(4))
 
         # ---- Top bar ----
         root.addWidget(self._build_top_bar())
@@ -323,8 +391,8 @@ class MainWindow(QMainWindow):
         # column (cam buttons) is always at the true horizontal midpoint.
         container = QWidget()
         grid = QGridLayout(container)
-        grid.setContentsMargins(4, 4, 4, 4)
-        grid.setSpacing(0)
+        grid.setContentsMargins(_px(4), _px(4), _px(4), _px(4))
+        grid.setSpacing(_px(0))
         grid.setColumnStretch(0, 1)  # left  — expands to fill half the slack
         grid.setColumnStretch(1, 0)  # centre — natural width, perfectly centred
         grid.setColumnStretch(2, 1)  # right  — expands to fill half the slack
@@ -334,19 +402,19 @@ class MainWindow(QMainWindow):
         # ---- Left: Move + Edit ----
         left = QWidget()
         left_hl = QHBoxLayout(left)
-        left_hl.setContentsMargins(0, 0, 0, 0)
-        left_hl.setSpacing(6)
+        left_hl.setContentsMargins(_px(0), _px(0), _px(0), _px(0))
+        left_hl.setSpacing(_px(6))
 
         self._move_btn = QPushButton("Move")
-        self._move_btn.setFixedHeight(60)
-        self._move_btn.setMinimumWidth(80)
+        self._move_btn.setFixedHeight(_px(60))
+        self._move_btn.setMinimumWidth(_px(80))
         self._move_btn.setStyleSheet(_move_btn_style(False))
         self._move_btn.clicked.connect(self._toggle_nudge)
         left_hl.addWidget(self._move_btn)
 
         self._mode_btn = QPushButton("Edit")
-        self._mode_btn.setFixedHeight(60)
-        self._mode_btn.setMinimumWidth(80)
+        self._mode_btn.setFixedHeight(_px(60))
+        self._mode_btn.setMinimumWidth(_px(80))
         self._mode_btn.setStyleSheet(_edit_btn_style(False))
         self._mode_btn.clicked.connect(self._toggle_edit)
         left_hl.addWidget(self._mode_btn)
@@ -362,27 +430,27 @@ class MainWindow(QMainWindow):
         # ---- Right: status label + Clear + SET ----
         right = QWidget()
         right_hl = QHBoxLayout(right)
-        right_hl.setContentsMargins(0, 0, 0, 0)
-        right_hl.setSpacing(6)
+        right_hl.setContentsMargins(_px(0), _px(0), _px(0), _px(0))
+        right_hl.setSpacing(_px(6))
 
         right_hl.addStretch()  # push buttons to the right edge
 
         self._conn_label = QLabel("Not connected")
-        self._conn_label.setStyleSheet("color:#555; font-size:10px;")
+        self._conn_label.setStyleSheet(_qss("color:#555; font-size:10px;"))
         right_hl.addWidget(self._conn_label)
 
         right_hl.addSpacing(8)
 
         self._clear_mode_btn = QPushButton("Clear")
-        self._clear_mode_btn.setFixedHeight(60)
-        self._clear_mode_btn.setMinimumWidth(100)
+        self._clear_mode_btn.setFixedHeight(_px(60))
+        self._clear_mode_btn.setMinimumWidth(_px(100))
         self._clear_mode_btn.setStyleSheet(_clear_mode_btn_style(False))
         self._clear_mode_btn.clicked.connect(self._toggle_clear_mode)
         right_hl.addWidget(self._clear_mode_btn)
 
         self._set_btn = QPushButton("SET")
-        self._set_btn.setFixedHeight(60)
-        self._set_btn.setMinimumWidth(80)
+        self._set_btn.setFixedHeight(_px(60))
+        self._set_btn.setMinimumWidth(_px(80))
         self._set_btn.setStyleSheet(_set_btn_style(False))
         self._set_btn.clicked.connect(self._on_set_btn)
         right_hl.addWidget(self._set_btn)
@@ -394,14 +462,14 @@ class MainWindow(QMainWindow):
     def _build_cam_selector(self) -> QWidget:
         w  = QWidget()
         hl = QHBoxLayout(w)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.setSpacing(4)
+        hl.setContentsMargins(_px(0), _px(0), _px(0), _px(0))
+        hl.setSpacing(_px(4))
         self._cam_btns: list[QPushButton] = []
         self._cam_containers: dict[int, _CamBtnContainer] = {}
         for mid in range(1, 6):
             btn = QPushButton(self._config.mount_label(mid))
-            btn.setFixedHeight(60)
-            btn.setMinimumWidth(150)
+            btn.setFixedHeight(_px(60))
+            btn.setMinimumWidth(_px(150))
             btn.setStyleSheet(_cam_btn_style(mid, mid == self._active_mount))
             btn.clicked.connect(self._make_cam_select(mid))
             self._cam_btns.append(btn)
@@ -414,8 +482,8 @@ class MainWindow(QMainWindow):
         # Three-column grid so Run is always perfectly centred.
         container = QWidget()
         grid = QGridLayout(container)
-        grid.setContentsMargins(4, 4, 4, 4)
-        grid.setSpacing(0)
+        grid.setContentsMargins(_px(4), _px(4), _px(4), _px(4))
+        grid.setSpacing(_px(0))
         grid.setColumnStretch(0, 1)  # left
         grid.setColumnStretch(1, 0)  # centre — Run button
         grid.setColumnStretch(2, 1)  # right
@@ -425,8 +493,8 @@ class MainWindow(QMainWindow):
         # ---- Left: Config / CV Track / Stop Tracking + status label ----
         left = QWidget()
         left_hl = QHBoxLayout(left)
-        left_hl.setContentsMargins(0, 0, 0, 0)
-        left_hl.setSpacing(6)
+        left_hl.setContentsMargins(_px(0), _px(0), _px(0), _px(0))
+        left_hl.setSpacing(_px(6))
 
         for label, handler in [
             ("⚙  Config",   self._open_config),
@@ -434,21 +502,21 @@ class MainWindow(QMainWindow):
             ("◉  CV Track", self._open_cv),
         ]:
             btn = QPushButton(label)
-            btn.setFixedHeight(60)
+            btn.setFixedHeight(_px(60))
             btn.setStyleSheet(_action_btn_style())
             btn.clicked.connect(handler)
             left_hl.addWidget(btn)
 
         # Stop Tracking — hidden until CV tracking is active
         self._stop_track_btn = QPushButton("■  Stop Tracking")
-        self._stop_track_btn.setFixedHeight(60)
-        self._stop_track_btn.setStyleSheet("""
+        self._stop_track_btn.setFixedHeight(_px(60))
+        self._stop_track_btn.setStyleSheet(_qss("""
             QPushButton {
                 background: #B71C1C; color: white; font-size: 14px;
                 border: none; border-radius: 8px; padding: 0 16px;
             }
             QPushButton:pressed { background: #7F0000; }
-        """)
+        """))
         self._stop_track_btn.setVisible(False)
         self._stop_track_btn.clicked.connect(self._on_stop_tracking)
         left_hl.addWidget(self._stop_track_btn)
@@ -456,15 +524,15 @@ class MainWindow(QMainWindow):
         left_hl.addStretch()
 
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color:#546E7A; font-size:10px;")
+        self._status_label.setStyleSheet(_qss("color:#546E7A; font-size:10px;"))
         left_hl.addWidget(self._status_label)
 
         grid.addWidget(left, 0, 0, A.AlignVCenter | A.AlignLeft)
 
         # ---- Centre: Run ----
         self._run_mode_btn = QPushButton("▶  Run")
-        self._run_mode_btn.setFixedHeight(60)
-        self._run_mode_btn.setMinimumWidth(120)
+        self._run_mode_btn.setFixedHeight(_px(60))
+        self._run_mode_btn.setMinimumWidth(_px(120))
         self._run_mode_btn.setStyleSheet(_run_btn_style(False))
         self._run_mode_btn.clicked.connect(self._toggle_run_mode)
         grid.addWidget(self._run_mode_btn, 0, 1, A.AlignVCenter | A.AlignHCenter)
@@ -472,8 +540,8 @@ class MainWindow(QMainWindow):
         # ---- Right: E-Stop + Exit ----
         right = QWidget()
         right_hl = QHBoxLayout(right)
-        right_hl.setContentsMargins(0, 0, 0, 0)
-        right_hl.setSpacing(6)
+        right_hl.setContentsMargins(_px(0), _px(0), _px(0), _px(0))
+        right_hl.setSpacing(_px(6))
 
         right_hl.addStretch()
 
@@ -481,12 +549,12 @@ class MainWindow(QMainWindow):
         right_hl.addWidget(self._estop_btn)
 
         exit_btn = QPushButton("Exit")
-        exit_btn.setFixedHeight(60)
-        exit_btn.setStyleSheet("""
+        exit_btn.setFixedHeight(_px(60))
+        exit_btn.setStyleSheet(_qss("""
             QPushButton { background:#B71C1C; color:#FFF; font-size: 20px;
                 border: 4px solid #F00; border-radius: 20px; padding:4px 16px; }
             QPushButton:pressed { background:#0D0D0D; }
-        """)
+        """))
         exit_btn.clicked.connect(self.close)
         right_hl.addWidget(exit_btn)
 
@@ -1089,7 +1157,7 @@ class MainWindow(QMainWindow):
     def _on_mount_connected(self, mount_id: int) -> None:
         self._conn_label.setText(f"Cam {mount_id} connected")
         self._conn_label.setStyleSheet(
-            f"color:{_accent_hex(mount_id)}; font-size:10px;")
+            _qss(f"color:{_accent_hex(mount_id)}; font-size:10px;"))
         # Apply the slot masks from the STATUS packet that triggered this signal
         # *before* removing the overlay, so correct borders are visible immediately
         # rather than waiting for the next _on_status_updated call.
@@ -1117,7 +1185,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(int)
     def _on_mount_disconnected(self, mount_id: int) -> None:
         self._conn_label.setText(f"Cam {mount_id} disconnected")
-        self._conn_label.setStyleSheet("color:#EF5350; font-size:10px;")
+        self._conn_label.setStyleSheet(_qss("color:#EF5350; font-size:10px;"))
         self._cam_containers[mount_id].set_connected(False)
         if self._run_mode and self._run_states[mount_id]['active']:
             self._stop_run(mount_id)
@@ -1459,13 +1527,13 @@ class MainWindow(QMainWindow):
 
         if ok:
             self._conn_label.setText(f"Hub: {label}")
-            self._conn_label.setStyleSheet("color:#4CAF50; font-size:10px;")
+            self._conn_label.setStyleSheet(_qss("color:#4CAF50; font-size:10px;"))
             # Register auto-reconnect callback (safe to register multiple times —
             # _connect_bridge is called once at startup and again after config changes).
             self._bridge.on_reconnect(self._on_bridge_reconnected)
         else:
             self._conn_label.setText(f"Failed: {label}")
-            self._conn_label.setStyleSheet("color:#EF5350; font-size:10px;")
+            self._conn_label.setStyleSheet(_qss("color:#EF5350; font-size:10px;"))
 
     def _on_bridge_reconnected(self) -> None:
         """Called from the Bridge RX thread after a successful auto-reconnect.
@@ -1483,7 +1551,7 @@ class MainWindow(QMainWindow):
         else:
             label = cfg.bridge_port or "serial"
         self._conn_label.setText(f"Hub: {label} (reconnected)")
-        self._conn_label.setStyleSheet("color:#FFA726; font-size:10px;")
+        self._conn_label.setStyleSheet(_qss("color:#FFA726; font-size:10px;"))
         # Only re-query mounts that are actually present.  Querying absent mounts
         # produces GET_CONFIG commands that never ACK, which the bridge's wedge
         # detector then mistakes for a wedged link — causing an endless
@@ -1530,17 +1598,17 @@ class _CalibPopup(QDialog):
         self._can_set      = False
 
         self.setWindowTitle(f"Calibrate — {subject_name}")
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(_px(360))
         self.setWindowFlags(
             self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         vl = QVBoxLayout(self)
-        vl.setSpacing(12)
-        vl.setContentsMargins(16, 16, 16, 16)
+        vl.setSpacing(_px(12))
+        vl.setContentsMargins(_px(16), _px(16), _px(16), _px(16))
 
         self._info = QLabel("Slider moving to far end…")
         self._info.setWordWrap(True)
-        self._info.setStyleSheet("font-size: 14px;")
+        self._info.setStyleSheet(_qss("font-size: 14px;"))
         vl.addWidget(self._info)
 
         # The same carriage sketch Find Limits uses.  Both are "the mount is
@@ -1553,7 +1621,7 @@ class _CalibPopup(QDialog):
             f"Camera {mount_id}  ·  {subject_name}\n"
             "Observation A recorded at current position.")
         self._detail.setWordWrap(True)
-        self._detail.setStyleSheet("color: #90A4AE; font-size: 11px;")
+        self._detail.setStyleSheet(_qss("color: #90A4AE; font-size: 11px;"))
         vl.addWidget(self._detail)
 
         btns = QDialogButtonBox()
@@ -1578,7 +1646,7 @@ class _CalibPopup(QDialog):
 
         if prompt == CP.MOVING_TO_B:
             self._info.setText("Slider moving to far end…")
-            self._info.setStyleSheet("font-size: 14px;")
+            self._info.setStyleSheet(_qss("font-size: 14px;"))
             self._set_btn.setEnabled(False)
             self._anim.show()
             self._anim.start(forward=True)
@@ -1586,14 +1654,14 @@ class _CalibPopup(QDialog):
         elif prompt == CP.WAIT_SET_B:
             self._info.setText(
                 f"Slider arrived.\n\nAim at  {self._subject_name}  then press Set.")
-            self._info.setStyleSheet("font-size: 14px; font-weight: bold;")
+            self._info.setStyleSheet(_qss("font-size: 14px; font-weight: bold;"))
             self._set_btn.setEnabled(True)
             self._can_set = True
             self._hide_anim()
 
         elif prompt == CP.SOLVED:
             self._info.setText("✓  Subject saved.")
-            self._info.setStyleSheet("font-size: 14px; color: #4CAF50; font-weight: bold;")
+            self._info.setStyleSheet(_qss("font-size: 14px; color: #4CAF50; font-weight: bold;"))
             self._set_btn.setEnabled(False)
             self._cancel_btn.setText("Close")
             self._hide_anim()
@@ -1605,7 +1673,7 @@ class _CalibPopup(QDialog):
             self._info.setText(
                 "✗  Could not solve 3D position.\n"
                 "Try with a longer slider travel and aim more precisely.")
-            self._info.setStyleSheet("font-size: 14px; color: #EF5350;")
+            self._info.setStyleSheet(_qss("font-size: 14px; color: #EF5350;"))
             self._set_btn.setEnabled(False)
             self._cancel_btn.setText("Close")
             self._hide_anim()
@@ -1623,7 +1691,7 @@ class _CalibPopup(QDialog):
             self._can_set = False
             self._set_btn.setEnabled(False)
             self._info.setText("Solving…")
-            self._info.setStyleSheet("font-size: 14px;")
+            self._info.setStyleSheet(_qss("font-size: 14px;"))
             self._hide_anim()
 
     def _on_cancel(self) -> None:
