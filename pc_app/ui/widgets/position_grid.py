@@ -99,6 +99,13 @@ MODE_CLEAR      = "clear"
 # and that band is as much of the look as the button is.  120 in a 178px row on
 # the screen this was designed against.
 _BTN_H_FRAC      = 120.0 / 178.0
+# The button's own shape, and the dials beside it, both as originally drawn.
+# Without the aspect cap the buttons simply absorbed every spare pixel of width
+# and came out stretched — wider than tall, which they never were — while the
+# dials were squeezed down onto their 72px floor.
+_BTN_ASPECT      = 130.0 / 120.0
+_DIAL_FRAC       = 0.78            # of button height
+_DIAL_GAP_FRAC   = 0.10
 _BTN_RADIUS_FRAC = 22.0 / 120.0    # of the BUTTON height, as originally tuned
 _BTN_FONT_FRAC   = 24.0 / 120.0
 _BTN_BORDER_FRAC =  8.0 / 120.0
@@ -207,6 +214,7 @@ class PositionGrid(QWidget):
         # Live layout metrics.  Seeded with the values the grid was designed at
         # so the very first paint is right even before any resize arrives, then
         # recomputed from the height actually granted — see _relayout().
+        self._row_layouts: dict[int, object] = {}
         self._row_h   = self._REF_ROW_H
         self._radius  = round(self._REF_ROW_H * _BTN_RADIUS_FRAC)
         self._font_px = round(self._REF_ROW_H * _BTN_FONT_FRAC)
@@ -496,8 +504,24 @@ class PositionGrid(QWidget):
         # A MAXIMUM, not a fixed height.  The minimum stays small, so the grid
         # can still shrink; the maximum stops the button swelling to fill the
         # band it is supposed to float in.
+        btn_w = round(btn_h * _BTN_ASPECT)
         for btn in self._buttons.values():
             btn.setMaximumHeight(btn_h)
+            btn.setMaximumWidth(btn_w)
+
+        # The dials scale with the row too.  They had a 72px minimum and no
+        # maximum, so with the buttons expanding they were pushed to that floor
+        # and sat almost touching.
+        # A MAXIMUM again, for the same reason as the buttons: setFixedSize
+        # here made the row's minimum height the dial's size, so after being
+        # shown on a 4K screen the grid could not shrink and a 1366x768 window
+        # kept 215px rows.  Every constraint in this method has to be an upper
+        # bound, or the layout ratchets.
+        dial = max(48, round(btn_h * _DIAL_FRAC))
+        for d in list(self._pt_dials.values()) + list(self._sl_dials.values()):
+            d.setMaximumSize(dial, dial)
+        for hl in self._row_layouts.values():
+            hl.setSpacing(max(3, round(btn_h * _DIAL_GAP_FRAC)))
 
         for mid in list(self._row_containers):
             self._refresh_row_borders(mid)
@@ -519,6 +543,7 @@ class PositionGrid(QWidget):
         hl  = QHBoxLayout(row)
         hl.setSpacing(3)
         hl.setContentsMargins(4, 4, 4, 4)
+        self._row_layouts[mount_id] = hl
 
         for slot in range(10):
             btn = WrappingButton(str(slot + 1))
@@ -541,9 +566,18 @@ class PositionGrid(QWidget):
             btn.pressed.connect(self._make_arrow_press(mount_id, slot))
             btn.released.connect(self._make_arrow_release(mount_id, slot))
             self._buttons[(mount_id, slot)] = btn
-            hl.addWidget(btn)
+            # Stretch 1, same as the spacer below.  An Expanding policy alone
+            # loses to any item that has an explicit stretch factor, so without
+            # this the spacer took every spare pixel and the buttons collapsed
+            # onto their minimum width.  With it they grow first, stop at their
+            # aspect cap, and the remainder goes to the spacer.
+            hl.addWidget(btn, 1)
 
-        hl.addSpacing(8)
+        # A stretch, not a fixed gap: with the buttons capped to their own
+        # aspect, whatever width is left over collects HERE rather than being
+        # shared out as wider buttons.  It also keeps the dials against the
+        # right-hand edge, which is where they have always sat.
+        hl.addStretch(1)
 
         accent  = col["accent"]
         pt_dial = RotaryDial(accent_colour=accent)
@@ -555,8 +589,13 @@ class PositionGrid(QWidget):
         # Slider dial starts greyed until a mount reports it has a slider
         # (set_has_slider, driven by CONFIG_REPORT / config).
         sl_dial.setEnabled(self._has_slider[mount_id])
-        hl.addWidget(sl_dial)   # Slider  — left
-        hl.addWidget(pt_dial)   # Pan/Tilt — right
+        # Stretch 1, like the buttons: an Expanding policy with no stretch
+        # factor loses to the spacer and the dial collapses onto its minimum.
+        for d in (sl_dial, pt_dial):
+            d.setSizePolicy(QSizePolicy.Policy.Expanding,
+                            QSizePolicy.Policy.Expanding)
+        hl.addWidget(sl_dial, 1)   # Slider  — left
+        hl.addWidget(pt_dial, 1)   # Pan/Tilt — right
 
         return row
 

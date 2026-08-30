@@ -46,7 +46,10 @@ class RotaryDial(QWidget):
         self._preset  = 0          # 0 = disconnected/unknown, 1-4 = active
         self._accent  = accent_colour
         self._pressed = False
-        self.setMinimumSize(72, 72)
+        # A floor, not a size.  72 was large enough to set the whole grid's
+        # minimum height once the dials started scaling with the row, which
+        # stopped a window shrinking after it had been shown on a big screen.
+        self.setMinimumSize(48, 48)
         self.setMaximumSize(90, 90)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
