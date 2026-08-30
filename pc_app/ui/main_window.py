@@ -26,6 +26,7 @@ import functools
 import logging
 import re
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QSizePolicy, QFrame, QInputDialog,
     QDialog, QDialogButtonBox, QMessageBox

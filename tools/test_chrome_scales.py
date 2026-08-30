@@ -50,6 +50,28 @@ def sample_sheets():
     return out
 
 
+# ---- 0. the call the app actually makes ------------------------------------
+# Every other check here passes an explicit height, which skips the screen
+# lookup entirely — so the one path the app takes was the one path untested,
+# and it shipped with QApplication unimported. NameError at startup, on a
+# machine that had already pulled.
+print("0. _init_ui_scale() with no argument:")
+s0 = MW._init_ui_scale()
+assert isinstance(s0, float) and 0.65 <= s0 <= 3.0, \
+    f"reading the scale from the screen returned {s0!r}"
+assert MW._px(60) > 0, "the scale is unusable after reading from the screen"
+print(f"   reads the screen and returns {s0:.2f}                   OK")
+
+# The module must carry everything that path needs, not rely on the caller
+# having imported it. This test imports QApplication itself, which is exactly
+# how the missing import stayed hidden.
+imports = SRC[:SRC.index("def _accent_hex")]
+assert "QApplication" in imports, \
+    "main_window does not IMPORT QApplication, though _init_ui_scale() calls it.\n" \
+    "    Matching anywhere in the file would pass on the call itself, which is\n" \
+    "    the thing that raised NameError."
+print("   QApplication imported by the module itself           OK")
+
 # ---- 1. the reference screen is untouched ----------------------------------
 print("1. the screen it was designed on:")
 MW._init_ui_scale(1080)
