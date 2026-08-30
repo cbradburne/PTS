@@ -106,6 +106,7 @@ _BTN_H_FRAC      = 120.0 / 178.0
 _BTN_ASPECT      = 130.0 / 120.0
 _DIAL_FRAC       = 0.78            # of button height
 _DIAL_GAP_FRAC   = 0.10
+_ROW_MARGIN      = 4     # the row layout's own left/right margin
 _BTN_RADIUS_FRAC = 22.0 / 120.0    # of the BUTTON height, as originally tuned
 _BTN_FONT_FRAC   = 24.0 / 120.0
 _BTN_BORDER_FRAC =  8.0 / 120.0
@@ -496,15 +497,30 @@ class PositionGrid(QWidget):
         if row_h == self._row_h:
             return                      # nothing moved; don't churn stylesheets
         self._row_h   = row_h
-        btn_h         = max(self._MIN_BTN_H, round(row_h * _BTN_H_FRAC))
+
+        # Height sets the size; the leftover WIDTH becomes even spacing.
+        #
+        # This is what the layout always did on the screen it was drawn for —
+        # 130px buttons with roughly 30px between them — and it is the look
+        # being matched.  Collecting the surplus in one place instead put a
+        # 300px hole between button 10 and the dials, and sizing from the width
+        # stretched the buttons out of shape.  Neither is what a bigger screen
+        # should do: it should give the same picture, larger.
+        btn_h = max(self._MIN_BTN_H, round(row_h * _BTN_H_FRAC))
+        btn_w = round(btn_h * _BTN_ASPECT)
+        dial  = max(48, round(btn_h * _DIAL_FRAC))
+
+        # Type, corners and border all scale with the button, or a 4K screen
+        # gets 265px buttons with 24px digits rattling around inside them.
         self._radius  = max(4, round(btn_h * _BTN_RADIUS_FRAC))
         self._font_px = max(9, round(btn_h * _BTN_FONT_FRAC))
         self._border  = max(2, round(btn_h * _BTN_BORDER_FRAC))
 
-        # A MAXIMUM, not a fixed height.  The minimum stays small, so the grid
-        # can still shrink; the maximum stops the button swelling to fill the
-        # band it is supposed to float in.
-        btn_w = round(btn_h * _BTN_ASPECT)
+        # 12 items in the row, so 11 gaps between them.
+        usable   = self.width() - m.left() - m.right() - _ROW_MARGIN * 2
+        leftover = usable - (10 * btn_w + 2 * dial)
+        spacing  = int(min(max(leftover / 11.0, 3), btn_w * 0.35))
+
         for btn in self._buttons.values():
             btn.setMaximumHeight(btn_h)
             btn.setMaximumWidth(btn_w)
@@ -517,11 +533,10 @@ class PositionGrid(QWidget):
         # shown on a 4K screen the grid could not shrink and a 1366x768 window
         # kept 215px rows.  Every constraint in this method has to be an upper
         # bound, or the layout ratchets.
-        dial = max(48, round(btn_h * _DIAL_FRAC))
         for d in list(self._pt_dials.values()) + list(self._sl_dials.values()):
             d.setMaximumSize(dial, dial)
         for hl in self._row_layouts.values():
-            hl.setSpacing(max(3, round(btn_h * _DIAL_GAP_FRAC)))
+            hl.setSpacing(spacing)
 
         for mid in list(self._row_containers):
             self._refresh_row_borders(mid)
@@ -542,7 +557,7 @@ class PositionGrid(QWidget):
         row.setStyleSheet(f"background: {col['row_bg']}; border-radius: 6px;")
         hl  = QHBoxLayout(row)
         hl.setSpacing(3)
-        hl.setContentsMargins(4, 4, 4, 4)
+        hl.setContentsMargins(_ROW_MARGIN, 4, _ROW_MARGIN, 4)
         self._row_layouts[mount_id] = hl
 
         for slot in range(10):
@@ -573,11 +588,10 @@ class PositionGrid(QWidget):
             # aspect cap, and the remainder goes to the spacer.
             hl.addWidget(btn, 1)
 
-        # A stretch, not a fixed gap: with the buttons capped to their own
-        # aspect, whatever width is left over collects HERE rather than being
-        # shared out as wider buttons.  It also keeps the dials against the
-        # right-hand edge, which is where they have always sat.
-        hl.addStretch(1)
+        # No stretch here: the surplus is spread across every gap in the row by
+        # _relayout(), which is how the original spacing came about. A collector
+        # at this point instead put the whole surplus between button 10 and the
+        # dials.
 
         accent  = col["accent"]
         pt_dial = RotaryDial(accent_colour=accent)

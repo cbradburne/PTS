@@ -51,10 +51,15 @@ def measure(w, h):
     app.processEvents()
     btn = GRID._buttons[(1, 0)]
     row = GRID._row_containers[1]
-    fill = sum(GRID._buttons[(1, s)].width() for s in range(10)) / max(1, row.width())
+    # How much of the row the content actually spans, first button to last
+    # dial. The complaint was surplus space, so this is the number that matters
+    # — not how much of it is button, which is fixed by the aspect.
+    d = GRID._sl_dials[1]
+    fill = ((d.x() + d.width() * 2) - btn.x()) / max(1, row.width())
     return dict(row_h=GRID._row_h, w=btn.width(), h=btn.height(),
                 font=GRID._font_px, radius=GRID._radius, fill=fill,
-                dial=GRID._pt_dials[1].width())
+                dial=GRID._pt_dials[1].width(),
+                gap=GRID._row_layouts[1].spacing())
 
 
 SCREENS = [(1920, 1080), (2560, 1440), (3840, 2160), (1366, 768), (1280, 800)]
@@ -86,8 +91,12 @@ assert abs(ref["w"] - 130) <= 4, \
     "    the buttons absorb every spare pixel and come out stretched"
 assert ref["font"] == 24, f"font is {ref['font']}px at 1920x1080, was 24"
 assert ref["radius"] == 22, f"radius is {ref['radius']}px at 1920x1080, was 22"
-print(f"   1920x1080: {ref['h']}px tall, {ref['font']}px type, "
-      f"{ref['radius']}px radius — as before   OK")
+assert abs(ref["dial"] - 90) <= 8, \
+    f"the dial is {ref['dial']}px at 1920x1080, was about 90"
+assert 25 <= ref["gap"] <= 45, \
+    f"{ref['gap']}px between buttons at 1920x1080; the reference is about 30"
+print(f"   1920x1080: {ref['w']}x{ref['h']} button, {ref['gap']}px gaps, "
+      f"{ref['dial']}px dial, {ref['font']}px type — as before   OK")
 
 # ---- 3. and every other screen is the same shape ---------------------------
 print("\n3. the same proportions everywhere:")
@@ -104,9 +113,10 @@ for (scr, m) in rows:
     assert abs(r - _BTN_H_FRAC) < 0.03, \
         f"{scr}: the button is {r:.2f} of its row, not {_BTN_H_FRAC:.2f} — it no\n" \
         "    longer floats in the camera's coloured band the way it was drawn"
-    # Fill is only comparable between screens of the SAME shape: a relatively
-    # wider screen genuinely has more spare width beside the dials. Checked for
-    # the 16:9 set below rather than asserted as an absolute here.
+    assert m["fill"] > 0.92, \
+        f"{scr}: the row's content spans only {m['fill']:.0%} of it. The surplus\n" \
+        "    has collected somewhere instead of being spread across the gaps —\n" \
+        "    a 300px hole between button 10 and the dials is how that looked."
     assert abs(m["font"] / m["h"] - 24.0 / 120.0) < 0.02, \
         f"{scr}: type is {m['font']}px in a {m['h']}px button — out of proportion"
     aspect = m["w"] / m["h"]
@@ -122,12 +132,13 @@ print("   ratio, type, aspect and dials all hold              OK")
 # The thing that actually went wrong: on a bigger screen of the same shape, the
 # surplus came out as gaps instead of as a bigger grid. So the buttons must
 # occupy the same SHARE of the row on every 16:9 screen.
-wide = [m["fill"] for (scr, m) in rows if abs(scr[0] / scr[1] - 16 / 9) < 0.01]
-assert max(wide) - min(wide) < 0.04, \
-    f"the buttons take between {min(wide):.0%} and {max(wide):.0%} of the row " \
-    "across\n    16:9 screens — the surplus is still going somewhere other than " \
-    "the grid"
-print(f"   16:9 screens all fill {min(wide):.0%}-{max(wide):.0%} of the row   OK")
+# The surplus goes into the gaps, so those scale with the button too — even
+# spacing, the way the reference screen has always looked.
+for (scr, m) in rows:
+    assert 3 <= m["gap"] <= m["w"] * 0.36, \
+        f"{scr}: {m['gap']}px between {m['w']}px buttons is not the even spacing " \
+        "the surplus is meant to become"
+print("   surplus becomes even spacing, not one hole          OK")
 
 # ---- 4. it can shrink as well as grow --------------------------------------
 # setFixedHeight on the buttons raises the grid's own minimum height, so once
