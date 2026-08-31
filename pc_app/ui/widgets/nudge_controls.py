@@ -8,21 +8,28 @@ meaning: nothing about a grid of squares says which of them turns the head
 which way.
 
   RadialNudge   pan and tilt as four separated arc groups around a hub.
-                Up and down are tilt, left and right are pan; the inner arc is
-                the small step and the outer the large one. The gaps at the
-                diagonals are the point: a slip near one lands on nothing
-                rather than on the wrong axis, and nudging pan when you meant
-                tilt is a shot on air going the wrong way.
+                Up and down are tilt, left and right are pan; the step grows
+                with the radius — fine nearest the hub, then small, then large
+                on the outside. The gaps at the diagonals are the point: a slip
+                near one lands on nothing rather than on the wrong axis, and
+                nudging pan when you meant tilt is a shot on air going the
+                wrong way.
 
                 The hub carries a legend naming which way each axis lies —
                 the one question a round control has to answer that a cross of
                 labelled squares answered by being a cross.
 
   SliderTrack   the slider as a rail rather than a row of buttons. Four tap
-                zones for the same discrete steps as before. No carriage: the
-                mount can report where it is, but drawing it would need the
-                rail's length as well, and the operator asked for the panel
-                without a readout.
+                zones for the discrete steps, and a run zone at each end that
+                sends the carriage all the way to that limit. No carriage
+                drawn: the mount can report where it is, but drawing it would
+                need the rail's length as well, and the operator asked for the
+                panel without a readout.
+
+                The run zones are a different colour and a different shape from
+                the nudges, because they are a different kind of action — one
+                is a step, the other is the whole rail — and they go grey
+                whenever the mount has no calibrated limits to run to.
 
   ZoomColumn    zoom stays OUT of the dial. It is press-and-hold: it runs while
                 held rather than stepping a fixed amount, and putting it among
@@ -46,6 +53,8 @@ TILT_LINE = "#7FBF72"; TILT_FILL = "#1B5E20"; TILT_LIT = "#2E7D32"
 PAN_LINE  = "#D4B800"; PAN_FILL  = "#3E3000"; PAN_LIT  = "#5D4700"
 ZOOM_LINE = "#90CAF9"; ZOOM_FILL = "#12305E"; ZOOM_LIT = "#1A3F7A"
 SL_LINE   = "#CE93D8"; SL_FILL   = "#3B0A57"; SL_LIT   = "#5A1080"
+RUN_LINE  = "#F48FB1"; RUN_FILL  = "#6A1040"; RUN_LIT  = "#A01860"
+DEAD_LINE = "#5A5560"; DEAD_FILL = "#241F28"
 WELL      = "#0E1518"; WELL_EDGE = "#2A363C"
 
 # Where the four arc groups sit, clockwise from twelve.
@@ -56,16 +65,24 @@ _UP, _RIGHT, _DOWN, _LEFT = 0.0, 90.0, 180.0, 270.0
 _HALF_SPAN = 32.0
 
 # Radii as a fraction of the dial's half-size, so the whole control scales.
-_R_HUB   = 0.30
-_R_IN_0  = 0.33
-_R_IN_1  = 0.575
-_R_OUT_0 = 0.655
-_R_OUT_1 = 0.92
+# Three rings now, innermost first: the step grows with the radius, which is
+# the only ordering that needs no explaining. Equal widths and equal gaps, and
+# the outer edge stays where it was — the slider track is matched to it.
+_R_HUB = 0.170
+_RINGS = ((0.215, 0.413),      # fine
+          (0.468, 0.667),      # small
+          (0.722, 0.920))      # large
+_R_OUT_1 = _RINGS[-1][1]       # the dial's drawn diameter, in half-sizes
 
 
 def _qt_angle(clock_deg: float) -> float:
     """Degrees clockwise from twelve -> Qt's counter-clockwise from three."""
     return 90.0 - clock_deg
+
+
+def _deg_label(v: float) -> str:
+    """+10°, +1°, +0.2° — no trailing zeros, and a real minus sign."""
+    return f"{'+' if v > 0 else '−'}{abs(v):g}°"
 
 
 class RadialNudge(QWidget):
@@ -78,13 +95,12 @@ class RadialNudge(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
         self.setMinimumSize(240, 240)
-        self._small = 1.0
-        self._large = 10.0
+        self._steps = (0.2, 1.0, 10.0)               # one per ring, inner first
         self._lit: tuple[float, int] | None = None   # (group angle, ring)
 
     # -- state ---------------------------------------------------------
-    def set_steps(self, small: float, large: float) -> None:
-        self._small, self._large = small, large
+    def set_steps(self, fine: float, small: float, large: float) -> None:
+        self._steps = (fine, small, large)
         self.update()
 
     # -- geometry ------------------------------------------------------
@@ -105,20 +121,58 @@ class RadialNudge(QWidget):
         return p
 
     def _groups(self):
-        """(centre angle, ring, axis, signed degrees) for all eight arcs."""
+        """(centre angle, ring, axis, signed degrees) for all twelve arcs."""
         for centre, axis, sign in ((_UP, "tilt", +1), (_DOWN, "tilt", -1),
                                    (_RIGHT, "pan", +1), (_LEFT, "pan", -1)):
-            yield centre, 0, axis, sign * self._small
-            yield centre, 1, axis, sign * self._large
+            for ring, step in enumerate(self._steps):
+                yield centre, ring, axis, sign * step
+
+    def _label_font(self, p, half) -> QFont:
+        """One size for all twelve labels: the largest that fits the worst arc.
+
+        Labels are horizontal, so which way an arc constrains them depends on
+        where it sits. Across the top and bottom the text runs along the arc
+        and the CHORD is the limit; out to the left and right the same
+        horizontal text runs straight through the ring, so the ring's WIDTH is.
+        The narrow one is a third of the wide one, and sizing every arc by its
+        chord is what put "−0.2°" through the side of its ring and into its
+        neighbour.
+
+        Twelve labels at twelve sizes would fit better still and look like an
+        accident, so the worst case sets the size for all of them. Measured
+        rather than derived, so it holds for whatever steps a mount is
+        configured with — 0.2 is only the default.
+        """
+        base = max(8.0, half * 0.085)
+        f = QFont(); f.setPointSizeF(base); f.setBold(True)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        best = base
+        for _centre, ring, axis, deg in self._groups():
+            r0, r1 = _RINGS[ring]
+            if axis == "tilt":
+                room = 2.0 * half * ((r0 + r1) / 2.0) \
+                       * math.sin(math.radians(_HALF_SPAN)) * 0.72
+            else:
+                room = half * (r1 - r0) * 0.82
+            w = fm.horizontalAdvance(_deg_label(deg))
+            if w > room:
+                # Every ratio is against the SAME measured width, so the
+                # smallest wins outright — shrinking as we go would compound
+                # each ratio into the next and end up far too small.
+                best = min(best, base * room / w)
+        f.setPointSizeF(max(6.0, best))
+        return f
 
     # -- painting ------------------------------------------------------
     def paintEvent(self, _event):
         cx, cy, half = self._metrics()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        label_font = self._label_font(p, half)
 
         for centre, ring, axis, deg in self._groups():
-            r0, r1 = (_R_IN_0, _R_IN_1) if ring == 0 else (_R_OUT_0, _R_OUT_1)
+            r0, r1 = _RINGS[ring]
             line = TILT_LINE if axis == "tilt" else PAN_LINE
             fill = TILT_FILL if axis == "tilt" else PAN_FILL
             if self._lit == (centre, ring):
@@ -132,10 +186,9 @@ class RadialNudge(QWidget):
             rl = (r0 + r1) / 2.0
             t = math.radians(centre)
             lx, ly = cx + half * rl * math.sin(t), cy - half * rl * math.cos(t)
-            f = QFont(); f.setPointSizeF(max(8.0, half * 0.085)); f.setBold(True)
-            p.setFont(f)
+            txt = _deg_label(deg)
+            p.setFont(label_font)
             p.setPen(QColor(line))
-            txt = f"{'+' if deg > 0 else '−'}{abs(deg):.0f}°"
             fm = p.fontMetrics()
             p.drawText(int(lx - fm.horizontalAdvance(txt) / 2),
                        int(ly + fm.capHeight() / 2), txt)
@@ -148,7 +201,7 @@ class RadialNudge(QWidget):
         p.setPen(QPen(QColor(WELL_EDGE), max(1.5, half * 0.012)))
         p.drawEllipse(QRectF(cx - hr, cy - hr, hr * 2, hr * 2))
 
-        f = QFont(); f.setPointSizeF(max(7.0, half * 0.075)); f.setBold(True)
+        f = QFont(); f.setPointSizeF(max(7.0, half * 0.052)); f.setBold(True)
         p.setFont(f)
         fm = p.fontMetrics()
         for i, (name, col) in enumerate((("TILT", TILT_LINE), ("PAN", PAN_LINE))):
@@ -162,11 +215,10 @@ class RadialNudge(QWidget):
         cx, cy, half = self._metrics()
         dx, dy = x - cx, y - cy
         r = math.hypot(dx, dy) / max(1.0, half)
-        if r < _R_IN_0 or r > _R_OUT_1:
-            return None
-        ring = 0 if r <= _R_IN_1 else (1 if r >= _R_OUT_0 else None)
+        ring = next((i for i, (r0, r1) in enumerate(_RINGS) if r0 <= r <= r1),
+                    None)
         if ring is None:
-            return None                      # the gap between the two rings
+            return None                      # hub, a gap between rings, or outside
         ang = (math.degrees(math.atan2(dx, -dy))) % 360.0
         for centre, rng, axis, deg in self._groups():
             if rng != ring:
@@ -191,32 +243,69 @@ class RadialNudge(QWidget):
         self.update()
 
 
+# The end-run zones, as a share of one nudge zone. Narrower because the label
+# is two characters against four, and because a smaller target is the right
+# shape for the one control here that moves the whole rail.
+_RUN_W = 0.75
+
+
 class SliderTrack(QWidget):
-    """The rail, drawn as a rail. Four tap zones, plus the live carriage."""
+    """The rail, drawn as a rail. Four nudge zones between two run-to-end zones."""
 
     nudged = pyqtSignal(float)           # signed millimetres
+    run    = pyqtSignal(int)             # -1 = run to the left end, +1 = right
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(76)
         self._small, self._large = 10.0, 100.0
+        self._runs_enabled = True
         self._lit: int | None = None
 
     def set_steps(self, small: float, large: float) -> None:
         self._small, self._large = small, large
         self.update()
 
+    def set_runs_enabled(self, enabled: bool) -> None:
+        """Grey the run zones out when the mount has no limits to run to.
+
+        A run is a relative move long enough to overshoot the rail, stopped by
+        the Teensy's own clamp. An uncalibrated slider has no clamp, so the
+        control has to say so rather than send a move that would not stop.
+        """
+        if enabled != self._runs_enabled:
+            self._runs_enabled = enabled
+            self.update()
+
     def _zones(self):
-        """(x0, x1, signed mm, label) across the track, left to right."""
+        """(x0, x1, kind, value, label) across the track, left to right.
+
+        kind is "run" (value -1 / +1) or "nudge" (value in signed mm).
+        """
         w, h = self.width(), self.height()
         pad = h * 0.10
         x0, x1 = pad, w - pad
-        span = (x1 - x0) / 4.0
-        for i, mm in enumerate((-self._large, -self._small,
-                                +self._small, +self._large)):
-            yield x0 + i * span, x0 + (i + 1) * span, mm, \
-                  f"{'+' if mm > 0 else '−'}{abs(mm):.0f}"
+        unit = (x1 - x0) / (4.0 + 2.0 * _RUN_W)
+        spec = [("run", -1, "<<", _RUN_W)]
+        spec += [("nudge", mm, f"{'+' if mm > 0 else '−'}{abs(mm):g}", 1.0)
+                 for mm in (-self._large, -self._small,
+                            +self._small, +self._large)]
+        spec += [("run", +1, ">>", _RUN_W)]
+        x = x0
+        for kind, value, label, width in spec:
+            yield x, x + unit * width, kind, value, label
+            x += unit * width
+
+    def _colours(self, i, kind):
+        """(fill, text) for one zone."""
+        if kind == "run":
+            if not self._runs_enabled:
+                return DEAD_FILL, DEAD_LINE
+            return (RUN_LIT if self._lit == i else RUN_FILL), RUN_LINE
+        if self._lit == i:
+            return SL_LIT, SL_LINE
+        return (SL_FILL if i in (1, 4) else "#2C0A40"), SL_LINE
 
     def paintEvent(self, _event):
         w, h = self.width(), self.height()
@@ -230,15 +319,15 @@ class SliderTrack(QWidget):
         # take the rounded corners and read as the ends of a rail.
         outer = QPainterPath()
         outer.addRoundedRect(body, rad, rad)
+        zones = list(self._zones())
         p.save()
         p.setClipPath(outer)
         p.setPen(Qt.PenStyle.NoPen)
-        for i, (zx0, zx1, mm, _lbl) in enumerate(self._zones()):
-            p.setBrush(QColor(SL_LIT if self._lit == i else
-                              (SL_FILL if i in (0, 3) else "#2C0A40")))
+        for i, (zx0, zx1, kind, _v, _lbl) in enumerate(zones):
+            p.setBrush(QColor(self._colours(i, kind)[0]))
             p.drawRect(QRectF(zx0, body.top(), zx1 - zx0, body.height()))
         p.setPen(QPen(QColor("#160820"), 2.0))
-        for zx0, _zx1, _mm, _lbl in list(self._zones())[1:]:
+        for zx0, _zx1, _k, _v, _lbl in zones[1:]:
             p.drawLine(int(zx0), int(body.top()), int(zx0), int(body.bottom()))
         p.restore()
 
@@ -248,8 +337,8 @@ class SliderTrack(QWidget):
 
         f = QFont(); f.setPointSizeF(max(8.0, h * 0.20)); f.setBold(True)
         p.setFont(f); fm = p.fontMetrics()
-        p.setPen(QColor(SL_LINE))
-        for zx0, zx1, _mm, lbl in self._zones():
+        for i, (zx0, zx1, kind, _v, lbl) in enumerate(zones):
+            p.setPen(QColor(self._colours(i, kind)[1]))
             p.drawText(int((zx0 + zx1) / 2 - fm.horizontalAdvance(lbl) / 2),
                        int(body.center().y() + fm.capHeight() / 2), lbl)
 
@@ -260,12 +349,17 @@ class SliderTrack(QWidget):
         p.end()
 
     def mousePressEvent(self, event):
-        x, y = event.position().x(), event.position().y()
-        for i, (zx0, zx1, mm, _lbl) in enumerate(self._zones()):
+        x = event.position().x()
+        for i, (zx0, zx1, kind, value, _lbl) in enumerate(self._zones()):
             if zx0 <= x <= zx1:
+                if kind == "run" and not self._runs_enabled:
+                    return                   # drawn dead, so behave dead
                 self._lit = i
                 self.update()
-                self.nudged.emit(mm)
+                if kind == "run":
+                    self.run.emit(int(value))
+                else:
+                    self.nudged.emit(value)
                 QTimer.singleShot(120, self._unlight)
                 return
 
@@ -285,9 +379,11 @@ class ZoomColumn(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         # Wide enough that the arrows are a target rather than a hint, and
         # capped in height so it stays a column beside the dial instead of
-        # stretching into a strip.
-        self.setFixedWidth(96)
-        self.setMaximumHeight(360)
+        # stretching into a strip. Both are set again by the panel's
+        # _apply_scale() — see set_metrics().
+        self._w, self._h = 96, 300
+        self.setFixedWidth(self._w)
+        self.setMaximumHeight(self._h)
         self._vel = (+fast, +slow, -slow, -fast)
         self._lbl = ("▲▲", "▲", "▼", "▼▼")
         self._lit: int | None = None
@@ -296,13 +392,26 @@ class ZoomColumn(QWidget):
         self._timer.timeout.connect(self._repeat)
         self._held: int | None = None
 
+    def set_metrics(self, width: int, height: int) -> None:
+        """Resize the column with the panel it sits in.
+
+        The maximum has to move with the hint, not stay where it was: a hint
+        that grows past a stale maximum is silently ignored, and the column
+        would stop growing while everything around it kept going.
+        """
+        self._w, self._h = int(width), int(height)
+        self.setFixedWidth(self._w)
+        self.setMaximumHeight(self._h)
+        self.updateGeometry()
+        self.update()
+
     def sizeHint(self):
         # A real hint, because a layout that is given an ALIGNMENT for this
         # widget sizes it from the hint rather than expanding it — and a bare
         # QWidget has no hint, so it lands at zero height and vanishes without
         # any error at all.
         from PyQt6.QtCore import QSize
-        return QSize(96, 300)
+        return QSize(self._w, self._h)
 
     def _caps(self):
         """Height reserved for the IN / OUT captions at each end."""
