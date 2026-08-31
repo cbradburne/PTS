@@ -14,12 +14,15 @@ which way.
                 rather than on the wrong axis, and nudging pan when you meant
                 tilt is a shot on air going the wrong way.
 
-                The hub is left free for the live angles, which the old cross
-                had nowhere to put.
+                The hub carries a legend naming which way each axis lies —
+                the one question a round control has to answer that a cross of
+                labelled squares answered by being a cross.
 
-  SliderTrack   the slider as the thing it actually is — a carriage on a rail
-                of known length. Four tap zones for the same discrete steps as
-                before, and the carriage drawn where the mount says it is.
+  SliderTrack   the slider as a rail rather than a row of buttons. Four tap
+                zones for the same discrete steps as before. No carriage: the
+                mount can report where it is, but drawing it would need the
+                rail's length as well, and the operator asked for the panel
+                without a readout.
 
   ZoomColumn    zoom stays OUT of the dial. It is press-and-hold: it runs while
                 held rather than stepping a fixed amount, and putting it among
@@ -77,18 +80,11 @@ class RadialNudge(QWidget):
         self.setMinimumSize(240, 240)
         self._small = 1.0
         self._large = 10.0
-        self._pan_deg: float | None = None
-        self._tilt_deg: float | None = None
         self._lit: tuple[float, int] | None = None   # (group angle, ring)
 
     # -- state ---------------------------------------------------------
     def set_steps(self, small: float, large: float) -> None:
         self._small, self._large = small, large
-        self.update()
-
-    def set_angles(self, pan: float | None, tilt: float | None) -> None:
-        """Live head angles for the hub, or None when they are not known."""
-        self._pan_deg, self._tilt_deg = pan, tilt
         self.update()
 
     # -- geometry ------------------------------------------------------
@@ -144,21 +140,21 @@ class RadialNudge(QWidget):
             p.drawText(int(lx - fm.horizontalAdvance(txt) / 2),
                        int(ly + fm.capHeight() / 2), txt)
 
-        # Hub — the live angles, or dashes until the mount has told us.
+        # Hub — a legend, not a readout. It names which way each axis lies,
+        # which is the thing a round control has to answer and a cross of
+        # labelled squares answered by itself.
         hr = half * _R_HUB
         p.setBrush(QColor(WELL))
         p.setPen(QPen(QColor(WELL_EDGE), max(1.5, half * 0.012)))
         p.drawEllipse(QRectF(cx - hr, cy - hr, hr * 2, hr * 2))
 
-        f = QFont(); f.setPointSizeF(max(7.0, half * 0.072))
+        f = QFont(); f.setPointSizeF(max(7.0, half * 0.075)); f.setBold(True)
         p.setFont(f)
         fm = p.fontMetrics()
-        rows = (("TILT", self._tilt_deg, TILT_LINE), ("PAN", self._pan_deg, PAN_LINE))
-        for i, (name, val, col) in enumerate(rows):
-            txt = f"{name} {val:+.1f}°" if val is not None else f"{name}   —"
+        for i, (name, col) in enumerate((("TILT", TILT_LINE), ("PAN", PAN_LINE))):
             p.setPen(QColor(col))
-            y = cy + (i * 2 - 1) * fm.height() * 0.62 + fm.capHeight() / 2
-            p.drawText(int(cx - fm.horizontalAdvance(txt) / 2), int(y), txt)
+            y = cy + (i * 2 - 1) * fm.height() * 0.58 + fm.capHeight() / 2
+            p.drawText(int(cx - fm.horizontalAdvance(name) / 2), int(y), name)
         p.end()
 
     # -- input ---------------------------------------------------------
@@ -205,16 +201,10 @@ class SliderTrack(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(76)
         self._small, self._large = 10.0, 100.0
-        self._mm: float | None = None
-        self._min_mm, self._max_mm = 0.0, 0.0
         self._lit: int | None = None
 
     def set_steps(self, small: float, large: float) -> None:
         self._small, self._large = small, large
-        self.update()
-
-    def set_position(self, mm: float | None, min_mm: float, max_mm: float) -> None:
-        self._mm, self._min_mm, self._max_mm = mm, min_mm, max_mm
         self.update()
 
     def _zones(self):
@@ -263,24 +253,10 @@ class SliderTrack(QWidget):
             p.drawText(int((zx0 + zx1) / 2 - fm.horizontalAdvance(lbl) / 2),
                        int(body.center().y() + fm.capHeight() / 2), lbl)
 
-        # The carriage, only once the mount has said where it is. A guessed
-        # position on a rail is worse than no position at all.
-        if self._mm is not None and self._max_mm > self._min_mm:
-            frac = (self._mm - self._min_mm) / (self._max_mm - self._min_mm)
-            frac = min(max(frac, 0.0), 1.0)
-            cxp = body.left() + frac * body.width()
-            r = body.height() * 0.17
-            p.setBrush(QColor("#F3D9F7"))
-            p.setPen(QPen(QColor(SL_LINE), 2.0))
-            p.drawEllipse(QRectF(cxp - r, body.center().y() - r, r * 2, r * 2))
-
         f2 = QFont(); f2.setPointSizeF(max(6.5, h * 0.145))
         p.setFont(f2); fm2 = p.fontMetrics()
         p.setPen(QColor("#8A6E93"))
-        cap = (f"SLIDER   {self._mm:.0f} mm  /  {self._min_mm:.0f}–{self._max_mm:.0f}"
-               if self._mm is not None and self._max_mm > self._min_mm
-               else "SLIDER   position not reported yet")
-        p.drawText(int(w / 2 - fm2.horizontalAdvance(cap) / 2), int(h - 2), cap)
+        p.drawText(int(w / 2 - fm2.horizontalAdvance("SLIDER") / 2), int(h - 2), "SLIDER")
         p.end()
 
     def mousePressEvent(self, event):

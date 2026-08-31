@@ -1,8 +1,10 @@
 """The Move panel's dial hits the arc you aimed at, and nothing when you miss.
 
 The panel was a cross of square buttons. It is now a dial of four separated arc
-groups with the live angles in the hub, a track for the slider showing where the
-carriage is, and a matching column for zoom.
+groups, a track for the slider, and a matching column for zoom. Nothing shows a
+live position: the mount answers CMD_GET_POSITION but volunteers nothing — the
+unsolicited broadcast was removed on purpose — so a readout would have meant
+the panel polling for it, which is the traffic that removal was for.
 
 The gaps are the feature, so they are what this file is mostly about. A slip
 near a diagonal has to land on NOTHING — nudging pan when you meant tilt is a
@@ -97,7 +99,7 @@ assert edge_out == [], f"2° outside the arc edge fired {edge_out}"
 print(f"   the edge is where it is drawn, +/-{_HALF_SPAN:.0f}°            OK")
 
 # The hub is a readout, not a button, and the ring gap is a gap.
-assert tap(0, _R_HUB * 0.5) == [], "the hub fires — it is a readout, not a target"
+assert tap(0, _R_HUB * 0.5) == [], "the hub fires — it is a legend, not a target"
 assert tap(0, (_R_IN_1 + _R_OUT_0) / 2) == [], "the gap between the rings fires"
 assert tap(0, 0.99) == [], "outside the outer ring fires"
 print("   hub, inter-ring gap and outside all dead          OK")
@@ -113,12 +115,18 @@ for frac, want in ((0.10, -100.0), (0.35, -10.0), (0.65, +10.0), (0.90, +100.0))
     assert MM == [want], f"a press {frac:.0%} across gave {MM}, expected {want:+g}"
 print("   −100 / −10 / +10 / +100, left to right            OK")
 
-# The carriage is drawn only when the mount has actually said where it is.
-TRACK.set_position(None, 0, 900)
-assert TRACK._mm is None, "an unknown position is being treated as a number"
-TRACK.set_position(412, 0, 900)
-assert TRACK._mm == 412, "a known position is not kept"
-print("   carriage only once a position has been reported   OK")
+# No position readout anywhere. The mount answers CMD_GET_POSITION but
+# volunteers nothing — the unsolicited broadcast was removed deliberately — so
+# anything drawing a live position would have to poll for it, which is the
+# traffic that removal was for.
+CTRL = (REPO / "pc_app/ui/widgets/nudge_controls.py").read_text()
+for gone in ("set_position", "set_angles", "_min_mm", "self._pan_deg"):
+    assert gone not in CTRL, \
+        f"{gone} is back — the panel is claiming a position again, and the only\n" \
+        "    way to keep one current is to poll for it"
+assert "request_position" not in (REPO / "pc_app/comms/mount_manager.py").read_text(), \
+    "request_position survives with no caller"
+print("   nothing draws a live position                     OK")
 
 # ---- 4. zoom --------------------------------------------------------------
 print("\n4. the zoom column:")
@@ -151,19 +159,37 @@ assert "self._dial.nudged.connect(self._on_dial)" in SRC, "the dial is not wired
 assert "self._track.nudged.connect(self._on_track)" in SRC, "the track is not wired"
 assert "self._zoom.started.connect(self._zoom_jog)" in SRC and \
        "self._zoom.stopped.connect(self._zoom_stop)" in SRC, "zoom is not wired"
-assert "self._mm.position_updated.connect(self._on_position)" in SRC, \
-    "nothing feeds the hub or the carriage, so both stay blank forever"
-print("   dial, track, zoom and the position feed all wired OK")
+assert "position_updated" not in SRC, \
+    "the panel subscribes to positions again but displays none"
+print("   dial, track and zoom all wired                    OK")
 
-# Positions are answered on request, so the panel has to ask — but only while
-# it is open, or this becomes the polling that was deliberately removed.
-assert "def request_position" in (REPO / "pc_app/comms/mount_manager.py").read_text(), \
-    "there is no way to ask for a position"
-ask = SRC[SRC.index("    def _ask_position(self)"):]
-ask = ask[:ask.index("\n    def ", 1)]
-assert "if not self.isVisible():" in ask, \
-    "the panel asks for positions while closed; that is a background poll with " \
-    "no\n    one looking at the answer"
-print("   asks only while the panel is open                 OK")
+# ---- 6. the track is the width of the dial it sits under ------------------
+# The dial paints inside the largest circle that FITS, so its drawn width is
+# min(w, h) x the outer radius — not the widget width, which is whatever the
+# layout handed it. Measuring the widget leaves the track visibly wider than
+# the control it belongs to.
+print("\n6. the track under the dial:")
+from PyQt6.QtCore import QObject, pyqtSignal
+from ui.widgets.nudge_overlay import NudgeOverlay
+class _St:
+    active_pt_preset = 2; active_sl_preset = 2; last_config_report = None
+class _MM(QObject):
+    position_updated = pyqtSignal(int, object)
+    def state(self, m): return _St()
+    def send_move_rel(self, *a): pass
+    def send_jog(self, *a): pass
+
+OV = NudgeOverlay(_MM())
+OV.show_for(1, nudge_deg_small=1, nudge_deg_large=10,
+            nudge_mm_small=10, nudge_mm_large=100)
+app.processEvents(); OV.layout().activate(); app.processEvents()
+d, tr = OV._dial, OV._track
+circle = min(d.width(), d.height()) * _R_OUT_1
+assert abs(tr.width() - circle) <= 2, \
+    f"the track is {tr.width()}px against a {circle:.0f}px dial circle"
+assert abs((tr.x() + tr.width() / 2) - (d.x() + d.width() / 2)) <= 2, \
+    "the track is not centred on the dial — it is centred on the panel, which " \
+    "the\n    zoom column pushes off to one side"
+print(f"   {tr.width()}px wide against a {circle:.0f}px circle, same centre   OK")
 
 print("\nALL CHECKS PASSED")

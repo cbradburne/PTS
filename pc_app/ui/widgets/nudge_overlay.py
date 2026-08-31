@@ -38,14 +38,15 @@ from __future__ import annotations
 
 import math
 from PyQt6.QtWidgets import (
-    QFrame, QPushButton, QLabel, QSizePolicy,
+    QFrame, QPushButton, QLabel, QSizePolicy, QWidget,
     QHBoxLayout, QVBoxLayout
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 
 from comms.mount_manager import MountManager
-from .nudge_controls import RadialNudge, SliderTrack, ZoomColumn
+from .nudge_controls import (RadialNudge, SliderTrack, ZoomColumn,
+                             _R_OUT_1 as DIAL_OUTER_FRAC)
 
 # ---------------------------------------------------------------------------
 # Axis colours
@@ -118,8 +119,6 @@ class NudgeOverlay(QFrame):
         """)
         self.setFixedSize(800, 800)
         self._build()
-        # The hub and the carriage are drawn from whatever the mount last said.
-        self._mm.position_updated.connect(self._on_position)
         self.hide()
 
     # ------------------------------------------------------------------
@@ -145,10 +144,7 @@ class NudgeOverlay(QFrame):
 
         self._dial.set_steps(nudge_deg_small, nudge_deg_large)
         self._track.set_steps(nudge_mm_small, nudge_mm_large)
-        # Blank until the mount answers, rather than showing the last camera's.
-        self._dial.set_angles(None, None)
-        self._track.set_position(None, *self._slider_range())
-        self._ask_position()
+        self._sync_track()
 
         self._centre_on_parent()
         self.show()
@@ -193,60 +189,47 @@ class NudgeOverlay(QFrame):
         mid.addWidget(self._zoom, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addLayout(mid, 1)
 
+        # The track lives in the dial's own column, not the panel's, and is
+        # matched to the diameter of the outer arc ring — see _sync_track().
+        # Anything else leaves it wider than the control it belongs to.
         self._track = SliderTrack()
         self._track.nudged.connect(self._on_track)
-        root.addWidget(self._track)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(24)
+        bottom.addStretch(1)
+        bottom.addWidget(self._track)
+        bottom.addStretch(1)
+        self._zoom_gutter = QWidget()
+        self._zoom_gutter.setFixedWidth(self._zoom.sizeHint().width())
+        bottom.addWidget(self._zoom_gutter)
+        root.addLayout(bottom)
 
-    # ------------------------------------------------------------------
-    # Live readout
-    # ------------------------------------------------------------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_track()
+
+    def _sync_track(self) -> None:
+        """Match the track's width to the dial's outer ring.
+
+        The dial paints inside the largest circle that fits, so its drawn width
+        is min(w, h) x the outer radius — not the widget's width, which is
+        whatever the layout handed it. Measuring the widget instead would leave
+        the track wider than the control it sits under.
+        """
+        d = getattr(self, "_dial", None)
+        if d is None:
+            return
+        self._track.setFixedWidth(
+            max(200, int(min(d.width(), d.height()) * DIAL_OUTER_FRAC)))
 
     def _on_dial(self, axis: str, degrees: float) -> None:
         if axis == "pan":
             self._nudge_pan(degrees)
         else:
             self._nudge_tilt(degrees)
-        self._ask_position()
 
     def _on_track(self, mm: float) -> None:
         self._nudge_slider(mm)
-        self._ask_position()
-
-    def _ask_position(self) -> None:
-        """Ask once, and once more when the move should have landed.
-
-        Positions are answered on request — nothing streams them — so the panel
-        asks for what it draws rather than leaving a stale carriage on screen.
-        Two requests per nudge, only while the panel is open, is a long way from
-        the 5 Hz poll this replaces.
-        """
-        if not self.isVisible():
-            return
-        self._mm.request_position(self._mount_id)
-        QTimer.singleShot(700, self._ask_position_once)
-
-    def _ask_position_once(self) -> None:
-        if self.isVisible():
-            self._mm.request_position(self._mount_id)
-
-    def _on_position(self, mount_id: int, pos) -> None:
-        if mount_id != self._mount_id or not self.isVisible():
-            return
-        self._dial.set_angles(pos.pan_deg, pos.tilt_deg)
-        lo, hi = self._slider_range()
-        self._track.set_position(pos.slider_mm if hi > lo else None, lo, hi)
-
-    def _slider_range(self) -> tuple[float, float]:
-        """The rail's usable millimetres, or (0, 0) when it is not known yet."""
-        st  = self._mm.state(self._mount_id)
-        rep = getattr(st, "last_config_report", None)
-        if rep is None:
-            return 0.0, 0.0
-        try:
-            spmm = self.SLIDER_STEPS_PER_MM
-            return (rep.slider_min_steps / spmm, rep.slider_max_steps / spmm)
-        except Exception:
-            return 0.0, 0.0
 
     # ------------------------------------------------------------------
     # Motion helpers
