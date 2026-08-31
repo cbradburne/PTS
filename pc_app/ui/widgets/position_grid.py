@@ -106,7 +106,12 @@ _BTN_H_FRAC      = 120.0 / 178.0
 _BTN_ASPECT      = 130.0 / 120.0
 _DIAL_FRAC       = 0.78            # of button height
 _DIAL_GAP_FRAC   = 0.10
-_ROW_MARGIN      = 4     # the row layout's own left/right margin
+# The row's own inset, as a fraction of the button height.  The coloured band
+# is not meant to start where the first button does: the reference screen leaves
+# a clear margin before button 1 and after the last dial, and at a fixed 4px
+# that margin vanished as the buttons grew.
+_ROW_MARGIN_FRAC = 0.25
+_ROW_MARGIN      = 4     # the value used before _relayout() has run once
 _BTN_RADIUS_FRAC = 22.0 / 120.0    # of the BUTTON height, as originally tuned
 _BTN_FONT_FRAC   = 24.0 / 120.0
 _BTN_BORDER_FRAC =  8.0 / 120.0
@@ -517,7 +522,8 @@ class PositionGrid(QWidget):
         self._border  = max(2, round(btn_h * _BTN_BORDER_FRAC))
 
         # 12 items in the row, so 11 gaps between them.
-        usable   = self.width() - m.left() - m.right() - _ROW_MARGIN * 2
+        row_margin = max(4, round(btn_h * _ROW_MARGIN_FRAC))
+        usable   = self.width() - m.left() - m.right() - row_margin * 2
         leftover = usable - (10 * btn_w + 2 * dial)
         spacing  = int(min(max(leftover / 11.0, 3), btn_w * 0.35))
 
@@ -537,6 +543,8 @@ class PositionGrid(QWidget):
             d.setMaximumSize(dial, dial)
         for hl in self._row_layouts.values():
             hl.setSpacing(spacing)
+            cm = hl.contentsMargins()
+            hl.setContentsMargins(row_margin, cm.top(), row_margin, cm.bottom())
 
         for mid in list(self._row_containers):
             self._refresh_row_borders(mid)
@@ -632,6 +640,7 @@ class PositionGrid(QWidget):
         if not self._connected.get(mount_id, False):
             btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"],
                                               BORDER_EMPTY,
+                                          border_w=self._border,
                                           radius=self._radius, font_px=self._font_px))
             return
 
@@ -653,7 +662,8 @@ class PositionGrid(QWidget):
                     border = BORDER_AT
                 else:
                     border = "#37474F"
-            btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border, border_w=4,
+            btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border,
+                                          border_w=max(2, self._border // 2),
                                           radius=self._radius, font_px=self._font_px))
             return
 
@@ -670,6 +680,7 @@ class PositionGrid(QWidget):
             else:
                 border = BORDER_EMPTY     # grey  — no subject stored
             btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border,
+                                          border_w=self._border,
                                           radius=self._radius, font_px=self._font_px))
             return
 
@@ -689,6 +700,7 @@ class PositionGrid(QWidget):
             border = BORDER_NOT_AT
 
         btn.setStyleSheet(_btn_stylesheet(col["btn_bg"], col["btn_text"], border,
+                                          border_w=self._border,
                                           radius=self._radius, font_px=self._font_px))
 
     def _refresh_row_borders(self, mount_id: int) -> None:

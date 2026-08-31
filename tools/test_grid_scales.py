@@ -30,7 +30,8 @@ from PyQt6.QtWidgets import QApplication, QSizePolicy
 app = QApplication.instance() or QApplication([])
 
 from ui.widgets.position_grid import (PositionGrid, _BTN_H_FRAC,
-                                      _BTN_ASPECT, _DIAL_FRAC)
+                                      _BTN_ASPECT, _DIAL_FRAC,
+                                      _ROW_MARGIN_FRAC)
 from config.position_store import PositionStore
 
 GRID = PositionGrid(PositionStore())
@@ -59,7 +60,11 @@ def measure(w, h):
     return dict(row_h=GRID._row_h, w=btn.width(), h=btn.height(),
                 font=GRID._font_px, radius=GRID._radius, fill=fill,
                 dial=GRID._pt_dials[1].width(),
-                gap=GRID._row_layouts[1].spacing())
+                gap=GRID._row_layouts[1].spacing(),
+                border=GRID._border,
+                left=btn.x(),
+                right=row.width() - (GRID._pt_dials[1].x()
+                                     + GRID._pt_dials[1].width()))
 
 
 SCREENS = [(1920, 1080), (2560, 1440), (3840, 2160), (1366, 768), (1280, 800)]
@@ -95,6 +100,10 @@ assert abs(ref["dial"] - 90) <= 8, \
     f"the dial is {ref['dial']}px at 1920x1080, was about 90"
 assert 25 <= ref["gap"] <= 45, \
     f"{ref['gap']}px between buttons at 1920x1080; the reference is about 30"
+assert ref["border"] == 8, \
+    f"the button border is {ref['border']}px at 1920x1080, was 8"
+assert 25 <= ref["left"] <= 38, \
+    f"button 1 starts {ref['left']}px into the row; the reference leaves about 30"
 print(f"   1920x1080: {ref['w']}x{ref['h']} button, {ref['gap']}px gaps, "
       f"{ref['dial']}px dial, {ref['font']}px type — as before   OK")
 
@@ -123,11 +132,30 @@ for (scr, m) in rows:
     assert abs(aspect - _BTN_ASPECT) < 0.06, \
         f"{scr}: the button is {aspect:.2f} wide for its height, not " \
         f"{_BTN_ASPECT:.2f} — it is being stretched to fill the row"
+    # The border is what made macOS look thin-lined: it was computed and then
+    # never passed to the stylesheet, so it stayed at a flat 8px while the
+    # buttons around it grew.
+    assert abs(m["border"] / m["h"] - 8.0 / 120.0) < 0.02, \
+        f"{scr}: an {m['border']}px border on a {m['h']}px button. Scaled with " \
+        "everything\n    else it should be about " \
+        f"{round(m['h'] * 8.0 / 120.0)}px — a fixed border reads as thin " \
+        "line-work on a big screen."
+    # And the row's own inset, so the coloured band does not start exactly where
+    # the first button does.
+    # Loose: the surplus is spread as spacing and the rounding of that lands a
+    # few pixels on the first cell, so the measured inset runs a little over the
+    # margin itself. What matters is that it scales and stays visible.
+    assert 0.12 < m["left"] / m["h"] < _ROW_MARGIN_FRAC + 0.14, \
+        f"{scr}: button 1 starts {m['left']}px into a row of {m['h']}px buttons; " \
+        "the band is meant to breathe at both ends"
+    assert m["right"] >= m["left"] * 0.7, \
+        f"{scr}: {m['right']}px after the last dial against {m['left']}px before " \
+        "the first button — the right-hand end is pinched"
     assert abs(m["dial"] / m["h"] - _DIAL_FRAC) < 0.08, \
         f"{scr}: the dial is {m['dial']}px beside a {m['h']}px button. Left to\n" \
         "    itself it collapses onto its own minimum and the two sit almost\n" \
         "    touching, which is how it looked before it scaled with the row."
-print("   ratio, type, aspect and dials all hold              OK")
+print("   ratio, type, aspect, dials, border and insets hold  OK")
 
 # The thing that actually went wrong: on a bigger screen of the same shape, the
 # surplus came out as gaps instead of as a bigger grid. So the buttons must
