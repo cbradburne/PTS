@@ -4,15 +4,21 @@ NudgeOverlay — floating panel for precise incremental camera movement.
 Appears on top of the position grid when the operator presses "Move".
 Closed by the X button or by pressing "Move" again.
 
-Layout (matches reference screenshot):
+Layout:
 
-  [X]      [Tilt +10°]                   [Z++]
-           [Tilt  +1°]                   [Z+]
-  [Pan-10] [Pan -1°]   [Pan +1°] [Pan+10°]  [Z-]
-           [Tilt  -1°]                   [Z--]
-           [Tilt -10°]
+  [X]
+        ╭───────────────╮
+        │   split-arc   │   [zoom]
+        │   pan / tilt  │   column
+        ╰───────────────╯
+  ╭─────────────────────────────╮
+  │  slider track, −100 … +100  │
+  ╰─────────────────────────────╯
 
-  [Sl-100mm][Sl-10mm]        [Sl+10mm][Sl+100mm]
+Pan and tilt are a dial of four separated arc groups with the live angles in
+the hub; the slider is a track showing where the carriage actually is. Both
+are drawn in widgets/nudge_controls.py, which explains why they are shaped the
+way they are.
 
 Axis colours (fixed, not camera colour):
   Tilt   — green
@@ -32,12 +38,14 @@ from __future__ import annotations
 
 import math
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QPushButton, QLabel, QSizePolicy
+    QFrame, QPushButton, QLabel, QSizePolicy,
+    QHBoxLayout, QVBoxLayout
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 
 from comms.mount_manager import MountManager
+from .nudge_controls import RadialNudge, SliderTrack, ZoomColumn
 
 # ---------------------------------------------------------------------------
 # Axis colours
@@ -61,34 +69,6 @@ _BTN_BASE = """
 #{fs}
 def _style(bg, text, border, press, fs=14):
     return _BTN_BASE.format(bg=bg, text=text, border=border, press=press, fs=fs)
-
-
-# ---------------------------------------------------------------------------
-# Hold button (for zoom — jogs while held)
-# ---------------------------------------------------------------------------
-
-class _HoldButton(QPushButton):
-    """Sends jog commands while held; sends stop on release."""
-
-    def __init__(self, label: str, on_start, on_stop, rate_ms: int = 50,
-                 parent=None):
-        super().__init__(label, parent)
-        self._start = on_start
-        self._stop  = on_stop
-        self._timer = QTimer(self)
-        self._timer.setInterval(rate_ms)
-        self._timer.timeout.connect(on_start)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._start()
-            self._timer.start()
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._timer.stop()
-        self._stop()
-        super().mouseReleaseEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +118,8 @@ class NudgeOverlay(QFrame):
         """)
         self.setFixedSize(800, 800)
         self._build()
+        # The hub and the carriage are drawn from whatever the mount last said.
+        self._mm.position_updated.connect(self._on_position)
         self.hide()
 
     # ------------------------------------------------------------------
@@ -161,19 +143,12 @@ class NudgeOverlay(QFrame):
         if tilt_spd  is not None: self.TILT_STEPS_PER_DEG  = tilt_spd
         if slider_spmm is not None: self.SLIDER_STEPS_PER_MM = slider_spmm
 
-        # Refresh button labels
-        self._lbl_tilt_u_s.setText(f"+{nudge_deg_small:.0f}°")
-        self._lbl_tilt_u_l.setText(f"+{nudge_deg_large:.0f}°")
-        self._lbl_tilt_d_s.setText(f"−{nudge_deg_small:.0f}°")
-        self._lbl_tilt_d_l.setText(f"−{nudge_deg_large:.0f}°")
-        self._lbl_pan_l_s.setText(f"−{nudge_deg_small:.0f}°")
-        self._lbl_pan_l_l.setText(f"−{nudge_deg_large:.0f}°")
-        self._lbl_pan_r_s.setText(f"+{nudge_deg_small:.0f}°")
-        self._lbl_pan_r_l.setText(f"+{nudge_deg_large:.0f}°")
-        self._lbl_sl_l_s.setText(f"−{nudge_mm_small:.0f}mm")
-        self._lbl_sl_l_l.setText(f"−{nudge_mm_large:.0f}mm")
-        self._lbl_sl_r_s.setText(f"+{nudge_mm_small:.0f}mm")
-        self._lbl_sl_r_l.setText(f"+{nudge_mm_large:.0f}mm")
+        self._dial.set_steps(nudge_deg_small, nudge_deg_large)
+        self._track.set_steps(nudge_mm_small, nudge_mm_large)
+        # Blank until the mount answers, rather than showing the last camera's.
+        self._dial.set_angles(None, None)
+        self._track.set_position(None, *self._slider_range())
+        self._ask_position()
 
         self._centre_on_parent()
         self.show()
@@ -195,110 +170,83 @@ class NudgeOverlay(QFrame):
     # ------------------------------------------------------------------
 
     def _build(self) -> None:
-        grid = QGridLayout(self)
-        grid.setSpacing(8)
-        grid.setContentsMargins(14, 14, 14, 14)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(14)
 
-        BIG = 100    # px — large buttons
-        SML = 100    # px — small buttons
-
-        # ---- Close button ----
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(48, 48)
-        close_btn.setStyleSheet(_style(_CLOSE_BG, _CLOSE_TEXT, _CLOSE_PRESS, _CLOSE_PRESS, fs=16))
+        close_btn.setStyleSheet(_style(_CLOSE_BG, _CLOSE_TEXT, _CLOSE_PRESS,
+                                       _CLOSE_PRESS, fs=16))
         close_btn.clicked.connect(self._on_close)
-        grid.addWidget(close_btn, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        root.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
-        # ---- Tilt (green, vertical column = col 2) ----
-        self._lbl_tilt_u_l = self._tilt_btn(f"+{self._nudge_deg_large:.0f}°", BIG,
-                                              lambda: self._nudge_tilt(+self._nudge_deg_large))
-        self._lbl_tilt_u_s = self._tilt_btn(f"+{self._nudge_deg_small:.0f}°", SML,
-                                              lambda: self._nudge_tilt(+self._nudge_deg_small))
-        self._lbl_tilt_d_s = self._tilt_btn(f"−{self._nudge_deg_small:.0f}°", SML,
-                                              lambda: self._nudge_tilt(-self._nudge_deg_small))
-        self._lbl_tilt_d_l = self._tilt_btn(f"−{self._nudge_deg_large:.0f}°", BIG,
-                                              lambda: self._nudge_tilt(-self._nudge_deg_large))
+        mid = QHBoxLayout()
+        mid.setSpacing(24)
+        self._dial = RadialNudge()
+        self._dial.nudged.connect(self._on_dial)
+        mid.addWidget(self._dial, 1)
 
-        grid.addWidget(self._lbl_tilt_u_l, 0, 2)
-        grid.addWidget(self._lbl_tilt_u_s, 1, 2)
-        grid.addWidget(self._lbl_tilt_d_s, 3, 2)
-        grid.addWidget(self._lbl_tilt_d_l, 4, 2)
+        self._zoom = ZoomColumn(self.ZOOM_JOG_FAST, self.ZOOM_JOG_SLOW)
+        self._zoom.started.connect(self._zoom_jog)
+        self._zoom.stopped.connect(self._zoom_stop)
+        mid.addWidget(self._zoom, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addLayout(mid, 1)
 
-        # ---- Pan (olive, horizontal row = row 2) ----
-        self._lbl_pan_l_l = self._pan_btn(f"−{self._nudge_deg_large:.0f}°", BIG,
-                                           lambda: self._nudge_pan(-self._nudge_deg_large))
-        self._lbl_pan_l_s = self._pan_btn(f"−{self._nudge_deg_small:.0f}°", SML,
-                                           lambda: self._nudge_pan(-self._nudge_deg_small))
-        self._lbl_pan_r_s = self._pan_btn(f"+{self._nudge_deg_small:.0f}°", SML,
-                                           lambda: self._nudge_pan(+self._nudge_deg_small))
-        self._lbl_pan_r_l = self._pan_btn(f"+{self._nudge_deg_large:.0f}°", BIG,
-                                           lambda: self._nudge_pan(+self._nudge_deg_large))
-
-        grid.addWidget(self._lbl_pan_l_l, 2, 0)
-        grid.addWidget(self._lbl_pan_l_s, 2, 1)
-        grid.addWidget(self._lbl_pan_r_s, 2, 3)
-        grid.addWidget(self._lbl_pan_r_l, 2, 4)
-
-        # ---- Zoom (blue, press-and-hold, col 5) ----
-        z_pp = _HoldButton("Z++", lambda: self._zoom_jog(+self.ZOOM_JOG_FAST),
-                           self._zoom_stop)
-        z_p  = _HoldButton("Z+",  lambda: self._zoom_jog(+self.ZOOM_JOG_SLOW),
-                           self._zoom_stop)
-        z_m  = _HoldButton("Z−",  lambda: self._zoom_jog(-self.ZOOM_JOG_SLOW),
-                           self._zoom_stop)
-        z_mm = _HoldButton("Z−−", lambda: self._zoom_jog(-self.ZOOM_JOG_FAST),
-                           self._zoom_stop)
-        for btn in (z_pp, z_p, z_m, z_mm):
-            btn.setFixedSize(72, SML)
-            btn.setStyleSheet(_style(_ZOOM_BG, _ZOOM_TEXT, _ZOOM_PRESS, _ZOOM_PRESS))
-        grid.addWidget(z_pp, 0, 5)
-        grid.addWidget(z_p,  1, 5)
-        grid.addWidget(z_m,  3, 5)
-        grid.addWidget(z_mm, 4, 5)
-
-        # ---- Slider (purple, row 5) ----
-        self._lbl_sl_l_l = self._slider_btn(f"−{self._nudge_mm_large:.0f}mm", 120,
-                                             lambda: self._nudge_slider(-self._nudge_mm_large))
-        self._lbl_sl_l_s = self._slider_btn(f"−{self._nudge_mm_small:.0f}mm", 120,
-                                             lambda: self._nudge_slider(-self._nudge_mm_small))
-        self._lbl_sl_r_s = self._slider_btn(f"+{self._nudge_mm_small:.0f}mm", 120,
-                                             lambda: self._nudge_slider(+self._nudge_mm_small))
-        self._lbl_sl_r_l = self._slider_btn(f"+{self._nudge_mm_large:.0f}mm", 120,
-                                             lambda: self._nudge_slider(+self._nudge_mm_large))
-
-        grid.addWidget(self._lbl_sl_l_l, 5, 0)
-        grid.addWidget(self._lbl_sl_l_s, 5, 1)
-        grid.addWidget(self._lbl_sl_r_s, 5, 3)
-        grid.addWidget(self._lbl_sl_r_l, 5, 4)
-
-        # Column spacer between tilt and zoom
-        grid.setColumnMinimumWidth(2, SML + 8)
-        grid.setColumnStretch(2, 1)
+        self._track = SliderTrack()
+        self._track.nudged.connect(self._on_track)
+        root.addWidget(self._track)
 
     # ------------------------------------------------------------------
-    # Button factories
+    # Live readout
     # ------------------------------------------------------------------
 
-    def _tilt_btn(self, label: str, size: int, handler) -> QPushButton:
-        btn = QPushButton(label)
-        btn.setFixedSize(size, size)
-        btn.setStyleSheet(_style(_TILT_BG, _TILT_TEXT, _TILT_PRESS, _TILT_PRESS))
-        btn.clicked.connect(handler)
-        return btn
+    def _on_dial(self, axis: str, degrees: float) -> None:
+        if axis == "pan":
+            self._nudge_pan(degrees)
+        else:
+            self._nudge_tilt(degrees)
+        self._ask_position()
 
-    def _pan_btn(self, label: str, size: int, handler) -> QPushButton:
-        btn = QPushButton(label)
-        btn.setFixedSize(size, size)
-        btn.setStyleSheet(_style(_PAN_BG, _PAN_TEXT, _PAN_PRESS, _PAN_PRESS))
-        btn.clicked.connect(handler)
-        return btn
+    def _on_track(self, mm: float) -> None:
+        self._nudge_slider(mm)
+        self._ask_position()
 
-    def _slider_btn(self, label: str, size: int, handler) -> QPushButton:
-        btn = QPushButton(label)
-        btn.setFixedSize(size, 60)
-        btn.setStyleSheet(_style(_SLIDER_BG, _SLIDER_TEXT, _SLIDER_PRESS, _SLIDER_PRESS))
-        btn.clicked.connect(handler)
-        return btn
+    def _ask_position(self) -> None:
+        """Ask once, and once more when the move should have landed.
+
+        Positions are answered on request — nothing streams them — so the panel
+        asks for what it draws rather than leaving a stale carriage on screen.
+        Two requests per nudge, only while the panel is open, is a long way from
+        the 5 Hz poll this replaces.
+        """
+        if not self.isVisible():
+            return
+        self._mm.request_position(self._mount_id)
+        QTimer.singleShot(700, self._ask_position_once)
+
+    def _ask_position_once(self) -> None:
+        if self.isVisible():
+            self._mm.request_position(self._mount_id)
+
+    def _on_position(self, mount_id: int, pos) -> None:
+        if mount_id != self._mount_id or not self.isVisible():
+            return
+        self._dial.set_angles(pos.pan_deg, pos.tilt_deg)
+        lo, hi = self._slider_range()
+        self._track.set_position(pos.slider_mm if hi > lo else None, lo, hi)
+
+    def _slider_range(self) -> tuple[float, float]:
+        """The rail's usable millimetres, or (0, 0) when it is not known yet."""
+        st  = self._mm.state(self._mount_id)
+        rep = getattr(st, "last_config_report", None)
+        if rep is None:
+            return 0.0, 0.0
+        try:
+            spmm = self.SLIDER_STEPS_PER_MM
+            return (rep.slider_min_steps / spmm, rep.slider_max_steps / spmm)
+        except Exception:
+            return 0.0, 0.0
 
     # ------------------------------------------------------------------
     # Motion helpers

@@ -677,6 +677,16 @@ class MountManager(QObject):
         """Abort an in-progress subject calibration."""
         self._send(pkt_add_subject_abort(mount_id))
 
+    def request_position(self, mount_id: int) -> None:
+        """Ask one mount for its live axis positions.
+
+        Nothing streams positions — the mount answers CMD_POSITION on request
+        and volunteers nothing — so anything that wants to DRAW a position has
+        to ask for it. Callers should ask when they need it and stop when they
+        do not, rather than polling.
+        """
+        self._send(pkt_get_position(mount_id))
+
     def send_delete_subject(self, mount_id: int, subject_id: int) -> None:
         """Delete a subject by ID (0-7) from the mount's EEPROM."""
         self._send(pkt_delete_subject(mount_id, subject_id))
