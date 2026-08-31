@@ -143,6 +143,20 @@ for frac, want in ((0.10, +700), (0.35, +200), (0.65, -200), (0.90, -700)):
 assert len(STOPPED) == 4, "releasing does not stop the jog every time"
 print("   fast/slow both ways, and every release stops it   OK")
 
+# The captions name the axis; the arrows only give a direction, and up-is-in is
+# a convention rather than something the control states. They also inset the
+# body, so the four zones must still land where a finger expects them — checked
+# by the presses above, which run against the widget's full height.
+assert "ZOOM IN" in CTRL and "ZOOM OUT" in CTRL, \
+    "the zoom column no longer says which way is which"
+VEL.clear()
+press(ZOOM, 48, 3)                       # in the top caption, above the body
+press(ZOOM, 48, 297)                     # in the bottom caption
+assert VEL == [], \
+    f"pressing a caption fired {VEL}; the labels are text, not a fifth and " \
+    "sixth button"
+print("   IN/OUT captions, and neither is pressable          OK")
+
 # A widget given an alignment in a layout is sized from its sizeHint, and a
 # bare QWidget has none — this one landed at zero height and vanished with no
 # error at all.

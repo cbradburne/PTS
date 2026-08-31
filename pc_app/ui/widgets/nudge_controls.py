@@ -304,20 +304,26 @@ class ZoomColumn(QWidget):
         from PyQt6.QtCore import QSize
         return QSize(96, 300)
 
-    def _zones(self):
+    def _caps(self):
+        """Height reserved for the IN / OUT captions at each end."""
+        return max(15.0, self.height() * 0.055)
+
+    def _body(self):
         w, h = self.width(), self.height()
-        pad = w * 0.06
-        y0, y1 = pad, h - pad
-        span = (y1 - y0) / 4.0
+        pad, cap = w * 0.06, self._caps()
+        return QRectF(pad, cap, w - pad * 2, h - cap * 2)
+
+    def _zones(self):
+        b = self._body()
+        span = b.height() / 4.0
         for i in range(4):
-            yield y0 + i * span, y0 + (i + 1) * span, i
+            yield b.top() + i * span, b.top() + (i + 1) * span, i
 
     def paintEvent(self, _event):
         w, h = self.width(), self.height()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pad = w * 0.06
-        body = QRectF(pad, pad, w - pad * 2, h - pad * 2)
+        body = self._body()
         rad = body.width() / 2.0
         outer = QPainterPath()
         outer.addRoundedRect(body, rad, rad)
@@ -339,6 +345,16 @@ class ZoomColumn(QWidget):
         for zy0, zy1, i in self._zones():
             p.drawText(int(w / 2 - fm.horizontalAdvance(self._lbl[i]) / 2),
                        int((zy0 + zy1) / 2 + fm.capHeight() / 2), self._lbl[i])
+
+        # Which way is which. The arrows say the direction but not the axis,
+        # and up-is-in is a convention rather than something the control tells
+        # you — worth a word at each end rather than a moment's doubt on air.
+        cf = QFont(); cf.setPointSizeF(max(6.5, w * 0.105)); cf.setBold(True)
+        p.setFont(cf); cfm = p.fontMetrics()
+        p.setPen(QColor("#5E7FA6"))
+        for txt, y in (("ZOOM IN", body.top() - self._caps() * 0.30),
+                       ("ZOOM OUT", body.bottom() + self._caps() * 0.80)):
+            p.drawText(int(w / 2 - cfm.horizontalAdvance(txt) / 2), int(y), txt)
         p.end()
 
     def _repeat(self):
