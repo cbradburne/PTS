@@ -16,6 +16,10 @@ setStyleSheet() call, because those run again on every state change — active
 and inactive, armed and idle — and one missed would resize a button the moment
 it was pressed.
 
+The arithmetic now lives in ui/ui_scale.py, because the Move panel needs the
+same number and main_window is what builds it. main_window keeps the private
+aliases, so everything below still reads MW._px.
+
 Run directly, or via tools/run_tests.sh with the rest.
 """
 import os, sys, pathlib, re
@@ -27,8 +31,10 @@ from PyQt6.QtWidgets import QApplication
 app = QApplication.instance() or QApplication([])
 
 import ui.main_window as MW
+import ui.ui_scale as SCALE
 
 SRC = (REPO / "pc_app/ui/main_window.py").read_text()
+SCALE_SRC = (REPO / "pc_app/ui/ui_scale.py").read_text()
 LINES = SRC.splitlines()
 
 STYLES = [MW._cam_btn_style, MW._clear_btn_style, MW._action_btn_style,
@@ -65,17 +71,25 @@ print(f"   reads the screen and returns {s0:.2f}                   OK")
 # The module must carry everything that path needs, not rely on the caller
 # having imported it. This test imports QApplication itself, which is exactly
 # how the missing import stayed hidden.
-imports = SRC[:SRC.index("def _accent_hex")]
+imports = SCALE_SRC[:SCALE_SRC.index("def init_ui_scale")]
 assert "QApplication" in imports, \
-    "main_window does not IMPORT QApplication, though _init_ui_scale() calls it.\n" \
+    "ui_scale does not IMPORT QApplication, though init_ui_scale() calls it.\n" \
     "    Matching anywhere in the file would pass on the call itself, which is\n" \
     "    the thing that raised NameError."
 print("   QApplication imported by the module itself           OK")
 
+# The aliases in main_window have to be the live functions, not a snapshot: a
+# `from ui_scale import _SCALE` anywhere would freeze at whatever it was when
+# the import ran, and every scaled size would come out at 1.0 forever.
+MW._init_ui_scale(2160)
+assert MW._px(60) == 120, \
+    f"main_window's _px gives {MW._px(60)} at 2160 — its alias is not live"
+print("   main_window's aliases track the shared number        OK")
+
 # ---- 1. the reference screen is untouched ----------------------------------
 print("1. the screen it was designed on:")
 MW._init_ui_scale(1080)
-assert MW._UI_SCALE == 1.0, f"scale at 1080 is {MW._UI_SCALE}, must be exactly 1"
+assert SCALE.scale() == 1.0, f"scale at 1080 is {SCALE.scale()}, must be exactly 1"
 assert MW._px(60) == 60 and MW._px(28) == 28, "the reference sizes have moved"
 sizes = set(int(x) for s in sample_sheets() for x in re.findall(r"font-size: ?(\d+)px", s))
 assert 28 in sizes, f"the bar type is no longer 28px at 1080: {sorted(sizes)}"
@@ -142,10 +156,10 @@ print("   first thing in _build(), before any widget exists    OK")
 # ---- 6. and it cannot run away ---------------------------------------------
 print("\n6. the clamps:")
 MW._init_ui_scale(200)
-assert MW._UI_SCALE >= 0.65, "a tiny screen scales below usability"
+assert SCALE.scale() >= 0.65, "a tiny screen scales below usability"
 lo = MW._px(60)
 MW._init_ui_scale(8000)
-assert MW._UI_SCALE <= 3.0, "a wall-sized display scales without limit"
+assert SCALE.scale() <= 3.0, "a wall-sized display scales without limit"
 print(f"   200px screen -> {lo}px buttons, 8000px -> {MW._px(60)}px    OK")
 
 MW._init_ui_scale(1080)   # leave it as the rest of the suite expects

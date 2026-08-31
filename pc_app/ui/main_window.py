@@ -22,11 +22,8 @@ MODE — EDIT:  position buttons store current camera position to that slot
 """
 from __future__ import annotations
 
-import functools
 import logging
-import re
 from PyQt6.QtWidgets import (
-    QApplication,
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QSizePolicy, QFrame, QInputDialog,
     QDialog, QDialogButtonBox, QMessageBox
@@ -42,6 +39,7 @@ from .widgets.nudge_overlay import NudgeOverlay
 from .widgets.slider_travel_anim import SliderTravelAnim
 from .dialogs.config_dialog import ConfigDialog
 from . import virtual_keyboard
+from . import ui_scale
 from comms.bridge import Bridge
 from comms.mount_manager import MountManager
 from comms.protocol import (TARGET_SLOT_LA_MIN, TARGET_SLOT_LA_MAX,
@@ -67,47 +65,14 @@ log = logging.getLogger(__name__)
 # window's; everything here is expressed against 1080 and scaled from it, the
 # same way PositionGrid scales from the height it is given.
 #
-# Read once at build time rather than on resize: a full-screen window does not
-# change size, and re-applying forty stylesheets to handle a case that cannot
-# happen is cost without benefit.
-_UI_REF_H = 1080.0
-_UI_SCALE = 1.0
-
-
-def _init_ui_scale(height: int | None = None) -> float:
-    """Set the scale from the screen, or from an explicit height for tests."""
-    global _UI_SCALE
-    if height is None:
-        scr = QApplication.primaryScreen()
-        if scr is None:
-            return _UI_SCALE
-        height = scr.geometry().height()
-    # Clamped: a phone-sized or wall-sized display should still be usable
-    # rather than faithfully proportioned into uselessness.
-    _UI_SCALE = max(0.65, min(3.0, height / _UI_REF_H))
-    return _UI_SCALE
-
-
-def _px(n: float) -> int:
-    return max(1, round(n * _UI_SCALE))
-
-
-def _qss(sheet: str) -> str:
-    """Scale every pixel length in a stylesheet.
-
-    Applied to the style helpers below rather than at each of the forty
-    setStyleSheet() calls, because those run again on every state change —
-    active/inactive, armed/idle — and one of them missing the transform would
-    resize a button the moment it was pressed.
-    """
-    return re.sub(r"(\d+)px", lambda m: f"{_px(int(m.group(1)))}px", sheet)
-
-
-def _scaled_style(fn):
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        return _qss(fn(*args, **kwargs))
-    return wrapper
+# The arithmetic lives in ui/ui_scale.py because the Move panel needs the same
+# number, and it is built by this module — importing back the other way is a
+# cycle.  The private aliases keep the forty call sites below reading the way
+# they did.
+_init_ui_scale = ui_scale.init_ui_scale
+_px            = ui_scale.px
+_qss           = ui_scale.qss
+_scaled_style  = ui_scale.scaled_style
 
 
 def _accent_hex(mount_id: int) -> str:
