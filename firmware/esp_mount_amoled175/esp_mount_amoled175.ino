@@ -537,6 +537,11 @@ static bool     _run_active  = false;
 static uint8_t  _run_subj    = 0;
 static uint8_t  _run_dir     = 0;
 static uint8_t  _run_preset  = 2;
+// Whether the current leg was running as of the last look-at status. Kept out
+// here rather than static inside the handler so starting a run always begins
+// from a known edge — a value left over from the previous run would otherwise
+// fire a leg change off the first packet of the next one.
+static bool     _run_leg_active = false;
 
 static void run_send_leg() {
     uint8_t p[3] = { (uint8_t)(_run_subj & 0x07), (uint8_t)(_run_dir & 1), _run_preset };
@@ -547,7 +552,8 @@ static void run_send_leg() {
 
 static void run_stop(const char *why) {
     if (!_run_active) return;
-    _run_active = false;
+    _run_active     = false;
+    _run_leg_active = false;
     Serial.printf("[RUN] stopped: %s\n", why);
 }
 static uint32_t _last_heartbeat_ms   = 0;
@@ -1283,7 +1289,10 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
         // Byte 3 is `repeat`.  Absent (an older client) means a single leg,
         // which is the behaviour that has always existed.
         bool rep = (pkt.payload_len >= 4) && pkt.payload[3];
-        if (rep && !_run_active) Serial.println("[RUN] started — mount owns it");
+        if (rep && !_run_active) {
+            Serial.println("[RUN] started — mount owns it");
+            _run_leg_active = false;   // this leg has not been seen running yet
+        }
         if (!rep) run_stop("single leg requested");
         _run_active = rep;
     }
@@ -1425,15 +1434,21 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
         // bit clear when a look-at sequence ends, so this is the transition —
         // and the whole decision now happens here rather than 400 km round the
         // houses and back.
+        //
+        // The bit is FLAG_LOOK_AT_ACTIVE, which is 0x40.  This read 0x01, a bit
+        // the Teensy never sets: la_now was false on every packet, the rising
+        // edge never happened, so the falling edge never did either.  The run
+        // took its first leg — the one the PC sends — and then waited forever
+        // for a transition that could not occur.  Named constant now, so the
+        // two ends cannot drift apart again.
         if (pkt.payload_len >= 14 && _run_active) {
-            static bool was_active = false;
-            bool la_now = (pkt.payload[13] & 0x01);
-            if (was_active && !la_now) {
+            bool la_now = (pkt.payload[13] & FLAG_LOOK_AT_ACTIVE) != 0;
+            if (_run_leg_active && !la_now) {
                 _run_dir ^= 1;
                 Serial.printf("[RUN] leg done — next leg, direction %u\n", _run_dir);
                 run_send_leg();
             }
-            was_active = la_now;
+            _run_leg_active = la_now;
         }
     }
     if (!_cfg_valid) return;   // unpaired — don't forward Teensy traffic anywhere

@@ -125,4 +125,93 @@ assert driven == {"AXIS_PAN", "AXIS_TILT"}, \
 print("\n4. it drives pan and tilt only — no fight for the")
 print("   slider the operator is holding                     OK")
 
+# ---- 5. and a slider nudge tracks too, not just a joystick slide -----------
+# The joystick tracked; the Move panel's slider buttons did not. Same feature,
+# different command: a MOVE_REL went through moveTo() into STATE_MOVING_TO_POS,
+# where _updateGoto() holds every axis at the target it was handed — and for a
+# slider-only move pan and tilt were handed the position they already had. The
+# camera slid down the rail with the subject walking out of frame.
+#
+# Rather than a second copy of the tracking gate, a slider-only nudge with a
+# subject selected now starts a real look-at move to a relative destination.
+print("\n5. a slider nudge from the Move panel:")
+rel = INO[INO.index("case CMD_MOVE_REL: {"):]
+rel = rel[:rel.index("\n        }")]
+assert "startLookAtMove" in rel, \
+    "a slider MOVE_REL no longer starts a look-at move — pan and tilt will sit\n" \
+    "    still while the rail moves, which is the bug this is about"
+
+# The routing decision, run against the cases it has to separate. The condition
+# is lifted from the source and evaluated, so it is the real logic being tested
+# and not a restatement of it.
+m = re.search(r"if \((d_pan == 0 && d_tilt == 0 && d_slider != 0 &&.*?"
+              r"hasLimits\(AXIS_SLIDER\))\) \{", rel, re.S)
+assert m, "the tracking condition changed shape — check it still separates the cases below"
+expr = re.sub(r"\s+", " ", m.group(1))
+py = (expr.replace("&&", "and")
+          .replace("_cfg.look_at_mode", "look_at")
+          .replace("mount.getLaSubjectId()", "subject")
+          .replace("mount.isRefSet()", "ref_set")
+          .replace("mount.hasLimits(AXIS_SLIDER)", "limits")
+          .replace("0xFF", "0xFF"))
+
+CASES = [
+    # d_pan d_tilt d_slider look_at subject ref limits  -> tracked
+    ((0, 0,  1600, True,  3, True,  True),  True,  "a slider nudge with a subject"),
+    ((0, 0, -1600, True,  3, True,  True),  True,  "the other way"),
+    ((0, 0,  1600, True,  0, True,  True),  True,  "subject 0 is a subject"),
+    ((0, 0,  1600, True, 0xFF, True, True), False, "no subject selected"),
+    ((0, 0,  1600, False, 3, True,  True),  False, "look-at mode off"),
+    ((0, 0,  1600, True,  3, False, True),  False, "no reference set"),
+    ((0, 0,  1600, True,  3, True,  False), False, "slider limits not found"),
+    ((320, 0, 1600, True, 3, True,  True),  False, "pan moved too — that is aiming"),
+    ((0, 320, 1600, True, 3, True,  True),  False, "tilt moved too"),
+    ((320, 0,    0, True, 3, True,  True),  False, "a pan-only nudge"),
+    ((0, 0,      0, True, 3, True,  True),  False, "nothing moved"),
+]
+for (d_pan, d_tilt, d_slider, look_at, subject, ref_set, limits), want, what in CASES:
+    got = bool(eval(py, {}, dict(d_pan=d_pan, d_tilt=d_tilt, d_slider=d_slider,
+                                 look_at=look_at, subject=subject,
+                                 ref_set=ref_set, limits=limits)))
+    assert got == want, \
+        f"{what}: the nudge is {'tracked' if got else 'not tracked'}, expected " \
+        f"{'tracked' if want else 'not tracked'}"
+print(f"   {len(CASES)} cases route correctly                       OK")
+
+# A pan or tilt nudge must still land as a plain move — and still drop the
+# subject, which is section 1's rule and the reason those cases are excluded.
+assert "if (!tracked)" in rel and "mount.moveRel(" in rel, \
+    "the plain relative move is gone — everything that is not tracked would do nothing"
+assert rel.index("startLookAtMove") < rel.index("if (!tracked)"), \
+    "the fallback runs before the attempt"
+print("   anything else still does a plain relative move    OK")
+
+# It has to be the same entry point every other look-at move uses, or the
+# tracking gate exists twice and the two will drift.
+assert "LOOK_AT_MAX_DEG_S" in rel, \
+    "the nudge asks for a different pan/tilt speed limit than every other look-at move"
+starts = len(re.findall(r"mount\.startLookAtMove\(", INO))
+assert starts == 2, \
+    f"{starts} call sites for startLookAtMove — expected the rail-end command and " \
+    "the nudge"
+print("   same entry point and speed cap as a rail-end move  OK")
+
+# Tapping the same button twice must not restart the move. startLookAtMove()
+# opens with emergencyStop() — a hard stop, no decel ramp — which on a live
+# shot is a visible jerk. A move already running is retargeted instead.
+assert "mount.getState() == STATE_LOOK_AT_MOVE" in rel, \
+    "a second nudge restarts the move, and startLookAtMove() hard-stops the rail\n" \
+    "    on the way in"
+assert "mount.moveSliderTo(" in rel, "a nudge during a move has nothing to retarget with"
+assert rel.index("mount.moveSliderTo(") < rel.index("mount.startLookAtMove("), \
+    "the retarget branch is not the one taken while a move is already running"
+la_move = CPP[CPP.index("void MountMotion::moveSliderTo("):]
+la_move = la_move[:la_move.index("\n}")]
+assert not re.search(r"^\s*_state\s*=[^=]", la_move, re.M), \
+    "moveSliderTo() assigns _state — retargeting would drop out of the look-at\n" \
+    "    move it is meant to extend, and tracking would stop mid-rail"
+assert "_goto_target[AXIS_SLIDER]" in la_move, \
+    "moveSliderTo() no longer records the destination the arrival test reads"
+print("   a second tap retargets instead of hard-stopping    OK")
+
 print("\nALL CHECKS PASSED")

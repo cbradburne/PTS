@@ -980,10 +980,55 @@ static void dispatch(const ParsedPacket &pkt) {
             int32_t d_slider = be32s(p + 8);
             int32_t d_zoom   = _cfg.lanc_zoom ? 0 : be32s(p + 12);
             uint8_t preset   = p[16];
+
+            // A slider-only nudge in look-at mode IS a look-at move — it just
+            // has a relative destination instead of a rail end.
+            //
+            // Jogging the slider already kept pan and tilt on the subject:
+            // MountMotion::update() tracks whenever the state is STATE_JOGGING
+            // and neither pan nor tilt is being driven.  A MOVE_REL went through
+            // moveTo() into STATE_MOVING_TO_POS instead, where _updateGoto()
+            // holds every axis at the target it was handed — and for a
+            // slider-only move that target is where pan and tilt already were.
+            // So the camera slid down the rail with the subject walking out of
+            // frame, while the same distance on the joystick tracked perfectly.
+            //
+            // Routed through the same entry point every other look-at move uses
+            // rather than a second implementation of the tracking gate. If it
+            // cannot start — no reference, no slider limits — it says so and
+            // the plain relative move below still happens.
+            bool tracked = false;
+            if (d_pan == 0 && d_tilt == 0 && d_slider != 0 &&
+                _cfg.look_at_mode && mount.getLaSubjectId() != 0xFF &&
+                mount.isRefSet() && mount.hasLimits(AXIS_SLIDER)) {
+                int32_t cur_phys = mount.getPosition(AXIS_SLIDER);
+                int32_t cur_log  = _cfg.slider_invert ? -cur_phys : cur_phys;
+                if (mount.getState() == STATE_LOOK_AT_MOVE) {
+                    // Already tracking: move the destination instead of
+                    // starting again. startLookAtMove() opens with an
+                    // emergencyStop(), which on a second tap of the same button
+                    // is a hard stop with no decel ramp — a visible jerk on a
+                    // shot that is live. Retargeting keeps the rail moving and
+                    // pan/tilt tracking through it, so taps add up.
+                    mount.moveSliderTo(cur_log + d_slider, preset);
+                    tracked = true;
+                } else {
+                    // startLookAtMove() clamps the destination to the rail, so a
+                    // deliberate overshoot — the Move panel's run-to-the-end —
+                    // ends at the limit with the subject tracked the whole way.
+                    tracked = mount.startLookAtMove(cur_log, cur_log + d_slider,
+                                                    preset, LOOK_AT_MAX_DEG_S);
+                    if (!tracked)
+                        Serial.println("[LookAt] slider nudge not tracked — "
+                                       "no ref or no slider limits");
+                }
+            }
+
             // moveRel() converts physical positions to logical space before
             // adding deltas, so moveTo()'s orientation transform is not applied
             // twice (which would send uninvolved axes to their mirror position).
-            mount.moveRel(d_pan, d_tilt, d_slider, d_zoom, preset);
+            if (!tracked)
+                mount.moveRel(d_pan, d_tilt, d_slider, d_zoom, preset);
 
             // Same rule as CMD_JOG above: moving a physical axis by hand while
             // in look-at mode means we are no longer aimed at the subject, so
