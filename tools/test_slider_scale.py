@@ -139,4 +139,54 @@ assert 30 < lo_mm < 35 and 1400 < hi_mm < 1600, \
     f"a 5100 -> 240000 step rail reads as {lo_mm:.0f} -> {hi_mm:.0f} mm"
 print(f"   5100 -> 240000 steps reads {lo_mm:.0f} -> {hi_mm:.0f} mm         OK")
 
+# ---- 4. the line the operator actually reads --------------------------------
+# The status bar at the bottom of the window was converted first, and it was the
+# wrong surface: the result of a limit find is read off the green line in the
+# Find Limits dialog, which is where the operator is already looking when it
+# finishes. Driven here rather than asserted from source, because "is it in
+# millimetres" is a question about what the label says.
+print("\n4. the Find Limits dialog:")
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QObject, pyqtSignal
+app = QApplication.instance() or QApplication([])
+
+from comms.protocol import Axis
+from ui.dialogs.find_limits_dialog import FindLimitsDialog
+
+
+class _MM(QObject):
+    limits_found = pyqtSignal(int, int, int, int)
+    def send_find_limits(self, *a): pass
+
+
+def result_for(axis, lo, hi):
+    mm = _MM()
+    dlg = FindLimitsDialog(1, mm, axis)
+    dlg._running = True
+    mm.limits_found.emit(1, int(axis), lo, hi)
+    app.processEvents()
+    return dlg._result.text()
+
+
+line = result_for(Axis.SLIDER, 5100, 240000)
+assert "steps" not in line, \
+    f"the dialog still reports the rail in steps: {line!r}"
+for want in ("1468 mm", "32 mm", "1500 mm"):
+    assert want in line, f"expected {want!r} in the result line, got {line!r}"
+print(f"   {line}   OK")
+
+zoom = result_for(Axis.ZOOM, 0, -18000)
+assert "mm" not in zoom, \
+    f"the zoom result claims millimetres, which a lens ring has none of: {zoom!r}"
+print(f"   zoom stays in steps                               OK")
+
+# Both surfaces, one conversion. If either grew its own the two could disagree
+# about the same rail on the same screen.
+DLG = (REPO / "pc_app/ui/dialogs/find_limits_dialog.py").read_text()
+for name, src in (("the dialog", DLG), ("main_window", MW)):
+    assert "NudgeOverlay.SLIDER_STEPS_PER_MM" in src, \
+        f"{name} converts with a number of its own rather than the one the Move " \
+        "panel\n    sends nudges with"
+print("   dialog and status bar share one steps/mm           OK")
+
 print("\nALL CHECKS PASSED")

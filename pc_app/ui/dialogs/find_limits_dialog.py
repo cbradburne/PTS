@@ -200,12 +200,30 @@ class FindLimitsDialog(QDialog):
         self._timeout.stop()
         self._running = False
         self._anim.park(at_far_end=True)
-        travel = max_steps - min_steps
         self._status.setText("Done.")
         self._status.setStyleSheet("font-size:12px; color:#B0BEC5;")
-        self._result.setText(
-            f"Travel: {travel} steps    (min {min_steps}, max {max_steps})")
+        self._result.setText(self._describe(min_steps, max_steps))
         self._apply_state()
+
+    def _describe(self, min_steps: int, max_steps: int) -> str:
+        """The result line, in the units the axis is actually measured in.
+
+        Millimetres for the rail: a step count is a number nobody can check
+        against the rail in front of them, and this line is the one an operator
+        reads after a limit find. Zoom stays in steps — it is a lens ring, not a
+        distance.
+
+        SLIDER_STEPS_PER_MM comes from the Move panel rather than a conversion
+        of its own, so what this reports and what the nudge buttons send cannot
+        drift apart.
+        """
+        travel = max_steps - min_steps
+        if self._axis != Axis.SLIDER:
+            return f"Travel: {travel} steps    (min {min_steps}, max {max_steps})"
+        from ui.widgets.nudge_overlay import NudgeOverlay
+        spmm = NudgeOverlay.SLIDER_STEPS_PER_MM
+        return (f"Travel: {travel / spmm:.0f} mm    "
+                f"(min {min_steps / spmm:.0f} mm, max {max_steps / spmm:.0f} mm)")
 
     def _on_timeout(self) -> None:
         self._running = False
