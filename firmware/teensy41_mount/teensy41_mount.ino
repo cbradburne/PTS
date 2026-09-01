@@ -592,9 +592,9 @@ static void send_config_report() {
     send_packet(CMD_CONFIG_REPORT, payload, CONFIG_REPORT_PAYLOAD_LEN);
 }
 
-// CMD_STATE_REPORT — lightweight bitmasks + active presets (6 bytes)
+// CMD_STATE_REPORT — bitmasks, active presets and axis limits (22 bytes)
 static void send_state_report() {
-    uint8_t payload[6];
+    uint8_t payload[STATE_REPORT_LIMITS_LEN];
     uint8_t *p = payload;
 
     write_be16(p,     _slot_occupied);  // +0: Which slots have data
@@ -602,7 +602,26 @@ static void send_state_report() {
     p[4] = _active_pt_preset;           // +4: Active PT speed preset
     p[5] = _active_sl_preset;           // +5: Active SL speed preset
 
-    send_packet(CMD_STATE_REPORT, payload, 6);
+    // The limits, which this report used to leave out entirely.
+    //
+    // They live in EEPROM and are restored into `mount` at boot, so the mount
+    // has known them since the last find-limits.  CMD_LIMITS_FOUND was the only
+    // thing that ever told a client, and that fires once, when the find runs —
+    // so a client started afterwards never heard.  Reopening the PC app greyed
+    // out the run-to-the-end buttons on a rail that had been calibrated for
+    // weeks, until find-limits was run again purely to re-announce the answer.
+    //
+    // An axis with no limits reports 0/0, which is what the PC already reads as
+    // "unknown" — the receiving side has been waiting for these fields since
+    // before they were sent.
+    bool sl_known = mount.hasLimits(AXIS_SLIDER);
+    bool zm_known = mount.hasLimits(AXIS_ZOOM);
+    write_be32(p +  6, (uint32_t)(sl_known ? mount.getMinLimit(AXIS_SLIDER) : 0));
+    write_be32(p + 10, (uint32_t)(sl_known ? mount.getMaxLimit(AXIS_SLIDER) : 0));
+    write_be32(p + 14, (uint32_t)(zm_known ? mount.getMinLimit(AXIS_ZOOM)   : 0));
+    write_be32(p + 18, (uint32_t)(zm_known ? mount.getMaxLimit(AXIS_ZOOM)   : 0));
+
+    send_packet(CMD_STATE_REPORT, payload, STATE_REPORT_LIMITS_LEN);
 }
 
 // ---------------------------------------------------------------------------

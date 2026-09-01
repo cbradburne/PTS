@@ -54,6 +54,11 @@ PACKET_MAX_PAYLOAD = 256   # raised: CMD_SUBJECT_LIST needs 232 bytes
 
 # Payload sizes for fixed-length large packets
 STATE_REPORT_PAYLOAD_LEN = 182   # 10 slots × 16 bytes + 22 bytes metadata
+# The short report the Teensy actually sends. 6 was masks and presets only; 22
+# adds the slider and zoom limits, which nothing else tells a client that
+# started after the last find-limits. See shared/protocol.h.
+STATE_REPORT_LITE_LEN    = 6
+STATE_REPORT_LIMITS_LEN  = 22
 SAVE_SPEEDS_PAYLOAD_LEN  = 72    # (4 PT + 4 SL + 1 ZM) × 8 bytes
 NUM_SLOTS = 10
 
@@ -623,32 +628,42 @@ def decode_status(payload: bytes) -> StatusPayload:
 def decode_state_report(payload: bytes) -> StateReportPayload:
     """Decode CMD_STATE_REPORT.
 
-    Accepts two payload sizes:
-      • 6 bytes  — lightweight format sent by current Teensy firmware:
+    Accepts three payload sizes, longest first — length-tolerant because a
+    mount on older firmware is a working mount, not a parse error:
+      • 6 bytes  — the original short report:
                    occupied(H) | slot_at(H) | pt_preset(B) | sl_preset(B)
-                   Slot position data and limits are not transmitted; the PC
-                   app retains whatever values it already holds for this mount.
+                   No slot positions and no limits; the PC app keeps whatever
+                   it already holds for this mount.
+      • 22 bytes — the same, plus slider and zoom min/max as int32. This is
+                   what current Teensy firmware sends, and it is the only thing
+                   that tells a client the limits without a find-limits running
+                   while it happens to be listening.
       • 182 bytes — full format: 10 × (pan,tilt,slider,zoom) int32 +
                    masks + presets + limits.
+
+    0/0 for an axis means its limits have not been found.
     """
-    if len(payload) < 6:
+    if len(payload) < STATE_REPORT_LITE_LEN:
         raise ParseError(f"STATE_REPORT payload too short: {len(payload)}")
 
     if len(payload) < STATE_REPORT_PAYLOAD_LEN:
-        # Lightweight 6-byte format from Teensy firmware.
         occupied, at_mask = struct.unpack(">HH", payload[0:4])
         pt_preset = payload[4]
         sl_preset = payload[5]
+        if len(payload) >= STATE_REPORT_LIMITS_LEN:
+            sl_min, sl_max, zm_min, zm_max = struct.unpack(">iiii", payload[6:22])
+        else:
+            sl_min = sl_max = zm_min = zm_max = 0
         return StateReportPayload(
             slots=[None] * NUM_SLOTS,   # positions not transmitted
             slot_occupied_mask=occupied,
             slot_at_mask=at_mask,
             active_pt_preset=pt_preset,
             active_sl_preset=sl_preset,
-            slider_min_steps=0,
-            slider_max_steps=0,
-            zoom_min_steps=0,
-            zoom_max_steps=0,
+            slider_min_steps=sl_min,
+            slider_max_steps=sl_max,
+            zoom_min_steps=zm_min,
+            zoom_max_steps=zm_max,
         )
 
     # Full 182-byte format.

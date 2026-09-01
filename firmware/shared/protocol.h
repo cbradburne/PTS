@@ -70,6 +70,21 @@
 
 // CMD_STATE_REPORT payload size (10 slots × 16 bytes + 22 bytes metadata = 182)
 #define STATE_REPORT_PAYLOAD_LEN  182
+// The Teensy does not send that 182-byte form: the slot POSITIONS in it are not
+// needed by anyone and are the bulk of it, so it sends a short report instead.
+//
+// That short report was 6 bytes — masks and presets — and carried no LIMITS.
+// The mount keeps its limits in EEPROM and restores them at boot, so it has
+// always known them; it just never said so, and CMD_LIMITS_FOUND only fires
+// when a limit find actually runs.  A client that started afterwards therefore
+// had no way to learn them: reopening the PC app greyed out every control that
+// needs a calibrated rail until the operator ran find-limits again.
+//
+// 22 = the 6, plus slider and zoom min/max as int32.  Read length-tolerantly:
+// 6 is still a valid report from an older mount and means "limits unknown",
+// which is also what 0/0 means in the fields below.
+#define STATE_REPORT_LITE_LEN       6
+#define STATE_REPORT_LIMITS_LEN    22
 // CMD_SAVE_SPEEDS payload size (4 PT + 4 SL + 1 ZM) × 8 bytes = 72
 #define SAVE_SPEEDS_PAYLOAD_LEN    72
 // CMD_CONFIG_REPORT payload size: 1 orientation byte + 72 speed bytes + 2 stall thresholds = 75
@@ -759,6 +774,17 @@ typedef struct __attribute__((packed)) {
 //   +170        slider_max_steps    int32 BE
 //   +174        zoom_min_steps      int32 BE
 //   +178        zoom_max_steps      int32 BE
+
+// CMD_STATE_REPORT, short form — what the Teensy actually sends
+// (STATE_REPORT_LIMITS_LEN = 22; the first 6 bytes alone are the older report):
+//   +00         slot_occupied_mask  uint16 BE  (bits 0-9)
+//   +02         slot_at_mask        uint16 BE  (bits 0-9)
+//   +04         active_pt_preset    uint8
+//   +05         active_sl_preset    uint8
+//   +06         slider_min_steps    int32 BE   0/0 = limits not found
+//   +10         slider_max_steps    int32 BE
+//   +14         zoom_min_steps      int32 BE   0/0 = limits not found
+//   +18         zoom_max_steps      int32 BE
 
 // CMD_SAVE_SPEEDS layout (72 bytes, decoded inline):
 //   +00..+31  4 × PT preset: uint32 max_speed, uint32 accel (presets 1-4)
