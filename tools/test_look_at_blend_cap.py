@@ -39,15 +39,21 @@ def define(name):
 
 
 
-def clear_la_body(hdr: str) -> str:
+def clear_la_body(src: str) -> str:
     """The body of clearLaSubject(), whatever fields it happens to clear.
 
     This used to be matched as the literal "_la_blend_brake = 0.0f; }" — which
     broke the moment another field was added before the brace. Every piece of
     state a switch sets has to be dropped here, and the test should say that
-    rather than pin the punctuation."""
-    s = hdr[hdr.index("void    clearLaSubject()"):]
-    return s[:s.index("}") + 1]
+    rather than pin the punctuation.
+
+    It lives in MountMotion.cpp now, not the header: it also has to STOP pan and
+    tilt, because _updateLookAt() leaves them in an unbounded rotateAsync() and
+    dropping the subject only stops steering them."""
+    s = CPP[CPP.index("void MountMotion::clearLaSubject()"):]
+    # Whitespace normalised for the same reason the literal match was dropped:
+    # an aligned assignment is the same statement as an unaligned one.
+    return re.sub(r"[ \t]+", " ", s[:s.index("\n}") + 2])
 
 
 PER_DEG = define("LOOK_AT_BLEND_MS_PER_DEG")
@@ -191,7 +197,7 @@ print("   ramps up as readily as down                         OK")
 print("\n5. when no blend is running:")
 assert "_la_blend_brake = 0.0f;      // and the fixed caps govern again" in setter, \
     "a first selection leaves the previous switch's cap in place"
-assert "_la_blend_brake = 0.0f;" in clear_la_body(HDR), \
+assert "_la_blend_brake = 0.0f;" in clear_la_body(CPP), \
     "dropping the subject leaves the cap behind"
 print("   cleared on a first selection and on deselect       OK")
 

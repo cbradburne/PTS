@@ -100,7 +100,16 @@ assert "_laAimNow(" in now_fn, \
     "the hand-off point is no longer derived from where the camera is pointing"
 print("   a switch mid-blend continues from the live aim     OK")
 
-assert "_la_blend_ms = 0;" in HDR, "dropping the subject does not cancel the blend"
+# clearLaSubject() moved from the header into MountMotion.cpp when it gained
+# the job of STOPPING pan and tilt as well as forgetting the subject — the
+# tracker leaves both axes in an unbounded rotateAsync(), so clearing the state
+# alone left them turning.
+clear_la = CPP[CPP.index("void MountMotion::clearLaSubject()"):]
+# Whitespace normalised: an aligned "_la_blend_ms    = 0;" is the same statement
+# as an unaligned one, and a test that cannot tell them apart fails on a tidy-up.
+clear_la = re.sub(r"[ \t]+", " ", clear_la[:clear_la.index("\n}")])
+assert "_la_blend_ms = 0;" in clear_la, \
+    "dropping the subject does not cancel the blend"
 print("   deselecting cancels it                             OK")
 
 # ---- 4. duration scales with the turn ---------------------------------------

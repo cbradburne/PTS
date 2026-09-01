@@ -475,17 +475,30 @@ void MountMotion::update() {
     // for a zoom axis rotating in any non-jog state.  Every other unbounded
     // motion is either watchdogged (_updateJog) or self-terminating (GOTO,
     // look-at slider, pre-aim, homing); LANC zoom has its own watchdog.
-    if (_state != STATE_JOGGING && _jog_dir[AXIS_ZOOM] != 0 &&
-            (millis() - _jog_last_ms > JOG_WATCHDOG_MS)) {
-        Serial.println("ZOOM watchdog: no packet — stopping zoom");
-        uint32_t stop_accel = (uint32_t)(physToUSteps(AXIS_ZOOM,
-                                  _zoom_preset.acceleration) * JOG_STOP_ACCEL_SCALE);
-        noInterrupts();
-        _stepper[AXIS_ZOOM]->setAcceleration(stop_accel);
-        _stepper[AXIS_ZOOM]->stopAsync();
-        interrupts();
-        _jog_dir[AXIS_ZOOM] = 0;
-        _jog_vel[AXIS_ZOOM] = 0;
+    // Pan and tilt are in here too, and were not.  They became jog-able in this
+    // state when the joystick was routed to jogPanTilt() during a look-at move;
+    // before that only zoom could be held here and only zoom needed covering.
+    // A held stick and a dead link would otherwise leave the head turning with
+    // nothing left to stop it — _updateJog() and its watchdog do not run
+    // outside STATE_JOGGING, which is the whole reason this block exists.
+    if (_state != STATE_JOGGING && (millis() - _jog_last_ms > JOG_WATCHDOG_MS)) {
+        static const int WATCHED[3] = { AXIS_PAN, AXIS_TILT, AXIS_ZOOM };
+        for (unsigned w = 0; w < 3; w++) {
+            const int ax = WATCHED[w];
+            if (_jog_dir[ax] == 0) continue;
+            const SpeedPreset &sp = (ax == AXIS_ZOOM)
+                                    ? _zoom_preset
+                                    : _pt_presets[constrain(_jog_preset[ax], 1, 4)];
+            Serial.printf("JOG watchdog: no packet — stopping axis %d\n", ax);
+            uint32_t stop_accel = (uint32_t)(physToUSteps(ax, sp.acceleration)
+                                             * JOG_STOP_ACCEL_SCALE);
+            noInterrupts();
+            _stepper[ax]->setAcceleration(stop_accel);
+            _stepper[ax]->stopAsync();
+            interrupts();
+            _jog_dir[ax] = 0;
+            _jog_vel[ax] = 0;
+        }
     }
 
     if (_state == STATE_FINDING_LIMITS) {
@@ -594,6 +607,20 @@ void MountMotion::jog(int16_t pan, int16_t tilt, int16_t slider, int16_t zoom,
                 _stepper[AXIS_ZOOM]->overrideSpeed(spd_factor);
             }
         }
+        // Pan and tilt during a look-at move are the operator taking the head.
+        //
+        // They used to be dropped on the floor right here. jogPanTilt() has
+        // handled this case correctly for a while — drop the subject, drive the
+        // axes, leave _state alone so the rail carries on — but nothing routed
+        // an ordinary joystick to it: the .ino calls jogPanTilt() only for
+        // axis_mask 0x03, which is CV tracking. A stick sends 0x0F and landed
+        // here, so the borders went red (the .ino clears the subject either
+        // way) and the head did not move.
+        //
+        // Not for goto_zoom_only: pan and tilt are zero by that branch's own
+        // definition, and jogPanTilt() would take _state to STATE_JOGGING and
+        // orphan the goto it is protecting.
+        if (!goto_zoom_only) jogPanTilt(pan, tilt, pt_preset);
         return;   // _state unchanged — the look-at controller or _updateGoto()
                   // keeps running and finishes the move it was already making
     }
@@ -786,6 +813,44 @@ void MountMotion::_updateJog() {
     if (!_jogging && !any_active) {
         _state = STATE_IDLE;
     }
+}
+
+// ---------------------------------------------------------------------------
+// clearLaSubject()  — drop the subject, and let go of the axes with it
+// ---------------------------------------------------------------------------
+//
+// This was an inline that cleared four fields, and that was not enough.
+//
+// _updateLookAt() drives pan and tilt with an unbounded rotateAsync() and
+// steers them by re-issuing setMaxSpeed() every 20 ms. The moment the subject
+// goes, `aiming` is false and it stops calling _driveTowardTarget() — so the
+// last speed it set stays set, and both axes carry on turning at it. Nothing
+// downstream stopped them: the jog paths only stop axes with _jog_dir[] set,
+// and a tracked axis has none.
+//
+// On the rig that was the head wandering off the moment the joystick dropped
+// the subject, which is the opposite of handing the axes over.
+//
+// Only on the transition, and only for axes the operator has not already
+// claimed: a held stick clears the subject on every packet at 20 Hz, and
+// stopping the motors under it each time would be a stutter, not a hand-over.
+
+void MountMotion::clearLaSubject() {
+    bool had_subject = (_la_subject_id != 0xFF);
+    _la_subject_id  = 0xFF;
+    _la_blend_ms    = 0;
+    _la_blend_brake = 0.0f;
+    _la_blend_accel = 0.0f;
+    if (!had_subject) return;
+
+    if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
+        noInterrupts();
+        for (int i = 0; i < 2; i++)            // PAN, TILT
+            if (_jog_dir[i] == 0) _stepper[i]->stopAsync();
+        interrupts();
+    }
+    _la_pt_dir[0] = 0;
+    _la_pt_dir[1] = 0;
 }
 
 // ---------------------------------------------------------------------------

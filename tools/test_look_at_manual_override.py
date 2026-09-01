@@ -146,4 +146,70 @@ for c in conds:
     assert "slider" not in c, f"the slider deselects again: ({c.strip()})"
 print("   the slider still does not deselect                  OK")
 
+# ---- 6. and an ORDINARY joystick actually gets there -----------------------
+# Everything above tests jogPanTilt(), which has been right for a while. None
+# of it asked whether a joystick reaches it — and it did not. The .ino routes
+# to jogPanTilt() only for axis_mask 0x03, which is CV tracking; a stick sends
+# 0x0F and went to jog(), whose look-at branch handled zoom and returned. The
+# subject was dropped (the .ino does that either way, so the borders went red)
+# and the head did not move. Tested from the entry point the packet uses.
+print("\n6. the path an ordinary joystick takes:")
+jogfn = body("void MountMotion::jog(int16_t pan", end="\n}\n\n")
+la_branch = jogfn[jogfn.index("if (_state == STATE_LOOK_AT_MOVE"):]
+assert "jogPanTilt(pan, tilt, pt_preset);" in la_branch, \
+    "jog()'s look-at branch does not hand pan/tilt to jogPanTilt(). A stick sends\n" \
+    "    axis_mask 0x0F, which lands here — so pan and tilt are discarded and the\n" \
+    "    joystick does nothing but turn the borders red."
+assert la_branch.index("jogPanTilt(") < la_branch.index("return;"), \
+    "the delegation is after the return, so it never runs"
+
+# Not for the goto-zoom case: pan and tilt are zero by that branch's own
+# definition, and jogPanTilt() would take _state to STATE_JOGGING and orphan
+# the goto the branch exists to protect.
+assert "if (!goto_zoom_only) jogPanTilt(" in la_branch, \
+    "a zoom nudge during a GOTO now runs jogPanTilt(0, 0), which sets\n" \
+    "    _state = STATE_JOGGING and abandons every axis the goto was steering"
+print("   0x0F reaches jogPanTilt, 0x03 already did           OK")
+print("   and a goto zoom nudge still does not                OK")
+
+# ---- 7. dropping the subject lets go of the axes ---------------------------
+# _updateLookAt() drives pan/tilt with an unbounded rotateAsync() and steers by
+# re-issuing setMaxSpeed(). When `aiming` goes false it simply stops calling
+# _driveTowardTarget(), so the last speed stays set and both axes keep turning.
+# Nothing else stopped them: the jog paths only stop axes with _jog_dir[] set,
+# and a tracked axis has none.
+print("\n7. what happens to pan and tilt when the subject goes:")
+assert "void    clearLaSubject();" in HDR, \
+    "clearLaSubject is inline again — an inline that only clears four fields is\n" \
+    "    what left both axes turning after the subject was dropped"
+clr = body("void MountMotion::clearLaSubject()")
+assert "stopAsync()" in clr, \
+    "clearLaSubject does not stop the axes. _updateLookAt() leaves them in an\n" \
+    "    unbounded rotateAsync(); dropping the subject just stops steering them."
+assert "_jog_dir[i] == 0" in clr, \
+    "it stops axes the operator has already claimed, which cancels the jog that\n" \
+    "    is replacing the tracking"
+assert "if (!had_subject) return;" in clr, \
+    "it acts when there was no subject to drop. A held stick clears on every\n" \
+    "    packet at 20 Hz, so this has to be the transition or the jog stutters."
+assert clr.index("had_subject") < clr.index("stopAsync()"), \
+    "the transition guard runs after the stop"
+print("   stopped, once, and only if the tracker had them     OK")
+
+# ---- 8. and a held stick cannot outlive the link ---------------------------
+# _updateJog() and its watchdog only run in STATE_JOGGING, which a look-at move
+# is not. Zoom had a dead-man here already because zoom was the only axis that
+# could be held in this state; pan and tilt can be now.
+print("\n8. the dead-man outside STATE_JOGGING:")
+upd_fn = body("void MountMotion::update()")
+wd = upd_fn[upd_fn.index("_state != STATE_JOGGING"):]
+wd = wd[:wd.index("STATE_FINDING_LIMITS")]
+for ax in ("AXIS_PAN", "AXIS_TILT", "AXIS_ZOOM"):
+    assert ax in wd, \
+        f"{ax} is not covered by the watchdog outside STATE_JOGGING. A held stick\n" \
+        "    and a dead link would leave it turning with nothing left to stop it."
+assert "_jog_dir[ax] == 0) continue;" in wd, \
+    "the watchdog stops axes that are not being jogged"
+print("   pan, tilt and zoom all covered                      OK")
+
 print("\nALL CHECKS PASSED")

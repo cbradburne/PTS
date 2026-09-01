@@ -443,8 +443,10 @@ public:
     uint8_t getLaSubjectId() const { return _la_subject_id; }
     // Dropping the subject cancels any blend with it — otherwise a half-finished
     // ease would still be running when the next subject is chosen.
-    void    clearLaSubject()       { _la_subject_id = 0xFF; _la_blend_ms = 0;
-                                     _la_blend_brake = 0.0f; _la_blend_accel = 0.0f; }
+    // Drops the subject AND stops pan/tilt if the tracker was driving them —
+    // see MountMotion.cpp. It used to be an inline that only cleared the state,
+    // which left both axes turning.
+    void    clearLaSubject();
     // Look-at mode itself, not merely "a subject id is set".  The subject id
     // persists across a mode change, so it cannot stand in for the mode: a
     // subject selected before look-at was switched off would otherwise still
