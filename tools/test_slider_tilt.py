@@ -34,8 +34,13 @@ print("1. the wire format:")
 m = re.search(r"#define\s+CONFIG_REPORT_PAYLOAD_LEN\s+(\d+)", PROTO_H)
 assert m, "CONFIG_REPORT_PAYLOAD_LEN is gone"
 PLEN = int(m.group(1))
-assert PLEN == 77, f"payload is {PLEN}B; the tilt needs 77 (75 of config + int16)"
-print(f"   CONFIG_REPORT_PAYLOAD_LEN = {PLEN}                    OK")
+# At LEAST 77 — the tilt occupies [75..76] and everything before it is fixed.
+# Pinning the total was wrong: this payload is designed to grow at the end (the
+# slider end margin took [77..78] on 2026-09-01), and an exact match turns every
+# such addition into a failure that says nothing about the tilt.
+assert PLEN >= 77, \
+    f"payload is {PLEN}B; the tilt occupies [75..76] and needs at least 77"
+print(f"   CONFIG_REPORT_PAYLOAD_LEN = {PLEN}, tilt at [75..76]   OK")
 
 assert "payload[75] = (uint8_t)((uint16_t)t10 >> 8);" in INO, \
     "the mount no longer writes the tilt high byte at [75]"

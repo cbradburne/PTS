@@ -57,6 +57,13 @@ STATE_REPORT_PAYLOAD_LEN = 182   # 10 slots × 16 bytes + 22 bytes metadata
 # The short report the Teensy actually sends. 6 was masks and presets only; 22
 # adds the slider and zoom limits, which nothing else tells a client that
 # started after the last find-limits. See shared/protocol.h.
+# 79 since the end margin was added at [77..78]; the decoder still accepts 73,
+# 75 and 77 from older firmware. check_protocol.py holds this equal to the C
+# header, which is the point of naming it here at all.
+CONFIG_REPORT_PAYLOAD_LEN    = 79
+SLIDER_END_MARGIN_MM_DEFAULT = 30
+SLIDER_END_MARGIN_MM_MIN     = 3
+SLIDER_END_MARGIN_MM_MAX     = 200
 STATE_REPORT_LITE_LEN    = 6
 STATE_REPORT_LIMITS_LEN  = 22
 SAVE_SPEEDS_PAYLOAD_LEN  = 72    # (4 PT + 4 SL + 1 ZM) × 8 bytes
@@ -502,7 +509,8 @@ def encode_set_orientation(pan_invert: bool, slider_invert: bool,
                            lanc_zoom: bool = False,
                            tilt_invert: bool = False,
                            look_at_mode: bool = False,
-                           slider_tilt_deg: float = 0.0) -> bytes:
+                           slider_tilt_deg: float = 0.0,
+                           slider_end_margin_mm: int | None = None) -> bytes:
     flags = ((0x01 if pan_invert    else 0) |
              (0x02 if slider_invert  else 0) |
              (0x04 if has_slider     else 0) |
@@ -513,7 +521,14 @@ def encode_set_orientation(pan_invert: bool, slider_invert: bool,
     # Tenths of a degree, signed: 0.1 deg is far finer than a rail can be
     # shimmed, and int16 covers the full +/-90 with room to spare.
     tilt10 = int(round(max(-90.0, min(90.0, slider_tilt_deg)) * 10.0))
-    return struct.pack(">Bh", flags, tilt10)
+    if slider_end_margin_mm is None:
+        # Omitted leaves the mount's stored margin alone, which is what the hub
+        # display relies on: it sends the flags byte only, and an Apply from the
+        # display must not reset the rail's end margin.
+        return struct.pack(">Bh", flags, tilt10)
+    margin = max(SLIDER_END_MARGIN_MM_MIN,
+                 min(SLIDER_END_MARGIN_MM_MAX, int(slider_end_margin_mm)))
+    return struct.pack(">BhH", flags, tilt10, margin)
 
 
 def encode_ping(timestamp_ms: int) -> bytes:
@@ -707,6 +722,9 @@ class ConfigReportPayload:
     stall_threshold_zoom:   int = 0
     look_at_mode:           bool = False
     slider_tilt_deg: float = 0.0   # rail inclination, deg; 0 = level
+    # How far the usable rail is held back from EACH stall, whole mm. 0 = the
+    # mount is on firmware from before the field existed.
+    slider_end_margin_mm: int = 0
 
 
 def decode_config_report(payload: bytes) -> ConfigReportPayload:
@@ -750,9 +768,14 @@ def decode_config_report(payload: bytes) -> ConfigReportPayload:
     # Tenths of a degree, signed.  Absent on older firmware — a level rail.
     slider_tilt_deg = (struct.unpack(">h", payload[75:77])[0] / 10.0
                        if len(payload) >= 77 else 0.0)
+    # Whole mm. Absent on older firmware, and 0 says so — the caller keeps
+    # whatever it already had rather than showing a rail with no margin.
+    slider_end_margin_mm = (struct.unpack(">H", payload[77:79])[0]
+                            if len(payload) >= 79 else 0)
 
     return ConfigReportPayload(
         slider_tilt_deg=slider_tilt_deg,
+        slider_end_margin_mm=slider_end_margin_mm,
         pan_invert=pan_invert,
         tilt_invert=tilt_invert,
         slider_invert=slider_invert,
@@ -911,12 +934,14 @@ def pkt_set_orientation(mount_id: int, pan_invert: bool, slider_invert: bool,
                         lanc_zoom: bool = False,
                         tilt_invert: bool = False,
                         look_at_mode: bool = False,
-                        slider_tilt_deg: float = 0.0) -> bytes:
+                        slider_tilt_deg: float = 0.0,
+                        slider_end_margin_mm: int | None = None) -> bytes:
     return build_packet(mount_id, Cmd.SET_ORIENTATION,
                         encode_set_orientation(pan_invert, slider_invert,
                                                has_slider, zoom_invert, lanc_zoom,
                                                tilt_invert, look_at_mode,
-                                               slider_tilt_deg))
+                                               slider_tilt_deg,
+                                               slider_end_margin_mm))
 
 def pkt_e_stop(mount_id: int = MOUNT_BROADCAST) -> bytes:
     return build_packet(mount_id, Cmd.E_STOP)

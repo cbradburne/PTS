@@ -49,14 +49,20 @@ def resolve(*sources):
     return out
 
 
-C = resolve(HDR, CPP)
+PROTO = (REPO / "firmware/shared/protocol.h").read_text()
+# protocol.h too: the end-margin default lives there, once, so the app and
+# the EEPROM default cannot drift from the firmware.
+C = resolve(PROTO, HDR, CPP)
 
 # ---- 1. the two ends match ---------------------------------------------------
 print("1. where the usable rail ends:")
 lf = CPP[CPP.index("case LimitFindState::MOVING_TO_MAX:"):]
 lf = lf[:lf.index("break;")]
-assert "const int32_t inset = LIMIT_BACK_OFF[idx] + LIMIT_SAFETY_MARGIN[idx];" in lf, \
+assert "const int32_t inset = LIMIT_BACK_OFF[idx] + margin;" in lf, \
     "the inset is no longer computed once for both ends"
+assert "_slider_end_margin_mm" in lf, \
+    "the slider's margin is not the per-mount setting, so the Settings field\n" \
+    "    would do nothing"
 
 calls = re.findall(r"setLimits\(ax,\s*([^,]+?),\s*\n?\s*([^)]+?)\);", lf, re.S)
 assert calls, "setLimits is no longer called from the MOVING_TO_MAX leg"
@@ -73,7 +79,7 @@ if back_off is None:                       # array literal did not evaluate
     back_off = int(re.search(r"LIMIT_BACK_OFF\[4\]\s*=\s*\{[^}]*?,\s*[^,]*,\s*(\d+)",
                              CPP).group(1))
 mm_per_step = C["NOMINAL_SLIDER_MM_PER_STEP"]
-margin_mm   = C["SLIDER_SAFETY_MARGIN_MM"]
+margin_mm   = C["SLIDER_END_MARGIN_MM_DEFAULT"]
 inset_mm    = back_off * mm_per_step + margin_mm
 print(f"   {inset_mm:.1f} mm at each end "
       f"({back_off} steps back-off + {margin_mm:.0f} mm margin)")

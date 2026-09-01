@@ -90,7 +90,21 @@
 // CMD_CONFIG_REPORT payload size: 1 orientation byte + 72 speed bytes + 2 stall thresholds = 75
 // 77 since the slider tilt was added at [75..76]; the decoder accepts 73 and 75
 // from older firmware and reads a level rail in that case.
-#define CONFIG_REPORT_PAYLOAD_LEN  77
+// 79 since the slider end margin was added at [77..78], uint16 whole mm.
+#define CONFIG_REPORT_PAYLOAD_LEN  79
+
+// How far the usable rail is held back from EACH stall, in whole millimetres.
+//
+// Per-mount and settable, because finding the right value is a matter of trying
+// one and listening — and a compile-time constant makes every attempt a Teensy
+// flash, which on this rig means the board out, re-homed, ref 0/0 and
+// recalibrated. See SLIDER_END_MARGIN_MM_MIN for why it has a floor.
+#define SLIDER_END_MARGIN_MM_DEFAULT  30
+// Below the jog back-off the soft limit a JOG respects would sit further out
+// than the limit a GOTO drives to, and jogging could reach past where a recall
+// is allowed. LIMIT_BACK_OFF is 300 steps ≈ 1.9 mm, so 3 mm clears it.
+#define SLIDER_END_MARGIN_MM_MIN       3
+#define SLIDER_END_MARGIN_MM_MAX     200
 
 // Pairing management payload sizes (mirror the disp_uart.h DISP_MSG_* messages)
 #define MOUNT_TABLE_PAYLOAD_LEN    30   // 5 × MAC(6); an all-zero slot = unbound
@@ -279,6 +293,13 @@ typedef enum : uint8_t {
     //
     // A mount sending only the flags byte is read as 0 (level), so old senders
     // keep working and a level rig is unaffected.
+    //
+    // Bytes [3..4] are uint16 slider end margin in whole millimetres, and are
+    // optional in the same way and for the same reason: the hub display sends
+    // the flags byte alone, and an Apply from the display must not silently
+    // reset the rail's end margin any more than it may level the rail. A sender
+    // that omits them leaves the stored margin alone.
+    //   payload: flags(1) [ + tilt_tenths_deg(2) [ + end_margin_mm(2) ] ]
     CMD_SET_ORIENTATION  = 0x07,
     CMD_E_STOP           = 0x08,
     CMD_GET_STATUS       = 0x09,

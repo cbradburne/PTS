@@ -72,6 +72,8 @@ class MountConfig:
     # they are not, and two rays anchored at the wrong heights never meet at the
     # subject.
     slider_tilt_deg: float = 0.0
+    # How far the usable rail is held back from EACH stall, whole mm.
+    slider_end_margin_mm: int = 30
     pan_tilt_presets: AxisGroupPresets = field(default_factory=_DEFAULT_PT_PRESETS)
     slider_presets:   AxisGroupPresets = field(default_factory=_DEFAULT_SL_PRESETS)
     zoom_preset:      SpeedPreset      = field(default_factory=_DEFAULT_ZM_PRESET)
@@ -147,6 +149,7 @@ def _mount_from_dict(d: dict) -> MountConfig:
     mc.lanc_zoom     = d.get("lanc_zoom",     False)
     mc.look_at_mode  = d.get("look_at_mode",  False)
     mc.slider_tilt_deg = float(d.get("slider_tilt_deg", 0.0))
+    mc.slider_end_margin_mm = int(d.get("slider_end_margin_mm", 30))
     if "pan_tilt_presets" in d:
         mc.pan_tilt_presets = _agp_from_dict(d["pan_tilt_presets"])
     # New format: separate slider_presets + zoom_preset

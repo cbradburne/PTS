@@ -144,11 +144,16 @@ static constexpr float GOTO_MIN_RAMP_S = 1.0f;  //0.8f;
 //
 // Expressed in mm and converted here, so it survives a pulley change: the
 // tooth counts in MountMotion.h drive the conversion.
+//
+// The SLIDER entry is now only the DEFAULT and the compile-time sanity check:
+// the rail's margin is a per-mount setting (_slider_end_margin_mm, see
+// _updateLimitFind) so it can be tuned without a Teensy flash. The number lives
+// in shared/protocol.h, once, because a second copy of it here would be free to
+// drift from the one the app and the EEPROM default use.
 // ZOOM — tune independently; set 0 if the zoom has no physical runout concern.
-static constexpr int32_t  SLIDER_SAFETY_MARGIN_MM = 30;
 static constexpr int32_t  LIMIT_SAFETY_MARGIN[4] = {
     0, 0,
-    (int32_t)(SLIDER_SAFETY_MARGIN_MM / NOMINAL_SLIDER_MM_PER_STEP),
+    (int32_t)(SLIDER_END_MARGIN_MM_DEFAULT / NOMINAL_SLIDER_MM_PER_STEP),
     100
 };
 static_assert(LIMIT_SAFETY_MARGIN[AXIS_SLIDER] > LIMIT_BACK_OFF[AXIS_SLIDER],
@@ -1678,7 +1683,16 @@ void MountMotion::_updateLimitFind() {
                 // (LIMIT_BACK_OFF 300 + margin 4800 steps, at 160 steps/mm) —
                 // measured on the rig as "about 32 mm".  Same inset both ends
                 // now, so the two ends of a rail move behave the same way.
-                const int32_t inset = LIMIT_BACK_OFF[idx] + LIMIT_SAFETY_MARGIN[idx];
+                // The slider's margin is a per-mount SETTING, not the compiled
+                // constant: the right value is found by trying one and
+                // listening, and as a constant every attempt cost a board
+                // removal, a re-home, a ref 0/0 and a recalibration. Every
+                // other axis keeps its constant — only the rail has an operator
+                // with a tape measure and a reason to tune it.
+                const int32_t margin = (ax == AXIS_SLIDER)
+                    ? (int32_t)(_slider_end_margin_mm / _slider_mm_per_step)
+                    : LIMIT_SAFETY_MARGIN[idx];
+                const int32_t inset = LIMIT_BACK_OFF[idx] + margin;
                 if (ax == AXIS_ZOOM && _zoom_invert) {
                     setLimits(ax, max_found + inset,   // negative end
                                           0 - inset);  // home end

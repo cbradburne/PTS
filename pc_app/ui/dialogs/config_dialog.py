@@ -305,6 +305,11 @@ class ConfigDialog(QWidget):
         if tilt_spin is not None:
             # From the MOUNT, so the box shows what is actually in force.
             tilt_spin.setValue(getattr(cr, "slider_tilt_deg", 0.0))
+        margin_spin = getattr(self, f"_{key}_end_margin", None)
+        # 0 means the mount is on firmware from before the field existed; keep
+        # what is on screen rather than showing a rail with no margin at all.
+        if margin_spin is not None and getattr(cr, "slider_end_margin_mm", 0):
+            margin_spin.setValue(cr.slider_end_margin_mm)
         # PT speed presets
         pt_rows = getattr(self, f"_{key}_pt_rows", None)
         if pt_rows is not None:
@@ -754,6 +759,31 @@ class ConfigDialog(QWidget):
             "subject in the wrong place.")
         tilt_hl.addWidget(QLabel("Slider tilt:"))
         tilt_hl.addWidget(slider_tilt_spin)
+        tilt_hl.addSpacing(16)
+
+        # End margin. A stall is noticed late — the threshold is desensitised so
+        # the carriage will not stall part-way along a tilted rail — so the
+        # position recorded at an end is already inside that stop, and driving
+        # back to it grinds. This holds the usable rail back from BOTH stalls.
+        #
+        # A setting rather than a constant because the right value is found by
+        # trying one and listening, and as a constant every attempt cost a board
+        # removal, a re-home, a ref 0/0 and a recalibration.
+        end_margin_spin = QSpinBox()
+        end_margin_spin.setRange(3, 200)
+        end_margin_spin.setSingleStep(5)
+        end_margin_spin.setSuffix(" mm")
+        end_margin_spin.setValue(getattr(mc, "slider_end_margin_mm", 30))
+        end_margin_spin.setToolTip(
+            "How far the usable rail is held back from EACH end stop.\n"
+            "The stall is noticed late, so the position found by Find Limits\n"
+            "is already inside the stop; without this every move to a limit\n"
+            "grinds against it.\n\n"
+            "Costs twice this much travel in total. Lower it until you hear\n"
+            "the carriage touch, then go back up. Takes effect on the next\n"
+            "Find Limits.")
+        tilt_hl.addWidget(QLabel("End margin:"))
+        tilt_hl.addWidget(end_margin_spin)
         tilt_hl.addStretch()
         ol.addWidget(tilt_row)
         # Only meaningful with a slider — same rule as look-at mode, and shown
@@ -882,6 +912,7 @@ class ConfigDialog(QWidget):
         setattr(self, f"_{key}_lanc_zoom",    lanc_zoom_cb)
         setattr(self, f"_{key}_look_at_mode", look_at_mode_cb)
         setattr(self, f"_{key}_slider_tilt", slider_tilt_spin)
+        setattr(self, f"_{key}_end_margin", end_margin_spin)
         setattr(self, f"_{key}_pt_rows",    pt_rows)
         setattr(self, f"_{key}_sl_rows",    sl_rows)
         setattr(self, f"_{key}_zm_spd",     zm_spd)
@@ -977,10 +1008,13 @@ class ConfigDialog(QWidget):
             # orientation first means every subsequent echo already carries the new
             # orientation, so no intermediate revert occurs.
             slider_tilt = getattr(self, f"_{key}_slider_tilt").value()
-            mc.slider_tilt_deg = slider_tilt
+            end_margin  = getattr(self, f"_{key}_end_margin").value()
+            mc.slider_tilt_deg       = slider_tilt
+            mc.slider_end_margin_mm  = end_margin
             self._mm.send_set_orientation(mount_id, pan_inv, slider_inv,
                                           has_slider, zoom_inv, lanc_zoom,
-                                          tilt_inv, look_at_mode, slider_tilt)
+                                          tilt_inv, look_at_mode, slider_tilt,
+                                          end_margin)
 
             # Speed presets — its CONFIG_REPORT echo (carrying the new PT/SL
             # values) will arrive at any subsequently-opened config dialog before

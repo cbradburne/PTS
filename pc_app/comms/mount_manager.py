@@ -417,11 +417,12 @@ class MountManager(QObject):
                               lanc_zoom: bool = False,
                               tilt_invert: bool = False,
                               look_at_mode: bool = False,
-                              slider_tilt_deg: float = 0.0) -> None:
+                              slider_tilt_deg: float = 0.0,
+                              slider_end_margin_mm: int | None = None) -> None:
         self._send(pkt_set_orientation(mount_id, pan_invert, slider_invert,
                                        has_slider, zoom_invert, lanc_zoom,
                                        tilt_invert, look_at_mode,
-                                       slider_tilt_deg))
+                                       slider_tilt_deg, slider_end_margin_mm))
 
     def send_e_stop(self, mount_id: int = MOUNT_BROADCAST) -> None:
         """E-STOP bypasses the send queue for minimum latency."""

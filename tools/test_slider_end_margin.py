@@ -1,4 +1,4 @@
-"""The slider's limits are held 30 mm back from where each stall was found.
+"""The slider's limits are held back from each stall by a per-mount setting.
 
 The rail is tilted. That needed more motor current and a less twitchy
 StallGuard threshold to stop the carriage stalling part-way along a move — and
@@ -32,18 +32,34 @@ CPP = (REPO / "firmware/teensy41_mount/MountMotion.cpp").read_text()
 HDR = (REPO / "firmware/teensy41_mount/MountMotion.h").read_text()
 
 # ---- 1. the margin, in millimetres -----------------------------------------
+# It is a SETTING now, not a constant: the right value is found by trying one
+# and listening, and as a constant every attempt cost a board removal, a
+# re-home, a ref 0/0 and a recalibration. The constant that remains is the
+# default and the compile-time sanity check.
 print("1. the margin:")
-m = re.search(r"SLIDER_SAFETY_MARGIN_MM = (\d+);", CPP)
-assert m, "the slider margin is no longer stated in mm"
+PROTO = (REPO / "firmware/shared/protocol.h").read_text()
+m = re.search(r"#define SLIDER_END_MARGIN_MM_DEFAULT\s+(\d+)", PROTO)
+assert m, "the slider margin default is no longer stated in mm"
 mm = int(m.group(1))
-assert mm == 30, f"the slider margin is {mm} mm, expected 30"
-print(f"   {mm} mm, written in mm not steps                    OK")
+assert mm == 30, f"the slider margin default is {mm} mm, expected 30"
+print(f"   {mm} mm default, written in mm not steps           OK")
 
-# Converted from the drive geometry rather than hardcoded, so a pulley change
-# does not silently turn 30 mm into some other distance.
-assert "SLIDER_SAFETY_MARGIN_MM / NOMINAL_SLIDER_MM_PER_STEP" in CPP, \
-    "the margin is no longer derived from the drive geometry"
-print("   converted via NOMINAL_SLIDER_MM_PER_STEP           OK")
+# One home for the number. A copy in MountMotion.cpp would be free to drift
+# from the one the EEPROM default and the app both use.
+assert "SLIDER_SAFETY_MARGIN_MM" not in CPP, \
+    "MountMotion.cpp has its own copy of the margin again — it and " \
+    "protocol.h's\n    default would drift, and only the rig would notice"
+assert "SLIDER_END_MARGIN_MM_DEFAULT / NOMINAL_SLIDER_MM_PER_STEP" in CPP, \
+    "the default is no longer derived from the drive geometry"
+print("   one definition, converted via the drive geometry   OK")
+
+# And the limit find reads the SETTING, not the constant.
+lf_use = CPP[CPP.index("const int32_t margin ="):]
+lf_use = lf_use[:lf_use.index(";", lf_use.index("LIMIT_SAFETY_MARGIN"))]
+assert "_slider_end_margin_mm" in lf_use and "AXIS_SLIDER" in lf_use, \
+    "the limit find still uses the compiled constant for the slider, so the\n" \
+    "    setting would do nothing"
+print("   and the limit find uses the setting                OK")
 
 step_mm = 40.0 / (32 * 200)          # SLIDER_MM_PER_REV / (µsteps × full steps)
 steps = int(mm / step_mm)

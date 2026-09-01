@@ -417,6 +417,12 @@ public:
     void setSliderTiltDeg(float deg) { _slider_tilt_deg = deg; }
     float getSliderTiltDeg() const   { return _slider_tilt_deg; }
 
+    // How far the usable rail is held back from EACH stall, in whole mm. Set
+    // per mount rather than compiled in, because the right value is found by
+    // trying one and listening — see _updateLimitFind().
+    void     setSliderEndMarginMm(uint16_t mm) { _slider_end_margin_mm = mm; }
+    uint16_t getSliderEndMarginMm() const      { return _slider_end_margin_mm; }
+
     // Set the session reference: maps current step count to known angles.
     // Called every session (and after subject calibration, automatically).
     void setLookAtRef(float pan_ref_deg, float tilt_ref_deg);
@@ -613,6 +619,7 @@ private:
     float           _tilt_deg_per_step;
     float           _slider_mm_per_step;   // set by setSliderMmPerStep() / EEPROM load
     float           _slider_tilt_deg = 0.0f;  // set by setSliderTiltDeg() / EEPROM load
+    uint16_t        _slider_end_margin_mm = SLIDER_END_MARGIN_MM_DEFAULT;
 
     // Where the camera actually is when the slider reads cx mm along the rail.
     // On a level rail this is (cx, 0) and everything below is unchanged.

@@ -109,6 +109,10 @@
       <tr><td><strong>Slider angle</strong></td><td>How far the rail climbs, in
       degrees. <code>0</code> is level; positive means the far end is higher.
       See below.</td></tr>
+      <tr><td><strong>End margin</strong></td><td>How far the usable rail is held
+      back from <em>each</em> end stop, 3&ndash;200&nbsp;mm (default 30). Applied
+      at the next <em>Find Limits</em>. See <a href="#find-limits">Find
+      Limits</a>.</td></tr>
     </table>
 
     <h3>Slider angle</h3>
@@ -176,7 +180,7 @@
     the direction it is currently travelling, so tune the threshold on a level rail
     and it holds on a raked one.</div>
 
-    <h3>Find Limits</h3>
+    <h3 id="find-limits">Find Limits</h3>
     <p>Drives the slider and zoom to their end stops to measure the axis range in
     millimetres. <strong>Required before using look-at tracking.</strong> Hidden if
     the camera has no slider.</p>
@@ -202,6 +206,14 @@
     <br><br>
     Home is still position 0 — the datum has not moved, only the usable range.
     The millimetre range the app shows after a limit find is the usable one.
+    <br><br>
+    <b>It is a setting.</b> <i>Config &rarr; camera tab &rarr; End margin</i>, per
+    mount, 3&ndash;200&nbsp;mm, stored on the mount and applied at the next
+    <i>Find Limits</i>. 30&nbsp;mm is a workaround for late detection, not a
+    measurement, so the right value is whatever your rig turns out to need:
+    lower it, run Find Limits, and listen at each end. If the carriage touches,
+    go back up. It is adjustable precisely so that finding out does not cost a
+    Teensy flash each time.
     <br><br>
     This is a workaround for late detection, not a fix for it. A stall threshold
     that trips at the stop with the current the tilt demands, or a physical switch,

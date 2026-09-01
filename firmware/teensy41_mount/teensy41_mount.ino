@@ -48,12 +48,15 @@
 #define STATUS_INTERVAL_MS  100   // send status to PC every 100ms
 
 // EEPROM layout (bytes)
+// v10: slider_end_margin_mm added to MountCfg — how far the usable rail is held
+// back from each stall, per mount and settable, so finding the right value is a
+// setting rather than a Teensy flash each time.
 // v9: slider_tilt_deg added to MountCfg.  The magic MUST move with the layout —
 // reading old bytes into the new shape would hand every field after the change
 // a value from the wrong offset.  Speeds and orientation flags fall back to
 // defaults once on first boot; limits and stall thresholds are untouched, since
 // they live in their own blocks whose magics never change for exactly this.
-#define EEPROM_MAGIC        0xCB0B
+#define EEPROM_MAGIC        0xCB0C
 #define EEPROM_ADDR_MAGIC   0
 #define EEPROM_ADDR_CONFIG  4
 
@@ -143,6 +146,16 @@ struct EepromConfig {
     // Two rays anchored at the wrong heights do not meet at the subject, and
     // tracking then drifts by degrees as the slider runs.
     float            slider_tilt_deg;
+
+    // How far the usable rail is held back from EACH stall, in whole mm.
+    //
+    // A stall is noticed late — the threshold was desensitised so the carriage
+    // would not stall part-way along a tilted rail — so the position recorded
+    // at an end is already inside that stop, and driving back to it grinds.
+    // This is the workaround for that, and the right value is found by trying
+    // one and listening, which is why it is a setting: as a constant, every
+    // attempt cost a board removal, a re-home, a ref 0/0 and a recalibration.
+    uint16_t         slider_end_margin_mm;
 };
 
 // ---------------------------------------------------------------------------
@@ -335,6 +348,8 @@ static void eeprom_load() {
         }
         _cfg.has_slider   = true;
         _cfg.look_at_mode = false;
+        _cfg.slider_end_margin_mm = SLIDER_END_MARGIN_MM_DEFAULT;
+        mount.setSliderEndMarginMm(_cfg.slider_end_margin_mm);
         // Seed preset defaults to match MountMotion's DEFAULT_*_PRESETS.
         // Index 0 unused; presets 1-4 match the arrays in MountMotion.cpp.
         const SpeedPreset pt_defs[5] = {{0,0},{1,1},{5,5},{10,10},{15,15}};
@@ -407,6 +422,15 @@ static void eeprom_load() {
     if (cfg.slider_mm_per_step > 0.0f) mount.setSliderMmPerStep(cfg.slider_mm_per_step);
     // The look-at maths lives in MountMotion; it needs the rail geometry too.
     mount.setSliderTiltDeg(cfg.slider_tilt_deg);
+    // Clamped on the way in as well as on the way from a command: a zero here
+    // means EEPROM from before this field existed, and zero margin is the
+    // grinding this setting exists to prevent.
+    if (cfg.slider_end_margin_mm < SLIDER_END_MARGIN_MM_MIN ||
+        cfg.slider_end_margin_mm > SLIDER_END_MARGIN_MM_MAX)
+        cfg.slider_end_margin_mm = SLIDER_END_MARGIN_MM_DEFAULT;
+    mount.setSliderEndMarginMm(cfg.slider_end_margin_mm);
+    Serial.printf("[eeprom_load] slider end margin = %u mm\n",
+                  (unsigned)cfg.slider_end_margin_mm);
 
     Serial.printf("[eeprom_load] sl_mm_step=%.8f\n", cfg.slider_mm_per_step);
 
@@ -589,6 +613,10 @@ static void send_config_report() {
         payload[75] = (uint8_t)((uint16_t)t10 >> 8);
         payload[76] = (uint8_t)((uint16_t)t10 & 0xFF);
     }
+    // [77..78] slider end margin, whole mm.  Reported for the same reason as
+    // the tilt: the dialog should show what the MOUNT holds, not what was last
+    // typed at it.
+    write_be16(payload + 77, _cfg.slider_end_margin_mm);
     send_packet(CMD_CONFIG_REPORT, payload, CONFIG_REPORT_PAYLOAD_LEN);
 }
 
@@ -1158,6 +1186,18 @@ static void dispatch(const ParsedPacket &pkt) {
                 int16_t t10 = (int16_t)((p[1] << 8) | p[2]);
                 _cfg.slider_tilt_deg = (float)t10 / 10.0f;
                 mount.setSliderTiltDeg(_cfg.slider_tilt_deg);
+            }
+            // Optional uint16 end margin, whole mm.  Same rule as the tilt: a
+            // sender that omits it leaves the stored value alone, so an Apply
+            // from the hub display cannot reset it.  Clamped, because a margin
+            // inside the jog back-off puts the soft limit a jog respects
+            // further out than the limit a goto drives to.
+            if (len >= 5) {
+                uint16_t m = (uint16_t)((p[3] << 8) | p[4]);
+                if (m < SLIDER_END_MARGIN_MM_MIN) m = SLIDER_END_MARGIN_MM_MIN;
+                if (m > SLIDER_END_MARGIN_MM_MAX) m = SLIDER_END_MARGIN_MM_MAX;
+                _cfg.slider_end_margin_mm = m;
+                mount.setSliderEndMarginMm(m);
             }
             bool look_at_changed  = (look_at_mode != _cfg.look_at_mode);
             bool old_zoom_inv     = _cfg.zoom_invert;

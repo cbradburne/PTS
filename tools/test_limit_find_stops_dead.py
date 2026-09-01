@@ -35,7 +35,7 @@ def resolve(*sources):
 
     Resolved rather than copied, so the millimetres below follow a pulley or
     microstep change instead of quietly describing the old hardware — which is
-    exactly why SLIDER_SAFETY_MARGIN_MM is written in mm and converted in the
+    exactly why the end margin is written in mm and converted in the
     firmware rather than pasted in as steps.
     """
     raw = {}
@@ -63,7 +63,8 @@ def const(consts, name):
     return float(consts[name])
 
 
-CONSTS = resolve(HDR, CPP)
+PROTO = (REPO / "firmware/shared/protocol.h").read_text()
+CONSTS = resolve(PROTO, HDR, CPP)
 
 # ---- 1. how far a ramp would carry it --------------------------------------
 print("1. what decelerating at the end stop costs:")
@@ -81,7 +82,7 @@ print(f"   {speed:.0f} steps/s at {accel:.0f} steps/s²"
 assert ramp_mm > 1.0, \
     f"the ramp is only {ramp_mm:.2f} mm — if that is genuinely true this test has\n" \
     "    lost its point, but check LIMIT_FIND_SPEED and LIMIT_FIND_ACCEL first"
-margin_mm = const(CONSTS, "SLIDER_SAFETY_MARGIN_MM")
+margin_mm = const(CONSTS, "SLIDER_END_MARGIN_MM_DEFAULT")
 print(f"   against a {margin_mm:.0f} mm far-end safety margin      "
       f"({100 * ramp_mm / margin_mm:.0f}% of it)")
 
