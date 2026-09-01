@@ -1488,10 +1488,30 @@ void MountMotion::_updateLimitFind() {
                       sg, thr, (int)stst, pos);
     }
 
+    // A STALL IS THE END OF TRAVEL, so the axis must stop dead on one.
+    //
+    // Both legs used to call stopAsync(), which decelerates — and there is
+    // nowhere left to decelerate into. At LIMIT_FIND_SPEED / LIMIT_FIND_ACCEL
+    // that ramp is v²/2a = 4000²/6400 = 2500 steps, which on the slider at
+    // 160 steps/mm is 15.6 mm of carriage driven INTO the end stop after the
+    // stop has already been found. The operator can hear it.
+    //
+    // It also made the datum wrong. setPosition(0) below writes pos directly
+    // while the step ISR is still running, so home was recorded and then
+    // walked away from by the length of the ramp. emergencyStop() stops this
+    // axis's timer — it is per-stepper, not the whole rig — so the zero is
+    // taken at a standstill, at the stall itself.
+    //
+    // A TIMEOUT is the opposite case: nothing was hit, the axis is mid-rail,
+    // and slamming it to a halt for no reason would be worse than the ramp.
+    // So the two are separated rather than sharing one stop.
+    bool stalled = !timed_out && stall_settled && _checkStall(ax);
+
     switch (_lf_state) {
         case LimitFindState::MOVING_TO_MIN: {
-            if (timed_out || (stall_settled && _checkStall(ax))) {
-                _stepper[idx]->stopAsync();
+            if (timed_out || stalled) {
+                if (stalled) _stepper[idx]->emergencyStop();
+                else         _stepper[idx]->stopAsync();
                 //_lf_min_found = _stepper[idx]->getPosition();
                 _stepper[idx]->setPosition(0);
                 _lf_min_found = 0;
@@ -1553,8 +1573,11 @@ void MountMotion::_updateLimitFind() {
         }
 
         case LimitFindState::MOVING_TO_MAX: {
-            if (timed_out || (stall_settled && _checkStall(ax))) {
-                _stepper[idx]->stopAsync();
+            if (timed_out || stalled) {
+                if (stalled) _stepper[idx]->emergencyStop();
+                else         _stepper[idx]->stopAsync();
+                // Read at a standstill now, so this is the stall point itself
+                // rather than a position the carriage is still moving past.
                 int32_t max_found = _stepper[idx]->getPosition();
 
                 // Restore normal operation — full current, disable StallGuard
