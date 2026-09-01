@@ -95,28 +95,66 @@ class JoystickHandler:
         self.axes         = JoystickAxes()
         self._smoothed    = JoystickAxes()   # EMA state
         self._initialised = False
+        self._warned_no_joystick = False
+        self._warned_open_failed = False
 
     def init(self) -> bool:
-        """Initialise pygame and connect to the first available joystick."""
+        """Initialise pygame and connect to the first available joystick.
+
+        MUST NOT RAISE. This is the retry path while nothing is plugged in, and
+        it runs every tick from CommandDispatcher._tick — a QTimer slot. PyQt6
+        turns an unhandled exception in a slot into qFatal(), so anything that
+        escapes here does not log a warning, it aborts the process.
+
+        That is exactly what plugging a controller into a running app used to
+        do: the app died the moment the DualSense was connected, and started
+        fine once it was already there.
+        """
         if not self._initialised:
             pygame.init()
             pygame.joystick.init()
             self._initialised = True
 
-        count = pygame.joystick.get_count()
-        if count == 0:
-            # init() is retried at the poll rate (~20 Hz) while unplugged —
-            # warn once per absence, not 20 times a second.
-            if not getattr(self, "_warned_no_joystick", False):
-                self._warned_no_joystick = True
-                log.warning("No joystick detected — will keep checking quietly")
+        try:
+            # SDL only notices a device being plugged in while its event queue
+            # is being pumped, and nothing pumped it while we were unplugged:
+            # poll() returns before its own pump when there is no joystick, and
+            # the dispatcher returns before poll(). So the pump belongs here,
+            # in the one path that runs when nothing is connected. Without it
+            # SDL's device list and get_count() can disagree about what is
+            # actually openable.
+            pygame.event.pump()
+
+            if pygame.joystick.get_count() == 0:
+                # Retried at the tick rate while unplugged — warn once per
+                # absence, not twenty times a second.
+                if not self._warned_no_joystick:
+                    self._warned_no_joystick = True
+                    log.warning("No joystick detected — will keep checking quietly")
+                return False
+
+            self._warned_no_joystick = False
+            if self._joystick is None:
+                # A device that has just appeared is not necessarily openable
+                # yet. A DualSense over Bluetooth enumerates in stages, so
+                # get_count() can report it a moment before SDL will hand it
+                # over and Joystick(0) raises "Invalid joystick device number".
+                # Failing here costs one tick; it used to cost the app.
+                joy = pygame.joystick.Joystick(0)
+                joy.init()
+                name = joy.get_name()
+        except pygame.error as e:
+            # Assigned below only on a clean open, so a half-opened device never
+            # becomes the live handle.
+            if not self._warned_open_failed:
+                self._warned_open_failed = True
+                log.warning("Joystick present but not ready (%s) — retrying", e)
             return False
 
-        self._warned_no_joystick = False
         if self._joystick is None:
-            self._joystick = pygame.joystick.Joystick(0)
-            self._joystick.init()
-            log.info(f"Joystick: {self._joystick.get_name()}")
+            self._warned_open_failed = False
+            self._joystick = joy
+            log.info(f"Joystick: {name}")
         return True
 
     def poll(self) -> bool:
@@ -128,9 +166,12 @@ class JoystickHandler:
             self.init()
             return False
 
-        pygame.event.pump()
-
         try:
+            # Inside the guard, not before it: poll() runs from the same QTimer
+            # slot as init(), so a pygame error escaping from here aborts the
+            # app just as surely as one from the open. Unplugging mid-session is
+            # where that would land.
+            pygame.event.pump()
             raw_lx = self._joystick.get_axis(_AXIS_LEFT_X)
             raw_ly = self._joystick.get_axis(_AXIS_LEFT_Y)
             raw_rx = self._joystick.get_axis(_AXIS_RIGHT_X)
