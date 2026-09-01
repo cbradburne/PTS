@@ -185,17 +185,23 @@
     from motor load, and a carriage arriving fast reads as a stall slightly late —
     so a slow approach finds the true end rather than a point past it.</p>
 
-    <div class="note"><b>The far end is inset by 30&nbsp;mm</b> A tilted rail needs
+    <div class="note"><b>Both ends are inset by 30&nbsp;mm</b> A tilted rail needs
     more motor current and a less twitchy stall threshold to stop the carriage
     stalling part-way along a move — and a less sensitive stall detector notices
-    the end stop <em>later</em>. By the time the far end is recorded the carriage
+    the end stop <em>later</em>. By the time an end is recorded the carriage
     has already run into it, so the stored limit sits somewhere inside the stop and
     every later move to that limit grinds against it.
     <br><br>
-    Pulling the usable far end back by 30&nbsp;mm costs 30&nbsp;mm of travel and
-    means a move to the limit stops short of the stop rather than against it. The
-    home end needs no margin — it <em>is</em> position 0, the home stall itself.
-    The millimetre range the app shows is the usable one.
+    Pulling each usable end back by 30&nbsp;mm costs 60&nbsp;mm of travel in total
+    and means a move to either limit stops short of the stop rather than against
+    it. The home end takes the same inset as the far one: position 0 is the home
+    <em>stall</em>, which is a point the carriage reached by running into
+    something, so it is no safer to drive back to than the far end is. Until
+    2026-09-01 only the far end was inset, and a look-at run parked hard against
+    the stop at one end and about 32&nbsp;mm short at the other.
+    <br><br>
+    Home is still position 0 — the datum has not moved, only the usable range.
+    The millimetre range the app shows after a limit find is the usable one.
     <br><br>
     This is a workaround for late detection, not a fix for it. A stall threshold
     that trips at the stop with the current the tilt demands, or a physical switch,

@@ -1590,13 +1590,27 @@ void MountMotion::_updateLimitFind() {
                 // For inverted zoom the range goes from 0 downward (negative), so
                 // max_found is a large negative number.  Store as (negative, 0) so
                 // that min_limit < max_limit and the jog soft-limit checks work correctly.
+                //
+                // BOTH ends take the inset, and they did not used to.  The near
+                // end was left at 0 — the home stall itself — on the reasoning
+                // that home is the datum, so only the far end needed pulling
+                // back.  But the reason the far end needs it applies just as
+                // much here: a stall is noticed late, so the position recorded
+                // at each end is already inside its stop, and driving back to
+                // it drives back into the stop.
+                //
+                // It showed as an asymmetry.  A look-at run to one end parked
+                // hard against the stop while the other stopped 31.9 mm short
+                // (LIMIT_BACK_OFF 300 + margin 4800 steps, at 160 steps/mm) —
+                // measured on the rig as "about 32 mm".  Same inset both ends
+                // now, so the two ends of a rail move behave the same way.
+                const int32_t inset = LIMIT_BACK_OFF[idx] + LIMIT_SAFETY_MARGIN[idx];
                 if (ax == AXIS_ZOOM && _zoom_invert) {
-                    setLimits(ax,
-                              max_found + LIMIT_BACK_OFF[idx] + LIMIT_SAFETY_MARGIN[idx], // negative
-                              0);   // home/end-stop is always position 0
+                    setLimits(ax, max_found + inset,   // negative end
+                                          0 - inset);  // home end
                 } else {
-                    setLimits(ax, 0,
-                              max_found - LIMIT_BACK_OFF[idx] - LIMIT_SAFETY_MARGIN[idx]);
+                    setLimits(ax,         0 + inset,   // home end
+                                  max_found - inset);
                 }
 
                 _lf_state = LimitFindState::IDLE;

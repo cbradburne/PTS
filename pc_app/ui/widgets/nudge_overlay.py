@@ -37,7 +37,7 @@ See _apply_scale().
 Step conversion:
   pan_steps_per_degree  — e.g. 17.78 for 0.9°/step × 16 µstep
   tilt_steps_per_degree — same
-  slider_steps_per_mm   — depends on leadscrew; configure in Settings
+  slider_steps_per_mm   — from the GT2 pulley and belt pitch; see below
   zoom jog velocities   — set as fraction of max speed (0–1000)
 
 All conversion factors are configurable per mount in Settings.
@@ -122,7 +122,12 @@ class NudgeOverlay(QFrame):
 
     _SLIDER_MICROSTEPS    = 32
     _SLIDER_STEP_ANGLE    = 1.8       # degrees per full motor step
-    _SLIDER_MM_PER_REV    = 40.0      # leadscrew pitch (mm per revolution)
+    # 20-tooth GT2 pulley on a 2 mm belt = 40 mm per motor revolution. This said
+    # "leadscrew pitch", which is the right number attached to the wrong part:
+    # the firmware derives the same 40 from SLIDER_PULLEY_TEETH x
+    # GT2_BELT_PITCH_MM, and anyone changing the pulley would have found nothing
+    # here to change. tools/test_slider_scale.py holds the two together.
+    _SLIDER_MM_PER_REV    = 40.0      # 20T GT2 pulley x 2.0 mm pitch
 
     PAN_STEPS_PER_DEG   = _PAN_TILT_MICROSTEPS * _PAN_GEAR_RATIO  / _PAN_TILT_STEP_ANGLE
     TILT_STEPS_PER_DEG  = _PAN_TILT_MICROSTEPS * _TILT_GEAR_RATIO / _PAN_TILT_STEP_ANGLE

@@ -1,4 +1,4 @@
-"""The slider's far limit is held 30 mm back from where the stall was found.
+"""The slider's limits are held 30 mm back from where each stall was found.
 
 The rail is tilted. That needed more motor current and a less twitchy
 StallGuard threshold to stop the carriage stalling part-way along a move — and
@@ -7,8 +7,15 @@ limit-find records the far end, the carriage is already into the stop, so the
 recorded position is not where travel safely ends. Every later goto to that
 limit drives back to the same place and grinds.
 
-Holding the usable far end back by 30 mm costs 30 mm of travel and means a move
-to the limit stops short of the stop rather than against it.
+Holding the usable end back by 30 mm costs 30 mm of travel and means a move to
+the limit stops short of the stop rather than against it.
+
+It applied to the FAR end only, on the reasoning that the near end is position
+0 — the home stall itself — so there was nothing to hold back from. That was
+wrong, and it showed: a look-at run parked hard against the stop at one end and
+stopped about 32 mm short at the other. Late detection is late at both ends, so
+the position recorded at each is already inside its stop, and home is no more a
+safe place to drive to than the far limit is. Both ends take the inset now.
 
 This is a workaround for late detection, not a fix for it. The honest fix is a
 stall threshold that trips at the stop with the current the tilt demands, or a
@@ -42,16 +49,24 @@ step_mm = 40.0 / (32 * 200)          # SLIDER_MM_PER_REV / (µsteps × full step
 steps = int(mm / step_mm)
 print(f"   = {steps} steps at {step_mm*1000:.2f} µm/step")
 
-# ---- 2. it is held back from the FAR end only ------------------------------
-# The near end is position 0 — the home stall itself — so there is nothing to
-# hold back from. Applying it there would move home away from home.
+# ---- 2. it applies to BOTH ends --------------------------------------------
+# Asserted as a property rather than as source text: this section used to match
+# the exact setLimits() line, which made a deliberate behaviour change look like
+# a broken test and said nothing about what the limits actually became.
 print("\n2. which end it applies to:")
 seg = CPP[CPP.index("// Position was zeroed at the min/home stall"):]
 seg = seg[:seg.index("_lf_state = LimitFindState::IDLE;")]
-assert "setLimits(ax, 0,\n                              max_found - LIMIT_BACK_OFF[idx] - LIMIT_SAFETY_MARGIN[idx]);" in seg, \
-    "the far limit no longer subtracts the margin"
-assert "setLimits(ax, 0," in seg, "the near limit is no longer the home stall at 0"
-print("   far end only; near end stays at the home stall     OK")
+calls = re.findall(r"setLimits\(ax,\s*([^,]+?),\s*\n?\s*([^)]+?)\);", seg, re.S)
+assert calls, "setLimits is no longer called after the far stall"
+for lo, hi in calls:
+    lo, hi = re.sub(r"\s+", " ", lo).strip(), re.sub(r"\s+", " ", hi).strip()
+    for end, expr in (("near", lo), ("far", hi)):
+        assert "inset" in expr or "LIMIT_SAFETY_MARGIN" in expr, \
+            f"the {end} limit takes no margin: setLimits(ax, {lo}, {hi}).\n" \
+            "    An end left at the raw stall is an end a recall drives into."
+    assert "max_found" in lo or "max_found" in hi, \
+        f"neither limit comes from the stall that was found: ({lo}, {hi})"
+print(f"   both ends, in {len(calls)} orientation(s)                       OK")
 
 # ---- 3. the margin must exceed the jog back-off ----------------------------
 # Otherwise the soft limit a JOG respects would sit further out than the limit

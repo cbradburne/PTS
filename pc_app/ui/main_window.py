@@ -1179,13 +1179,28 @@ class MainWindow(QMainWindow):
         if axis == int(Axis.SLIDER):
             mc.slider_min = min_steps
             mc.slider_max = max_steps
+            # Millimetres, not steps. A step count is a number nobody can check
+            # against the rail in front of them; "1438 mm of travel" is one you
+            # can hold a tape measure to, and it is how the far-end margin and
+            # the nudge steps are already expressed everywhere else.
+            #
+            # SLIDER_STEPS_PER_MM rather than a conversion of its own: it is the
+            # number the Move panel already turns operator millimetres into
+            # steps with, so the readout cannot disagree with the control.
+            spmm = NudgeOverlay.SLIDER_STEPS_PER_MM
+            detail = (f"{min_steps / spmm:.0f} → {max_steps / spmm:.0f} mm "
+                      f"({(max_steps - min_steps) / spmm:.0f} mm of travel)")
         elif axis == int(Axis.ZOOM):
             mc.zoom_min = min_steps
             mc.zoom_max = max_steps
+            # Zoom has no millimetres — it is a lens ring, not a rail.
+            detail = f"{min_steps} → {max_steps} steps"
+        else:
+            detail = f"{min_steps} → {max_steps} steps"
         save_config(self._config)
         self._status_label.setText(
-            f"Limits found — Cam {mount_id} {'Slider' if axis == 2 else 'Zoom'}: "
-            f"{min_steps} → {max_steps} steps")
+            f"Limits found — Cam {mount_id} "
+            f"{'Slider' if axis == int(Axis.SLIDER) else 'Zoom'}: {detail}")
 
     # ------------------------------------------------------------------
     # Action buttons
