@@ -222,8 +222,29 @@ class FindLimitsDialog(QDialog):
             return f"Travel: {travel} steps    (min {min_steps}, max {max_steps})"
         from ui.widgets.nudge_overlay import NudgeOverlay
         spmm = NudgeOverlay.SLIDER_STEPS_PER_MM
-        return (f"Travel: {travel / spmm:.0f} mm    "
+        line = (f"Travel: {travel / spmm:.0f} mm    "
                 f"(min {min_steps / spmm:.0f} mm, max {max_steps / spmm:.0f} mm)")
+        # And say which end margin produced them.
+        #
+        # The margin is a setting that only takes effect when a limit find runs,
+        # so changing it and not re-running one leaves the old limits in place —
+        # which looks exactly like the setting being ignored. The number was
+        # already implicit in "min", but only to someone who knew to read it
+        # that way. Reported from the MOUNT's own config report, so it is what
+        # the find actually used rather than what the dialog last sent.
+        margin = self._reported_margin_mm()
+        if margin:
+            line += f"    [end margin {margin} mm]"
+        return line
+
+    def _reported_margin_mm(self) -> int:
+        try:
+            cr = self._mm.state(self._mount_id).last_config_report
+            return int(getattr(cr, "slider_end_margin_mm", 0) or 0)
+        except Exception:
+            # A mount on older firmware reports no margin, and a stub in a test
+            # has no state at all. Neither is worth a traceback in a slot.
+            return 0
 
     def _on_timeout(self) -> None:
         self._running = False

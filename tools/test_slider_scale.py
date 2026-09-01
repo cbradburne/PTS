@@ -160,9 +160,14 @@ from comms.protocol import Axis
 from ui.dialogs.find_limits_dialog import FindLimitsDialog
 
 
+class _CR:
+    slider_end_margin_mm = 0
+class _St:
+    last_config_report = _CR()
 class _MM(QObject):
     limits_found = pyqtSignal(int, int, int, int)
     def send_find_limits(self, *a): pass
+    def state(self, m): return _St()
 
 
 def result_for(axis, lo, hi):
@@ -180,6 +185,21 @@ assert "steps" not in line, \
 for want in ("1468 mm", "32 mm", "1500 mm"):
     assert want in line, f"expected {want!r} in the result line, got {line!r}"
 print(f"   {line}   OK")
+
+# The end margin the find actually used, from the MOUNT's config report. The
+# margin only takes effect when a limit find runs, so changing it and not
+# re-running one leaves the old limits in place — which is indistinguishable
+# from the setting being ignored unless the result says which margin made it.
+_CR.slider_end_margin_mm = 10
+with_margin = result_for(Axis.SLIDER, 1900, 240000)
+assert "end margin 10 mm" in with_margin, \
+    f"the result does not say which margin produced it: {with_margin!r}"
+assert "min 12 mm" in with_margin, \
+    f"a 10 mm margin should put the near limit at 12 mm: {with_margin!r}"
+_CR.slider_end_margin_mm = 0
+assert "end margin" not in result_for(Axis.SLIDER, 5100, 240000), \
+    "a mount that reports no margin still gets one printed"
+print(f"   {with_margin}   OK")
 
 zoom = result_for(Axis.ZOOM, 0, -18000)
 assert "mm" not in zoom, \
