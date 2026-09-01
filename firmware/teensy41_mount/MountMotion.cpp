@@ -135,12 +135,27 @@ static constexpr float GOTO_MIN_RAMP_S = 1.0f;  //0.8f;
 // where the travel safely ends, it is somewhere inside the stop.  Every later
 // goto to that limit then drives back to the same place and grinds.
 //
-// Pulling the usable far end back by 30 mm costs 30 mm of travel and means a
-// move to the limit stops short of the stop rather than against it.  It is a
+// Pulling the usable end back costs that much travel at each end and means a
+// move to a limit stops short of the stop rather than against it.  It is a
 // workaround for late detection rather than a fix for it — the honest fix is a
 // stall threshold that trips at the stop with the current the tilt demands, or
 // a physical switch, either of which would let this go back to a millimetre or
 // two.
+//
+// MEASURED, 2026-09-01: it is already down to a millimetre or two, and 30 mm
+// was carrying about 28 mm of slack.  With the margin set to 10 the carriage
+// parks 10 mm clear of BOTH stops, so the whole 11.9 mm inset (10 + the 1.9 mm
+// back-off) is arriving at the stop with about 1.9 mm to spare — late detection
+// is costing under 2 mm, not the tens this number implies.
+//
+// The likely reason is that 30 was chosen when the find ran at 6000 steps/s.
+// LIMIT_FIND_SPEED came down to 4000 afterwards, for the tilt, and the distance
+// between first contact and the StallGuard trip scales with it.  Nobody
+// re-measured the margin when the speed changed, which is how a workaround
+// outlives its cause.
+//
+// The default is left at 30 because it is per-mount and five mounts need not
+// agree; a rig that has been checked can set its own.
 //
 // Expressed in mm and converted here, so it survives a pulley change: the
 // tooth counts in MountMotion.h drive the conversion.
