@@ -1561,11 +1561,20 @@ void MountMotion::_updateLimitFind() {
     // 160 steps/mm is 15.6 mm of carriage driven INTO the end stop after the
     // stop has already been found. The operator can hear it.
     //
-    // It also made the datum wrong. setPosition(0) below writes pos directly
-    // while the step ISR is still running, so home was recorded and then
-    // walked away from by the length of the ramp. emergencyStop() stops this
-    // axis's timer — it is per-stepper, not the whole rig — so the zero is
-    // taken at a standstill, at the stall itself.
+    // What this does NOT do is move the recorded limit. getPosition() and
+    // setPosition(0) are on the line after the stop call, so the old
+    // stopAsync() recorded the stall point too — the ramp happened after the
+    // number was taken. Both ends are recorded where the stall was, before and
+    // after this change.
+    //
+    // That matters for LIMIT_SAFETY_MARGIN below, which is sized to cover the
+    // stall being NOTICED late — the recorded point already being inside the
+    // stop. Nothing here makes that smaller, so this is not a reason to reduce
+    // the margin. It was claimed as one on 2026-09-01 and it was wrong.
+    //
+    // emergencyStop() stops this axis's own timer (per-stepper, not the whole
+    // rig), so the reading is taken at a standstill rather than a few steps
+    // into a ramp. Worth having for its own sake; worth nothing in millimetres.
     //
     // A TIMEOUT is the opposite case: nothing was hit, the axis is mid-rail,
     // and slamming it to a halt for no reason would be worse than the ramp.

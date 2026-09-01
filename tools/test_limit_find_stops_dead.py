@@ -8,10 +8,13 @@ Both legs called stopAsync(), which ramps down at LIMIT_FIND_ACCEL. This file
 works out how far that actually carries the carriage, and fails if the stall
 path can ramp at all.
 
-It also made the datum wrong at the min end. setPosition(0) writes pos straight
-into the stepper while its step ISR is still running, so home was recorded and
-then walked away from by the length of the ramp — the recorded zero sat inside
-the stop by exactly the distance measured below.
+What it does NOT do is move the recorded limit, and this file said otherwise
+when it was written. getPosition() and setPosition(0) are on the line after the
+stop call, so the old stopAsync() recorded the stall point too — the ramp came
+after the number was taken. Both ends land where the stall was, before and
+after. Taking the reading at a standstill is still the right way round, it is
+just not worth any millimetres of LIMIT_SAFETY_MARGIN: that margin covers the
+stall being NOTICED late, which this change does not touch.
 
 A TIMEOUT is the opposite case and must still ramp: nothing was hit, the axis
 is out in the middle of the rail, and halting it dead there would be worse than
@@ -100,10 +103,12 @@ for leg in ("MOVING_TO_MIN", "MOVING_TO_MAX"):
         "    and the axis is somewhere out in the middle of the rail"
     print(f"   {leg:<13} dead on a stall, ramped on a timeout  OK")
 
-# ---- 3. the datum is taken with the axis stopped ---------------------------
-# setPosition() is a bare `pos = p` in the library, so writing it while the step
-# ISR is running loses the race by the length of whatever the axis does next.
-print("\n3. where home ends up:")
+# ---- 3. the reading is taken with the axis stopped -------------------------
+# Not because the recorded position would otherwise be wrong — it would not, the
+# read is the very next line — but because a reading taken while an axis is
+# still moving depends on how long that next line takes, and setPosition() is a
+# bare `pos = p` racing an ISR that is also writing it.
+print("\n3. when the position is read:")
 assert "void setPosition(int32_t p) { pos = p; }" in \
        (REPO / "libraries/TeensyStep4/src/Stepper.h").read_text(), \
     "setPosition is no longer a bare write — re-check whether it is ISR-safe now"
@@ -116,6 +121,7 @@ mx = mx[:mx.index("break;")]
 assert mx.index("emergencyStop();") < mx.index("getPosition()"), \
     "the far limit is read while the carriage is still moving"
 print("   min zeroed and max read at a standstill           OK")
+print("   (this changes no millimetres — see the docstring)  OK")
 
 # ---- 4. _checkStall is still only asked once ------------------------------
 # It CLEARS _stall_isr_fired, so calling it on the timeout path would eat a
