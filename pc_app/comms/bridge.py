@@ -614,6 +614,7 @@ class Bridge:
     # unchanged line into the log forever.  A mount that is DOWN is exempt: its
     # running total climbs, and that is worth a line each time.
     _outage_last: dict[int, tuple] = {}
+    _outage_down: set[int] = set()
     _outage_seen = False
 
     def _note_mount_outage(self, pkt: Packet) -> None:
@@ -644,8 +645,29 @@ class Bridge:
             log.info("MOUNT OUTAGE accounting live — hub is reporting; from here "
                      "silence means no mount has been out, not a dead counter")
         for mid, st in sorted(stats.items()):
+            # ONCE per outage, on the edge.
+            #
+            # The hub re-sends these totals every minute, and while a mount is
+            # down its running gap grows, so every packet carried a different
+            # total and every one was logged.  A mount switched off deliberately
+            # produced 461 of the 462 warnings in a 7.7 hour log and buried the
+            # one that meant something.  A warning that fires sixty times an
+            # hour for an unchanged condition is not a warning, it is weather.
+            #
+            # So: warn on the way down, say nothing while it stays down, and
+            # note the recovery on the way back up — which re-arms the warning
+            # for the next one.
+            down_now = bool(st["now"])
+            was_down = mid in self._outage_down
+            if down_now:
+                if was_down:
+                    continue
+                self._outage_down.add(mid)
+            elif was_down:
+                self._outage_down.discard(mid)
+
             key = (st["count"], st["total_s"], st["min_s"], st["max_s"], st["now"])
-            if not st["now"] and self._outage_last.get(mid) == key:
+            if not down_now and not was_down and self._outage_last.get(mid) == key:
                 continue
             self._outage_last[mid] = key
             total = st["total_s"]
@@ -654,9 +676,11 @@ class Bridge:
                     % (mid, human, st["count"]))
             if st["count"]:
                 line += ", min %ds, max %ds" % (st["min_s"], st["max_s"])
-            if st["now"]:
-                line += "  — DOWN RIGHT NOW"
-            (log.warning if st["now"] else log.info)(line)
+            if down_now:
+                line += "  — DOWN AS OF NOW (silent until it returns)"
+            elif was_down:
+                line += "  — BACK"
+            (log.warning if down_now else log.info)(line)
 
     def _note_sat_downlink(self, pkt: Packet) -> None:
         """What the relay was asked to do, against what its radio took.

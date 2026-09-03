@@ -116,6 +116,7 @@ class _P:
 
 _b = Bridge.__new__(Bridge)
 _b._outage_last = {}
+_b._outage_down = set()
 
 
 def render(stats):
@@ -132,7 +133,7 @@ print(f"   {out.split('|', 1)[1]}")
 
 _b._outage_last = {}
 out = render({5: (3, 128, 11, 64, True)})
-assert out.startswith("WARNING") and "DOWN RIGHT NOW" in out, out
+assert out.startswith("WARNING") and "DOWN" in out, out
 print(f"   {out.split('|', 1)[1]}")
 
 # The 60 s resend must not repeat an unchanged line forever.
@@ -142,11 +143,19 @@ assert render(same), "first summary should log"
 assert not render(same), "an unchanged summary was logged twice"
 print("   unchanged summary not repeated on the 60s resend    OK")
 
-# ...but a mount still down keeps reporting, because its total is climbing.
-_b._outage_last = {}
+# ...and a mount still down does NOT keep reporting, which is the reverse of
+# what this asserted until 2026-09-03.  The reasoning was that its total is
+# climbing so each packet is new information — true of the number, false of the
+# situation.  A mount switched off deliberately produced 461 of the 462 warnings
+# in a 7.7 hour log.  Once on the way down, once on the way back; section 5
+# drives the whole cycle.
+_b._outage_last, _b._outage_down = {}, set()
 down = {1: (1, 30, 30, 30, True)}
-assert render(down) and render(down), "a mount still down should keep reporting"
-print("   a mount still down keeps reporting                  OK")
+assert render(down), "the first packet of an outage must report it"
+assert not render({1: (1, 90, 30, 90, True)}), \
+    "still down a minute later and it logged again — the total climbing is not " \
+    "news"
+print("   a mount still down reports once, then stops         OK")
 
 # ---- 5. the instrument must prove it is alive ------------------------------
 # Everything above is silent while every mount behaves, which is right — but a
@@ -156,6 +165,7 @@ print("   a mount still down keeps reporting                  OK")
 print("\n5. liveness:")
 _b2 = Bridge.__new__(Bridge)
 _b2._outage_last = {}
+_b2._outage_down = set()
 _b2._outage_seen = False
 clean = bytes(NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT)      # nobody has ever been out
 
@@ -174,12 +184,70 @@ print("   healthy rig confirms once, then stays quiet         OK")
 # And it must not swallow a real outage arriving in that same first packet.
 _b3 = Bridge.__new__(Bridge)
 _b3._outage_last = {}
+_b3._outage_down = set()
 _b3._outage_seen = False
 _buf.truncate(0); _buf.seek(0)
 _b3._note_mount_outage(_P(hub_encode({4: (2, 46, 14, 32, False)})))
 both = _buf.getvalue()
 assert "accounting live" in both and "cam4" in both, both
 print("   an outage in the first packet is still reported     OK")
+
+# ---- 6. once per outage, not once a minute -----------------------------------
+# The hub re-sends these totals every minute and a running gap grows, so every
+# packet carried a different total and every one was logged. A mount switched
+# off deliberately produced 461 of the 462 warnings in a 7.7 hour log and buried
+# the one that meant something.
+print("\n6. how often a continuing outage is reported:")
+_b4 = Bridge.__new__(Bridge)
+_b4._outage_last, _b4._outage_down, _b4._outage_seen = {}, set(), True
+
+
+def render4(stats):
+    _buf.truncate(0); _buf.seek(0)
+    _b4._note_mount_outage(_P(hub_encode(stats)))
+    return _buf.getvalue().strip()
+
+
+# Goes down, and keeps being down with the total climbing exactly as the hub
+# reports it.
+first = render4({5: (0, 60, 0, 60, True)})
+assert first.startswith("WARNING") and "cam5" in first, first
+assert "DOWN" in first, first
+print("   the moment it goes down: one WARNING               OK")
+
+for minutes in range(2, 12):
+    quiet = render4({5: (0, 60 * minutes, 0, 60 * minutes, True)})
+    assert quiet == "", \
+        f"still down after {minutes} minutes and it logged again: {quiet!r}\n" \
+        "    A warning that repeats for an unchanged condition is weather, not " \
+        "a warning."
+print("   ten more minutes down: silence                     OK")
+
+# Back. One line, and it says so.
+back = render4({5: (1, 720, 720, 720, False)})
+assert back.startswith("INFO") and "BACK" in back, back
+assert "12m 0s" in back and "1 event(s)" in back, back
+print("   when it returns: one INFO, with the duration       OK")
+
+assert not render4({5: (1, 720, 720, 720, False)}), \
+    "the recovery line repeats while the mount stays up"
+
+# And the warning is re-armed for the next one — a mount that drops twice is
+# two events, and the second must be as loud as the first.
+again = render4({5: (1, 780, 60, 720, True)})
+assert again.startswith("WARNING") and "DOWN" in again, \
+    f"the second outage did not warn: {again!r}"
+print("   next time it drops: WARNING again                  OK")
+
+# A mount that is ALREADY down when the app starts still gets its one warning:
+# the state is news to this log even though it is not news to the hub.
+_b5 = Bridge.__new__(Bridge)
+_b5._outage_last, _b5._outage_down, _b5._outage_seen = {}, set(), True
+_buf.truncate(0); _buf.seek(0)
+_b5._note_mount_outage(_P(hub_encode({5: (0, 2577, 0, 2577, True)})))
+start = _buf.getvalue().strip()
+assert start.startswith("WARNING") and "42m 57s" in start, start
+print("   already down at startup: still reported once       OK")
 
 _lg.handlers, _lg.level, _lg.propagate = _saved
 print("\nALL CHECKS PASSED")
