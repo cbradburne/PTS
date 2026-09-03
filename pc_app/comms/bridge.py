@@ -642,8 +642,22 @@ class Bridge:
         # the difference legible: after it, no news IS good news.
         if not self._outage_seen:
             self._outage_seen = True
+            # Whatever is already down on the first packet is the STATE OF THE
+            # WORLD, not an event.  On this rig four of the five mounts are off
+            # most of the time, so warning about each of them would put four
+            # warnings in the log before the operator had done anything, every
+            # single launch — which is the same burial as before, just once a
+            # session instead of once a minute.
+            #
+            # So the baseline is latched silently and named in one line. A
+            # warning from here means a mount went away WHILE WE WERE WATCHING,
+            # which is the only version of this worth interrupting for.
+            already = sorted(m for m, s in stats.items() if s["now"])
+            self._outage_down.update(already)
             log.info("MOUNT OUTAGE accounting live — hub is reporting; from here "
-                     "silence means no mount has been out, not a dead counter")
+                     "silence means no mount has been out, not a dead counter%s",
+                     ("; not present right now: "
+                      + ", ".join(f"cam{m}" for m in already)) if already else "")
         for mid, st in sorted(stats.items()):
             # ONCE per outage, on the edge.
             #

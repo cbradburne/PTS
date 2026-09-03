@@ -239,15 +239,54 @@ assert again.startswith("WARNING") and "DOWN" in again, \
     f"the second outage did not warn: {again!r}"
 print("   next time it drops: WARNING again                  OK")
 
-# A mount that is ALREADY down when the app starts still gets its one warning:
-# the state is news to this log even though it is not news to the hub.
+# A mount that is ALREADY down when the app starts is the STATE OF THE WORLD,
+# not an event. Four of the five mounts are off most of the time on this rig, so
+# warning about each would put four warnings in the log before the operator had
+# done anything — the same burial as before, once a session instead of once a
+# minute. Named in the liveness line instead, and latched so it stays quiet.
+print("\n7. what is already down when the app starts:")
 _b5 = Bridge.__new__(Bridge)
-_b5._outage_last, _b5._outage_down, _b5._outage_seen = {}, set(), True
+_b5._outage_last, _b5._outage_down, _b5._outage_seen = {}, set(), False
 _buf.truncate(0); _buf.seek(0)
-_b5._note_mount_outage(_P(hub_encode({5: (0, 2577, 0, 2577, True)})))
+_b5._note_mount_outage(_P(hub_encode({2: (0, 90, 0, 90, True)},)))
+_buf.truncate(0); _buf.seek(0)
+_b6 = Bridge.__new__(Bridge)
+_b6._outage_last, _b6._outage_down, _b6._outage_seen = {}, set(), False
+_b6._note_mount_outage(_P(hub_encode({2: (0, 90, 0, 90, True),
+                                      3: (0, 90, 0, 90, True),
+                                      5: (0, 2577, 0, 2577, True)})))
 start = _buf.getvalue().strip()
-assert start.startswith("WARNING") and "42m 57s" in start, start
-print("   already down at startup: still reported once       OK")
+assert "WARNING" not in start, \
+    f"four mounts switched off warn at every launch:\n{start}"
+for cam in ("cam2", "cam3", "cam5"):
+    assert cam in start, f"{cam} is not named in the baseline line: {start!r}"
+assert start.count("\n") == 0, f"one line, not one per mount:\n{start}"
+print("   named in one INFO line, no warnings                OK")
+
+# ...and latched, so they stay quiet on every resend after that.
+_buf.truncate(0); _buf.seek(0)
+_b6._note_mount_outage(_P(hub_encode({2: (0, 150, 0, 150, True),
+                                      3: (0, 150, 0, 150, True),
+                                      5: (0, 2637, 0, 2637, True)})))
+assert not _buf.getvalue().strip(), \
+    f"the baseline mounts logged again on the next resend:\n{_buf.getvalue()}"
+print("   and silent on every resend after                   OK")
+
+# But one of them coming back, then going again, is an event either way.
+_buf.truncate(0); _buf.seek(0)
+_b6._note_mount_outage(_P(hub_encode({2: (0, 150, 0, 150, True),
+                                      3: (0, 150, 0, 150, True),
+                                      5: (1, 2700, 2700, 2700, False)})))
+back = _buf.getvalue().strip()
+assert back.startswith("INFO") and "cam5" in back and "BACK" in back, back
+_buf.truncate(0); _buf.seek(0)
+_b6._note_mount_outage(_P(hub_encode({2: (0, 150, 0, 150, True),
+                                      3: (0, 150, 0, 150, True),
+                                      5: (1, 2760, 60, 2700, True)})))
+gone = _buf.getvalue().strip()
+assert gone.startswith("WARNING") and "cam5" in gone, \
+    f"a mount that went away while we were watching did not warn: {gone!r}"
+print("   one that returns and drops again: INFO then WARNING OK")
 
 _lg.handlers, _lg.level, _lg.propagate = _saved
 print("\nALL CHECKS PASSED")
