@@ -288,5 +288,48 @@ assert gone.startswith("WARNING") and "cam5" in gone, \
     f"a mount that went away while we were watching did not warn: {gone!r}"
 print("   one that returns and drops again: INFO then WARNING OK")
 
+# ---- 8. and none of it is special to one mount -----------------------------
+# Every mount is off at some point on this rig — four of five, most of the time.
+# The rules above have to be the SAME rules for all of them, so the whole cycle
+# is driven once per mount and the results compared rather than spot-checked.
+print("\n8. the same for every mount:")
+shapes = {}
+for mid in range(1, NUM_MOUNTS + 1):
+    bb = Bridge.__new__(Bridge)
+    bb._outage_last, bb._outage_down, bb._outage_seen = {}, set(), True
+
+    def step(stats):
+        _buf.truncate(0); _buf.seek(0)
+        bb._note_mount_outage(_P(hub_encode(stats)))
+        line = _buf.getvalue().strip()
+        return line.split("|", 1)[0] if line else ""
+
+    shapes[mid] = [
+        step({mid: (0,  60, 0,  60, True)}),    # goes down
+        step({mid: (0, 120, 0, 120, True)}),    # still down
+        step({mid: (0, 180, 0, 180, True)}),    # still down
+        step({mid: (1, 240, 240, 240, False)}), # back
+        step({mid: (1, 240, 240, 240, False)}), # still up
+        step({mid: (1, 300, 60, 240, True)}),   # down again
+    ]
+want = ["WARNING", "", "", "INFO", "", "WARNING"]
+for mid, got in shapes.items():
+    assert got == want, \
+        f"cam{mid} behaves differently from the rest: {got} vs {want}"
+print(f"   all {NUM_MOUNTS} follow warn / silence / back / warn      OK")
+
+# And all five down at once is still ONE line, naming all five.
+_b7 = Bridge.__new__(Bridge)
+_b7._outage_last, _b7._outage_down, _b7._outage_seen = {}, set(), False
+_buf.truncate(0); _buf.seek(0)
+_b7._note_mount_outage(_P(hub_encode(
+    {m: (0, 600, 0, 600, True) for m in range(1, NUM_MOUNTS + 1)})))
+all_down = _buf.getvalue().strip()
+assert "WARNING" not in all_down and all_down.count("\n") == 0, \
+    f"a rig with everything switched off is not quiet:\n{all_down}"
+for m in range(1, NUM_MOUNTS + 1):
+    assert f"cam{m}" in all_down, f"cam{m} is not named: {all_down!r}"
+print("   the whole rig off at startup: one line, no warnings OK")
+
 _lg.handlers, _lg.level, _lg.propagate = _saved
 print("\nALL CHECKS PASSED")
