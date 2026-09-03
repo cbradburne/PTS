@@ -845,6 +845,12 @@ class ConfigDialog(QWidget):
         zm_hl.addWidget(QLabel("  Accel (deg/s²):")); zm_hl.addWidget(zm_acc)
         zm_form.addRow("Preset:", zm_row)
         layout.addWidget(zm_box)
+        # LANC zoom is a serial command to the camera, not a stepper: there is
+        # no speed or acceleration to set, and no position to accelerate to.
+        # Same rule as the slider boxes above, and the same ordering trap —
+        # setVisible before addWidget shows it as a top-level window.
+        lanc_zoom_cb.toggled.connect(lambda on: zm_box.setVisible(not on))
+        zm_box.setVisible(not mc.lanc_zoom)
 
         # StallGuard thresholds
         sg_box  = QGroupBox("StallGuard Thresholds (0=sensitive, 255=coarse)")
@@ -854,6 +860,23 @@ class ConfigDialog(QWidget):
         sg_form.addRow("Slider:", sg_slider)
         sg_form.addRow("Zoom:",   sg_zoom)
         layout.addWidget(sg_box)
+
+        # A StallGuard threshold is how hard an axis has to push before the
+        # driver calls it a stall. An axis that is not there has none, and a
+        # LANC zoom is not a stepper at all — so neither row means anything in
+        # those cases, and a box with both rows hidden is a title with nothing
+        # under it.
+        def _sg_rows(*_ignored, _box=sg_box, _form=sg_form,
+                     _slider=has_slider_cb, _lanc=lanc_zoom_cb):
+            want_slider = _slider.isChecked()
+            want_zoom   = not _lanc.isChecked()
+            _form.setRowVisible(0, want_slider)
+            _form.setRowVisible(1, want_zoom)
+            _box.setVisible(want_slider or want_zoom)
+
+        has_slider_cb.toggled.connect(_sg_rows)
+        lanc_zoom_cb.toggled.connect(_sg_rows)
+        _sg_rows()
 
         # Find Limits — at the bottom of each camera tab
         limits_box  = QGroupBox("Find Limits")
