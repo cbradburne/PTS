@@ -101,7 +101,51 @@ assert '_det_focus_btn = make_button(_scr_detail, "FOCUS", C_SURF2, ev_detail_fo
 assert "lv_obj_add_flag(_det_focus_btn, LV_OBJ_FLAG_HIDDEN);" in disp, \
     "the button is not hidden at build time, so it shows before any camera has\n" \
     "    reported and disappears a moment later"
-print("   built hidden, above the zoom slider                 OK")
+print("   built hidden                                       OK")
+
+# Where it sits, computed rather than described. The line above used to SAY
+# "above the zoom slider" and assert nothing of the kind, so the button could be
+# moved anywhere and this file would still have congratulated it.
+DEFS = {k: int(v) for k, v in
+        re.findall(r"#define\s+(HSL_X|HSL_W|DET_BTN_W|DET_BTN_H|DET_BTN_Y)\s+(\d+)",
+                   DISP)}
+assert len(DEFS) == 5, f"the layout constants changed shape: {sorted(DEFS)}"
+
+
+def geom(name, kind):
+    m = re.search(rf"lv_obj_set_{kind}\({name},\s*([^,]+),\s*([^)]+)\);", disp)
+    assert m, f"no lv_obj_set_{kind} for {name}"
+    return tuple(int(eval(g.strip(), {}, DEFS)) for g in m.groups())
+
+
+fw, fh = geom("_det_focus_btn", "size")
+fx, fy = geom("_det_focus_btn", "pos")
+cw, ch = geom("_det_clear_btn", "size")
+cx, cy = geom("_det_clear_btn", "pos")
+sw, sh = geom("_det_set_btn", "size")
+_, sy  = geom("_det_set_btn", "pos")
+
+assert (fw, fh) == (cw, ch) == (sw, sh), \
+    f"FOCUS is {fw}x{fh}, CLEAR {cw}x{ch}, SET {sw}x{sh} — one row of buttons " \
+    "should be\n    one size"
+assert fy == cy == sy, \
+    f"FOCUS sits at y={fy}, CLEAR/SET at y={cy}/{sy} — they do not line up"
+print(f"   {fw}x{fh} at y={fy}, same as CLEAR and SET           OK")
+
+# Centred on the ZOOM column below it, not on anything else.
+zoom_centre  = DEFS["HSL_X"] + DEFS["HSL_W"] / 2
+focus_centre = fx + fw / 2
+assert abs(focus_centre - zoom_centre) < 1, \
+    f"FOCUS is centred at x={focus_centre:.0f}, the ZOOM column at " \
+    f"x={zoom_centre:.0f} —\n    it is the camera's control and should sit over " \
+    "the camera's fader"
+print(f"   centred at x={focus_centre:.0f} over the ZOOM column at "
+      f"x={zoom_centre:.0f}      OK")
+
+# And clear of the buttons it shares the row with.
+assert fx + fw < cx, \
+    f"FOCUS ends at x={fx + fw} and CLEAR starts at x={cx} — they overlap"
+print(f"   {cx - (fx + fw)}px clear of CLEAR                            OK")
 
 refresh = disp[disp.index("static void _detail_refresh_focus()"):]
 refresh = refresh[:refresh.index("\n}")]

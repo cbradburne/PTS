@@ -224,10 +224,19 @@ static lv_obj_t *_pos_slot_btn[5][10] = {};
 #define JOY_THUMB_SIZE   50
 #define JOY_DEAD_ZONE    12   // px from centre below which zero is sent
 
+#define HSL_X            10   // horizontal sliders (ZOOM, SLIDER): left edge
 #define HSL_W           230   // horizontal slider: track width
 #define HSL_H            64   // horizontal slider: track height
 #define HSL_THUMB_W      54   // thumb width
 #define HSL_THUMB_H      54   // thumb height
+
+// CLEAR, SET and FOCUS share one row on the detail screen: same size, same y.
+// Named so they line up by construction rather than by three literals that
+// happen to agree — FOCUS was added at a different size and height and read as
+// a different kind of control because of it.
+#define DET_BTN_W       110
+#define DET_BTN_H        40
+#define DET_BTN_Y       180
 
 struct Joystick { lv_obj_t *bg; lv_obj_t *thumb; };
 struct HSlider  { lv_obj_t *bg; lv_obj_t *thumb; };
@@ -2465,13 +2474,13 @@ static void build_detail_screen() {
     // centred: (800 - (110+16+110)) / 2 = 282
     // CLEAR sits left of SET, matching the web app, GC screen and PC app.
     _det_clear_btn = make_button(_scr_detail, "CLEAR", C_SURF2, ev_detail_clear);
-    lv_obj_set_size(_det_clear_btn, 110, 40);
-    lv_obj_set_pos(_det_clear_btn, 282, 180);
+    lv_obj_set_size(_det_clear_btn, DET_BTN_W, DET_BTN_H);
+    lv_obj_set_pos(_det_clear_btn, 282, DET_BTN_Y);
     _det_clear_lbl = lv_obj_get_child(_det_clear_btn, 0);
 
     _det_set_btn = make_button(_scr_detail, "SET", C_ACCENT, ev_detail_set);
-    lv_obj_set_size(_det_set_btn, 110, 40);
-    lv_obj_set_pos(_det_set_btn, 408, 180);
+    lv_obj_set_size(_det_set_btn, DET_BTN_W, DET_BTN_H);
+    lv_obj_set_pos(_det_set_btn, 408, DET_BTN_Y);
     _det_set_lbl = lv_obj_get_child(_det_set_btn, 0);
 
     // ── Speed dials ───────────────────────────────────────────────
@@ -2506,31 +2515,33 @@ static void build_detail_screen() {
                           ev_joy_pt_pressing, ev_joy_pt_release);
 
     // ── FOCUS — only with a camera paired ────────────────────────
-    // Above the ZOOM label, in the empty band between the slot buttons and the
-    // left-hand sliders.  Hidden rather than greyed when no camera is paired:
-    // there is nothing to focus, and a disabled button invites a press and a
-    // question about why nothing happened.
+    // On the CLEAR / SET row and the same size as them, so the three read as
+    // one row of buttons; centred on the ZOOM column below it, so it is
+    // obviously the camera's control and not a third position button.
+    // Hidden rather than greyed when no camera is paired: there is nothing to
+    // focus, and a disabled button invites a press and a question about why
+    // nothing happened.
     _det_focus_btn = make_button(_scr_detail, "FOCUS", C_SURF2, ev_detail_focus);
-    lv_obj_set_size(_det_focus_btn, HSL_W, 44);
-    lv_obj_set_pos(_det_focus_btn, 10, 210);
+    lv_obj_set_size(_det_focus_btn, DET_BTN_W, DET_BTN_H);
+    lv_obj_set_pos(_det_focus_btn, HSL_X + (HSL_W - DET_BTN_W) / 2, DET_BTN_Y);
     lv_obj_add_flag(_det_focus_btn, LV_OBJ_FLAG_HIDDEN);
 
     // ── Left horizontal sliders (ZOOM top, SLIDER bottom) ────────
     // Each 230×64 px, x=10; bottom of last slider = 382+64 = 446 ✓
     lv_obj_t *zlbl = make_label(_scr_detail, "ZOOM", &lv_font_montserrat_12, C_DIM);
     lv_obj_set_size(zlbl, HSL_W, 14);
-    lv_obj_set_pos(zlbl, 10, 266);
+    lv_obj_set_pos(zlbl, HSL_X, 266);
     lv_obj_set_style_text_align(zlbl, LV_TEXT_ALIGN_CENTER, 0);
 
-    build_hslider(_scr_detail, 10, 284, &_hsl_zoom,
+    build_hslider(_scr_detail, HSL_X, 284, &_hsl_zoom,
                   ev_hsl_zoom_pressing, ev_hsl_zoom_release);
 
     lv_obj_t *sllbl = make_label(_scr_detail, "SLIDER", &lv_font_montserrat_12, C_DIM);
     lv_obj_set_size(sllbl, HSL_W, 14);
-    lv_obj_set_pos(sllbl, 10, 364);
+    lv_obj_set_pos(sllbl, HSL_X, 364);
     lv_obj_set_style_text_align(sllbl, LV_TEXT_ALIGN_CENTER, 0);
 
-    build_hslider(_scr_detail, 10, 382, &_hsl_sl,
+    build_hslider(_scr_detail, HSL_X, 382, &_hsl_sl,
                   ev_hsl_sl_pressing, ev_hsl_sl_release);
 
     // Do NOT call lv_obj_update_layout here — this function can be called from inside
