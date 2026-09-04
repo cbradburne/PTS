@@ -261,11 +261,24 @@ class SliderTrack(QWidget):
         self.setMinimumHeight(76)
         self._small, self._large = 10.0, 100.0
         self._runs_enabled = True
+        self._enabled      = True
         self._lit: int | None = None
 
     def set_steps(self, small: float, large: float) -> None:
         self._small, self._large = small, large
         self.update()
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Grey the whole rail out on a mount that has no slider.
+
+        Greyed rather than hidden, unlike the config dialog's slider rows: this
+        is the same control the main window's slider dial uses, and that greys
+        out too. The panel keeps its shape, so the dial and the zoom column do
+        not move about depending on which camera is selected.
+        """
+        if enabled != self._enabled:
+            self._enabled = enabled
+            self.update()
 
     def set_runs_enabled(self, enabled: bool) -> None:
         """Grey the run zones out when the mount has no limits to run to.
@@ -299,6 +312,8 @@ class SliderTrack(QWidget):
 
     def _colours(self, i, kind):
         """(fill, text) for one zone."""
+        if not self._enabled:
+            return DEAD_FILL, DEAD_LINE
         if kind == "run":
             if not self._runs_enabled:
                 return DEAD_FILL, DEAD_LINE
@@ -332,7 +347,7 @@ class SliderTrack(QWidget):
         p.restore()
 
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(SL_LINE), 2.0))
+        p.setPen(QPen(QColor(SL_LINE if self._enabled else DEAD_LINE), 2.0))
         p.drawPath(outer)
 
         f = QFont(); f.setPointSizeF(max(8.0, h * 0.20)); f.setBold(True)
@@ -344,11 +359,13 @@ class SliderTrack(QWidget):
 
         f2 = QFont(); f2.setPointSizeF(max(6.5, h * 0.145))
         p.setFont(f2); fm2 = p.fontMetrics()
-        p.setPen(QColor("#8A6E93"))
+        p.setPen(QColor("#8A6E93" if self._enabled else "#4A464E"))
         p.drawText(int(w / 2 - fm2.horizontalAdvance("SLIDER") / 2), int(h - 2), "SLIDER")
         p.end()
 
     def mousePressEvent(self, event):
+        if not self._enabled:
+            return                       # drawn dead, so behave dead
         x = event.position().x()
         for i, (zx0, zx1, kind, value, _lbl) in enumerate(self._zones()):
             if zx0 <= x <= zx1:

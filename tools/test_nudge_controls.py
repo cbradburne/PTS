@@ -174,6 +174,20 @@ mm, runs = tap_track(CENTRES[0])
 assert runs == [-1], "the runs never came back"
 print("   dead while the limits are unknown, live after     OK")
 
+# And the whole rail greys out on a mount that has no slider at all. Two
+# separate questions with two separate answers: "is there a rail" and "has it
+# been calibrated". A mount with no slider must not accept a nudge either —
+# there is no axis to send it to.
+TRACK.set_enabled(False)
+for x in (CENTRES[0], CENTRES[2], CENTRES[-1]):
+    mm, runs = tap_track(x)
+    assert mm == [] and runs == [], \
+        f"a mount with no slider still moved something: {mm}/{runs}"
+TRACK.set_enabled(True)
+mm, runs = tap_track(CENTRES[2])
+assert mm == [-10.0], "the track never comes back when a slider appears"
+print("   a mount with no slider: the whole rail is dead     OK")
+
 # No position readout anywhere. The mount answers CMD_GET_POSITION but
 # volunteers nothing — the unsolicited broadcast was removed deliberately — so
 # anything drawing a live position would have to poll for it, which is the
@@ -248,6 +262,7 @@ from ui.widgets.nudge_overlay import NudgeOverlay
 class _St:
     active_pt_preset = 2; active_sl_preset = 2; last_config_report = None
     slider_min = 1000; slider_max = 241000        # a calibrated 1.5m rail
+    has_slider = True
 class _MM(QObject):
     position_updated     = pyqtSignal(int, object)
     mount_status_updated = pyqtSignal(int)
@@ -394,6 +409,34 @@ mmgr.mount_status_updated.emit(1)
 assert ov._track._runs_enabled is True, \
     "limits arrived while the panel was open and the run zones stayed grey"
 print("   live again the moment the limits arrive           OK")
+
+# ---- 9. and the whole track follows "has slider" ---------------------------
+# The panel keeps its shape either way: greyed, not hidden, so the dial and the
+# zoom column do not move about depending on which camera is selected.
+print("\n9. a mount with no slider:")
+mmgr.st.has_slider = False
+ov._sync_runs()
+assert ov._track._enabled is False, \
+    "the track stays live on a mount with no slider — every press would go to an\n" \
+    "    axis that is not there"
+mmgr.sent.clear()
+press(ov._track, ov._track.width() * 0.5, ov._track.height() * 0.5)
+assert mmgr.sent == [], f"a nudge went out to a mount with no slider: {mmgr.sent}"
+print("   greyed, and nothing goes out                      OK")
+
+mmgr.st.has_slider = True
+ov._sync_runs()
+assert ov._track._enabled is True, "the track never returns when a slider does"
+print("   and back when a slider does have one              OK")
+
+# Greyed rather than hidden: the main window greys its slider dial the same way,
+# and a panel that changes shape per camera is harder to use than one that does
+# not.
+assert "set_enabled" in (REPO / "pc_app/ui/widgets/nudge_controls.py").read_text()
+assert "setVisible" not in SRC, \
+    "the track is being hidden rather than greyed — the panel then changes shape\n" \
+    "    depending on which camera is selected"
+print("   greyed, not hidden, so the panel keeps its shape   OK")
 
 # Nothing inside the panel may carry a raw pixel count any more — that is the
 # whole point, and a new setFixedSize(48, 48) would undo it silently.

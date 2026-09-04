@@ -341,6 +341,15 @@ class NudgeOverlay(QFrame):
         return int(hi - lo)
 
     def _sync_runs(self) -> None:
+        """Match the track to what the selected mount actually has.
+
+        Two separate questions, and both are the mount's to answer: whether
+        there is a rail at all, and whether it has been calibrated. A mount with
+        no slider greys the whole track; one with a slider but no limits keeps
+        the nudges and greys only the two run-to-the-end zones.
+        """
+        st = self._mm.state(self._mount_id)
+        self._track.set_enabled(bool(getattr(st, "has_slider", True)))
         self._track.set_runs_enabled(self._slider_span() is not None)
 
     def _on_mount_status(self, mount_id: int) -> None:
