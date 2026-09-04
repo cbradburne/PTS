@@ -80,6 +80,77 @@ python3 main.py</code></pre>
     won't react, exactly like a disconnected axis. See
     <a href="config.html">Configuration</a>.</div>
 
+    <h2>The Move panel</h2>
+    <p>Press <strong>Move</strong> in the top bar for a floating panel of precise,
+    repeatable steps — the control for framing a shot by a known amount rather
+    than by feel. It works on whichever camera is active, and pressing
+    <strong>Move</strong> again (or the red <strong>✕</strong>) closes it.</p>
+
+    <figure class="shot" data-file="move-panel.png">
+      <img src="../assets/img/move-panel.png" alt="The Move panel"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>Pan and tilt on the dial, zoom held on the right, the slider
+      along the bottom.</figcaption>
+    </figure>
+
+    <h3>Pan and tilt — the dial</h3>
+    <p>Up and down are <strong>tilt</strong>, left and right are
+    <strong>pan</strong>, and the hub says so rather than leaving you to work it
+    out. The step grows outward: <code>0.2°</code> nearest the centre, then
+    <code>1°</code>, then <code>10°</code> on the outside. One press, one step.</p>
+
+    <div class="note"><b>The gaps are the feature</b> The diagonals are dead —
+    about 13° of nothing either side of each one. A press that slips between up
+    and right does nothing at all, rather than moving the axis you did not mean.
+    Nudging pan when you meant tilt is a shot on air going the wrong way, so the
+    dial is built to make a near miss cost nothing. The hub in the middle is a
+    legend, not a button, and the gap between the rings is a gap.</div>
+
+    <h3>Zoom — press and hold</h3>
+    <p>The column on the right runs while held rather than stepping: outer zones
+    are fast, inner zones slow, and releasing stops it. Up is in, down is out, and
+    the captions say which is which — the arrows give a direction but not an axis.
+    On a mount with <a href="config.html">LANC zoom</a> this drives the camera's
+    own zoom motor instead of a stepper; the control is the same.</p>
+
+    <h3>Slider — the track</h3>
+    <p>Four tap zones for discrete steps — <code>−100</code>, <code>−10</code>,
+    <code>+10</code>, <code>+100</code>&nbsp;mm — with a run to each end of the
+    rail at the outsides.</p>
+    <table>
+      <tr><th style="width:22%">Control</th><th>What it does</th></tr>
+      <tr><td><code>−10</code> / <code>+10</code> etc.</td><td>Moves the carriage
+      by that many millimetres, at the active slider speed preset.</td></tr>
+      <tr><td><code>&lt;&lt;</code> / <code>&gt;&gt;</code></td><td>Runs the
+      carriage all the way to that end of the rail. It stops at the usable limit,
+      not against the end stop — see <a href="config.html#find-limits">End
+      margin</a>.</td></tr>
+    </table>
+
+    <div class="note"><b>The run buttons grey out until limits are found</b> A run
+    is a move long enough to overshoot the rail, stopped by the mount's own soft
+    limit. A slider that has never had <em>Find Limits</em> run on it has no such
+    limit, so there would be nothing to stop the move — the two zones go grey and
+    do nothing until the mount reports a calibrated rail. They come back on their
+    own the moment it does, with the panel still open.</div>
+
+    <div class="tip"><b>In look-at mode, the slider keeps the subject</b> With a
+    subject selected, a slider step is a look-at move to a relative destination:
+    pan and tilt hold the subject framed all the way along, exactly as they do
+    when you slide by hand on the joystick. Tapping again extends the move rather
+    than restarting it. See <a href="lookat.html">Look-at tracking</a>.</div>
+
+    <h3>What it does not show</h3>
+    <p>There is no position readout. The mount answers when asked where it is, but
+    it does not volunteer it — that unsolicited stream was removed deliberately to
+    keep the radio quiet — so a live readout here would mean the panel polling for
+    one. The numbers you need are on the dial and the track: they say what a press
+    will <em>do</em>, which is the question you are asking when the panel is
+    open.</p>
+
+    <p>The panel sizes itself from the screen, like the grid and the bars, so it
+    looks the same on a 1080p laptop and a 4K console.</p>
+
     <h2>Diagnostics &amp; health</h2>
     <p>Every node in the system — Teensys, bridges, hub, console — reports heap,
     worst loop time, link failures and reset cause into the PC app's log every 10
@@ -87,10 +158,24 @@ python3 main.py</code></pre>
     degradation show up hours before they'd become a symptom. See
     <a href="troubleshooting.html">Troubleshooting</a> for reading them.</p>
 
-    <h2>Built-in OSC server</h2>
-    <p>The app runs its own <a href="companion.html">OSC server</a> (default UDP
-    <code>9700</code>), so Companion or QLab can drive the rig through the PC app —
-    handy when the PC is on the network anyway. It's toggleable in Config.</p>
+    <h2>OSC — the hub's, not the app's</h2>
+    <p>The PC app does <strong>not</strong> run an OSC server. The
+    <a href="companion.html">OSC surface</a> is the hub's, on
+    <code>192.168.4.1:9700</code>, and Companion or QLab talk to it directly —
+    so the rig answers whether or not this app is running.</p>
+
+    <div class="note"><b>There used to be two</b> The app ran a second server on
+    the same port answering the same addresses, and the two drifted: tally and
+    record existed only in the app's, autofocus and zoom only in the hub's.
+    Companion talks to the hub, so a tally button sent a perfectly good message
+    to a server that had never heard of it and dropped it without a word. Two
+    address spaces that can disagree is the fault; one that cannot is the fix,
+    and the hub is the right survivor because it is always on and the PC is not.</div>
+
+    <p>What the app does do is <em>report</em> what the hub's OSC is doing —
+    where feedback is being sent and how many messages went out — in the log, so
+    a Companion page that has stopped updating can be told from one that was
+    never being fed. See <a href="troubleshooting.html">Troubleshooting</a>.</p>
 
     <div class="tip"><b>No keyboard?</b> For touchscreen setups, enable
     <strong>Virtual keyboard</strong> in Config and an on-screen keyboard appears

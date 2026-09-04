@@ -13,6 +13,7 @@ slot on the site fills itself in (no HTML edits needed):
 | `lookat-move.mp4` | Look-at — a move mid-travel (video, with `.jpg` poster) |
 | `cv-window.png` | CV tracking — the tracking window with a lock-on target |
 | `pc-app.png` | Control surfaces — PC app screenshot |
+| `move-panel.png` | Control surfaces — the Move panel |
 | `cad.png` | Build it — CAD model |
 | `pcb.jpg` | Build it — the mount PCB |
 
