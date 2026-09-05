@@ -52,7 +52,7 @@ FIELDS = ("t", "issued", "cb_ok", "cb_fail", "refused", "nomem",
           "in_flight", "floor", "max", "rx", "heap", "err")
 
 
-def open_port(dev: str, baud: int):
+def open_port(dev: str, baud: int, fatal: bool = True):
     try:
         import serial                      # pyserial
     except ImportError:
@@ -60,7 +60,9 @@ def open_port(dev: str, baud: int):
     try:
         return serial.Serial(dev, baud, timeout=1)
     except Exception as e:
-        sys.exit(f"cannot open {dev}: {e}")
+        if fatal:
+            sys.exit(f"cannot open {dev}: {e}")
+        return None
 
 
 class Side:
@@ -71,19 +73,52 @@ class Side:
         self.last: dict[str, str] = {}
         self.seen  = 0
         self.alive = 0.0          # when we last heard anything at all
+        self.reconnects = 0
         self.notes: list[str] = []
 
 
-def reader(port, side: Side, out, lock: threading.Lock,
-           stop: threading.Event) -> None:
+def reader(dev: str, baud: int, side: Side, ports: dict, out,
+           lock: threading.Lock, stop: threading.Event) -> None:
+    """Read one board, and get it back when it goes away.
+
+    A board that reboots drops its USB CDC device and re-enumerates. The reader
+    used to die silently on the stale handle, and the log would show that side
+    frozen on its last values while everything looked like it was still running.
+
+    That is not a corner case here — it is the case. THE FAULT BEING HUNTED ENDS
+    IN A SELF-RESTART, so without this the logger goes deaf at exactly the
+    moment worth watching, and the run says "wedged" with no record of what
+    happened next.
+    """
+    port = ports.get(side.name)
     while not stop.is_set():
+        if port is None:
+            time.sleep(1.0)
+            port = open_port(dev, baud, fatal=False)
+            if port is None:
+                continue
+            ports[side.name] = port          # so the console can write to it again
+            side.reconnects += 1
+            msg = (f"{side.name} PORT BACK after {side.reconnects} "
+                   f"reconnect(s) — the board rebooted, its counters start again")
+            with lock:
+                out.write(f"# {datetime.now().isoformat(timespec='seconds')} {msg}\n")
+            print(f"  ~~~ [{side.name}] reconnected ({dev}) — board rebooted, "
+                  f"counters restart")
         try:
             raw = port.readline().decode("utf-8", "replace").strip()
         except Exception as e:
             with lock:
                 out.write(f"# {datetime.now().isoformat(timespec='seconds')} "
-                          f"{side.name} PORT ERROR {e}\n")
-            break
+                          f"{side.name} PORT LOST {e}\n")
+            print(f"  ~~~ [{side.name}] port lost ({e}) — waiting for it to come back")
+            try:
+                port.close()
+            except Exception:
+                pass
+            port = None
+            ports[side.name] = None
+            continue
         if not raw:
             continue
         now  = datetime.now()
@@ -174,11 +209,12 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
     started = time.time()
     with open(path, "w", buffering=1) as f:
         f.write("wall_iso,side," + ",".join(FIELDS) + "\n")
-        threads = [threading.Thread(target=reader, args=(tx_port, tx, f, lock, stop),
+        threads = [threading.Thread(target=reader,
+                                    args=(tx_dev, baud, tx, ports, f, lock, stop),
                                     daemon=True)]
-        if rx_port is not None:
+        if rx_dev:
             threads.append(threading.Thread(target=reader,
-                                            args=(rx_port, rx, f, lock, stop),
+                                            args=(rx_dev, baud, rx, ports, f, lock, stop),
                                             daemon=True))
         threads.append(threading.Thread(target=console,
                                         args=(ports, f, lock, stop), daemon=True))
@@ -197,6 +233,15 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
                           "then `go` here, or `help`)")
                     continue
 
+                # Stale is not the same as steady. Two identical lines a minute
+                # apart read as "nothing is changing" when what happened is that
+                # the board stopped talking — which is how a frozen TX side
+                # looked like a healthy one.
+                tx_age = time.time() - tx.alive
+                if tx_age > max(5.0, every * 1.5):
+                    print(f"  [tx] SILENT for {tx_age:.0f}s — last values below "
+                          f"are stale, not current")
+
                 floor  = int(t_last["floor"])
                 issued = int(t_last["issued"])
                 cbs    = int(t_last["cb_ok"]) + int(t_last["cb_fail"])
@@ -206,8 +251,8 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
 
                 if r_last:
                     got = int(r_last["rx"])
-                    if base_rx is None:
-                        base_rx = got
+                    if base_rx is None or got < base_rx:
+                        base_rx = got        # first sample, or the board rebooted
                     # The comparison only one logger can make: what the sender
                     # thinks it completed, against what the receiver actually
                     # got. They diverge in the interesting case.

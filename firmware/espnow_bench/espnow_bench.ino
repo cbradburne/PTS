@@ -170,6 +170,44 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
     _rx_bytes = _rx_bytes + (uint32_t)len;
 }
 
+// esp_now.h numbers these from ESP_ERR_ESPNOW_BASE (0x3064). Printing the hex
+// makes the operator go and look it up, which is the opposite of what a bench
+// is for — and the two that matter here read completely differently:
+// NOT_FOUND is a setup mistake, NO_MEM is the fault under study.
+static const char *espnow_err_name(esp_err_t e) {
+    switch (e) {
+        case ESP_OK:                    return "OK";
+        case ESP_ERR_ESPNOW_NOT_INIT:   return "NOT_INIT (esp_now_init not done)";
+        case ESP_ERR_ESPNOW_ARG:        return "ARG (bad argument)";
+        case ESP_ERR_ESPNOW_NO_MEM:     return "NO_MEM (the buffer pool is empty — THE WEDGE)";
+        case ESP_ERR_ESPNOW_FULL:       return "FULL (peer list full)";
+        case ESP_ERR_ESPNOW_NOT_FOUND:  return "NOT_FOUND (peer not registered — check 'peer')";
+        case ESP_ERR_ESPNOW_INTERNAL:   return "INTERNAL";
+        case ESP_ERR_ESPNOW_EXIST:      return "EXIST (peer already added)";
+        case ESP_ERR_ESPNOW_IF:         return "IF (wrong interface)";
+        default:                        return "unknown";
+    }
+}
+
+// Registering the peer is what `peer` and `go` both have to do, so it lives in
+// one place. Remove first: add on an existing peer returns EXIST and changes
+// nothing, which is how a corrected MAC silently kept the old one.
+static bool peer_register() {
+    if (_cfg.role != 1) return false;
+    esp_now_del_peer(_cfg.peer);
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, _cfg.peer, 6);
+    p.channel = _cfg.channel;
+    p.ifidx   = WIFI_IF_STA;
+    p.encrypt = false;
+    esp_err_t e = esp_now_add_peer(&p);
+    if (e != ESP_OK) {
+        Serial.printf("[bench] add_peer failed: %s\n", espnow_err_name(e));
+        return false;
+    }
+    return true;
+}
+
 static void peer_rate_long(const uint8_t *mac) {
     esp_now_rate_config_t r = {};
     r.phymode = WIFI_PHY_MODE_11B;
@@ -195,15 +233,8 @@ static void radio_start() {
     esp_now_register_send_cb(on_sent);
     esp_now_register_recv_cb(on_recv);
 
-    if (_cfg.role == 1) {
-        esp_now_peer_info_t p = {};
-        memcpy(p.peer_addr, _cfg.peer, 6);
-        p.channel = _cfg.channel;
-        p.ifidx   = WIFI_IF_STA;
-        p.encrypt = false;
-        esp_now_add_peer(&p);
-        if (_cfg.phy_lr) peer_rate_long(p.peer_addr);
-    }
+    if (_cfg.role == 1 && peer_register() && _cfg.phy_lr)
+        peer_rate_long(_cfg.peer);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,8 +343,14 @@ static void handle_line(char *line) {
         memcpy(_cfg.peer, want, 6);
         cfg_save();
         mac_str(_cfg.peer, buf);
-        Serial.printf("[bench] peer %s — I will send TO that board. "
-                      "reboot or 'go' to apply\n", buf);
+        // Applied HERE, not "on reboot or go". It used to say that and neither
+        // did it: the MAC reached NVS and never reached the ESP-NOW stack, so
+        // every send came back NOT_FOUND and read as a dead link.
+        bool ok = peer_register();
+        if (ok && _cfg.phy_lr) peer_rate_long(_cfg.peer);
+        Serial.printf("[bench] peer %s — I will send TO that board. %s\n",
+                      buf, ok ? "registered, ready for 'go'"
+                              : "NOT registered — see the error above");
         return;
     }
     if (!strcmp(cmd, "chan") && a1) { _cfg.channel = atoi(a1); cfg_save();
@@ -336,8 +373,24 @@ static void handle_line(char *line) {
     if (!strcmp(cmd, "phy") && a1)  { _cfg.phy_lr = !strcmp(a1, "lr"); cfg_save();
         Serial.printf("[bench] phy %s (reboot to apply)\n",
                       _cfg.phy_lr ? "1Mbps long preamble" : "default"); return; }
-    if (!strcmp(cmd, "go"))    { counters_reset(); _cfg.running = 1; cfg_save();
-        Serial.println("[bench] running"); return; }
+    if (!strcmp(cmd, "go")) {
+        if (_cfg.role == 1) {
+            // Defensive: cheap, and the alternative is a run that produces
+            // nothing but refusals and looks like the fault being hunted.
+            if (!esp_now_is_peer_exist(_cfg.peer)) {
+                Serial.println("[bench] peer was not registered — doing it now");
+                if (peer_register() && _cfg.phy_lr) peer_rate_long(_cfg.peer);
+            }
+            uint8_t z[6] = {};
+            if (!memcmp(_cfg.peer, z, 6)) {
+                Serial.println("[bench] no peer set. 'peer <the RX board's MAC>' "
+                               "first — it prints its own on boot.");
+                return;
+            }
+        }
+        counters_reset(); _cfg.running = 1; cfg_save();
+        Serial.println("[bench] running"); return;
+    }
     if (!strcmp(cmd, "stop"))  { _cfg.running = 0; cfg_save();
         Serial.println("[bench] stopped"); return; }
     if (!strcmp(cmd, "reset")) { counters_reset(); Serial.println("[bench] zeroed"); return; }
@@ -436,22 +489,38 @@ void loop() {
                     if (e == ESP_ERR_ESPNOW_NO_MEM) _nomem = _nomem + 1;
                     if (!_t_first_ref_ms) {
                         _t_first_ref_ms = now;
-                        Serial.printf("[bench] FIRST REFUSAL at t=%lus err=0x%X "
+                        Serial.printf("[bench] FIRST REFUSAL at t=%lus err=%s "
                                       "in_flight=%lu\n",
                                       (unsigned long)((now - _t_start_ms) / 1000UL),
-                                      (int)e, (unsigned long)in_flight());
+                                      espnow_err_name(e), (unsigned long)in_flight());
                     }
-                    // Continuous refusals with no callback in between is the
-                    // wedge itself, as opposed to a momentary full queue.
                     _consec_refused = _consec_refused + 1;
-                    if (_consec_refused == 50 && !_t_wedge_ms) {
-                        _t_wedge_ms = now;
-                        Serial.printf("[bench] *** WEDGED at t=%lus — 50 refusals "
-                                      "in a row, in_flight=%lu, cb since start "
-                                      "ok=%lu fail=%lu\n",
-                                      (unsigned long)((now - _t_start_ms) / 1000UL),
-                                      (unsigned long)in_flight(),
-                                      (unsigned long)_cb_ok, (unsigned long)_cb_fail);
+
+                    // ONLY NO_MEM is the wedge.
+                    //
+                    // This used to call 50 refusals of any kind a wedge, and an
+                    // unregistered peer duly produced "*** WEDGED at t=0s" with
+                    // zero sends ever made. A bench that cries wolf on a setup
+                    // mistake is worse than one that says nothing: the run looks
+                    // like a reproduction and the data is worthless.
+                    if (e == ESP_ERR_ESPNOW_NO_MEM) {
+                        if (_consec_refused >= 50 && !_t_wedge_ms) {
+                            _t_wedge_ms = now;
+                            Serial.printf("[bench] *** WEDGED at t=%lus — 50 NO_MEM "
+                                          "in a row, in_flight=%lu, cb since start "
+                                          "ok=%lu fail=%lu\n",
+                                          (unsigned long)((now - _t_start_ms) / 1000UL),
+                                          (unsigned long)in_flight(),
+                                          (unsigned long)_cb_ok,
+                                          (unsigned long)_cb_fail);
+                        }
+                    } else if (_consec_refused == 50) {
+                        // Anything else repeating is the bench being held wrong,
+                        // and it should say so instead of banking a result.
+                        Serial.printf("[bench] NOT THE FAULT — 50 refusals of %s "
+                                      "in a row.\n        Nothing has been sent. "
+                                      "This is a setup problem, not the wedge.\n",
+                                      espnow_err_name(e));
                     }
                 }
             }
