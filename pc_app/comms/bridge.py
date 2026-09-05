@@ -939,10 +939,24 @@ class Bridge:
         # unchanged, so older logs still read the same.
         n32 = h.node_u32
         if h.node_name == "bridge":
-            refused = (n32 >> 16) & 0xFFFF
+            # High half is the bridge's PERSISTENT isolation-restart count, kept
+            # in its NVS so it survives both the restart that rescues it and a
+            # power cycle. Every other counter on a wedged mount is reset by the
+            # very restart that ends the wedge, which is why cam1 wedging twice
+            # in 44 hours was only visible to someone willing to read 44 hours
+            # of log.
+            #
+            # It used to carry the refused-send count, on the reasoning that a
+            # refusal climbing is the wedge starting. The field log disproved
+            # that: zero in every health report, including cam1's own 18 seconds
+            # before it went down. A refusal means the radio will not accept a
+            # send, so the report carrying the number is the one thing that
+            # cannot get out. It survives in the post-mortem MOUNT_EVENT, which
+            # is the only place it has ever actually been read.
+            wedges  = (n32 >> 16) & 0xFFFF
             n32txt  = "n32 %d" % (n32 & 0xFFFF)
-            if refused:
-                n32txt += " | TX REFUSED %d" % refused
+            if wedges:
+                n32txt += " | WEDGES %d" % wedges
         elif h.node_type == HEALTH_NODE_SATELLITE:
             # Same packing, different pair: refusals high, self-restart streak
             # low.  The streak is spelled out rather than left as a number

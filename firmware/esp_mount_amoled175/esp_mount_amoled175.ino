@@ -583,6 +583,36 @@ static volatile uint32_t _espnow_tx_refused  = 0; // sends the stack would not a
 static volatile uint16_t _espnow_last_tx_err = 0; // esp_err_t of the most recent refusal
 static uint32_t _reinit_count       = 0;          // completed full ESP-NOW reinits
 
+// How many times this bridge has taken itself down for isolation, EVER.
+//
+// Not RTC_NOINIT like _iso_restarts above: that one is deliberately cleared by
+// a power cycle, because it is a quota for one episode and the operator
+// intervening should hand it back. This is the opposite question — "is this
+// bridge getting worse?" — and a rig switched off overnight must not forget the
+// answer. So it lives in NVS, and a reflash is the only thing that clears it.
+//
+// Every other counter resets on the restart that rescues the mount, which is
+// why the log could show cam1 wedging twice in 44 hours only to someone willing
+// to read 44 hours of log. One number in every health line answers it instead.
+static uint32_t _wedge_count = 0;
+
+static void wedge_count_load() {
+    _mount_prefs.begin("wedge", true);
+    _wedge_count = _mount_prefs.getUInt("n", 0);
+    _mount_prefs.end();
+}
+
+// Called with the chip about to restart, so it must WRITE, not defer. A flash
+// write here costs nothing that matters: this path has run twice in 44 hours.
+static void wedge_count_bump() {
+    _wedge_count++;
+    _mount_prefs.begin("wedge", false);
+    _mount_prefs.putUInt("n", _wedge_count);
+    _mount_prefs.end();
+    Serial.printf("[ESPNOW] isolation restart #%lu for this bridge\n",
+                  (unsigned long)_wedge_count);
+}
+
 // ---------------------------------------------------------------------------
 // RF window: rssi and noise floor, accumulated per frame.
 //
@@ -979,10 +1009,21 @@ static void send_health(bool anomaly) {
     // defined as node-specific, and this keeps the wire format, the golden test
     // and every existing log line unchanged — a bridge's reinit count has only
     // ever been 0-3, so the low half still reads exactly as it always did.
-    // Worth the packing: a refusal count climbing is the wedge STARTING, which
-    // is two minutes of warning before the mount takes itself down, whereas the
-    // event report only ever arrives after the fact.
-    h.node_u32      = ((_espnow_tx_refused & 0xFFFFUL) << 16) |
+    //
+    // The high half used to carry _espnow_tx_refused, on the reasoning that a
+    // refusal count climbing is the wedge STARTING and therefore two minutes of
+    // warning. 44 hours of field log on 2026-09-03..05 says otherwise: it read
+    // ZERO in every one of thousands of health reports, including cam1's own
+    // report 18 SECONDS before it wedged, and there were two wedges in that
+    // span. It cannot be otherwise — a refusal means the radio will not accept
+    // a send, so the report carrying the number is the one thing that cannot go
+    // out. The count survives only in the post-mortem MOUNT_EVENT, which is
+    // where it is still reported and where it has always actually been read.
+    //
+    // So the half now carries the persistent wedge count instead: not a
+    // prediction, which this link cannot give, but the trend — how many times
+    // this bridge has done it, surviving both the restart and a power cycle.
+    h.node_u32      = ((_wedge_count & 0xFFFFUL) << 16) |
                       (_reinit_count & 0xFFFFUL);
 #endif
     uint8_t p[24];
@@ -2845,6 +2886,7 @@ void setup() {
     // Load runtime identity from NVS, then set the accent colour before any
     // UI calls.  Unpaired units get neutral grey and boot into SETUP.
     cfg_load();
+    wedge_count_load();
     _col_accent = lv_color_hex(_cfg_valid ? MOUNT_ACCENT_HEX[_mount_id - 1]
                                           : 0x9E9E9E);
     if (_cfg_valid)
@@ -3208,6 +3250,12 @@ void loop() {
                     _evt_tx_s    = (uint16_t)(held / 1000UL);
                     _evt_refused = (uint16_t)_espnow_tx_refused;
                     _evt_txerr   = _espnow_last_tx_err;
+                    // Counts too. From the operator's chair a TX wedge and a
+                    // full isolation are the same event — the radio stopped and
+                    // the bridge rebooted itself to get it back — and "is this
+                    // one getting worse" is asked of the bridge, not of which
+                    // of the two ways it failed.
+                    wedge_count_bump();
                     esp_restart();
                 } else {
                     // A boot has not fixed it either.  Stay up and keep working
@@ -3377,6 +3425,7 @@ void loop() {
             _evt_tx_s    = (uint16_t)((millis() - _last_espnow_tx_ok_ms) / 1000UL);
             _evt_refused = (uint16_t)_espnow_tx_refused;
             _evt_txerr   = _espnow_last_tx_err;
+            wedge_count_bump();     // persists across the restart AND a power cycle
             esp_restart();
         } else {
             // Restarting has been tried and did not help.  Stay up and keep
