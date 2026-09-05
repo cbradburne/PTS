@@ -60,6 +60,7 @@ sketch_for() {
         hubdemo) echo "$REPO/firmware/esp32_hub" ;;
         display) echo "$REPO/firmware/esp32_display" ;;
         amoled)  echo "$REPO/firmware/esp_mount_amoled175" ;;
+        bench)   echo "$REPO/firmware/espnow_bench" ;;
         sat)     echo "$REPO/firmware/esp32_satellite" ;;
         hubeth)  echo "$REPO/firmware/esp32_hub_eth" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
@@ -80,6 +81,9 @@ fqbn_for() {
         hubdemo) echo "$FQBN_HUB" ;;
         display) echo "$FQBN_DISPLAY" ;;
         amoled)  echo "$FQBN_AMOLED" ;;
+        # Same board as a mount bridge, so the fault it hunts is the
+        # fault the rig has — but no display, no Teensy, no protocol.
+        bench)   echo "$FQBN_AMOLED" ;;
         sat)     echo "$FQBN_SAT" ;;
         hubeth)  echo "$FQBN_HUBETH" ;;
         teensy)  echo "$FQBN_TEENSY" ;;
