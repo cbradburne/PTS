@@ -129,7 +129,7 @@ One line a second from the TX board:
 
 ```
 t=612s issued=30600 cb_ok=30594 cb_fail=0 refused=0 nomem=0
-       in_flight=6 floor=0 max=9 rx=0 heap=284512 err=0x0 cmd=1220 ack=1220
+       in_flight=6 floor=0 max=9 rx=0 heap=284512 err=0x0 cmd=1220 ack=1220 ovl=47
 ```
 
 `cmd` is commands received, `ack` the replies sent for them, and **`ovl` is the
