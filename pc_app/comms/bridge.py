@@ -953,10 +953,24 @@ class Bridge:
             # send, so the report carrying the number is the one thing that
             # cannot get out. It survives in the post-mortem MOUNT_EVENT, which
             # is the only place it has ever actually been read.
-            wedges  = (n32 >> 16) & 0xFFFF
-            n32txt  = "n32 %d" % (n32 & 0xFFFF)
+            # wedges(8) | leak floor(8) | reinit(16). The low half is what it
+            # has always been.
+            wedges = (n32 >> 24) & 0xFF
+            leak   = (n32 >> 16) & 0xFF
+            n32txt = "n32 %d" % (n32 & 0xFFFF)
             if wedges:
                 n32txt += " | WEDGES %d" % wedges
+            # The leak, and the only number here that moves BEFORE the fault.
+            # esp_now_send() takes a buffer from a small pool and the send
+            # callback returns it; this is how many were taken and never given
+            # back. Every other counter on a wedged mount moves only once the
+            # pool is already empty, and by then the radio cannot report it —
+            # cam1's own health read a clean zero 18 seconds before it went.
+            #
+            # Anything but 0 is worth knowing. A floor that climbs across
+            # reports is the wedge arriving in slow motion.
+            if leak:
+                n32txt += " | TX BUFFERS LEAKED %d" % leak
         elif h.node_type == HEALTH_NODE_SATELLITE:
             # Same packing, different pair: refusals high, self-restart streak
             # low.  The streak is spelled out rather than left as a number

@@ -583,6 +583,53 @@ static volatile uint32_t _espnow_tx_refused  = 0; // sends the stack would not a
 static volatile uint16_t _espnow_last_tx_err = 0; // esp_err_t of the most recent refusal
 static uint32_t _reinit_count       = 0;          // completed full ESP-NOW reinits
 
+// ── The leak, counted ────────────────────────────────────────────────────
+// esp_now_send() takes a buffer from a small pool; the send-complete callback
+// returns it. espressif/esp-idf#18682 is exactly this pool being exhausted by
+// callbacks that never fire, and it is what "the stack's TX queue was full"
+// means when a mount goes quiet.
+//
+// Nothing counted the callbacks, so the difference — buffers taken and not
+// given back — has never been visible. Every counter this bridge had moves
+// only once the pool is ALREADY empty, and by then the radio cannot report it:
+// cam1's own health read a clean zero eighteen seconds before it wedged.
+//
+// This one moves at the FIRST lost buffer.
+static volatile uint32_t _espnow_issued  = 0;   // esp_now_send() returned ESP_OK
+static volatile uint32_t _espnow_cb_total = 0;  // send callback fired, either way
+
+// in_flight bounces by one or two with every send; what matters is whether it
+// ever comes back DOWN. The floor over a window only rises, so a rising floor
+// is a leak and a flat one is sends in progress.
+static uint8_t  _espnow_leak_floor = 0;   // saturating: 255 is far past the pool
+
+static inline uint32_t espnow_in_flight() {
+    uint32_t i = _espnow_issued, c = _espnow_cb_total;
+    return (i >= c) ? (i - c) : 0;
+}
+
+// Called from loop(); cheap, and deliberately does no more than measure.
+// Acting on it — a clean teardown while the radio still works, instead of
+// twenty seconds isolated and a reboot — waits until the rig has said what
+// this number actually does. Measure first.
+static void espnow_leak_poll() {
+    static uint32_t win_ms = 0;
+    static uint32_t win_min = 0xFFFFFFFF;
+    uint32_t inf = espnow_in_flight();
+    if (inf < win_min) win_min = inf;
+    uint32_t now = millis();
+    if (now - win_ms < 5000UL) return;
+    win_ms  = now;
+    if (win_min != 0xFFFFFFFF && win_min > _espnow_leak_floor) {
+        _espnow_leak_floor = (win_min > 255) ? 255 : (uint8_t)win_min;
+        Serial.printf("[ESPNOW] LEAK floor %u — issued %lu, callbacks %lu\n",
+                      _espnow_leak_floor,
+                      (unsigned long)_espnow_issued,
+                      (unsigned long)_espnow_cb_total);
+    }
+    win_min = 0xFFFFFFFF;
+}
+
 // How many times this bridge has taken itself down for isolation, EVER.
 //
 // Not RTC_NOINIT like _iso_restarts above: that one is deliberately cleared by
@@ -889,6 +936,10 @@ static void espnow_peer_long_range(const uint8_t *mac) {
 static void espnow_tx(const uint8_t *buf, uint16_t n) {
     if (_rf_tx_attempts < 0xFFFF) _rf_tx_attempts = _rf_tx_attempts + 1;
     esp_err_t e = esp_now_send(_hub_mac, buf, n);
+    if (e == ESP_OK) {
+        // Taken by the stack — a buffer is now out, and the callback owes it back.
+        _espnow_issued = _espnow_issued + 1;
+    }
     if (e != ESP_OK) {
         // Refused outright: it did not go out, and it never reaches the send
         // callback, so it must be counted as a failure HERE or not at all.
@@ -1023,7 +1074,15 @@ static void send_health(bool anomaly) {
     // So the half now carries the persistent wedge count instead: not a
     // prediction, which this link cannot give, but the trend — how many times
     // this bridge has done it, surviving both the restart and a power cycle.
-    h.node_u32      = ((_wedge_count & 0xFFFFUL) << 16) |
+    // wedges(8) | leak floor(8) | reinit(16).
+    //
+    // The low half is untouched and still reads exactly as it always did — a
+    // bridge's reinit count has only ever been 0-3. The high half splits: the
+    // wedge count needs one byte (255 isolation restarts since flashing would
+    // be a mount to retire, not to trend), which leaves a byte for the number
+    // that is the point of all this.
+    h.node_u32      = ((uint32_t)(_wedge_count > 255 ? 255 : _wedge_count) << 24) |
+                      ((uint32_t)_espnow_leak_floor << 16) |
                       (_reinit_count & 0xFFFFUL);
 #endif
     uint8_t p[24];
@@ -1105,6 +1164,9 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
 }
 
 static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
+    // Before anything else: it fired, and that is the fact the leak is measured
+    // from. Success or failure both return the buffer; not firing is the fault.
+    _espnow_cb_total = _espnow_cb_total + 1;
     if (s == ESP_NOW_SEND_SUCCESS) {
         _espnow_consec_fails  = 0;
         _espnow_refresh_count = 0;
@@ -3502,6 +3564,8 @@ void loop() {
     }
 
     // ── Heartbeat ────────────────────────────────────────────────────────
+    espnow_leak_poll();
+
     if (now - _last_heartbeat_ms >= STATUS_HEARTBEAT_MS)
         send_status_heartbeat();
 

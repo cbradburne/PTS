@@ -79,7 +79,10 @@ print("   both radio self-rescues, and no other restart      OK")
 
 # ---- 3. it reaches the operator --------------------------------------------
 print("\n3. how it is reported:")
-assert "((_wedge_count & 0xFFFFUL) << 16)" in INO, \
+# The count shares node_u32 with the TX-buffer leak floor now — see
+# test_tx_buffer_leak.py. Eight bits each, and a bridge that has wedged 255
+# times has told you everything the number can.
+assert "(_wedge_count > 255 ? 255 : _wedge_count) << 24" in INO, \
     "the count is not put in node_u32, so nothing carries it to the app"
 assert "(_espnow_tx_refused & 0xFFFFUL) << 16" not in INO, \
     "the refused count is still in health. It reads zero in every report by\n" \
@@ -88,12 +91,12 @@ assert "(_espnow_tx_refused & 0xFFFFUL) << 16" not in INO, \
 assert "_evt_refused = (uint16_t)_espnow_tx_refused;" in INO, \
     "the refused count was dropped from the post-mortem too — that is the one\n" \
     "    place it has ever actually been read"
-print("   node_u32 high half, refusals kept in the post-mortem OK")
+print("   node_u32 top byte, refusals kept in the post-mortem OK")
 
 # The PC reads the same half the mount writes. Two ends of one field, and
 # nothing else holds them together.
-assert "wedges  = (n32 >> 16) & 0xFFFF" in BR, \
-    "the app does not read the high half as the wedge count"
+assert "wedges = (n32 >> 24) & 0xFF" in BR, \
+    "the app does not read the top byte as the wedge count"
 assert 'WEDGES %d" % wedges' in BR, "the count is decoded and never printed"
 assert "TX REFUSED" not in BR, \
     "the app still labels that half 'TX REFUSED', so a wedge count would print\n" \
@@ -155,10 +158,10 @@ assert "WEDGES" not in clean, \
     f"a bridge that has never wedged still says so: {clean}"
 assert "n32 1" in clean, f"the reinit count moved: {clean}"
 
-worn = health_line((3 << 16) | 1)        # three wedges, reinit 1
+worn = health_line((3 << 24) | 1)        # three wedges, reinit 1
 assert "WEDGES 3" in worn, f"three wedges do not read as three: {worn}"
 assert "n32 1" in worn, \
-    f"the reinit count changed when the high half did — the halves are not\n" \
+    f"the reinit count changed when the top byte did — the fields are not\n" \
     f"    independent: {worn}"
 print(f"   {clean.split(chr(124))[-1].strip()}  ->  "
       f"{worn.split(chr(124))[-2].strip()}   OK")
