@@ -389,7 +389,19 @@ static void handle_line(char *line) {
             }
         }
         counters_reset(); _cfg.running = 1; cfg_save();
-        Serial.println("[bench] running"); return;
+        // The whole configuration, every time, into whatever is recording.
+        //
+        // The run file carried only what was typed THROUGH the logger, so a
+        // setting that came from NVS, or was set before the logger started,
+        // appeared nowhere — and the file's own name was the only claim about
+        // what the run tested. A tag is a claim; this is evidence.
+        mac_str(_cfg.peer, buf);
+        Serial.printf("[bench] running | peer=%s rate=%uHz size=%u cap=%u "
+                      "load=%u/%ums scan=%us phy=%s chan=%u\n",
+                      buf, _cfg.rate_hz, _cfg.size, _cfg.cap,
+                      _cfg.load_ms, _cfg.load_period_ms, _cfg.scan_period_s,
+                      _cfg.phy_lr ? "1M-LR" : "default", _cfg.channel);
+        return;
     }
     if (!strcmp(cmd, "stop"))  { _cfg.running = 0; cfg_save();
         Serial.println("[bench] stopped"); return; }
