@@ -74,9 +74,8 @@ class Side:
         self.notes: list[str] = []
 
 
-def reader(dev: str, baud: int, side: Side, out, lock: threading.Lock,
+def reader(port, side: Side, out, lock: threading.Lock,
            stop: threading.Event) -> None:
-    port = open_port(dev, baud)
     while not stop.is_set():
         try:
             raw = port.readline().decode("utf-8", "replace").strip()
@@ -106,6 +105,46 @@ def reader(dev: str, baud: int, side: Side, out, lock: threading.Lock,
                 out.write(f"{iso},{side.name}," + ",".join(d[k] for k in FIELDS) + "\n")
 
 
+def console(ports: dict, out, lock: threading.Lock, stop: threading.Event) -> None:
+    """Type at the boards from the window that is logging them.
+
+    The logger holds both serial ports, so without this there is no way to say
+    `go` — or to change `cap` mid-run — without stopping the recording. Worse,
+    a setting changed in another terminal would not appear in the log at all,
+    and a run file that does not say what was varied is not evidence.
+
+    Plain text goes to the TX board. Prefix with `rx ` for the receiver.
+    """
+    while not stop.is_set():
+        try:
+            line = input()
+        except (EOFError, KeyboardInterrupt):
+            stop.set()
+            return
+        line = line.strip()
+        if not line:
+            continue
+        side = "tx"
+        if line.startswith("rx ") or line.startswith("rx:"):
+            side, line = "rx", line[3:].strip()
+        port = ports.get(side)
+        if port is None:
+            print(f"  (no {side} board connected)")
+            continue
+        try:
+            port.write((line + "\n").encode())
+        except Exception as e:
+            print(f"  (write to {side} failed: {e})")
+            continue
+        # Into the run file as well as onto the wire: "cap 1 at t=3600" is the
+        # single most important thing a comparison needs and the easiest to
+        # forget you did.
+        with lock:
+            out.write(f"# {datetime.now().isoformat(timespec='seconds')} "
+                      f"{side} <<< {line}\n")
+        print(f"  >>> [{side}] {line}")
+
+
 def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
            baud: int, every: int) -> None:
     os.makedirs(outdir, exist_ok=True)
@@ -116,21 +155,33 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
     lock = threading.Lock()
     stop = threading.Event()
 
+    tx_port = open_port(tx_dev, baud)
+    rx_port = open_port(rx_dev, baud) if rx_dev else None
+    ports = {"tx": tx_port, "rx": rx_port}
+
     print(f"recording -> {path}")
     print(f"  tx {tx_dev}")
     print(f"  rx {rx_dev}" if rx_dev else "  rx (not connected — the arriving/"
           "not-arriving question cannot be answered)")
+    print("\nType commands here: plain text goes to the TX board, prefix `rx `")
+    print("for the receiver. Try `help`, or `stats`. First time:")
+    print("    rx role rx        then read its MAC off the line it prints")
+    print("    role tx")
+    print("    peer AA:BB:CC:DD:EE:FF")
+    print("    go")
     print("Ctrl-C to stop and summarise.\n")
 
     started = time.time()
     with open(path, "w", buffering=1) as f:
         f.write("wall_iso,side," + ",".join(FIELDS) + "\n")
-        threads = [threading.Thread(target=reader, args=(tx_dev, baud, tx, f, lock, stop),
+        threads = [threading.Thread(target=reader, args=(tx_port, tx, f, lock, stop),
                                     daemon=True)]
-        if rx_dev:
+        if rx_port is not None:
             threads.append(threading.Thread(target=reader,
-                                            args=(rx_dev, baud, rx, f, lock, stop),
+                                            args=(rx_port, rx, f, lock, stop),
                                             daemon=True))
+        threads.append(threading.Thread(target=console,
+                                        args=(ports, f, lock, stop), daemon=True))
         for t in threads:
             t.start()
 
@@ -142,7 +193,8 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
                 with lock:
                     t_last, r_last = dict(tx.last), dict(rx.last) if rx else {}
                 if not t_last:
-                    print("  (waiting for the TX board — has it been told 'go'?)")
+                    print("  (no report from the TX board yet — type `role tx` "
+                          "then `go` here, or `help`)")
                     continue
 
                 floor  = int(t_last["floor"])

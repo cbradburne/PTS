@@ -33,7 +33,20 @@ ESP-NOW is involved at all. The RX board is entirely passive.
 What both boards **do** have to agree on is the **channel** (`chan`, default 1).
 That is the one setting a silent link usually comes down to.
 
-On the RX board type `role rx` — it reboots and prints its MAC, says it needs
+You do not need a separate terminal for any of this — **the logger types at both
+boards for you** (see below), and it records what you typed into the run file.
+Start it first, then set the boards up through it:
+
+```
+rx role rx                     # the receiver reboots and prints its MAC
+role tx
+peer AA:BB:CC:DD:EE:FF         # the MAC it just printed
+go
+```
+
+Plain text goes to the TX board; prefix with `rx ` for the receiver.
+
+On the RX board `role rx` makes it reboot and print its MAC, say it needs
 nothing from you, and then:
 
 - announces the first frame it gets, and which MAC it came from, so you know the
@@ -63,6 +76,13 @@ tools/bench_log.py --tx /dev/cu.usbmodemAAAA --rx /dev/cu.usbmodemBBBB \
 
 (`python3 tools/bench_log.py …` works too, and is what to reach for if the
 executable bit has not survived however the repo reached your machine.)
+
+The logger holds both serial ports, so it is also the only thing that can talk
+to the boards while it runs — type at it directly. Everything you type is
+written into the CSV as well as onto the wire, which matters more than it
+sounds: **"cap 1 at t=3600" is the single most important thing a comparison
+needs, and the easiest to forget you did.** A run file that does not say what
+was varied is not evidence.
 
 One logger, both boards, one PC clock across the pair — which is not
 convenience, it is the only way to ask the question the bench exists for:
