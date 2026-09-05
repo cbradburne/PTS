@@ -61,6 +61,7 @@ sketch_for() {
         display) echo "$REPO/firmware/esp32_display" ;;
         amoled)  echo "$REPO/firmware/esp_mount_amoled175" ;;
         bench)   echo "$REPO/firmware/espnow_bench" ;;
+        benchrx) echo "$REPO/firmware/espnow_bench" ;;
         sat)     echo "$REPO/firmware/esp32_satellite" ;;
         hubeth)  echo "$REPO/firmware/esp32_hub_eth" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
@@ -81,9 +82,16 @@ fqbn_for() {
         hubdemo) echo "$FQBN_HUB" ;;
         display) echo "$FQBN_DISPLAY" ;;
         amoled)  echo "$FQBN_AMOLED" ;;
-        # Same board as a mount bridge, so the fault it hunts is the
-        # fault the rig has — but no display, no Teensy, no protocol.
+        # Same board as a mount BRIDGE, so the fault it hunts is the fault the
+        # rig has — but no display, no Teensy, no protocol.  This is the board
+        # that should take the TX role: the display work it does not do here is
+        # the very thing `load` exists to put back one variable at a time.
         bench)   echo "$FQBN_AMOLED" ;;
+        # The RX role stands in for the hub, and the hub is not an AMOLED — no
+        # octal PSRAM, hardware CDC.  Flashing the amoled build to a board with
+        # no OPI PSRAM does not boot, so the receiving end gets its own target
+        # rather than a footnote someone reads afterwards.
+        benchrx) echo "$FQBN_HUBETH" ;;
         sat)     echo "$FQBN_SAT" ;;
         hubeth)  echo "$FQBN_HUBETH" ;;
         teensy)  echo "$FQBN_TEENSY" ;;

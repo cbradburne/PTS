@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Record an espnow_bench run from BOTH boards at once.
+
+    tools/bench_log.py --tx /dev/cu.usbmodem101 --rx /dev/cu.usbmodem201 \
+                       --tag cap0-rate50
+    tools/bench_log.py --compare bench-logs/*.csv
+
+Both boards on USB into one logger, one PC clock over the pair. That matters
+more than convenience, because it is the only way to ask the question the whole
+bench exists for:
+
+    when the send callback stops firing, are the frames still ARRIVING?
+
+  frames arrive, callbacks stopped  -> the radio is fine and the CALLBACK is the
+                                       fault. The pool leaks because buffers are
+                                       never returned, not because sends fail.
+  frames stop too                   -> the transmit path really is down, and the
+                                       callback is telling the truth.
+
+Those want opposite fixes and one board cannot tell them apart. The TX side sees
+its own counters go quiet either way.
+
+    in_flight = issued - (cb_ok + cb_fail)     buffers not given back
+    floor                                      lowest in_flight has returned to;
+                                               only ever rises, so a rising floor
+                                               IS the leak
+
+`refused` cannot warn — a refusal is the radio declining a send, so the report
+carrying the number is the one thing that cannot go out.
+
+A run that does not wedge is a result. Tag it and keep it: it is what rules a
+configuration out later.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+import re
+import sys
+import threading
+import time
+from datetime import datetime
+
+LINE = re.compile(
+    r"t=(?P<t>\d+)s issued=(?P<issued>\d+) cb_ok=(?P<cb_ok>\d+) "
+    r"cb_fail=(?P<cb_fail>\d+) refused=(?P<refused>\d+) nomem=(?P<nomem>\d+) "
+    r"in_flight=(?P<in_flight>\d+) floor=(?P<floor>\d+) max=(?P<max>\d+) "
+    r"rx=(?P<rx>\d+) heap=(?P<heap>\d+) err=(?P<err>0x[0-9A-Fa-f]+)")
+
+FIELDS = ("t", "issued", "cb_ok", "cb_fail", "refused", "nomem",
+          "in_flight", "floor", "max", "rx", "heap", "err")
+
+
+def open_port(dev: str, baud: int):
+    try:
+        import serial                      # pyserial
+    except ImportError:
+        sys.exit("pyserial is not installed:  python3 -m pip install pyserial")
+    try:
+        return serial.Serial(dev, baud, timeout=1)
+    except Exception as e:
+        sys.exit(f"cannot open {dev}: {e}")
+
+
+class Side:
+    """One board's latest numbers, updated by its own reader thread."""
+
+    def __init__(self, name: str):
+        self.name  = name
+        self.last: dict[str, str] = {}
+        self.seen  = 0
+        self.alive = 0.0          # when we last heard anything at all
+        self.notes: list[str] = []
+
+
+def reader(dev: str, baud: int, side: Side, out, lock: threading.Lock,
+           stop: threading.Event) -> None:
+    port = open_port(dev, baud)
+    while not stop.is_set():
+        try:
+            raw = port.readline().decode("utf-8", "replace").strip()
+        except Exception as e:
+            with lock:
+                out.write(f"# {datetime.now().isoformat(timespec='seconds')} "
+                          f"{side.name} PORT ERROR {e}\n")
+            break
+        if not raw:
+            continue
+        now  = datetime.now()
+        iso  = now.isoformat(timespec="seconds")
+        side.alive = time.time()
+        m = LINE.search(raw)
+        with lock:
+            if not m:
+                # FIRST REFUSAL, *** WEDGED, scan notices, the banner. Kept in
+                # the same file as the numbers, in time order, because that is
+                # how they will be read.
+                side.notes.append(f"{iso} {raw}")
+                out.write(f"# {iso} {side.name} {raw}\n")
+                print(f"  · [{side.name}] {raw}")
+            else:
+                d = m.groupdict()
+                side.last = d
+                side.seen += 1
+                out.write(f"{iso},{side.name}," + ",".join(d[k] for k in FIELDS) + "\n")
+
+
+def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
+           baud: int, every: int) -> None:
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, f"{tag}-{datetime.now():%Y%m%d-%H%M}.csv")
+
+    tx = Side("tx")
+    rx = Side("rx") if rx_dev else None
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    print(f"recording -> {path}")
+    print(f"  tx {tx_dev}")
+    print(f"  rx {rx_dev}" if rx_dev else "  rx (not connected — the arriving/"
+          "not-arriving question cannot be answered)")
+    print("Ctrl-C to stop and summarise.\n")
+
+    started = time.time()
+    with open(path, "w", buffering=1) as f:
+        f.write("wall_iso,side," + ",".join(FIELDS) + "\n")
+        threads = [threading.Thread(target=reader, args=(tx_dev, baud, tx, f, lock, stop),
+                                    daemon=True)]
+        if rx_dev:
+            threads.append(threading.Thread(target=reader,
+                                            args=(rx_dev, baud, rx, f, lock, stop),
+                                            daemon=True))
+        for t in threads:
+            t.start()
+
+        last_floor = 0
+        base_rx = None
+        try:
+            while True:
+                time.sleep(every)
+                with lock:
+                    t_last, r_last = dict(tx.last), dict(rx.last) if rx else {}
+                if not t_last:
+                    print("  (waiting for the TX board — has it been told 'go'?)")
+                    continue
+
+                floor  = int(t_last["floor"])
+                issued = int(t_last["issued"])
+                cbs    = int(t_last["cb_ok"]) + int(t_last["cb_fail"])
+                line = (f"  t={t_last['t']:>6}s issued={issued:<9} cb={cbs:<9} "
+                        f"in_flight={t_last['in_flight']:<4} floor={floor:<4} "
+                        f"refused={t_last['refused']}")
+
+                if r_last:
+                    got = int(r_last["rx"])
+                    if base_rx is None:
+                        base_rx = got
+                    # The comparison only one logger can make: what the sender
+                    # thinks it completed, against what the receiver actually
+                    # got. They diverge in the interesting case.
+                    line += f" | rx_got={got - base_rx}"
+                    if cbs and (got - base_rx) > cbs * 1.05:
+                        line += "  <-- ARRIVING WITHOUT CALLBACKS"
+                    if time.time() - rx.alive > 10:
+                        line += "  <-- RX BOARD SILENT"
+                print(line)
+
+                if floor > last_floor:
+                    print(f"  FLOOR {last_floor} -> {floor}   buffers not coming "
+                          f"back — this is the leak")
+                    last_floor = floor
+        except KeyboardInterrupt:
+            stop.set()
+
+    summarise_run(path, time.time() - started)
+
+
+def read_csv(path: str):
+    rows = []
+    with open(path) as f:
+        for line in f:
+            if line.startswith("#") or line.startswith("wall_iso"):
+                continue
+            p = line.strip().split(",")
+            if len(p) != len(FIELDS) + 2:
+                continue
+            d = dict(zip(FIELDS, p[2:]))
+            d["side"] = p[1]
+            rows.append(d)
+    return rows
+
+
+def summarise_run(path: str, secs: float) -> None:
+    rows = read_csv(path)
+    txr = [r for r in rows if r["side"] == "tx"]
+    rxr = [r for r in rows if r["side"] == "rx"]
+    print(f"\n{path}")
+    print(f"  ran {secs / 60:.1f} min")
+    if not txr:
+        print("  no TX samples — was the board told 'go'?")
+        return
+    last = txr[-1]
+    lost = int(last["issued"]) - int(last["cb_ok"]) - int(last["cb_fail"])
+    ref  = next((r["t"] for r in txr if int(r["refused"])), None)
+    wed  = next((r["t"] for r in txr if int(r["nomem"]) > 50), None)
+    print(f"  issued             {last['issued']}")
+    print(f"  callbacks          {int(last['cb_ok']) + int(last['cb_fail'])}")
+    print(f"  never returned     {lost}")
+    print(f"  floor reached      {last['floor']}")
+    print(f"  first refusal at   {ref + 's' if ref else 'never'}")
+    print(f"  wedged at          {wed + 's' if wed else 'never'}")
+    if rxr:
+        got = int(rxr[-1]["rx"]) - int(rxr[0]["rx"])
+        print(f"  receiver got       {got}")
+        cbs = int(last["cb_ok"]) + int(last["cb_fail"])
+        if lost > 20 and got > cbs * 1.05:
+            print("  -> frames ARRIVED that never produced a callback. The radio "
+                  "sent them;\n     the callback is the fault, and the pool leaks "
+                  "because of it.")
+        elif lost > 20:
+            print("  -> frames stopped arriving as the callbacks stopped. The "
+                  "transmit path\n     itself is down, not just the notification.")
+    else:
+        print("  receiver           not connected")
+    if int(last["floor"]) == 0 and ref is None:
+        print("  -> no leak in this run. That is a result: it rules this "
+              "configuration out.")
+
+
+def compare(paths: list[str]) -> None:
+    """Two runs differing in one variable, read against each other. That
+    comparison is the finding; a single run says almost nothing."""
+    print(f"{'run':<32} {'mins':>6} {'issued':>9} {'lost':>6} {'floor':>6} "
+          f"{'rx_got':>8} {'1st ref':>9} {'wedged':>8}")
+    for p in sorted(paths):
+        rows = read_csv(p)
+        txr = [r for r in rows if r["side"] == "tx"]
+        rxr = [r for r in rows if r["side"] == "rx"]
+        name = os.path.basename(p)
+        if not txr:
+            print(f"{name:<32} {'(no tx samples)':>6}")
+            continue
+        last = txr[-1]
+        lost = int(last["issued"]) - int(last["cb_ok"]) - int(last["cb_fail"])
+        ref  = next((r["t"] for r in txr if int(r["refused"])), None)
+        wed  = next((r["t"] for r in txr if int(r["nomem"]) > 50), None)
+        got  = (int(rxr[-1]["rx"]) - int(rxr[0]["rx"])) if rxr else None
+        print(f"{name:<32} {int(last['t']) / 60:6.1f} {last['issued']:>9} "
+              f"{lost:>6} {last['floor']:>6} "
+              f"{(got if got is not None else '-'):>8} "
+              f"{(ref + 's') if ref else 'never':>9} "
+              f"{(wed + 's') if wed else 'never':>8}")
+    print("\n'lost' is issued minus callbacks — buffers the stack never gave "
+          "back.\n'rx_got' is what the other board actually received. lost high "
+          "with rx_got\nhealthy means the frames went out and only the callback "
+          "was missing.")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--tx", help="serial port of the sending board")
+    ap.add_argument("--rx", help="serial port of the receiving board")
+    ap.add_argument("--tag", default="run",
+                    help="name the run after its variables, e.g. cap0-rate50-load40")
+    ap.add_argument("--outdir", default="bench-logs")
+    ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--every", type=int, default=10,
+                    help="seconds between status lines (default 10)")
+    ap.add_argument("--compare", nargs="+", metavar="CSV",
+                    help="summarise finished runs side by side")
+    a = ap.parse_args()
+
+    if a.compare:
+        files = [f for pat in a.compare for f in glob.glob(pat)] or a.compare
+        compare(files)
+        return
+    if not a.tx:
+        ap.error("give --tx (and ideally --rx), or --compare some CSVs")
+    record(a.tx, a.rx, a.tag, a.outdir, a.baud, a.every)
+
+
+if __name__ == "__main__":
+    main()

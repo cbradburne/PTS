@@ -3,11 +3,26 @@
 Two boards on a desk, both on USB serial, existing only to reproduce and then
 kill the ESP-NOW transmit wedge that takes a mount off the air.
 
+## What you need
+
+| | board | why that one |
+|---|---|---|
+| **TX** — the mount | an **AMOLED** bridge board (spare, or one off a mount) | It is the board that wedges. The `load` experiment puts back the PSRAM/display work this firmware leaves out, and that only means something on the same silicon. |
+| **RX** — the hub | **any ESP32-S3** — a hub-eth board, a satellite, or a plain S3 devkit | It only has to receive and ACK. It is not the suspect. |
+| | **two USB cables to the same PC** | Both boards logged on one clock. See below — it is what answers the question. |
+
+Nothing else. No Teensy, no display panel needed on the AMOLED, no hub, no
+network. The two boards can sit a foot apart on a desk.
+
 ```bash
-tools/build.sh flash bench /dev/cu.usbmodemXXXX     # same binary on both boards
+tools/build.sh flash bench   /dev/cu.usbmodemAAAA    # the AMOLED  (OPI PSRAM)
+tools/build.sh flash benchrx /dev/cu.usbmodemBBBB    # the S3      (no PSRAM)
 ```
 
-On one board type `role rx` — it reboots and prints its MAC. On the other:
+Two targets because the FQBNs differ — an AMOLED build flashed to a board with
+no octal PSRAM does not boot. Same source either way.
+
+On the RX board type `role rx` — it reboots and prints its MAC. On the TX board:
 
 ```
 role tx
@@ -18,6 +33,43 @@ go
 
 Both boards persist their settings in NVS, so an overnight run survives a power
 cut and resumes where it was. `help` lists every command.
+
+## Logging both boards
+
+```bash
+python3 -m pip install pyserial
+tools/bench_log.py --tx /dev/cu.usbmodemAAAA --rx /dev/cu.usbmodemBBBB \
+                   --tag cap0-rate50
+```
+
+One logger, both boards, one PC clock across the pair — which is not
+convenience, it is the only way to ask the question the bench exists for:
+
+**when the callbacks stop, are the frames still arriving?**
+
+- **arriving, no callbacks** → the radio is fine and the *callback* is the fault.
+  The pool leaks because buffers are never returned, not because sends fail.
+- **frames stop too** → the transmit path really is down and the callback is
+  telling the truth.
+
+Those want opposite fixes, and the TX board alone cannot tell them apart — its
+counters go quiet either way. The logger says which, in as many words, at the
+end of every run.
+
+Runs land in `bench-logs/` as CSV. Compare them:
+
+```bash
+tools/bench_log.py --compare bench-logs/*.csv
+```
+
+```
+run                       mins   issued   lost  floor  rx_got  1st ref  wedged
+cap0-rate50-...csv         9.8    30000  15000  14995   29500     410s    410s
+cap1-rate50-...csv       840.0  2520000      3      0 2519997    never   never
+```
+
+That table is the deliverable. Two runs differing in one variable is a finding;
+one run on its own is an anecdote.
 
 ## What the numbers mean
 
@@ -121,17 +173,6 @@ phy def      # then reboot
 1 Mbps with a long preamble buys 6–10 dB of range and makes every frame roughly
 eight times longer on air. Longer frames mean longer in flight, and more of them
 outstanding at the same send rate.
-
-## Recording a run
-
-The serial output is one line per second and already CSV-ish:
-
-```bash
-screen -L -Logfile bench-cap0-rate50.log /dev/cu.usbmodemXXXX 115200
-```
-
-Name the file after the variables. A run that does not wedge is a result and
-worth keeping — it is what rules a hypothesis out.
 
 ## What a finding looks like
 
