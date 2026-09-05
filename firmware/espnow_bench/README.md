@@ -132,10 +132,14 @@ t=612s issued=30600 cb_ok=30594 cb_fail=0 refused=0 nomem=0
        in_flight=6 floor=0 max=9 rx=0 heap=284512 err=0x0 cmd=1220 ack=1220
 ```
 
-`cmd` is commands received, `ack` the replies sent for them. Both read 0 unless
-`poll` is on. `max` is the high-water mark of `in_flight`, and with `poll` on it
-is the first thing to look at: **`max` still 1 means no overlap and the run is
-testing nothing new.**
+`cmd` is commands received, `ack` the replies sent for them, and **`ovl` is the
+number of times `in_flight` went above 1** — two buffers out of the pool at once.
+All three read 0 unless `poll` is on.
+
+`ovl` is the first thing to look at with `poll` running. **`ovl` still 0 means no
+overlap and the run is testing nothing new.** It is counted per transition and
+sampled every loop pass, which matters: an overlap lasts about a millisecond, so
+anything sampled once a second sees almost none of them.
 
 **`in_flight = issued − (cb_ok + cb_fail)`** is the whole point. It is the number
 of buffers `esp_now_send()` has taken from the stack's pool that the

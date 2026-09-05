@@ -26,7 +26,8 @@ import bench_log
 
 OLD = ("t=612s issued=30600 cb_ok=30594 cb_fail=0 refused=0 nomem=0 "
        "in_flight=6 floor=0 max=9 rx=0 heap=284512 err=0x0")
-NEW = OLD + " cmd=1220 ack=1220"
+MID = OLD + " cmd=1220 ack=1220"           # the build that could not see overlap
+NEW = MID + " ovl=47"
 
 m = bench_log.LINE.search(OLD)
 assert m, "the previous build's line no longer parses — half a run would be lost"
@@ -36,13 +37,19 @@ assert row[-2:] == ["0", "0"], f"missing cmd/ack should read 0, got {row[-2:]}"
 assert None not in row, "a None would raise inside the join and kill the reader"
 print(f"   old line -> {len(row)} columns, cmd/ack default to 0     OK")
 
+m = bench_log.LINE.search(MID)
+assert m, "the intermediate build's line does not parse"
+assert (m.group("cmd"), m.group("ack"), m.group("ovl")) == ("1220", "1220", None), \
+    f"cmd/ack build misread: {m.groupdict()}"
+
 m = bench_log.LINE.search(NEW)
 assert m, "the new line does not parse at all"
 d = m.groupdict()
 assert d["cmd"] == "1220" and d["ack"] == "1220", f"cmd/ack misread: {d}"
+assert d["ovl"] == "47", f"the overlap count misread: {d}"
 assert d["heap"] == "284512" and d["err"] == "0x0", \
-    "the optional group ate part of the line before it"
-print("   new line -> cmd=1220 ack=1220, nothing else disturbed  OK")
+    "an optional group ate part of the line before it"
+print("   new line -> cmd/ack/ovl read, nothing else disturbed  OK")
 
 # The header the reader writes must match the row width, or every column after
 # the break is silently misaligned.
@@ -115,10 +122,47 @@ assert "_cmd_rx = 0" in reset and "_cmd_acked = 0" in reset, \
     "    that arrived before it"
 print("   both counters zeroed by the same reset             OK")
 
-# ---- 5. poll 0 is the old bench, byte for byte -----------------------------
+# ---- 5. the overlap is sampled fast enough to see ---------------------------
+# The whole verdict rests on this. An overlap lasts about a millisecond;
+# report() runs once a second. Tracking the high water mark there missed
+# essentially all of them, and said so plainly in a real run: a board sending
+# 20 frames a second logged max=0 — never one in flight, which cannot be true.
+# The board then declared NO OVERLAP, which was a fact about the sampler.
+print("\n5. sampling rate of the instrument:")
+rep = INO[INO.index("static void report("):]
+rep = rep[:rep.index("\n}")]
+for counter in ("_max_in_flight =", "_overlaps ="):
+    assert counter not in rep, \
+        f"{counter.split(' ')[0]} is updated inside report(), which runs once a\n" \
+        "    second. A millisecond-long overlap between two reports is invisible,\n" \
+        "    and the run reports 'no overlap' having never looked."
+
+lp = INO[INO.index("void loop()"):]
+floor_blk = lp[lp.index("static uint32_t floor_win_ms"):]
+floor_blk = floor_blk[:floor_blk.index("// ---- ", 10)]
+assert "if (inf > _max_in_flight) _max_in_flight = inf;" in floor_blk, \
+    "the high water mark is not tracked beside the floor, at loop rate"
+assert "_overlaps = _overlaps + 1" in floor_blk, \
+    "overlaps are not counted at loop rate"
+assert "prev_inf <= 1" in floor_blk, \
+    "overlap is counted per sample rather than per transition — a loop running\n" \
+    "    tens of thousands of times a second would score one 1 ms overlap dozens\n" \
+    "    of times, and the count would measure loop speed"
+print("   max and overlaps tracked in loop(), not report()   OK")
+print("   counted on the transition, so it counts events      OK")
+
+# The verdict has to read the counter that can actually see one.
+verdict = INO[INO.index("static bool overlap_said"):]
+verdict = verdict[:verdict.index("static bool overlap_warned")]
+assert "_overlaps" in verdict, \
+    "the OVERLAP announcement still keys off the high water mark rather than the\n" \
+    "    event count"
+print("   the announcement reads the event count             OK")
+
+# ---- 6. poll 0 is the old bench, byte for byte -----------------------------
 # Two runs that differ in one variable is the whole method. If poll changed
 # anything while off, last night's three hours stop being a baseline.
-print("\n5. poll 0:")
+print("\n6. poll 0:")
 for guard in ("_cfg.poll_hz && _rx_peer_ready", "_cfg.role == 2"):
     assert guard in body, f"the poll stream is not guarded by {guard}"
 print("   the command stream is off unless poll and role rx  OK")

@@ -156,6 +156,7 @@ static volatile uint32_t _cmd_rx    = 0;   // command frames in   (callback only
 static uint32_t          _cmd_acked = 0;   // replies attempted   (loop only)
 
 static uint32_t _max_in_flight  = 0;
+static uint32_t _overlaps       = 0;   // times in_flight went above 1
 static uint32_t _t_start_ms     = 0;
 static uint32_t _t_first_ref_ms = 0;   // when the FIRST refusal happened
 static uint32_t _t_wedge_ms     = 0;   // when refusals became continuous
@@ -359,19 +360,19 @@ static bool bench_send(const uint8_t *peer, uint8_t type, uint16_t len,
 // ---------------------------------------------------------------------------
 
 static void report(uint32_t now) {
-    uint32_t inf = in_flight();
-    if (inf > _max_in_flight) _max_in_flight = inf;
+    uint32_t inf = in_flight();   // max/overlap are tracked in loop(), at loop rate
     Serial.printf(
         "t=%lus issued=%lu cb_ok=%lu cb_fail=%lu refused=%lu nomem=%lu "
         "in_flight=%lu floor=%lu max=%lu rx=%lu heap=%lu err=0x%lX "
-        "cmd=%lu ack=%lu\n",
+        "cmd=%lu ack=%lu ovl=%lu\n",
         (unsigned long)((now - _t_start_ms) / 1000UL),
         (unsigned long)_issued, (unsigned long)_cb_ok, (unsigned long)_cb_fail,
         (unsigned long)_refused, (unsigned long)_nomem,
         (unsigned long)inf, (unsigned long)_in_flight_floor,
         (unsigned long)_max_in_flight, (unsigned long)_rx_count,
         (unsigned long)ESP.getFreeHeap(), (unsigned long)_last_err,
-        (unsigned long)_cmd_rx, (unsigned long)_cmd_acked);
+        (unsigned long)_cmd_rx, (unsigned long)_cmd_acked,
+        (unsigned long)_overlaps);
 }
 
 static void counters_reset() {
@@ -384,7 +385,7 @@ static void counters_reset() {
     // _cmd_rx), so zeroing one without the other spins out a burst of ACKs for
     // commands that arrived before the run started.
     _cmd_rx = 0; _cmd_acked = 0;
-    _max_in_flight = _in_flight_floor = _consec_refused = 0;
+    _max_in_flight = _in_flight_floor = _consec_refused = _overlaps = 0;
     _t_start_ms = millis();
     _t_first_ref_ms = _t_wedge_ms = 0;
 }
@@ -688,6 +689,23 @@ void loop() {
     static uint32_t floor_min    = 0xFFFFFFFF;
     uint32_t inf = in_flight();
     if (inf < floor_min) floor_min = inf;
+
+    // The high water mark and the overlap count belong HERE, at loop rate, not
+    // in report().
+    //
+    // report() runs once a second and an overlap lasts about a millisecond, so
+    // sampling there sees almost none of them. It said so itself: a board
+    // sending 20 frames a second reported max=0 — never one in flight, which
+    // cannot be true. Every "no overlap" verdict taken that way was measuring
+    // the sampler.
+    //
+    // Counted on the transition rather than per sample: a 1 ms overlap seen by
+    // a loop running tens of thousands of times a second would otherwise score
+    // dozens.
+    static uint32_t prev_inf = 0;
+    if (inf > _max_in_flight) _max_in_flight = inf;
+    if (inf > 1 && prev_inf <= 1) _overlaps = _overlaps + 1;
+    prev_inf = inf;
     if (now - floor_win_ms >= 5000UL) {
         floor_win_ms = now;
         if (floor_min != 0xFFFFFFFF && floor_min > _in_flight_floor)
@@ -736,12 +754,25 @@ void loop() {
     // managed that is a thirty-second question, and finding out from a clean
     // twelve-hour log that the answer was no is the waste worth preventing.
     static bool overlap_said = false;
-    if (!overlap_said && _max_in_flight > 1) {
+    if (!overlap_said && _overlaps) {
         overlap_said = true;
-        Serial.printf("[bench] OVERLAP — in_flight reached %lu. Two sends are "
-                      "outstanding at once,\n        which the metronome alone "
-                      "never managed in three hours.\n",
-                      (unsigned long)_max_in_flight);
+        Serial.printf("[bench] OVERLAP — two sends outstanding at once, %lus in. "
+                      "The metronome\n        alone never managed it in three "
+                      "hours. Watch 'ovl' from here: if\n        the leak tracks "
+                      "it, that is the mechanism.\n",
+                      (unsigned long)((now - _t_start_ms) / 1000UL));
+    }
+    // Rate, not just the fact. Tuning `poll` needs to know whether overlap is
+    // happening twice an hour or twice a second, and the answer decides whether
+    // an overnight run is worth starting.
+    static uint32_t overlap_said_ms = 0;
+    if (overlap_said && (now - overlap_said_ms) >= 300000UL) {
+        overlap_said_ms = now;
+        uint32_t secs = (now - _t_start_ms) / 1000UL;
+        if (secs) Serial.printf("[bench] overlaps %lu in %lus — %lu per 1000 "
+                                "sends\n", (unsigned long)_overlaps,
+                                (unsigned long)secs,
+                                (unsigned long)(_issued ? _overlaps * 1000UL / _issued : 0));
     }
     static bool overlap_warned = false;
     if (!overlap_warned && !overlap_said && _cfg.running && _cfg.role == 1 &&

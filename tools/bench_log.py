@@ -50,10 +50,10 @@ LINE = re.compile(
     r"cb_fail=(?P<cb_fail>\d+) refused=(?P<refused>\d+) nomem=(?P<nomem>\d+) "
     r"in_flight=(?P<in_flight>\d+) floor=(?P<floor>\d+) max=(?P<max>\d+) "
     r"rx=(?P<rx>\d+) heap=(?P<heap>\d+) err=(?P<err>0x[0-9A-Fa-f]+)"
-    r"(?: cmd=(?P<cmd>\d+) ack=(?P<ack>\d+))?")
+    r"(?: cmd=(?P<cmd>\d+) ack=(?P<ack>\d+))?(?: ovl=(?P<ovl>\d+))?")
 
 FIELDS = ("t", "issued", "cb_ok", "cb_fail", "refused", "nomem",
-          "in_flight", "floor", "max", "rx", "heap", "err", "cmd", "ack")
+          "in_flight", "floor", "max", "rx", "heap", "err", "cmd", "ack", "ovl")
 
 
 def open_port(dev: str, baud: int, fatal: bool = True):
@@ -258,9 +258,9 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
                 # but max still 1 is a metronome with extra steps, and the
                 # sooner that is on screen the less of a night it wastes.
                 if int(t_last.get("cmd") or 0):
-                    hwm = int(t_last["max"])
-                    line += f" | acked={t_last['ack']} peak={hwm}"
-                    line += "  <-- OVERLAP" if hwm > 1 else "  <-- STILL NO OVERLAP"
+                    ovl = int(t_last.get("ovl") or 0)
+                    line += f" | acked={t_last['ack']} peak={t_last['max']} ovl={ovl}"
+                    line += "" if ovl else "  <-- STILL NO OVERLAP"
 
                 if r_last:
                     got = int(r_last["rx"])
