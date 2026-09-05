@@ -42,14 +42,18 @@ import threading
 import time
 from datetime import datetime
 
+# cmd/ack are optional so a board still running the previous build logs rather
+# than falling through to the notes as unparsed text — which is what a strict
+# regex does when only one of the two boards has been flashed.
 LINE = re.compile(
     r"t=(?P<t>\d+)s issued=(?P<issued>\d+) cb_ok=(?P<cb_ok>\d+) "
     r"cb_fail=(?P<cb_fail>\d+) refused=(?P<refused>\d+) nomem=(?P<nomem>\d+) "
     r"in_flight=(?P<in_flight>\d+) floor=(?P<floor>\d+) max=(?P<max>\d+) "
-    r"rx=(?P<rx>\d+) heap=(?P<heap>\d+) err=(?P<err>0x[0-9A-Fa-f]+)")
+    r"rx=(?P<rx>\d+) heap=(?P<heap>\d+) err=(?P<err>0x[0-9A-Fa-f]+)"
+    r"(?: cmd=(?P<cmd>\d+) ack=(?P<ack>\d+))?")
 
 FIELDS = ("t", "issued", "cb_ok", "cb_fail", "refused", "nomem",
-          "in_flight", "floor", "max", "rx", "heap", "err")
+          "in_flight", "floor", "max", "rx", "heap", "err", "cmd", "ack")
 
 
 def open_port(dev: str, baud: int, fatal: bool = True):
@@ -137,7 +141,8 @@ def reader(dev: str, baud: int, side: Side, ports: dict, out,
                 d = m.groupdict()
                 side.last = d
                 side.seen += 1
-                out.write(f"{iso},{side.name}," + ",".join(d[k] for k in FIELDS) + "\n")
+                out.write(f"{iso},{side.name},"
+                          + ",".join(d[k] or "0" for k in FIELDS) + "\n")
 
 
 def console(ports: dict, out, lock: threading.Lock, stop: threading.Event) -> None:
@@ -248,6 +253,14 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
                 line = (f"  t={t_last['t']:>6}s issued={issued:<9} cb={cbs:<9} "
                         f"in_flight={t_last['in_flight']:<4} floor={floor:<4} "
                         f"refused={t_last['refused']}")
+
+                # Whether `poll` is doing its job. A run with commands flowing
+                # but max still 1 is a metronome with extra steps, and the
+                # sooner that is on screen the less of a night it wastes.
+                if int(t_last.get("cmd") or 0):
+                    hwm = int(t_last["max"])
+                    line += f" | acked={t_last['ack']} peak={hwm}"
+                    line += "  <-- OVERLAP" if hwm > 1 else "  <-- STILL NO OVERLAP"
 
                 if r_last:
                     got = int(r_last["rx"])
