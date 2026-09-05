@@ -61,6 +61,9 @@ tools/bench_log.py --tx /dev/cu.usbmodemAAAA --rx /dev/cu.usbmodemBBBB \
                    --tag cap0-rate50
 ```
 
+(`python3 tools/bench_log.py …` works too, and is what to reach for if the
+executable bit has not survived however the repo reached your machine.)
+
 One logger, both boards, one PC clock across the pair — which is not
 convenience, it is the only way to ask the question the bench exists for:
 
