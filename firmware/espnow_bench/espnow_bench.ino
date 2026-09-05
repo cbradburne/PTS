@@ -247,7 +247,8 @@ static void print_help() {
     Serial.println(
       "\n espnow_bench — one fault, nothing else\n"
       "   role tx|rx|idle      what this board is (persists)\n"
-      "   peer AA:BB:...       who TX sends to (persists)\n"
+      "   peer AA:BB:...       the RECEIVER's MAC — who this board sends TO.\n"
+      "                        Read it off the RX board's boot line. (persists)\n"
       "   chan <1-13>          WiFi channel\n"
       "   rate <Hz>            sends per second\n"
       "   size <8-240>         payload bytes\n"
@@ -293,10 +294,26 @@ static void handle_line(char *line) {
         ESP.restart();
     }
     if (!strcmp(cmd, "peer") && a1) {
-        if (!parse_mac(a1, _cfg.peer)) { Serial.println("[bench] bad MAC"); return; }
+        uint8_t want[6];
+        if (!parse_mac(a1, want)) { Serial.println("[bench] bad MAC"); return; }
+        // Your own MAC is the one mistake worth catching, because it is the
+        // easy one to make: `peer` is who this board SENDS TO, so on the TX it
+        // is the RECEIVER's MAC. Point it at yourself and every send goes
+        // nowhere, in a way that looks exactly like a dead radio.
+        uint8_t mine[6];
+        esp_wifi_get_mac(WIFI_IF_STA, mine);
+        if (!memcmp(want, mine, 6)) {
+            Serial.println("[bench] that is MY OWN MAC. 'peer' is who this board "
+                           "sends TO —\n        on the TX board that is the RX "
+                           "board's MAC, the one it\n        prints on boot. Not "
+                           "set.");
+            return;
+        }
+        memcpy(_cfg.peer, want, 6);
         cfg_save();
         mac_str(_cfg.peer, buf);
-        Serial.printf("[bench] peer %s — reboot or 'go' to apply\n", buf);
+        Serial.printf("[bench] peer %s — I will send TO that board. "
+                      "reboot or 'go' to apply\n", buf);
         return;
     }
     if (!strcmp(cmd, "chan") && a1) { _cfg.channel = atoi(a1); cfg_save();
@@ -354,8 +371,8 @@ void setup() {
                   buf, _cfg.channel);
     if (_cfg.role == 1) {
         mac_str(_cfg.peer, buf);
-        Serial.printf("[bench] peer=%s rate=%uHz size=%u cap=%u load=%u/%ums "
-                      "scan=%us phy=%s\n",
+        Serial.printf("[bench] sending TO %s | rate=%uHz size=%u cap=%u "
+                      "load=%u/%ums scan=%us phy=%s\n",
                       buf, _cfg.rate_hz, _cfg.size, _cfg.cap,
                       _cfg.load_ms, _cfg.load_period_ms, _cfg.scan_period_s,
                       _cfg.phy_lr ? "1M-LR" : "default");

@@ -38,13 +38,18 @@ boards for you** (see below), and it records what you typed into the run file.
 Start it first, then set the boards up through it:
 
 ```
-rx role rx                     # the receiver reboots and prints its MAC
+rx role rx                     # the receiver reboots and prints ITS OWN MAC
 role tx
-peer AA:BB:CC:DD:EE:FF         # the MAC it just printed
+peer AA:BB:CC:DD:EE:FF         # <- that MAC. The RECEIVER's, not the TX's.
 go
 ```
 
 Plain text goes to the TX board; prefix with `rx ` for the receiver.
+
+**`peer` is who the board sends TO.** On the TX board that is the *receiver's*
+MAC — the one the RX board printed a moment ago. The RX board never needs a peer
+of any kind. Typing the TX's own MAC there is the easy mistake and it looks
+exactly like a dead radio, so the board refuses it and says why.
 
 On the RX board `role rx` makes it reboot and print its MAC, say it needs
 nothing from you, and then:
