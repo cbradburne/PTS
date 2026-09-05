@@ -1189,12 +1189,32 @@ class Bridge:
                      mount, rssi, sname, flags, hrs, uptime)
 
     def _log_wedge_side(self, now: float, mount: int = 0) -> None:
-        """At wedge time, log which mount wedged and whether the stall is host-
-        side or hub-side using the hub's USB-RX counters.  We keep transmitting
-        during a wedge (a ping every ~1 s plus idle probes), so the hub should
-        keep receiving bytes if the OUT pipe is healthy.  If its RX counter has
-        frozen, our bytes aren't arriving → host-side (Windows USB-CDC OUT halt).
-        If it's still climbing, bytes arrive but aren't forwarded → hub-side."""
+        """At wedge time, say WHERE the stall is — with only the evidence to hand.
+
+        The hub's USB-RX counters answer one question: are our bytes reaching
+        the hub?  Frozen means they are not (host-side, a Windows USB-CDC OUT
+        halt).  Climbing means they are.
+
+        Climbing does NOT mean the hub is at fault, and this used to say it did:
+        "HUB-SIDE — bytes ARE reaching the hub but aren't forwarded; fix is in
+        hub firmware".  That is a false dichotomy — it rules out the host and
+        then blames the hub without ever having looked past it.  The mount is
+        the third possibility and, on this rig, the usual one.
+
+        Logged on 2026-09-04 19:47, one line apart:
+
+            → HUB-SIDE — ... fix is in hub firmware
+            Mount 1 unreachable 12.8s, but mount 4 is still ACKing — ...
+            this is mount-side. Not touching the hub; mount 1 likely needs a
+            power cycle.
+
+        The second was right: cam1's bridge had run its ESP-NOW stack out of
+        memory and rebooted itself a second later.  The first was the more
+        alarming of the two and would have sent someone into hub firmware.
+
+        So the mount is ruled out before the hub is blamed, using the check
+        that already existed for it — an ACK from any OTHER mount proves the
+        hub's transmit path works, which leaves the silent mount as the fault."""
         if self._hub_diag_rx_t is None:
             # Say what is actually unknown.  "Firmware may predate the
             # diagnostic" was written when USB was the only transport and was
@@ -1215,8 +1235,20 @@ class Bridge:
             verdict = ("HOST-SIDE — our bytes are NOT reaching the hub "
                        "(Windows USB-CDC OUT halt); fix is host port/cable/driver")
         else:
-            verdict = ("HUB-SIDE — bytes ARE reaching the hub but aren't forwarded; "
-                       "fix is in hub firmware")
+            peer = self._hub_tx_proven_ok(now, mount) if mount else 0
+            if peer:
+                verdict = (f"MOUNT-SIDE — our bytes reach the hub, and mount {peer} "
+                           f"is still ACKing, so the hub forwards fine. Mount {mount} "
+                           "is the fault; check its bridge, not the hub")
+            elif mount:
+                verdict = ("HUB-SIDE OR MOUNT-SIDE — our bytes reach the hub, but no "
+                           "other mount is ACKing either, so nothing here separates a "
+                           "hub that has stopped forwarding from a mount that has "
+                           "stopped answering. Power one other mount on to tell them "
+                           "apart")
+            else:
+                verdict = ("PAST THE HUB — our bytes reach the hub, so the host and "
+                           "the OUT pipe are fine; the fault is downstream of it")
         log.warning("WEDGE mount=%d host/hub: hub_rx_bytes=%d pkts=%d | hub last received "
                     "PC bytes %.1fs ago | last diag %.1fs ago → %s",
                     mount, self._hub_rx_bytes, self._hub_rx_pkts, since_adv, since_diag, verdict)
