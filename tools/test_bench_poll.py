@@ -175,4 +175,54 @@ assert cfg.rstrip().endswith("poll_hz;   // RX only: commands per second sent AT
     "    silently changing every setting the bench has saved"
 print("   poll_hz appended last, so saved settings survive   OK")
 
+# ---- 7. the one alarm that has to be right -------------------------------
+# "Frames arriving while the callbacks stopped" is the question the whole bench
+# exists to answer, and it is the alarm most easily believed. It used to compare
+# cumulative rx against cumulative callbacks — counters with different origins,
+# because `go` zeroes the TX's and not the receiver's. A real run flew it on
+# every line for a constant 742-frame offset while cb == issued throughout,
+# which is the exact opposite of the fault.
+print("\n7. arriving-without-callbacks:")
+src = (REPO / "tools/bench_log.py").read_text()
+blk = src[src.index("if r_last:"):src.index("if floor > last_floor")]
+assert "d_got" in blk and "d_cb" in blk, \
+    "the alarm is back to comparing cumulative totals, which cannot survive the\n" \
+    "    TX and RX counting from different moments"
+assert "issued < prev_issued" in blk, \
+    "rx_got is not re-baselined when the TX's counters reset, so it reads high\n" \
+    "    by however many frames arrived before `go`"
+
+
+def alarm(samples):
+    """Replay (issued, cbs, rx) samples through the alarm's arithmetic."""
+    fired, prev_i = [], (None, None, None)
+    for issued, cbs, got in samples:
+        pi, pc, pg = prev_i
+        d_got = got - pg if pg is not None else -1
+        d_cb  = cbs - pc if pc is not None else -1
+        d_iss = issued - pi if pi is not None else -1
+        fired.append(d_got > 0 and d_iss > 0 and d_cb >= 0 and d_cb < d_got * 0.1)
+        prev_i = (issued, cbs, got)
+    return fired
+
+
+# The real run, verbatim: a constant 742 offset, every send answered.
+healthy = [(2058, 2058, 2800), (3458, 3458, 4200),
+           (4858, 4858, 5600), (6258, 6258, 7000)]
+assert not any(alarm(healthy)), \
+    "a healthy board with an offset baseline still trips the alarm"
+print("   constant 742 offset, cb == issued  -> silent      OK")
+
+# The fault: sends still accepted, frames still landing, callbacks stopped.
+wedging = [(2058, 2058, 2800), (3458, 2058, 4200), (4858, 2058, 5600)]
+assert alarm(wedging)[1:] == [True, True], \
+    "callbacks stopped while frames keep arriving and the alarm stayed quiet —\n" \
+    "    this is the one case the bench exists to catch"
+print("   callbacks stop, frames keep landing -> fires      OK")
+
+# A reboot on either side must not read as the fault.
+assert not any(alarm([(6258, 6258, 7000), (14, 14, 20), (1414, 1414, 1420)])), \
+    "a restart reads as the fault"
+print("   a restart on either board            -> silent    OK")
+
 print("\nALL CHECKS PASSED")

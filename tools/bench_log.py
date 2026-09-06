@@ -228,6 +228,7 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
 
         last_floor = 0
         base_rx = None
+        prev_cbs = prev_got = prev_issued = None
         try:
             while True:
                 time.sleep(every)
@@ -266,14 +267,35 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
                     got = int(r_last["rx"])
                     if base_rx is None or got < base_rx:
                         base_rx = got        # first sample, or the board rebooted
+                    # `go` on the TX zeroes ITS counters and not the receiver's,
+                    # so without this the two are counted from different moments
+                    # and rx_got reads permanently high by however many frames
+                    # arrived before the TX was started.
+                    if prev_issued is not None and issued < prev_issued:
+                        base_rx = got
+                    line += f" | rx_got={got - base_rx}"
+
                     # The comparison only one logger can make: what the sender
                     # thinks it completed, against what the receiver actually
                     # got. They diverge in the interesting case.
-                    line += f" | rx_got={got - base_rx}"
-                    if cbs and (got - base_rx) > cbs * 1.05:
+                    #
+                    # Asked as a RATE, not a total. Comparing cumulative rx
+                    # against cumulative callbacks meant comparing two counters
+                    # with different origins, and a run where the TX was started
+                    # second flew this alarm all night on a CONSTANT offset —
+                    # while cb == issued on every single line, which is the
+                    # opposite of the fault. Deltas have no origin to disagree
+                    # about.
+                    d_got = got - prev_got if prev_got is not None else -1
+                    d_cb  = cbs - prev_cbs if prev_cbs is not None else -1
+                    d_iss = issued - prev_issued if prev_issued is not None else -1
+                    if (d_got > 0 and d_iss > 0 and d_cb >= 0
+                            and d_cb < d_got * 0.1):
                         line += "  <-- ARRIVING WITHOUT CALLBACKS"
+                    prev_got = got
                     if time.time() - rx.alive > 10:
                         line += "  <-- RX BOARD SILENT"
+                prev_cbs, prev_issued = cbs, issued
                 print(line)
 
                 if floor > last_floor:
