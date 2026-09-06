@@ -157,6 +157,40 @@ a refusal means the radio will not accept a send, so the report carrying the
 number is the one thing that cannot go out. cam1's own health report 18 seconds
 before it wedged read zero.
 
+## Runs so far
+
+Both clean. Neither reproduced the wedge, and that is a result rather than a
+failure — each one closes off a mechanism the rig can no longer be suspected of.
+
+| run | config | for | sent | overlaps | floor | outcome |
+|---|---|---|---|---|---|---|
+| `cap0-rate50-…1822` | rate 50, cap 0, 1M-LR, no load/scan | **3.0 h** | 542,067 | 0 (`in_flight` never above 1) | 0 | clean |
+| `cap0-rate50-…2313` | rate 200 + poll 20, cap 0, 1M-LR, no load/scan | **13.3 h** | 10,512,753 | 486,030, up to **5** deep | 0 | clean |
+
+Read against the rig, where cam1 wedged after 31.1 h and again after 11.4 h:
+
+- The second run ran **longer than the shorter wedge** and sent **24× more
+  frames** than cam1 could have managed in that time even at a flat-out
+  10.4 sends/s. Not volume.
+- It also stacked **486,030 overlapping sends, five buffers deep**, without
+  losing a single one — 957,735 commands, 957,735 replies, none unanswered, and
+  every send matched by its callback. Not concurrency, and not reply-on-arrival.
+- `floor` sat at 0 for all 47,889 samples and the heap drifted **24 bytes in
+  thirteen hours**. Whatever the mount is doing, this is not it.
+
+Together with what was already known, the field is now:
+
+| ruled out | how |
+|---|---|
+| RF / link quality | clean for hours at −80 dBm while collapsing at −76; cam1 wedges at −33 dBm, cam4 never at −68 dBm |
+| BLE / WiFi coexistence | the wedge predates the Blackmagic code existing at all. Secondarily: the wedge logs come from the work rig, where cam1 has no camera paired, and an unbonded mount never scans |
+| send volume | 542k, then 10.5M, nothing |
+| overlapping sends | 486k overlaps five deep, nothing |
+
+Which leaves the variables this firmware deliberately does **not** have —
+`load` above all. That is now the experiment worth running, and the 13.3 h run
+above is its control: same rates, same cap, same PHY, load the only difference.
+
 ## The experiments, in order
 
 Each one changes exactly one thing. Run the baseline first so you know what
@@ -176,6 +210,9 @@ go
 Leave it. The rig takes 11–31 hours; the bench may be faster because there is
 nothing else competing. If `floor` stays at 0 for a day, the send stream alone
 is **not** the cause and the answer is in one of the variables below.
+
+**Done — clean.** 542,067 sends in 3.0 h, `floor` 0. The send stream alone is
+not the cause.
 
 ### 2. Overlap — the one the first run pointed at
 
@@ -211,6 +248,15 @@ nothing" can both be true.
 `poll 0` restores the previous behaviour exactly, so the pair differs in one
 variable.
 
+**Done — clean.** 13.3 h at `rate 200` + `poll 20`: 10,512,753 sends, 486,030
+overlaps up to five deep, `floor` 0, every command answered. Not concurrency.
+
+One thing that run taught about tuning it: overlap does not scale smoothly with
+the rates. Going from `rate 50`+`poll 20` to `rate 200`+`poll 20` — 4× the data
+rate — took overlap from 0.05/s to **10.4/s**, roughly 200×. It behaves like a
+threshold: at 20 ms spacing sends essentially never touch, at 5 ms they touch
+constantly. So if `ovl` is not moving, raise `rate` rather than nudging `poll`.
+
 ### 3. Rate — is it really rate?
 
 Cutting a satellite's traffic by 88% took it from 36 restarts in 17 hours to
@@ -218,6 +264,10 @@ zero, so rate is the strongest clue there is. Run `rate 10`, `rate 50`,
 `rate 200` and record time-to-first-refusal for each. If the time scales with
 rate, it is a per-send leak and the arithmetic will tell you the leak rate per
 thousand sends.
+
+Partly answered, and awkwardly: 220 sends/s for 13.3 h did nothing, so on the
+bench rate does not reproduce what it plainly governs on the rig. Whatever rate
+is a proxy for out there, it is not the send count and not the overlap.
 
 ### 4. The cap — is the fix three lines?
 
@@ -231,7 +281,11 @@ anything useful about a refusal in the moment"*. If `cap 1` (or 2, or 4) stops
 the floor rising where `cap 0` does not, **that is the fix**, and it is a small
 change to `espnow_tx()`.
 
-### 5. Load — is it the display, not the radio?
+### 5. Load — is it the display, not the radio?  ← RUN THIS NEXT
+
+Everything above came back clean, which promotes this one: it is the largest
+thing the bench does not have. Keep `rate 200` and `poll 20` exactly as they
+were, so the 13.3 h clean run is the control and load is the only difference.
 
 ```
 cap 0
@@ -256,8 +310,21 @@ load 0 0
 scan 30
 ```
 
-The mount scans while hunting for a hub. A scan retunes the radio out from
-under an in-flight send.
+A scan retunes the radio out from under an in-flight send.
+
+Read the history before spending a night on it. The mount used to scan every
+five minutes for the life of the run, and that was found and removed — an
+overnight log caught **174 failures, one every 300 s to the second**, phase
+locked to the mount's boot, ~100–150 `txfail` in a burst each time. But those
+were the hub misreading a run of failures as a wedge and refreshing the peer,
+not the NO_MEM fault: `esp_mount_amoled175.ino` around the `[REACQ]` block has
+the whole account.
+
+Since then the bridge scans only **at boot** or when its base has gone
+**silent**, so a mount with a healthy hub link does not scan at all. That makes
+it a poor fit for cam1, whose link was the strongest on the rig — unless the
+link went quiet first, which is worth checking in the logs before testing it
+here.
 
 ### 7. PHY rate
 
