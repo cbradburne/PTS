@@ -702,14 +702,35 @@ void loop() {
     // Counted on the transition rather than per sample: a 1 ms overlap seen by
     // a loop running tens of thousands of times a second would otherwise score
     // dozens.
+    //
+    // Measured ABOVE THE FLOOR, not above 1. Once buffers start leaking,
+    // in_flight never returns below the floor, so a fixed threshold of 1 stops
+    // counting transitions altogether — the first leak run froze `ovl` at
+    // 437,307 for its last thirteen hours and read as "overlap stopped" when
+    // what had happened was the floor reaching 2. The number has to mean the
+    // same thing before and after a leak or it cannot be compared across runs.
     static uint32_t prev_inf = 0;
+    uint32_t base = _in_flight_floor;
     if (inf > _max_in_flight) _max_in_flight = inf;
-    if (inf > 1 && prev_inf <= 1) _overlaps = _overlaps + 1;
+    if (inf > base + 1 && prev_inf <= base + 1) _overlaps = _overlaps + 1;
     prev_inf = inf;
     if (now - floor_win_ms >= 5000UL) {
         floor_win_ms = now;
-        if (floor_min != 0xFFFFFFFF && floor_min > _in_flight_floor)
+        if (floor_min != 0xFFFFFFFF && floor_min > _in_flight_floor) {
+            // THE headline event. Said out loud, with the heap beside it,
+            // because the two together are the whole proof: a buffer that
+            // never came back, and the memory it took with it. The first
+            // reproduction stepped 0->1->2->3 and dropped exactly 208 bytes
+            // each time.
+            Serial.printf("[bench] *** LEAK — floor %lu -> %lu at t=%lus, "
+                          "heap %lu, issued %lu\n",
+                          (unsigned long)_in_flight_floor,
+                          (unsigned long)floor_min,
+                          (unsigned long)((now - _t_start_ms) / 1000UL),
+                          (unsigned long)ESP.getFreeHeap(),
+                          (unsigned long)_issued);
             _in_flight_floor = floor_min;
+        }
         floor_min = 0xFFFFFFFF;
     }
 

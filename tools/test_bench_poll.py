@@ -144,12 +144,36 @@ assert "if (inf > _max_in_flight) _max_in_flight = inf;" in floor_blk, \
     "the high water mark is not tracked beside the floor, at loop rate"
 assert "_overlaps = _overlaps + 1" in floor_blk, \
     "overlaps are not counted at loop rate"
-assert "prev_inf <= 1" in floor_blk, \
+assert "prev_inf <= base + 1" in floor_blk, \
     "overlap is counted per sample rather than per transition — a loop running\n" \
     "    tens of thousands of times a second would score one 1 ms overlap dozens\n" \
     "    of times, and the count would measure loop speed"
 print("   max and overlaps tracked in loop(), not report()   OK")
 print("   counted on the transition, so it counts events      OK")
+
+# Measured against the floor, not a fixed 1. Once buffers leak, in_flight never
+# returns below the floor, so a fixed threshold stops counting altogether: the
+# first leak run froze ovl at 437,307 for thirteen hours and read as "overlap
+# stopped" when what had happened was the floor reaching 2.
+assert "uint32_t base = _in_flight_floor;" in floor_blk, \
+    "the overlap threshold is not taken from the floor, so the number stops\n" \
+    "    counting the moment a leak starts — exactly when it is worth reading"
+assert "inf > base + 1" in floor_blk, \
+    "the threshold is still a fixed 1 rather than floor+1"
+print("   measured above the floor, so it survives a leak    OK")
+
+# A floor rise is the headline event and has to be said out loud, with the heap
+# beside it: the two together are the proof.
+win = INO[INO.index("if (now - floor_win_ms >= 5000UL)"):]
+win = win[:win.index("\n    }", win.index("floor_min = 0xFFFFFFFF;"))]
+assert "LEAK" in win and "getFreeHeap" in win, \
+    "a floor rise is not announced with the heap beside it. A buffer that never\n" \
+    "    came back and the memory it took are one fact, and the run file should\n" \
+    "    carry it whether or not anyone was watching the logger."
+assert win.index("Serial.printf") < win.index("_in_flight_floor = floor_min;"), \
+    "the announcement prints the new floor as the old one — it has to run before\n" \
+    "    the assignment to say '2 -> 3' rather than '3 -> 3'"
+print("   a floor rise is announced, with the heap           OK")
 
 # The verdict has to read the counter that can actually see one.
 verdict = INO[INO.index("static bool overlap_said"):]

@@ -141,6 +141,12 @@ overlap and the run is testing nothing new.** It is counted per transition and
 sampled every loop pass, which matters: an overlap lasts about a millisecond, so
 anything sampled once a second sees almost none of them.
 
+It counts transitions above **the floor**, not above 1, so that it keeps meaning
+the same thing once buffers start leaking. Measured against a fixed 1 it stopped
+counting the moment the floor reached 2 — the first leak run froze `ovl` for its
+last thirteen hours and read as "overlap stopped" when nothing of the sort had
+happened.
+
 **`in_flight = issued − (cb_ok + cb_fail)`** is the whole point. It is the number
 of buffers `esp_now_send()` has taken from the stack's pool that the
 send-complete callback has not yet given back.
@@ -159,15 +165,64 @@ before it wedged read zero.
 
 ## Runs so far
 
-Both clean. Neither reproduced the wedge, and that is a result rather than a
-failure — each one closes off a mechanism the rig can no longer be suspected of.
+**The third run reproduced it. It is the load.**
 
-| run | config | for | sent | overlaps | floor | outcome |
-|---|---|---|---|---|---|---|
-| `cap0-rate50-…1822` | rate 50, cap 0, 1M-LR, no load/scan | **3.0 h** | 542,067 | 0 (`in_flight` never above 1) | 0 | clean |
-| `cap0-rate50-…2313` | rate 200 + poll 20, cap 0, 1M-LR, no load/scan | **13.3 h** | 10,512,753 | 486,030, up to **5** deep | 0 | clean |
+| run | config | for | sent | floor | outcome |
+|---|---|---|---|---|---|
+| `…0905-1822` | rate 50, cap 0, no load | 3.0 h | 542,067 | 0 | clean |
+| `…0905-2313` | rate 200 + poll 20, cap 0, no load | 13.3 h | 10,512,753 | 0 | clean |
+| `…0906-1238` | **the same, plus `load 40 100`** | 20.0 h | 10,075,316 | **0 → 3** | **LEAKED** |
 
-Read against the rig, where cam1 wedged after 31.1 h and again after 11.4 h:
+The third differs from the second in one thing: 40 ms of blocked loop in every
+100. Same cap, same PHY, same peer, same boards, 10 million sends either way.
+
+### The signature
+
+| | at | heap after | change |
+|---|---|---|---|
+| floor 0 → 1 | 5.97 h | 265,516 | **−208 B** |
+| floor 1 → 2 | 6.28 h | 265,308 | **−208 B** |
+| floor 2 → 3 | 15.17 h | 265,100 | **−208 B** |
+
+**Exactly 208 bytes per lost buffer, three times, never returned.** For the last
+hour of the run `in_flight` never once dropped below 3 — it took values 3 and 4
+and nothing else. Three buffers are simply gone.
+
+The control's heap moved 24 bytes in 13.3 hours and its floor never left 0.
+
+This is what the field data pointed at all along: cam1 wedged twice on the
+**strongest link on the rig** (−33 dBm) while cam4 sat at −68 dBm through a
+satellite and never did. A radio explanation has that backwards. Starving the
+loop does not.
+
+### What it means for the mount
+
+The mount renders 37 KB draw buffers out of PSRAM on this same chip. A blocked
+loop is a blocked loop whether an LVGL flush or a `nop` spin is doing the
+blocking — so the suspect is now the display work, not the radio, and the fix
+is on that side: shorter flushes, yielding during them, or getting the ESP-NOW
+callback out from behind the Arduino loop task.
+
+Rate is explained too, and it was never really about the send count: more
+traffic means more callbacks due during each block, and it is the callback that
+returns the buffer. Cutting a satellite's traffic 88% cut its exposure by the
+same factor — which is why that worked without anyone knowing why.
+
+### Still open
+
+- **Is it block length or duty cycle?** `load 40 400` (same 40 ms block, a
+  quarter of the duty) against `load 10 100` (same duty, 10 ms blocks) separates
+  them, and the answer decides the fix: if it is block length, chunking the
+  flush is enough.
+- **Does `cap` prevent it?** Fewer sends outstanding means fewer callbacks
+  queued behind the block. §4 tests it directly, and it would be a small change
+  to `espnow_tx()`.
+
+First, though, make it faster — see §5.
+
+### Read against the rig
+
+cam1 wedged after 31.1 h and again after 11.4 h:
 
 - The second run ran **longer than the shorter wedge** and sent **24× more
   frames** than cam1 could have managed in that time even at a flat-out
@@ -178,18 +233,22 @@ Read against the rig, where cam1 wedged after 31.1 h and again after 11.4 h:
 - `floor` sat at 0 for all 47,889 samples and the heap drifted **24 bytes in
   thirteen hours**. Whatever the mount is doing, this is not it.
 
+Add 40 ms of blocked loop and it leaks in six hours at a *lower* send rate. So
+none of volume, concurrency or reply-on-arrival is the mechanism — they are the
+traffic the mechanism acts on.
+
 Together with what was already known, the field is now:
 
 | ruled out | how |
 |---|---|
 | RF / link quality | clean for hours at −80 dBm while collapsing at −76; cam1 wedges at −33 dBm, cam4 never at −68 dBm |
 | BLE / WiFi coexistence | the wedge predates the Blackmagic code existing at all. Secondarily: the wedge logs come from the work rig, where cam1 has no camera paired, and an unbonded mount never scans |
-| send volume | 542k, then 10.5M, nothing |
+| send volume | 542k sends, then 10.5M, nothing — and it later leaked at a *lower* rate |
 | overlapping sends | 486k overlaps five deep, nothing |
 
-Which leaves the variables this firmware deliberately does **not** have —
-`load` above all. That is now the experiment worth running, and the 13.3 h run
-above is its control: same rates, same cap, same PHY, load the only difference.
+| **confirmed** | **how** |
+|---|---|
+| **a blocked loop** | same rates, same cap, plus `load 40 100`: floor 0 → 3, 208 bytes gone each time, `in_flight` never below 3 again |
 
 ## The experiments, in order
 
@@ -281,11 +340,30 @@ anything useful about a refusal in the moment"*. If `cap 1` (or 2, or 4) stops
 the floor rising where `cap 0` does not, **that is the fix**, and it is a small
 change to `espnow_tx()`.
 
-### 5. Load — is it the display, not the radio?  ← RUN THIS NEXT
+Worth running now that §5 gives something to prevent: keep `load 40 100` and add
+`cap 2`. Fewer sends outstanding means fewer callbacks queued behind each block.
+A run that leaks without a cap and not with one is the whole answer.
 
-Everything above came back clean, which promotes this one: it is the largest
-thing the bench does not have. Keep `rate 200` and `poll 20` exactly as they
-were, so the 13.3 h clean run is the control and load is the only difference.
+### 5. Load — is it the display, not the radio?  ← **THIS ONE REPRODUCED IT**
+
+Everything above came back clean, which promoted this one: it was the largest
+thing the bench did not have. `rate 200` and `poll 20` left exactly as they
+were, so the 13.3 h clean run is its control and load the only difference.
+
+**Result: floor 0 → 3 in 20 h, 208 bytes gone each step.** See *Runs so far*.
+
+What is left is to make it FASTER, because every experiment from here costs a
+night at six hours to first leak. Push the block length up:
+
+```
+load 100 200     # 100 ms blocks, half the time
+```
+
+If time-to-first-leak drops with it, that is both a faster bench and evidence
+that block length — not duty cycle — is the variable. Then `load 40 400`
+(same block, quarter the duty) against `load 10 100` (same duty, short blocks)
+separates the two properly, and the answer decides the fix on the mount: if it
+is block length, chunking the LVGL flush is enough.
 
 ```
 cap 0
