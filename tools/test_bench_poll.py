@@ -126,6 +126,19 @@ print("   both counters zeroed by the same reset             OK")
 # the same power cycle starts from a false zero, and the run after the first
 # reproduction did exactly that — in_flight read 3 from first sample to last,
 # which was the PREVIOUS run's damage.
+# Zeroing while sends are outstanding leaves cb_ok permanently AHEAD of issued —
+# their callbacks land after the reset with no matching send. in_flight() clamps
+# negatives to zero, so it then reads 0 for the whole run and the first leaked
+# buffers are invisible. A cap test against three leaks in twenty hours could
+# have come back clean while leaking.
+assert "in_flight()" in reset and "delay(" in reset, \
+    "the counters are zeroed without letting outstanding sends land, so a run\n" \
+    "    started while sends were in flight begins with cb_ok ahead of issued and\n" \
+    "    in_flight pinned at 0 for its whole duration"
+assert reset.index("delay(") < reset.index("_issued = 0"), \
+    "the drain runs after the zeroing, which is no drain at all"
+print("   outstanding sends drained before zeroing            OK")
+
 assert "_in_flight_floor" in reset and "REBOOT" in reset, \
     "`go` does not warn when the board has already leaked. It zeroes the\n" \
     "    counters and not the radio, so the next run measures from a false zero\n" \

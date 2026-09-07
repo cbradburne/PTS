@@ -376,6 +376,31 @@ static void report(uint32_t now) {
 }
 
 static void counters_reset() {
+    // Let the sends in flight land before zeroing, or the counters start the
+    // run already wrong — and wrong in the direction that hides the fault.
+    //
+    // `_issued` and `_cb_ok` were zeroed together while sends were still
+    // outstanding. Their callbacks arrived a moment later and incremented
+    // _cb_ok with no matching _issued, leaving cb_ok PERMANENTLY ahead:
+    //
+    //     t=0   issued=132   cb_ok=134
+    //     t=24  issued=3492  cb_ok=3494
+    //
+    // in_flight() clamps negatives to zero, so it then reads 0 for the whole
+    // run whatever happens, and the first two leaked buffers are invisible.
+    // The run that found this was a cap test against a leak of three buffers
+    // in twenty hours — it could have come back clean while leaking.
+    //
+    // Sending is off here (go sets running AFTER this), so the stack drains on
+    // its own; we only have to wait. The callbacks come from the WiFi task, not
+    // from loop(), so a plain delay is enough.
+    for (int i = 0; i < 40 && in_flight(); i++) delay(5);
+    if (in_flight())
+        Serial.printf("[bench] %lu send(s) still unacknowledged after 200ms — "
+                      "counters may start\n        skewed. `stop`, wait, then "
+                      "`go` again if the first line shows cb_ok\n        ahead "
+                      "of issued.\n", (unsigned long)in_flight());
+
     // A leak survives `go`, and nothing but a reboot clears it.
     //
     // `go` zeroes these counters; it does not hand the stack back the buffers

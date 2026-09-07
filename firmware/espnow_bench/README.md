@@ -176,6 +176,12 @@ of buffers `esp_now_send()` has taken from the stack's pool that the
 send-complete callback has not yet given back.
 
 - It bouncing between 0 and a few is **normal** — that is just sends in flight.
+- **The heap is the second witness, and the one that settles an argument.** A
+  real leak costs a fixed number of bytes per buffer and never gives them back
+  — 208 on these boards, three times over in the run that reproduced it. A floor
+  that rises while the heap returns to its old value is not a leak; it is a
+  callback that came back late, or a `go` issued while sends were outstanding.
+  Check both before believing either.
 - **`floor` is the number to watch.** It is the lowest `in_flight` has returned
   to in the last five seconds, and it only ever rises. A floor that climbs and
   never comes down is buffers being *lost*, not buffers in use. That is the leak,
