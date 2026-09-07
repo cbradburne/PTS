@@ -154,6 +154,7 @@ def console(ports: dict, out, lock: threading.Lock, stop: threading.Event) -> No
     and a run file that does not say what was varied is not evidence.
 
     Plain text goes to the TX board. Prefix with `rx ` for the receiver.
+    `newfile [tag]` is the one command handled here rather than sent on.
     """
     while not stop.is_set():
         try:
@@ -164,6 +165,26 @@ def console(ports: dict, out, lock: threading.Lock, stop: threading.Event) -> No
         line = line.strip()
         if not line:
             continue
+
+        # Roll the CSV without touching the boards. A run changing variable —
+        # `cap 2` on top of a load that leaks — wants its own file, and the
+        # alternative is restarting the logger, which drops samples across the
+        # gap and resets the rx baseline and the deltas the wedge alarm needs.
+        if line.split()[0] in ("newfile", "roll"):
+            bits = line.split(None, 1)
+            new_tag = bits[1].strip() if len(bits) > 1 else None
+            base = os.path.basename(out.path)
+            stem = new_tag or base.rsplit("-", 2)[0]
+            nxt = os.path.join(os.path.dirname(out.path),
+                               f"{stem}-{datetime.now():%Y%m%d-%H%M%S}.csv")
+            with lock:
+                old = out.roll(nxt)
+            print(f"  --- rolled: {os.path.basename(old)} -> "
+                  f"{os.path.basename(nxt)}")
+            print("      the boards were not touched — counters carry on. Say "
+                  "`go` if you want them zeroed.")
+            continue
+
         side = "tx"
         if line.startswith("rx ") or line.startswith("rx:"):
             side, line = "rx", line[3:].strip()
@@ -183,6 +204,49 @@ def console(ports: dict, out, lock: threading.Lock, stop: threading.Event) -> No
             out.write(f"# {datetime.now().isoformat(timespec='seconds')} "
                       f"{side} <<< {line}\n")
         print(f"  >>> [{side}] {line}")
+
+
+class Out:
+    """The run file, swappable underneath the threads writing to it.
+
+    `newfile` starts a fresh CSV without touching the boards. Restarting the
+    logger would do it too, but at a cost: it drops the samples either side of
+    the gap and resets the rx baseline and the deltas the wedge alarm is built
+    on. Rolling the file leaves the run running and the boards untouched.
+
+    The threads hold this object rather than the handle, so one swap reaches
+    all of them.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self.f = open(path, "w", buffering=1)
+        self.rolled: list[str] = []
+        self._header()
+
+    def _header(self) -> None:
+        self.f.write("wall_iso,side," + ",".join(FIELDS) + "\n")
+
+    def write(self, s: str) -> None:
+        self.f.write(s)
+
+    def roll(self, path: str) -> str:
+        # A note at each end, so neither file is a fragment of unknown origin.
+        old = self.path
+        self.f.write(f"# {datetime.now().isoformat(timespec='seconds')} "
+                     f"continues in {os.path.basename(path)}\n")
+        self.f.close()
+        self.rolled.append(old)
+        self.path = path
+        self.f = open(path, "w", buffering=1)
+        self._header()
+        self.f.write(f"# {datetime.now().isoformat(timespec='seconds')} "
+                     f"continued from {os.path.basename(old)} — the boards were "
+                     f"not touched, their counters carry on\n")
+        return old
+
+    def close(self) -> None:
+        self.f.close()
 
 
 def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
@@ -209,11 +273,13 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
     print("    role tx")
     print("    peer AA:BB:CC:DD:EE:FF")
     print("    go")
+    print("`newfile [tag]` starts a fresh CSV without touching the boards —")
+    print("use it when you change the variable under test.")
     print("Ctrl-C to stop and summarise.\n")
 
     started = time.time()
-    with open(path, "w", buffering=1) as f:
-        f.write("wall_iso,side," + ",".join(FIELDS) + "\n")
+    f = Out(path)
+    try:
         threads = [threading.Thread(target=reader,
                                     args=(tx_dev, baud, tx, ports, f, lock, stop),
                                     daemon=True)]
@@ -304,8 +370,15 @@ def record(tx_dev: str, rx_dev: str | None, tag: str, outdir: str,
                     last_floor = floor
         except KeyboardInterrupt:
             stop.set()
+    finally:
+        f.close()
 
-    summarise_run(path, time.time() - started)
+    # The file that was open at the end, not the one opened at the start —
+    # `newfile` may have rolled it several times since.
+    summarise_run(f.path, time.time() - started)
+    if f.rolled:
+        print(f"  (earlier parts of this session: "
+              f"{', '.join(os.path.basename(p) for p in f.rolled)})")
 
 
 def read_csv(path: str):

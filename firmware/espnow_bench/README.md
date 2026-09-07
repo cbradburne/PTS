@@ -106,7 +106,13 @@ tools/bench_log.py --tx /dev/cu.usbmodemAAAA --rx /dev/cu.usbmodemBBBB \
 executable bit has not survived however the repo reached your machine.)
 
 The logger holds both serial ports, so it is also the only thing that can talk
-to the boards while it runs — type at it directly. Everything you type is
+to the boards while it runs — type at it directly. `newfile [tag]` closes the
+CSV and opens a fresh one **without touching the boards**, which is what you
+want when the variable under test changes mid-session (`cap 2` on top of a load
+that leaks, say). Restarting the logger would also start a new file, but it
+drops the samples either side of the gap and resets the receiver baseline and
+the deltas the arriving-without-callbacks alarm is built on. Each file names the
+other, so neither is a fragment of unknown origin. Everything you type is
 written into the CSV as well as onto the wire, which matters more than it
 sounds: **"cap 1 at t=3600" is the single most important thing a comparison
 needs, and the easiest to forget you did.** A run file that does not say what
