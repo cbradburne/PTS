@@ -468,7 +468,14 @@ static void handle_line(char *line) {
         _cfg.role = !strcmp(a1, "tx") ? 1 : !strcmp(a1, "rx") ? 2 : 0;
         _cfg.running = 0;
         cfg_save();
-        Serial.printf("[bench] role %s — rebooting to apply cleanly\n", a1);
+        // running=0 above is deliberate — a board whose role just changed must
+        // not come back transmitting. But it is the step that gets forgotten:
+        // the reboot looks like the whole job, the board comes up configured
+        // and linked and silent, and a run sits at issued=0 until someone reads
+        // the counters. So say both halves.
+        Serial.printf("[bench] role %s — rebooting to apply cleanly. It comes "
+                      "back STOPPED:\n        `go` on this board when you are "
+                      "ready.\n", a1);
         delay(100);
         ESP.restart();
     }
@@ -623,6 +630,14 @@ void setup() {
                           "commands back. 'go' on this board to run.\n",
                           _cfg.poll_hz);
     }
+    // A configured, linked, silent board looks identical to a working one until
+    // someone reads issued=0 off the log. `role` clears the run flag on
+    // purpose, so this is the normal state after a reboot, not a fault — but it
+    // has to be said or the reboot looks like the whole job.
+    if (_cfg.role != 0 && !_cfg.running)
+        Serial.println("[bench] STOPPED — nothing will be sent until you type "
+                       "`go` on this board.");
+
     print_help();
     counters_reset();
 }

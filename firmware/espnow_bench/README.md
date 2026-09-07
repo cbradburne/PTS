@@ -88,8 +88,11 @@ immediately after the first reproduction: `go`, and `in_flight` read 3 from the
 first sample to the last, never moving — the previous run's damage, not the new
 run's. The board now says so when you `go` with a non-zero floor behind you.
 
-Power cycle both boards, or `role tx` / `role rx` which reboot, then set up and
-run.
+Power cycle both boards, or `role tx` / `role rx` which reboot — then **`go` on
+each**. `role` clears the run flag deliberately, so a board whose role just
+changed does not come back transmitting; the cost is that the reboot looks like
+the whole job and the pair comes up configured, linked and silent. Both boards
+now say `STOPPED` on boot when that is where they are.
 
 ## Logging both boards
 
