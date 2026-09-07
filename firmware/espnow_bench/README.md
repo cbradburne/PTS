@@ -76,6 +76,21 @@ go
 Both boards persist their settings in NVS, so an overnight run survives a power
 cut and resumes where it was. `help` lists every command.
 
+### Reboot between leak runs
+
+**`go` zeroes the counters. It does not give the stack back the buffers it
+lost.** Only a chip reboot does — that has been the one fixed point of this
+fault since August, and it applies to the bench exactly as it does to a mount.
+
+So a second leak run on the same power cycle starts however many buffers down
+the last one ended, with `floor` measuring from a false zero. It happened
+immediately after the first reproduction: `go`, and `in_flight` read 3 from the
+first sample to the last, never moving — the previous run's damage, not the new
+run's. The board now says so when you `go` with a non-zero floor behind you.
+
+Power cycle both boards, or `role tx` / `role rx` which reboot, then set up and
+run.
+
 ## Logging both boards
 
 ```bash

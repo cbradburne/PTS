@@ -122,6 +122,19 @@ assert "_cmd_rx = 0" in reset and "_cmd_acked = 0" in reset, \
     "    that arrived before it"
 print("   both counters zeroed by the same reset             OK")
 
+# A leak survives `go`; only a reboot clears it. Measuring a second leak run on
+# the same power cycle starts from a false zero, and the run after the first
+# reproduction did exactly that — in_flight read 3 from first sample to last,
+# which was the PREVIOUS run's damage.
+assert "_in_flight_floor" in reset and "REBOOT" in reset, \
+    "`go` does not warn when the board has already leaked. It zeroes the\n" \
+    "    counters and not the radio, so the next run measures from a false zero\n" \
+    "    and looks clean while carrying the last run's losses."
+assert reset.index("REBOOT") < reset.index("_in_flight_floor = 0") \
+       if "_in_flight_floor = 0" in reset else True, \
+    "the warning reads the floor after zeroing it, so it can never fire"
+print("   `go` warns if the board has already leaked         OK")
+
 # ---- 5. the overlap is sampled fast enough to see ---------------------------
 # The whole verdict rests on this. An overlap lasts about a millisecond;
 # report() runs once a second. Tracking the high water mark there missed

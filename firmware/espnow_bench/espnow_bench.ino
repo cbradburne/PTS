@@ -376,6 +376,26 @@ static void report(uint32_t now) {
 }
 
 static void counters_reset() {
+    // A leak survives `go`, and nothing but a reboot clears it.
+    //
+    // `go` zeroes these counters; it does not hand the stack back the buffers
+    // it lost. Start a second leak run on the same power cycle and it begins
+    // however many buffers down the last one ended, with `floor` measuring from
+    // a false zero — the run after the first reproduction did exactly that and
+    // sat at in_flight=3 from its first sample to its last, which was the
+    // PREVIOUS run's damage showing through.
+    //
+    // "Only a full esp_restart() clears it" has been the one fixed point of
+    // this fault since August. So say it here, where the mistake is made.
+    if (_in_flight_floor) {
+        Serial.printf("\n[bench] *** THIS BOARD HAS ALREADY LEAKED %lu BUFFER(S).\n"
+                      "        `go` zeroes the counters, not the radio — they are "
+                      "still gone, and\n        floor will start from a false "
+                      "zero. REBOOT BOTH BOARDS (power cycle,\n        or `role "
+                      "tx` / `role rx`) before a run meant to measure a leak.\n\n",
+                      (unsigned long)_in_flight_floor);
+    }
+
     // Assigned one at a time: chaining through a volatile reads back what was
     // just written, which C++20 deprecates and which is meaningless here anyway.
     _issued = 0; _cb_ok = 0; _cb_fail = 0;
