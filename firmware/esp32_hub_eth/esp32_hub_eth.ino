@@ -309,6 +309,11 @@ static inline void disp_unlock() { if (_disp_mux) xSemaphoreGive(_disp_mux); }
 // worse than no button.  Declared here because disp_update_cam() below reads it.
 static bool _cam_linked[NUM_MOUNTS] = {};
 
+// Declared here for the same reason _cam_linked is: disp_update_cam() below
+// reads it, and the routing table itself lives with the satellite code further
+// down.
+static int8_t _mount_sat[NUM_MOUNTS];
+
 // ---------------------------------------------------------------------------
 // Display send helpers
 // ---------------------------------------------------------------------------
@@ -320,7 +325,12 @@ static void disp_update_cam(uint8_t mount_id, uint8_t state, uint8_t flags, int8
     uint8_t cf = 0;
     if (mount_id >= 1 && mount_id <= NUM_MOUNTS && _cam_linked[mount_id - 1])
         cf |= DISP_CAM_BLE_LINKED;
-    uint8_t buf[5] = { mount_id, state, flags, (uint8_t)rssi, cf };
+    // Which satellite the mount is reached through, 0 for the hub's own radio.
+    // Same wire form as CMD_MOUNT_ROUTE so the two cannot drift: slot + 1.
+    uint8_t sat = 0;
+    if (mount_id >= 1 && mount_id <= NUM_MOUNTS && _mount_sat[mount_id - 1] >= 0)
+        sat = (uint8_t)(_mount_sat[mount_id - 1] + 1);
+    uint8_t buf[6] = { mount_id, state, flags, (uint8_t)rssi, cf, sat };
     disp_lock();
     disp_uart_send(Serial1, DISP_MSG_UPDATE_CAM, buf, sizeof(buf));
     disp_unlock();
@@ -875,7 +885,7 @@ static SatSlot   _sat[MAX_SATELLITES];
 static WiFiServer _sat_server(SAT_LINK_PORT);
 
 // mount_id-1 -> satellite slot serving it, or -1 for "local ESP-NOW".
-static int8_t _mount_sat[NUM_MOUNTS];
+// (Declared up with the display helpers, which read it.)
 
 // A satellite dropping off must not strand its mounts pointing at a dead
 // socket: they revert to local ESP-NOW, which is also what happens if the
@@ -1284,7 +1294,22 @@ static void bcast_mount_table() {
 // Sent whenever the set changes (a satellite arriving, leaving, or naming
 // itself) and alongside the mount table, so a client connecting after the fact
 // is not left with numbers until the next change.
+// The display needs the names too, and gets them from inside send_sat_names()
+// rather than at its call sites: there are three of those and a fourth would
+// have been added without this one, leaving the screen showing slot numbers
+// while every other client showed names.
+static void disp_send_sat_names() {
+    uint8_t buf[SAT_SLOTS * SAT_NAME_LEN];
+    memset(buf, 0, sizeof(buf));
+    for (int i = 0; i < MAX_SATELLITES && i < SAT_SLOTS; i++)
+        memcpy(buf + i * SAT_NAME_LEN, _sat[i].name, SAT_NAME_LEN);
+    disp_lock();
+    disp_uart_send(Serial1, DISP_MSG_SAT_NAMES, buf, sizeof(buf));
+    disp_unlock();
+}
+
 static void send_sat_names() {
+    disp_send_sat_names();
     // Names first, then the addresses, so a client from before the addresses
     // existed reads the names it expects and stops.  See CMD_SAT_NAMES.
     uint8_t buf[SAT_TABLE_PAYLOAD_LEN] = {};
@@ -1896,6 +1921,12 @@ static void dispatch_disp_msg(uint8_t type, uint8_t len, const uint8_t *d) {
     }
     if (type == DISP_MSG_GET_MOUNT_TABLE) {
         disp_send_mount_table();
+        // ...and what to call the satellites, the same three things the network
+        // clients get on CMD_GET_MOUNT_TABLE. The display asks for this when it
+        // comes up, which is the one moment it has no names at all — without it
+        // a screen that booted after the satellites would show "SAT 2" until
+        // one of them happened to reconnect.
+        disp_send_sat_names();
         return;
     }
     if (type == DISP_MSG_HEALTH && len >= 24) {

@@ -31,6 +31,7 @@ struct CamStatus {
     uint8_t  sl_preset    = 0;   // active SL preset 1-4, 0 = disconnected
     uint32_t last_seen_ms = 0;   // millis() of last UPDATE_CAM — staleness sweep
     bool     cam_linked   = false;  // a camera is paired and connected (DISP_CAM_*)
+    uint8_t  sat          = 0;   // 0 = the hub's own radio, else satellite slot + 1
 };
 
 // ---- Per-tile slot state ----
@@ -44,11 +45,16 @@ struct TileSlots {
 // ---- Public API ----
 void hub_display_init(hub_send_fn_t send_cb);
 void hub_ui_tick();
-// cam_flags defaults to 0 so a hub too old to send the fifth byte simply
-// reports "no camera" rather than failing to build.
+// cam_flags and sat default to 0 so a hub too old to send the fifth or sixth
+// byte simply reports "no camera" and "on the hub's own radio" rather than
+// failing to build.
 void hub_ui_update_cam(uint8_t mount_id,
                        uint8_t state, uint8_t flags, int8_t rssi,
-                       uint8_t cam_flags = 0);
+                       uint8_t cam_flags = 0, uint8_t sat = 0);
+// Satellite names in slot order, each NUL-padded to SAT_NAME_LEN. An empty
+// slot leaves the display showing "SAT n", which is what it did before names
+// existed.
+void hub_ui_update_sat_names(const uint8_t *names, uint8_t len);
 void hub_ui_set_disconnected(uint8_t mount_id);
 void hub_ui_update_clients(uint8_t tcp_count, uint8_t ws_count);
 void hub_ui_update_preset(uint8_t mount_id, uint8_t pt_preset, uint8_t sz_preset);

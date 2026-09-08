@@ -5,10 +5,16 @@
  * Packet format:  [0xDD][type:1][len:1][payload:len][xor_checksum:1]
  *
  * Hub → Display:
- *   DISP_MSG_UPDATE_CAM        (5 bytes: mount_id, state, flags, rssi, cam_flags)
- *       cam_flags is appended, not squeezed in: the mount status flags byte
- *       has all eight bits spoken for.  A display from before this reads the
- *       first four and stops, so the two can be flashed independently.
+ *   DISP_MSG_UPDATE_CAM        (6 bytes: mount_id, state, flags, rssi, cam_flags,
+ *                                        sat)
+ *       cam_flags and sat are appended, not squeezed in: the mount status flags
+ *       byte has all eight bits spoken for.  A display from before either one
+ *       reads what it knows and stops, so the two boards can be flashed
+ *       independently.
+ *       `sat` is 0 for a mount on the hub's own radio, or satellite slot + 1.
+ *       It rides on every status rather than being its own message, so it
+ *       cannot be missed and a mount that roams redraws within one refresh —
+ *       the same reasoning as cam_flags.
  *   DISP_MSG_SET_DISCONNECTED  (1 byte)
  *   DISP_MSG_UPDATE_PRESET     (3 bytes)
  *   DISP_MSG_UPDATE_CLIENTS    (2 bytes)
@@ -58,6 +64,12 @@
 #define DISP_MSG_HEALTH            0x15   // 24 bytes: display's CMD_HEALTH payload (PayloadHealth
                                           //           wire layout) — hub wraps it into a CMD_HEALTH
                                           //           packet (mount_id 0xFD) and forwards to the PC
+#define DISP_MSG_SAT_NAMES         0x16   // SAT_SLOTS * SAT_NAME_LEN bytes (6*13=78): the satellite
+                                          //           names, slot order, each NUL-padded. Empty slot
+                                          //           = empty string, and the display then shows the
+                                          //           slot number, which is what it did before names
+                                          //           existed. UPDATE_CAM says WHICH satellite a
+                                          //           mount is on; this says what to call it.
 
 #define DISP_UART_MAX_PAYLOAD      80
 

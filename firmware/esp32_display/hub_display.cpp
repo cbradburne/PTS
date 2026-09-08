@@ -183,6 +183,26 @@ static StaticTask_t _lvgl_task_static_buf;
 
 static hub_send_fn_t    _send_cb   = nullptr;
 static CamStatus      _cam[5];
+
+// Satellite names, slot order, learned from DISP_MSG_SAT_NAMES.  A slot the hub
+// has no name for stays empty and reads as "SAT n" — a satellite too old to
+// introduce itself is still worth naming by number, which is what a mount cell
+// showed before any of this.
+static char _sat_name[SAT_SLOTS][SAT_NAME_LEN];
+
+// " via Foyer" for a mount reached through a satellite, "" for one on the hub's
+// own radio.  Written into a caller's buffer so both the tile and the mounts
+// panel format one string each rather than sharing a static.
+//
+// The name is clipped to 9 characters for the TILE, which is ~128px wide at
+// montserrat_10: "-67 dBm via Basement" already fills 110px of it. The mounts
+// panel is 620px and passes the full length.
+static void sat_suffix(uint8_t sat, char *out, size_t n, int max_name) {
+    if (!sat || sat > SAT_SLOTS) { out[0] = 0; return; }
+    const char *nm = _sat_name[sat - 1];
+    if (nm[0]) snprintf(out, n, "  via %.*s", max_name, nm);
+    else       snprintf(out, n, "  via SAT %u", (unsigned)sat);
+}
 static TileSlots      _slots[5];
 static uint8_t        _tcp_clients = 0;
 static uint8_t        _ws_clients  = 0;
@@ -2874,7 +2894,7 @@ static bool table_mac_valid(int i) {
 static void mounts_panel_refresh() {
     if (!_mp_panel) return;
     for (int i = 0; i < 5; i++) {
-        char buf[24];
+        char buf[48];
         bool bound = table_mac_valid(i);
         if (bound) fmt_mac(buf, sizeof(buf), _mount_table[i]);
         else       snprintf(buf, sizeof(buf), "-  unpaired  -");
@@ -2882,8 +2902,11 @@ static void mounts_panel_refresh() {
         lv_obj_set_style_text_color(_mp_mac_lbl[i],
             lv_color_hex(bound ? C_TEXT : C_DIM), 0);
 
-        if (_cam[i].connected)
-            snprintf(buf, sizeof(buf), "ONLINE  %d dBm", (int)_cam[i].rssi);
+        if (_cam[i].connected) {
+            char via[24];
+            sat_suffix(_cam[i].sat, via, sizeof(via), SAT_NAME_LEN - 1);
+            snprintf(buf, sizeof(buf), "ONLINE  %d dBm%s", (int)_cam[i].rssi, via);
+        }
         else
             snprintf(buf, sizeof(buf), bound ? "offline" : "");
         lv_label_set_text(_mp_st_lbl[i], buf);
@@ -3315,7 +3338,7 @@ void hub_ui_tick() {
 
 void hub_ui_update_cam(uint8_t mount_id,
                        uint8_t state, uint8_t flags, int8_t rssi,
-                       uint8_t cam_flags) {
+                       uint8_t cam_flags, uint8_t sat) {
     if (mount_id < 1 || mount_id > 5) return;
     int i = mount_id - 1;
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
@@ -3328,6 +3351,7 @@ void hub_ui_update_cam(uint8_t mount_id,
     uint8_t old_state       = _cam[i].state;
     uint8_t old_flags       = _cam[i].flags;
     int8_t  old_rssi        = _cam[i].rssi;
+    uint8_t old_sat         = _cam[i].sat;
     bool look_at_changed    = (old_flags & FLAG_LOOK_AT_MODE) != (flags & FLAG_LOOK_AT_MODE);
 
     _cam[i].connected    = true;
@@ -3335,6 +3359,7 @@ void hub_ui_update_cam(uint8_t mount_id,
     _cam[i].flags        = flags;
     _cam[i].rssi         = rssi;
     _cam[i].cam_linked   = (cam_flags & DISP_CAM_BLE_LINKED) != 0;
+    _cam[i].sat          = sat;
     _cam[i].last_seen_ms = millis();   // feeds the staleness sweep in hub_ui_tick()
 
     // A camera pairing or dropping is the only thing that changes whether the
@@ -3343,7 +3368,9 @@ void hub_ui_update_cam(uint8_t mount_id,
     if (_cam[i].cam_linked != was_linked && _detail_cam == i) _detail_refresh_focus();
 
     bool state_changed = !was_connected || (old_state != state) || (old_flags != flags);
-    bool rssi_changed  = !was_connected || (old_rssi  != rssi);
+    // The route rides on the RSSI line, so a mount roaming to another satellite
+    // has to redraw it even when the signal number has not moved.
+    bool rssi_changed  = !was_connected || (old_rssi  != rssi) || (old_sat != sat);
 
     // First connect: set all static "CONNECTED" elements once.
     if (!was_connected) {
@@ -3368,8 +3395,10 @@ void hub_ui_update_cam(uint8_t mount_id,
     // RSSI — only update text when value changed; only update colour when
     // threshold band changes (green/amber/red).
     if (rssi_changed) {
-        char rssi_buf[12];
-        snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm", (int)rssi);
+        char via[20];
+        sat_suffix(sat, via, sizeof(via), 9);
+        char rssi_buf[32];
+        snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm%s", (int)rssi, via);
         lv_label_set_text(_tile_rssi[i], rssi_buf);
 
         uint32_t rssi_col     = (rssi     >= -65) ? C_GREEN_LIT :
@@ -3397,6 +3426,31 @@ void hub_ui_update_cam(uint8_t mount_id,
             refresh_positions_slots();
     }
 
+    xSemaphoreGive(_lvgl_mux);
+}
+
+// Names change when a satellite introduces itself or drops off, which is rare
+// and cheap to redraw wholesale — both surfaces that show a name are rebuilt
+// from _cam[] anyway.
+void hub_ui_update_sat_names(const uint8_t *names, uint8_t len) {
+    if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
+    memset(_sat_name, 0, sizeof(_sat_name));
+    for (int i = 0; i < SAT_SLOTS; i++) {
+        int off = i * SAT_NAME_LEN;
+        if (off + SAT_NAME_LEN > len) break;
+        memcpy(_sat_name[i], names + off, SAT_NAME_LEN);
+        _sat_name[i][SAT_NAME_LEN - 1] = 0;
+    }
+    // The RSSI line carries the name, so every connected tile is stale now.
+    for (int i = 0; i < 5; i++) {
+        if (!_cam[i].connected) continue;
+        char via[20];
+        sat_suffix(_cam[i].sat, via, sizeof(via), 9);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d dBm%s", (int)_cam[i].rssi, via);
+        lv_label_set_text(_tile_rssi[i], buf);
+    }
+    mounts_panel_refresh();
     xSemaphoreGive(_lvgl_mux);
 }
 

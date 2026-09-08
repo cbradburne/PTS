@@ -84,14 +84,23 @@ print(f"   which is where PayloadHealth.flags actually is      OK")
 
 # ---- 3. both ends tolerate the other being older ---------------------------
 print("\n3. a hub and a display flashed at different times:")
-assert "uint8_t buf[5] = { mount_id, state, flags, (uint8_t)rssi, cf };" in HUB, \
-    "the hub no longer sends the fifth byte"
+# Pinned by POSITION, not by the whole line: the payload has grown once since
+# (a sixth byte for the satellite a mount is routed through) and will again.
+# What must not change is that cf is fifth, because a display flashed before
+# that byte existed reads exactly four and stops.
+import re as _re
+m = _re.search(r"uint8_t buf\[(\d+)\] = \{ mount_id, state, flags, \(uint8_t\)rssi, cf([,}])",
+               HUB)
+assert m, "the hub's UPDATE_CAM payload no longer starts " \
+          "mount_id, state, flags, rssi, cf — a display from before the fifth " \
+          "byte reads four and would misread whatever took its place"
+assert int(m.group(1)) >= 5, "the payload lost the fifth byte"
 assert "(len >= 5) ? d[4] : 0" in DINO, \
     "the display assumes the fifth byte is present; an older hub sends four"
-assert "uint8_t cam_flags = 0);" in DHDR, \
+assert "uint8_t cam_flags = 0" in DHDR, \
     "the parameter has no default, so anything still calling the four-argument\n" \
     "    form stops compiling instead of behaving as it did"
-print("   4 bytes -> no button; 5 bytes -> the flag           OK")
+print(f"   4 bytes -> no button; cf is byte 5 of {m.group(1)}            OK")
 
 # ---- 4. the button appears and disappears with the camera ------------------
 print("\n4. the button:")

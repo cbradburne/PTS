@@ -138,7 +138,12 @@ static void dispatch_msg(uint8_t type, uint8_t len, const uint8_t *d) {
             // four, and the display then simply never shows a Focus button.
             hub_ui_update_cam(d[0], d[1], d[2],
                               (len >= 4) ? (int8_t)d[3] : 0,
-                              (len >= 5) ? d[4] : 0);
+                              (len >= 5) ? d[4] : 0,
+                              (len >= 6) ? d[5] : 0);
+            break;
+
+        case DISP_MSG_SAT_NAMES:
+            hub_ui_update_sat_names(d, len);
             break;
 
         case DISP_MSG_SET_DISCONNECTED:
