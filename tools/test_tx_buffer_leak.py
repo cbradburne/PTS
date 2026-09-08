@@ -77,10 +77,12 @@ print("   and does not act on what it finds                 OK")
 print("\n3. what the health line carries:")
 assert "((uint32_t)_espnow_leak_floor << 16)" in INO, \
     "the floor is not in node_u32, so nothing carries it off the mount"
-assert "(_reinit_count & 0xFFFFUL)" in INO, \
-    "the reinit count moved out of the low half, which every existing log line " \
-    "reads"
-print("   wedges(8) | leak(8) | reinit(16)                  OK")
+assert "(_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL))" in INO, \
+    "the reinit count is not in the low byte"
+assert "_espnow_drain_deferred > 255 ? 255" in INO, \
+    "the drain-deferral count is not carried, so a mount that stops wedging\n" \
+    "    cannot say whether the bound had anything to do with it"
+print("   wedges(8) | leak(8) | deferrals(8) | reinit(8)     OK")
 
 BUF = io.StringIO()
 _h = logging.StreamHandler(BUF); _h.setFormatter(logging.Formatter("%(message)s"))
@@ -126,16 +128,34 @@ for want in ("WEDGES 2", "TX BUFFERS LEAKED 7", "n32 1"):
     assert want in both, f"missing {want!r}: {both}"
 print("   7 leaked reads as 7, beside 2 wedges and reinit 1  OK")
 
-# The three fields are independent — a packing mistake shows as one moving the
+# All FOUR fields are independent — a packing mistake shows as one moving the
 # others, and this is the only thing holding the two ends of that field together.
-for w, lk, ri in ((0, 0, 3), (1, 0, 1), (0, 64, 2), (255, 255, 65535)):
-    line = health((w << 24) | (lk << 16) | ri)
-    assert f"n32 {ri}" in line, f"reinit {ri} lost when wedges={w} leak={lk}: {line}"
+for w, lk, df, ri in ((0, 0, 0, 3), (1, 0, 0, 1), (0, 64, 0, 2),
+                      (0, 0, 9, 1), (2, 7, 40, 5), (255, 255, 255, 255)):
+    line = health((w << 24) | (lk << 16) | (df << 8) | ri)
+    assert f"n32 {ri}" in line, \
+        f"reinit {ri} lost when wedges={w} leak={lk} defer={df}: {line}"
     if lk:
         assert f"LEAKED {lk}" in line, f"leak {lk} lost: {line}"
     if w:
         assert f"WEDGES {w}" in line, f"wedges {w} lost: {line}"
-print("   all three independent across the range            OK")
+    if df:
+        assert f"drain deferred {df}" in line, f"deferrals {df} lost: {line}"
+    else:
+        assert "drain deferred" not in line, \
+            f"a bound that never engaged is reported as if it had: {line}"
+print("   all four independent across the range             OK")
+
+# The distinction the whole counter exists for: a mount that has stopped
+# wedging while this reads 0 did not stop because of the bound.
+quiet = health(1)
+assert "drain deferred" not in quiet, "a quiet mount claims the bound engaged"
+engaged = health((40 << 8) | 1)
+assert "drain deferred 40" in engaged, f"the bound engaging is not reported: {engaged}"
+assert health((255 << 8) | 1).count("255+") == 1, \
+    "a saturated deferral count does not say it saturated, so 255 reads as an\n" \
+    "    exact figure when it means 'at least'"
+print("   engaged vs never-engaged are distinguishable      OK")
 
 _lg.handlers, _lg.level, _lg.propagate = _saved
 print("\nALL CHECKS PASSED")

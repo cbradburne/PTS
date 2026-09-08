@@ -97,6 +97,8 @@ print("   node_u32 top byte, refusals kept in the post-mortem OK")
 # nothing else holds them together.
 assert "wedges = (n32 >> 24) & 0xFF" in BR, \
     "the app does not read the top byte as the wedge count"
+assert "defer  = (n32 >> 8) & 0xFF" in BR, \
+    "the app does not read the drain-deferral byte"
 assert 'WEDGES %d" % wedges' in BR, "the count is decoded and never printed"
 assert "TX REFUSED" not in BR, \
     "the app still labels that half 'TX REFUSED', so a wedge count would print\n" \

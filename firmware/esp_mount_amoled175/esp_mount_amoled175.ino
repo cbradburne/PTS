@@ -608,6 +608,50 @@ static inline uint32_t espnow_in_flight() {
     return (i >= c) ? (i - c) : 0;
 }
 
+// ── The burst bound ──────────────────────────────────────────────────────────
+//
+// The bench needed TWO things together to lose a buffer, and neither alone did
+// it (firmware/espnow_bench/README.md has the runs):
+//
+//   no load,     peak 5 in flight, 13.3 h  -> clean
+//   load 40/100, peak 2 in flight, 16.8 h  -> clean
+//   load 40/100, peak 6 in flight, 20.0 h  -> three buffers gone, 208 B each
+//
+// On this board the two are the same event. An LVGL flush blocks loop(); hub
+// commands queue behind it; the loop resumes and the drain below answers every
+// one of them back to back, up to ESPNOW_RX_DEPTH of them, with nothing pacing
+// it. The block manufactures the burst — which is why the mount's average send
+// rate (0.4/s idle, 10.4/s busy) never hinted at this and reasoning from it was
+// wrong.
+//
+// So: stop answering when enough sends are already outstanding, and leave the
+// rest queued for the next pass. Nothing is dropped and nothing waits long —
+// loop() comes round again in microseconds.
+//
+// Set to 0 to restore exactly the old behaviour, which is how to A/B this on
+// the rig without reverting the commit.
+#ifndef ESPNOW_TX_INFLIGHT_CAP
+#define ESPNOW_TX_INFLIGHT_CAP 2
+#endif
+
+static uint32_t _espnow_drain_deferred = 0;   // times the bound cut a drain short
+
+// Measured ABOVE the leaked floor, and that is not a detail.
+//
+// Buffers lost to the ESP-IDF leak never come back before a reboot. Counting
+// them here would mean that after three leaks the bound sees 3 outstanding
+// for ever, stops answering the hub entirely, and the mount goes off the air —
+// trading a leak that takes eleven hours for an outage that takes effect at
+// once. The floor is what the leak poll has already written off; only what is
+// above it is a send that will actually complete.
+static inline bool espnow_tx_saturated() {
+    if (!ESPNOW_TX_INFLIGHT_CAP) return false;
+    uint32_t inf = espnow_in_flight();
+    uint32_t gone = _espnow_leak_floor;
+    uint32_t live = (inf > gone) ? (inf - gone) : 0;
+    return live >= (uint32_t)ESPNOW_TX_INFLIGHT_CAP;
+}
+
 // Called from loop(); cheap, and deliberately does no more than measure.
 // Acting on it — a clean teardown while the radio still works, instead of
 // twenty seconds isolated and a reboot — waits until the rig has said what
@@ -1081,9 +1125,16 @@ static void send_health(bool anomaly) {
     // wedge count needs one byte (255 isolation restarts since flashing would
     // be a mount to retire, not to trend), which leaves a byte for the number
     // that is the point of all this.
+    //
+    // Fourth field added with the drain bound: whether it ever ENGAGED. Without
+    // it a fortnight without wedges says nothing — a bound that never fires and
+    // a bound that fixed the fault look identical from here. Reinit gives up
+    // its top byte for it; it has never exceeded 3, and both saturate.
     h.node_u32      = ((uint32_t)(_wedge_count > 255 ? 255 : _wedge_count) << 24) |
                       ((uint32_t)_espnow_leak_floor << 16) |
-                      (_reinit_count & 0xFFFFUL);
+                      ((uint32_t)(_espnow_drain_deferred > 255 ? 255
+                                  : _espnow_drain_deferred) << 8) |
+                      (_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL));
 #endif
     uint8_t p[24];
     encode_health_payload(p, &h);
@@ -3521,12 +3572,27 @@ void loop() {
     }
 
     // ── Drain ESP-NOW RX queue ───────────────────────────────────────────
+    // Bounded by sends already in flight, not by a count of packets: spacing
+    // the ACKs over loop passes would not help, because a pass takes
+    // microseconds and the frames would still stack up in the radio. What the
+    // bench showed working was withholding a send until the outstanding ones
+    // complete. See espnow_tx_saturated().
+    //
+    // At least one message every pass, whatever the bound says, so a mount can
+    // never stop answering the hub entirely.
     EspNowMsg en_msg;
     while (xQueueReceive(_espnow_rx_q, &en_msg, 0) == pdTRUE) {
         for (int i = 0; i < en_msg.len; i++) {
             ParsedPacket pkt;
             if (pkt_feed(&_espnow_parser, en_msg.data[i], &pkt))
                 handle_hub_packet(pkt);
+        }
+        if (espnow_tx_saturated()) {
+            // Left in the queue, answered next pass. Counted, because "did the
+            // bound ever engage" is the first thing to ask of a rig that stops
+            // wedging — otherwise a quiet fortnight proves nothing.
+            _espnow_drain_deferred++;
+            break;
         }
     }
 

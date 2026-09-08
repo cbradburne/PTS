@@ -953,13 +953,21 @@ class Bridge:
             # send, so the report carrying the number is the one thing that
             # cannot get out. It survives in the post-mortem MOUNT_EVENT, which
             # is the only place it has ever actually been read.
-            # wedges(8) | leak floor(8) | reinit(16). The low half is what it
-            # has always been.
+            # wedges(8) | leak floor(8) | drain deferrals(8) | reinit(8).
+            # All four saturate; reinit gave up its top byte when the drain
+            # bound went in, having never exceeded 3.
             wedges = (n32 >> 24) & 0xFF
             leak   = (n32 >> 16) & 0xFF
-            n32txt = "n32 %d" % (n32 & 0xFFFF)
+            defer  = (n32 >> 8) & 0xFF
+            n32txt = "n32 %d" % (n32 & 0xFF)
             if wedges:
                 n32txt += " | WEDGES %d" % wedges
+            # Whether the burst bound ever engaged. A mount that stops wedging
+            # while this reads 0 did NOT stop because of the bound, and that is
+            # worth knowing before anyone calls the fault fixed.
+            if defer:
+                n32txt += " | drain deferred %d%s" % (defer,
+                                                      "+" if defer == 255 else "")
             # The leak, and the only number here that moves BEFORE the fault.
             # esp_now_send() takes a buffer from a small pool and the send
             # callback returns it; this is how many were taken and never given
