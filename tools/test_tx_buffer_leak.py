@@ -140,18 +140,18 @@ for w, lk, df, ri in ((0, 0, 0, 3), (1, 0, 0, 1), (0, 64, 0, 2),
     if w:
         assert f"WEDGES {w}" in line, f"wedges {w} lost: {line}"
     if df:
-        assert f"drain deferred {df}" in line, f"deferrals {df} lost: {line}"
+        assert f"sends held back {df}" in line, f"deferrals {df} lost: {line}"
     else:
-        assert "drain deferred" not in line, \
+        assert "sends held back" not in line, \
             f"a bound that never engaged is reported as if it had: {line}"
 print("   all four independent across the range             OK")
 
 # The distinction the whole counter exists for: a mount that has stopped
 # wedging while this reads 0 did not stop because of the bound.
 quiet = health(1)
-assert "drain deferred" not in quiet, "a quiet mount claims the bound engaged"
+assert "sends held back" not in quiet, "a quiet mount claims the bound engaged"
 engaged = health((40 << 8) | 1)
-assert "drain deferred 40" in engaged, f"the bound engaging is not reported: {engaged}"
+assert "sends held back 40" in engaged, f"the bound engaging is not reported: {engaged}"
 assert health((255 << 8) | 1).count("255+") == 1, \
     "a saturated deferral count does not say it saturated, so 255 reads as an\n" \
     "    exact figure when it means 'at least'"

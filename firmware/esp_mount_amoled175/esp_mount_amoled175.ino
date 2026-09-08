@@ -634,7 +634,16 @@ static inline uint32_t espnow_in_flight() {
 #define ESPNOW_TX_INFLIGHT_CAP 2
 #endif
 
-static uint32_t _espnow_drain_deferred = 0;   // times the bound cut a drain short
+// Sends the bound actually held back, on EITHER path — a queued command left
+// for the next pass, or a periodic report that was due and waited.
+//
+// It counts real deferrals only, which the first field build did not: the drain
+// counted every time it finished while the radio was busy, whether or not
+// anything was still queued. With one GET_CONFIG every ~3 s the queue is nearly
+// always empty after the first message, so the number pegged at 255 within the
+// hour on two mounts while saying nothing about whether a command had ever
+// waited. A counter that cannot answer its own question is worse than none.
+static uint32_t _espnow_drain_deferred = 0;
 
 // Measured ABOVE the leaked floor, and that is not a detail.
 //
@@ -681,6 +690,21 @@ static inline bool espnow_tx_saturated() {
 static inline bool espnow_defer_periodic(uint32_t age, uint32_t interval) {
     if (!espnow_tx_saturated()) return false;
     return age < interval + ESPNOW_PERIODIC_DEFER_MS;   // else overdue — go anyway
+}
+
+// Counted once per deferral, not once per loop pass.
+//
+// The guard is re-tested every pass while a report waits, and the loop runs
+// around a hundred times a second, so counting inside it would score a single
+// 400 ms hold as forty. The flag holds until the report actually goes.
+static inline bool periodic_held(uint32_t age, uint32_t interval, bool *held) {
+    bool defer = espnow_defer_periodic(age, interval);
+    if (defer) {
+        if (!*held) { *held = true; _espnow_drain_deferred++; }
+    } else {
+        *held = false;
+    }
+    return defer;
 }
 
 // Called from loop(); cheap, and deliberately does no more than measure.
@@ -1198,9 +1222,10 @@ static void health_check_bridge(uint32_t now) {
     // none, because its silence reads as nothing to see.
     // RF and HEALTH share this interval and started together, so without the
     // guard they go out back to back for the life of the mount.
+    static bool rf_held = false;
     uint32_t rf_age = now - _rf_last_ms;
     if (rf_age >= HEALTH_INTERVAL_MS &&
-            !espnow_defer_periodic(rf_age, HEALTH_INTERVAL_MS)) {
+            !periodic_held(rf_age, HEALTH_INTERVAL_MS, &rf_held)) {
         _rf_last_ms = now;
         send_rf_report();
     }
@@ -1224,7 +1249,8 @@ static void health_check_bridge(uint32_t now) {
     bool jog_busy = (now - _last_jog_fwd_ms) < HEALTH_JOG_DEFER_MS;
     bool overdue  = h_age > HEALTH_INTERVAL_MS + 2000;
     if (jog_busy && !overdue) return;
-    if (espnow_defer_periodic(h_age, HEALTH_INTERVAL_MS)) return;
+    static bool health_held = false;
+    if (periodic_held(h_age, HEALTH_INTERVAL_MS, &health_held)) return;
     send_health(false);
 }
 
@@ -3629,10 +3655,13 @@ void loop() {
                 handle_hub_packet(pkt);
         }
         if (espnow_tx_saturated()) {
-            // Left in the queue, answered next pass. Counted, because "did the
-            // bound ever engage" is the first thing to ask of a rig that stops
-            // wedging — otherwise a quiet fortnight proves nothing.
-            _espnow_drain_deferred++;
+            // Counted only if something is actually LEFT. Without the queue
+            // check this fired every time the drain finished while the radio
+            // was busy — which, at one command every ~3 s, is nearly every
+            // time, and the count pegged at 255 within the hour meaning
+            // nothing. Now it says a command really did wait a pass.
+            if (uxQueueMessagesWaiting(_espnow_rx_q) > 0)
+                _espnow_drain_deferred++;
             break;
         }
     }
@@ -3676,9 +3705,10 @@ void loop() {
     // Deferred rather than skipped: _last_heartbeat_ms is written inside the
     // send, so not calling it leaves this test true and the next pass tries
     // again. See espnow_defer_periodic().
+    static bool hb_held = false;
     uint32_t hb_age = now - _last_heartbeat_ms;
     if (hb_age >= STATUS_HEARTBEAT_MS &&
-            !espnow_defer_periodic(hb_age, STATUS_HEARTBEAT_MS))
+            !periodic_held(hb_age, STATUS_HEARTBEAT_MS, &hb_held))
         send_status_heartbeat();
 
     // ── Health telemetry (10 s cadence, jog-deferred, anomaly-triggered) ─

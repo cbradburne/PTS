@@ -971,7 +971,7 @@ class Bridge:
             # while this reads 0 did NOT stop because of the bound, and that is
             # worth knowing before anyone calls the fault fixed.
             if defer:
-                n32txt += " | drain deferred %d%s" % (defer,
+                n32txt += " | sends held back %d%s" % (defer,
                                                       "+" if defer == 255 else "")
             # The leak, and the only number here that moves BEFORE the fault.
             # esp_now_send() takes a buffer from a small pool and the send

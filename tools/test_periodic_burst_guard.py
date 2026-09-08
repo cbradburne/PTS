@@ -48,7 +48,7 @@ for name, marker, occurrence in (("STATUS", "send_status_heartbeat();", "last"),
     else:
         i = INO.rindex(marker)
     window = INO[max(0, i - 500):i]
-    assert "espnow_defer_periodic" in window, \
+    assert "periodic_held" in window, \
         f"{name} is sent without the in-flight guard. RF and HEALTH share one\n" \
         f"    interval and STATUS lands on the same pass every other time, so an\n" \
         f"    unguarded one puts the mount back to three sends in microseconds."
@@ -78,7 +78,7 @@ assert "_last_heartbeat_ms =" not in hb, \
     "    skipped for a whole interval instead of retried next pass"
 rf = INO[INO.index("uint32_t rf_age = now - _rf_last_ms;"):]
 rf = rf[:rf.index("send_rf_report();")]
-assert rf.index("espnow_defer_periodic") < rf.index("_rf_last_ms = now;"), \
+assert rf.index("periodic_held") < rf.index("_rf_last_ms = now;"), \
     "the RF timestamp is stamped before the guard, so a deferred RF report is\n" \
     "    lost for ten seconds rather than retried"
 print("   timestamps stamped only when the send happens      OK")
@@ -120,6 +120,27 @@ assert "#ifndef ESPNOW_TX_INFLIGHT_CAP" in INO, \
 assert re.search(r"if \(!ESPNOW_TX_INFLIGHT_CAP\) return false;", INO), \
     "setting the cap to 0 does not disable the guard"
 print("   cap 0 restores the old behaviour exactly           OK")
+
+# ---- 3b. the counter counts deferrals, not loop passes ---------------------
+# The guard is re-tested every pass while a report waits and the loop runs about
+# a hundred times a second, so a naive count scores one 400 ms hold as forty.
+# And the ACK drain must not count a "deferral" when the queue is already empty
+# — the first field build did, and pegged at 255 within the hour on two mounts
+# while saying nothing about whether a command had ever waited.
+print("\n3b. what the counter counts:")
+ph = INO[INO.index("static inline bool periodic_held"):]
+ph = ph[:ph.index("\n}")]
+assert "if (!*held)" in ph and "*held = true" in ph, \
+    "the periodic deferral is counted every pass rather than once per hold"
+assert "*held = false" in ph, "the flag never clears, so only the first hold counts"
+drain = INO[INO.index("if (espnow_tx_saturated()) {"):]
+drain = drain[:drain.index("break;")]
+assert "uxQueueMessagesWaiting" in drain, \
+    "the drain counts a deferral without checking anything is still queued, so\n" \
+    "    it counts finishing-while-busy instead of holding-something-back"
+assert drain.index("uxQueueMessagesWaiting") < drain.index("_espnow_drain_deferred"), \
+    "the queue check runs after the increment"
+print("   once per hold, and only when something waits       OK")
 
 # ---- 4. the hub USB line speaks on a change, not on a timer ----------------
 print("\n4. the hub's USB serial state:")
