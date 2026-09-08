@@ -203,15 +203,20 @@ before it wedged read zero.
 | `…0905-2313` | rate 200 + poll 20, cap 0, no load | 13.3 h | 10,512,753 | 0 | clean |
 | `…0906-1238` | **the same, plus `load 40 100`** | 20.0 h | 10,075,316 | **0 → 3** | **LEAKED** |
 | `…0907-0851` | `load 100 200`, cap 0 | 6.8 h | 2,944,102 | 0 | clean (short) |
-| `…0907-1558` | **`load 40 100` + `cap 2`** | 16.8 h | 8,443,677 | 0 | **clean** |
+| `…0907-1558` | **`load 40 100` + `cap 2`** | **23.2 h** | **11,682,437** | 0 | **clean** |
 
 The third differs from the second in one thing: 40 ms of blocked loop in every
 100. Same cap, same PHY, same peer, same boards, 10 million sends either way.
 
 The fifth differs from the third in one thing: `cap 2`. Same load, same
-140 sends/s, same 100 overlaps per 1000 — peak `in_flight` held at 2 instead of
-6. The leak run had lost all three buffers by 15.17 h; this ran 16.8 h and lost
-none, heap unmoved at 265,724.
+140 sends/s, same 101 overlaps per 1000 against 98 — peak `in_flight` held at 2
+instead of 6, for every one of its 83,457 samples.
+
+It has now run **longer than the leak run and sent more frames**: 23.2 h and
+11.7 M sends against 20.0 h and 10.1 M, with the floor at 0 and the heap
+unmoved at 265,724. Three events in the shorter run, none in the longer one —
+about 3.5 expected, so **p ≈ 0.03**. On the bench, bounding in-flight sends
+prevents the leak.
 
 ### It needs BOTH, and that is the mechanism
 
