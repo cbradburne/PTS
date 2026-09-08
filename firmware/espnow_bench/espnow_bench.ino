@@ -717,10 +717,13 @@ void loop() {
     // Attempted once each whether or not the send is accepted, because the rig
     // does not retry an ACK either.
     if (_cfg.running && _cfg.role == 1) {
-        // Bounded per pass. The bridge dequeues from a FreeRTOS queue that is
-        // finite and drops when full, so an unbounded drain here would be the
-        // bench inventing a burst the rig cannot produce — and, if the loop
-        // ever fell behind a fast `poll`, would stall it doing so.
+        // Bounded per pass, and this is CONSERVATIVE next to the mount: the
+        // bridge drains its receive queue unbounded (amoled .ino:3525) and
+        // answers every non-JOG packet, so a blocked loop lets commands pile up
+        // and the resumed loop fires up to ESPNOW_RX_DEPTH=16 ACKs back to
+        // back. The block manufactures the burst. Bounded here anyway, because
+        // a drain that can stall the loop behind a fast `poll` measures the
+        // bench rather than the fault.
         uint8_t budget = 8;
         while (_cmd_acked != _cmd_rx && budget--) {
             _cmd_acked = _cmd_acked + 1;

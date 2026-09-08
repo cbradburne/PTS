@@ -202,9 +202,51 @@ before it wedged read zero.
 | `…0905-1822` | rate 50, cap 0, no load | 3.0 h | 542,067 | 0 | clean |
 | `…0905-2313` | rate 200 + poll 20, cap 0, no load | 13.3 h | 10,512,753 | 0 | clean |
 | `…0906-1238` | **the same, plus `load 40 100`** | 20.0 h | 10,075,316 | **0 → 3** | **LEAKED** |
+| `…0907-0851` | `load 100 200`, cap 0 | 6.8 h | 2,944,102 | 0 | clean (short) |
+| `…0907-1558` | **`load 40 100` + `cap 2`** | 16.8 h | 8,443,677 | 0 | **clean** |
 
 The third differs from the second in one thing: 40 ms of blocked loop in every
 100. Same cap, same PHY, same peer, same boards, 10 million sends either way.
+
+The fifth differs from the third in one thing: `cap 2`. Same load, same
+140 sends/s, same 100 overlaps per 1000 — peak `in_flight` held at 2 instead of
+6. The leak run had lost all three buffers by 15.17 h; this ran 16.8 h and lost
+none, heap unmoved at 265,724.
+
+### It needs BOTH, and that is the mechanism
+
+| | load | peak in flight | result |
+|---|---|---|---|
+| 13.3 h | none | 5 | clean |
+| 16.8 h | 40/100 | **2** | clean |
+| 20.0 h | 40/100 | **6** | **3 buffers gone** |
+
+Blocking alone does not do it. Concurrency alone does not do it. Both together
+do — and on the mount they are not independent, because **the block is what
+creates the burst.**
+
+`esp_mount_amoled175.ino:3525` drains the ESP-NOW receive queue unbounded:
+
+```c
+while (xQueueReceive(_espnow_rx_q, &en_msg, 0) == pdTRUE) {
+    ... handle_hub_packet(pkt);      // an ACK per non-JOG packet, line 1357
+}
+```
+
+`ESPNOW_RX_DEPTH` is 16. An LVGL flush blocks the loop; commands from the hub
+queue up behind it; the loop resumes and fires up to sixteen ACKs back to back
+with no cap and no pacing. That is a burst the average send rate (0.4/s idle,
+10.4/s busy) gives no hint of, and it is exactly the condition these runs show
+leaking.
+
+**So the fix is on the mount and it is small: bound that drain.** Handling two
+packets per loop pass instead of all sixteen leaves the rest queued for the next
+pass microseconds later — no frames dropped, and never more than a couple of
+sends outstanding. That is what `cap 2` did here.
+
+Statistics, honestly: one run, zero events where about three were expected —
+p ≈ 0.05. Suggestive on its own. What makes it more than suggestive is that the
+mechanism is visible in the bridge's source.
 
 ### The signature
 
