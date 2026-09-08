@@ -652,6 +652,37 @@ static inline bool espnow_tx_saturated() {
     return live >= (uint32_t)ESPNOW_TX_INFLIGHT_CAP;
 }
 
+// ── The burst the rig actually makes ─────────────────────────────────────────
+//
+// The ACK drain below was the obvious suspect and the field logs say it is
+// nearly idle: the mount's whole inbound traffic is one GET_CONFIG keepalive
+// every ~3 s, and loop passes are 9-11 ms, so commands essentially never queue
+// two deep. It bursts from somewhere else entirely.
+//
+// _rf_last_ms and _health_last_ms both start at 0 and share HEALTH_INTERVAL_MS,
+// so RF and HEALTH are locked together for ever — two sends back to back in one
+// pass, every ten seconds. STATUS at 5 s lands on the same pass every other
+// time, making three. Three sends within microseconds, on an idle mount, with
+// no hub traffic and nobody touching the display: exactly the condition the
+// bench needed to lose a buffer.
+//
+// So the periodic reports get the same bound, and deferring one is nearly free:
+// every caller's test is `age >= interval`, and skipping leaves that true, so
+// the report goes out on a later pass a few milliseconds behind. Nothing is
+// dropped and no state is added.
+//
+// The escape matters more than the bound. STATUS is the mount's liveness signal
+// and the hub gives up after MOUNT_PRESENCE_TIMEOUT_MS (16 s); holding one
+// anywhere near that would trade a leak that takes hours for an outage that
+// takes effect at once. 400 ms is two orders of magnitude clear of it and still
+// dozens of loop passes for the radio to finish what it has.
+#define ESPNOW_PERIODIC_DEFER_MS 400
+
+static inline bool espnow_defer_periodic(uint32_t age, uint32_t interval) {
+    if (!espnow_tx_saturated()) return false;
+    return age < interval + ESPNOW_PERIODIC_DEFER_MS;   // else overdue — go anyway
+}
+
 // Called from loop(); cheap, and deliberately does no more than measure.
 // Acting on it — a clean teardown while the radio still works, instead of
 // twenty seconds isolated and a reboot — waits until the rig has said what
@@ -1165,7 +1196,11 @@ static void health_check_bridge(uint32_t now) {
     // health line, and emitted not one RF report in the whole log.  A
     // diagnostic that switches itself off when the fault appears is worse than
     // none, because its silence reads as nothing to see.
-    if (now - _rf_last_ms >= HEALTH_INTERVAL_MS) {
+    // RF and HEALTH share this interval and started together, so without the
+    // guard they go out back to back for the life of the mount.
+    uint32_t rf_age = now - _rf_last_ms;
+    if (rf_age >= HEALTH_INTERVAL_MS &&
+            !espnow_defer_periodic(rf_age, HEALTH_INTERVAL_MS)) {
         _rf_last_ms = now;
         send_rf_report();
     }
@@ -1176,14 +1211,20 @@ static void health_check_bridge(uint32_t now) {
         (_health_loop_max_ms > HEALTH_LOOP_STALL_MS) ||
         (_espnow_fail_total - _health_last_txfail >= HEALTH_TXFAIL_JUMP);
     if (anomaly && (now - _health_anom_ms) >= HEALTH_ANOMALY_GAP_MS) {
+        // Held back only while the radio is busy, and _health_anom_ms is left
+        // alone so the next pass retries. An anomaly report is the one worth
+        // waiting a few milliseconds for rather than adding to a burst.
+        if (espnow_tx_saturated()) return;
         _health_anom_ms = now;
         send_health(true);
         return;
     }
-    if (now - _health_last_ms < HEALTH_INTERVAL_MS) return;
+    uint32_t h_age = now - _health_last_ms;
+    if (h_age < HEALTH_INTERVAL_MS) return;
     bool jog_busy = (now - _last_jog_fwd_ms) < HEALTH_JOG_DEFER_MS;
-    bool overdue  = (now - _health_last_ms) > HEALTH_INTERVAL_MS + 2000;
+    bool overdue  = h_age > HEALTH_INTERVAL_MS + 2000;
     if (jog_busy && !overdue) return;
+    if (espnow_defer_periodic(h_age, HEALTH_INTERVAL_MS)) return;
     send_health(false);
 }
 
@@ -3632,7 +3673,12 @@ void loop() {
     // ── Heartbeat ────────────────────────────────────────────────────────
     espnow_leak_poll();
 
-    if (now - _last_heartbeat_ms >= STATUS_HEARTBEAT_MS)
+    // Deferred rather than skipped: _last_heartbeat_ms is written inside the
+    // send, so not calling it leaves this test true and the next pass tries
+    // again. See espnow_defer_periodic().
+    uint32_t hb_age = now - _last_heartbeat_ms;
+    if (hb_age >= STATUS_HEARTBEAT_MS &&
+            !espnow_defer_periodic(hb_age, STATUS_HEARTBEAT_MS))
         send_status_heartbeat();
 
     // ── Health telemetry (10 s cadence, jog-deferred, anomaly-triggered) ─

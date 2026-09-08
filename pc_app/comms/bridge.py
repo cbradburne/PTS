@@ -617,6 +617,11 @@ class Bridge:
     _outage_down: set[int] = set()
     _outage_seen = False
 
+    # Same idea for the hub's USB port: report the state when it CHANGES, not
+    # thirty times an hour. None means nothing has been said yet, so the first
+    # report states whatever it finds.
+    _hub_usb_state: str | None = None
+
     def _note_mount_outage(self, pkt: Packet) -> None:
         """How long each mount has been uncontrollable, since the hub booted.
 
@@ -1125,15 +1130,37 @@ class Bridge:
             lps  = int.from_bytes(pkt.payload[6:8], "big")
             drop = pkt.payload[8]          # percent of serial frames dropped
             fn = log.warning if pms >= 1000 else log.info
-            # 100% is the ordinary state when nothing is reading the USB port —
-            # the PC app talks TCP — so it is worth naming rather than alarming.
-            note = ""
-            if drop >= 100:
-                note = " | USB serial not being read (all frames dropped)"
-            elif drop:
-                note = f" | {drop}% of serial frames dropped"
             fn("HUB LOOP: %d loops/s | worst pass %d ms | worst section '%s' "
-               "%d ms%s", lps, pms, sec, sms, note)
+               "%d ms", lps, pms, sec, sms)
+
+            # Said on a CHANGE, not on every report.
+            #
+            # It used to ride on the line above, every 30 s, for ever: the hub's
+            # USB port has nothing reading it because the app is on TCP and USB
+            # is power and flashing only, so "all frames dropped" was the
+            # permanent normal state. A warning that is always on is not a
+            # warning — it trains the eye past the line, and the case that
+            # matters (something IS reading and losing frames) would have
+            # scrolled by in the same words.
+            #
+            # The first report after a restart states the state whatever it is,
+            # so a rotated log always establishes its baseline rather than
+            # leaving it to be inferred from silence.
+            state = "unread" if drop >= 100 else ("partial" if drop else "clean")
+            if state != self._hub_usb_state:
+                first = self._hub_usb_state is None
+                self._hub_usb_state = state
+                if state == "unread":
+                    log.info("HUB USB serial: nothing is reading it, frames "
+                             "dropped%s — normal when the app is on TCP and USB "
+                             "is power and flashing only", " (at startup)" if first else "")
+                elif state == "partial":
+                    log.warning("HUB USB serial: %d%% of frames dropped — "
+                                "something IS reading the port and not keeping "
+                                "up, which loses hub diagnostics", drop)
+                else:
+                    log.info("HUB USB serial: being read cleanly, no frames "
+                             "dropped")
         elif kind == 10:
             # Frames the hub SHED to a slow TCP client — counted since 2026-06,
             # reported only to a serial port nothing reads, in a build where the
