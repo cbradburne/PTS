@@ -245,12 +245,13 @@
 // guesses at it were wrong before this was written.
 // 25 was offered/attempts/sent/refused (16) + three top commands (9).
 // 33 since the send-callback counters were appended at [25..32]: callbacks(4),
-// leak floor(2), callback-stall ms(2). A client accepts either length and reads
+// leak floor(2), callback-stall ms(2), sends held back(2). A client accepts any
+// of these lengths and reads
 // the tail only when it is there, so a satellite and a PC app updated at
 // different times still talk — the same trick as the 75/77/79-byte
 // CONFIG_REPORT. SAT_DOWNLINK_MIN_LEN is what a reader must require.
 #define SAT_DOWNLINK_MIN_LEN       25
-#define SAT_DOWNLINK_PAYLOAD_LEN   33
+#define SAT_DOWNLINK_PAYLOAD_LEN   35
 #define SAT_DOWNLINK_TOP_CMDS       3
 #define SAT_HELLO_PAYLOAD_LEN      SAT_NAME_LEN                // satellite → hub
 #define SAT_NAMES_PAYLOAD_LEN      (SAT_SLOTS * SAT_NAME_LEN)  // hub → clients

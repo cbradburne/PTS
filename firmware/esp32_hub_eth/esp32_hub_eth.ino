@@ -504,10 +504,71 @@ static volatile uint32_t _espnow_fail_cum[NUM_MOUNTS] = {};
 static volatile uint32_t _espnow_issued   = 0;   // esp_now_send() returned ESP_OK
 static volatile uint32_t _espnow_cb_total = 0;   // callback fired, either status
 static volatile uint32_t _espnow_cb_last_ms = 0; // ...and when it last did
+// The stall these three detect, kept here beside them rather than with the rest
+// of the self-rescue state: the TX bound below has to read it, and it is
+// callback state before it is ladder state.
+static uint32_t _cb_stall_since_ms = 0;   // 0 = callbacks are arriving
+static bool     _cb_stall_active   = false;
 
 static inline uint32_t espnow_in_flight() {
     uint32_t i = _espnow_issued, c = _espnow_cb_total;
     return (i >= c) ? (i - c) : 0;
+}
+
+// ── The burst bound, which this radio never had ──────────────────────────────
+//
+// Everything above measures the wedge and escalates on it. This is the first
+// thing on the hub meant to stop it happening.
+//
+// The bench needed TWO conditions together and neither alone did it
+// (firmware/espnow_bench/README.md): a blocked loop AND three or more sends in
+// flight. load 40/100 uncapped lost all three buffers by 15.17 h; the same load
+// at cap 2 ran 23.18 h and 11.7 M sends clean.
+//
+// This hub has both. On 2026-09-09 its callback stalled twice, and its own
+// health line read loopmax 427 ms and 403 ms at those two moments — that is the
+// blocked loop, measured. The burst is just as real: the PC sends five
+// GET_CONFIG in one go every ~4 s, they arrive in one TCP segment, and one loop
+// pass forwards all five back to back. broadcast_to_mounts_routed() does the
+// same for a broadcast. Five sends in microseconds, which is what the bench
+// called the fault condition.
+//
+// Bounding it needs a ring, because unlike the mount there is nothing else
+// holding the frame: the packet is consumed by the time it reaches the radio,
+// so a caller cannot be asked to try again. Nothing is dropped — the rest wait
+// for the next loop pass, microseconds later.
+#ifndef ESPNOW_TX_INFLIGHT_CAP
+#define ESPNOW_TX_INFLIGHT_CAP 2       // 0 restores the old behaviour exactly
+#endif
+// Deep enough for a broadcast to all five plus a burst behind it.
+#define ESPNOW_TX_QUEUE_DEPTH 16
+// The escape matters more than the bound. A frame held indefinitely is an
+// outage that starts now, traded for a leak that takes hours — so past this,
+// it goes regardless of how many are outstanding.
+#define ESPNOW_TX_DEFER_MS    400UL
+
+struct EspNowTxFrame {
+    uint32_t queued_ms;
+    uint16_t len;
+    uint8_t  idx;
+    uint8_t  data[PKT_BUF_SIZE + 4];
+};
+static EspNowTxFrame _entx_q[ESPNOW_TX_QUEUE_DEPTH];
+static uint8_t  _entx_head = 0, _entx_tail = 0;
+static uint32_t _entx_deferred = 0;   // frames the bound actually held back
+static uint32_t _entx_dropped  = 0;   // ring full — see enqueue
+
+// Saturation is measured on live sends only.
+//
+// A callback stall parks in_flight high for ever, and counting that would mean
+// the hub stops transmitting entirely at exactly the moment it is already in
+// trouble — trading a leak that takes hours for an outage that takes effect at
+// once. The stall has its own detector and its own ladder; while it is active
+// this bound stands aside and lets everything through.
+static inline bool espnow_tx_saturated() {
+    if (!ESPNOW_TX_INFLIGHT_CAP) return false;
+    if (_cb_stall_active) return false;
+    return espnow_in_flight() >= (uint32_t)ESPNOW_TX_INFLIGHT_CAP;
 }
 
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
@@ -664,8 +725,8 @@ static inline bool mount_is_active(int i, uint32_t now) {
 RTC_NOINIT_ATTR static uint32_t _self_restart_streak;
 
 static uint32_t _tx_wedge_since_ms[NUM_MOUNTS] = {};  // 0 = no wedge clock running
-static uint32_t _cb_stall_since_ms = 0;   // 0 = callbacks are arriving
-static bool     _cb_stall_active   = false;
+// _cb_stall_since_ms / _cb_stall_active live up with the ESP-NOW callback
+// counters — the TX bound reads them before this point in the file.
 static uint32_t _last_reinit_ms       = 0;   // stamped by hub_espnow_full_reinit()
 static uint32_t _last_wifi_reinit_ms  = 0;   // stamped by hub_wifi_full_reinit()
 static uint32_t _last_wedge_ms        = 0;   // last time any wedge clock was active
@@ -1012,12 +1073,9 @@ static void send_to_mount_routed(int idx, const uint8_t *raw, uint16_t len) {
     espnow_send_if_present(idx, raw, len);
 }
 
-static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
-    if (idx < 0 || idx >= NUM_MOUNTS) return;
-    if (!mount_mac_valid(idx)) return;
-    uint32_t seen = _mount_last_seen[idx];
-    if (seen == 0 || (millis() - seen) > MOUNT_PRESENT_MS) return;   // not here
-
+// The actual send. Everything reaches the radio through here, and nothing else
+// calls esp_now_send() on this node.
+static void espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
     esp_err_t e = esp_now_send(_mount_mac[idx], raw, len);
     if (e == ESP_OK) {
         // Counted only on ESP_OK: a rejected send never took a buffer, so
@@ -1037,6 +1095,54 @@ static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
     if (now - last_log[idx] < 2000) return;
     last_log[idx] = now;
     Serial.printf("[ESPNOW] send to mount %d REJECTED: %s\n", idx + 1, esp_err_to_name(e));
+}
+
+// Drain the ring, stopping as soon as enough sends are already outstanding.
+// Called from loop() and from the enqueue below, so a frame arriving on a quiet
+// radio still goes out in the same pass and pays nothing for the ring.
+static void espnow_tx_pump(uint32_t now) {
+    while (_entx_head != _entx_tail) {
+        EspNowTxFrame &f = _entx_q[_entx_tail];
+        // Overdue frames go regardless — see ESPNOW_TX_DEFER_MS.
+        if (espnow_tx_saturated() && (now - f.queued_ms) < ESPNOW_TX_DEFER_MS) break;
+        _entx_tail = (uint8_t)((_entx_tail + 1) % ESPNOW_TX_QUEUE_DEPTH);
+        espnow_send_now(f.idx, f.data, f.len);
+    }
+}
+
+static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
+    if (idx < 0 || idx >= NUM_MOUNTS) return;
+    if (!mount_mac_valid(idx)) return;
+    uint32_t seen = _mount_last_seen[idx];
+    if (seen == 0 || (millis() - seen) > MOUNT_PRESENT_MS) return;   // not here
+    if (len > sizeof(_entx_q[0].data)) return;
+
+    uint32_t now = millis();
+    // The common case is an idle radio: pump first, and if nothing is waiting
+    // and nothing is outstanding this sends immediately, exactly as before.
+    espnow_tx_pump(now);
+    if (_entx_head == _entx_tail && !espnow_tx_saturated()) {
+        espnow_send_now(idx, raw, len);
+        return;
+    }
+
+    uint8_t next = (uint8_t)((_entx_head + 1) % ESPNOW_TX_QUEUE_DEPTH);
+    if (next == _entx_tail) {
+        // Full. Drop the OLDEST rather than this one: these are control
+        // commands and the newest is the operator's latest intention — a stale
+        // jog is worth less than the stop that followed it. Sixteen deep behind
+        // a 400 ms escape means this needs the radio to have stopped entirely,
+        // which the stall detector is already escalating on.
+        _entx_tail = (uint8_t)((_entx_tail + 1) % ESPNOW_TX_QUEUE_DEPTH);
+        _entx_dropped++;
+    }
+    EspNowTxFrame &f = _entx_q[_entx_head];
+    f.queued_ms = now;
+    f.idx       = (uint8_t)idx;
+    f.len       = len;
+    memcpy(f.data, raw, len);
+    _entx_head  = next;
+    _entx_deferred++;
 }
 
 static void forward_to_mounts(const ParsedPacket &pkt);
@@ -3593,6 +3699,11 @@ void loop() {
     esp_task_wdt_reset();
 
     uint32_t now = millis();
+
+    // Anything the TX bound held back last pass, before anything else runs and
+    // above every early return below.  A held frame is worth microseconds, and
+    // this is the path that carries commands to the mounts.
+    espnow_tx_pump(now);
 
     // One-shot if the wire never comes up.  Silence here would look exactly
     // like a satellite that is switched off, so it is worth a line in the log.

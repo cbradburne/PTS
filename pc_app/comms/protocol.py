@@ -1776,7 +1776,7 @@ BASE_SILENT_MS            = 3 * BASE_HEARTBEAT_MS
 # the tail only when it is there, so a satellite and a PC app updated at
 # different times still talk.
 SAT_DOWNLINK_MIN_LEN      = 25
-SAT_DOWNLINK_PAYLOAD_LEN  = 33
+SAT_DOWNLINK_PAYLOAD_LEN  = 35
 SAT_DOWNLINK_TOP_CMDS     = 3
 MOUNT_EVENT_ISOLATED      = 1
 MOUNT_EVENT_TX_WEDGE      = 2

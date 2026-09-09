@@ -726,10 +726,13 @@ class Bridge:
         # The tail is optional.  A satellite from before the send-callback
         # counters sends 25 bytes, and everything above it still reads.
         cb = leak = stall = None
-        if len(b) >= SAT_DOWNLINK_PAYLOAD_LEN:
+        held = 0
+        if len(b) >= 33:
             cb    = int.from_bytes(b[25:29], "big")
             leak  = (b[29] << 8) | b[30]
             stall = (b[31] << 8) | b[32]
+        if len(b) >= SAT_DOWNLINK_PAYLOAD_LEN:
+            held  = (b[33] << 8) | b[34]
         slot = pkt.mount_id - SAT_ADDR_BASE
         who  = self._sat_names.get(slot) or f"SAT {slot}"
         prev = self._sat_dn_prev.get(who)
@@ -780,7 +783,14 @@ class Bridge:
         if d_cb is not None and d_sent and not d_cb:
             tx += (" | %d sends accepted and NOT ONE callback — the pool is emptying"
                    % d_sent)
+        # Not a fault, and deliberately not a warning: it is the burst bound
+        # doing its job.  It is here because a satellite that stops wedging
+        # while this reads 0 did not stop because of the bound.
+        quiet = ""
+        if held:
+            quiet = " | sends held back %d%s" % (held, "+" if held >= 0xFFFF else "")
         fn = log.warning if (d_ref or tx) else log.info
+        tx += quiet
         fn("SAT DOWNLINK %-12s offered %d, sent %d, refused %d (%d send calls)%s%s%s",
            who, d_off, d_sent, d_ref, d_att, note, tx, breakdown)
 

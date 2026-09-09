@@ -54,13 +54,23 @@ assert re.search(r"_espnow_cb_last_ms\s*=\s*millis\(\);", cb), \
     "nothing records WHEN the last callback arrived, so a stall has no clock"
 print("   callbacks counted first, and timestamped            OK")
 
-snd = block("static void espnow_send_if_present(")
+# espnow_send_now() is the one place esp_now_send() is called on this node; the
+# queue and the bound sit in front of it.
+snd = block("static void espnow_send_now(")
 assert re.search(r"_espnow_issued\s*=\s*_espnow_issued \+ 1;", snd), \
     "sends are not counted"
 assert snd.index("e == ESP_OK") < snd.index("_espnow_issued"), \
     "a REJECTED send is counted as issued — it never took a buffer, so it would\n" \
     "    read as an outstanding send that can never complete"
-print("   sends counted on ESP_OK only                        OK")
+# Code lines only: this file discusses esp_now_send() in several comments, and
+# counting those would make the check pass or fail on prose.
+calls = [l for l in HUB.splitlines()
+         if "esp_now_send(" in l.split("//")[0]]
+assert len(calls) == 1, \
+    "esp_now_send() is called from %d places, so the counter and the burst bound\n" \
+    "    no longer see every buffer taken:\n      %s" \
+    % (len(calls), "\n      ".join(c.strip() for c in calls))
+print("   sends counted on ESP_OK only, one send path         OK")
 
 # ---- 2. the rung that the outage needed ------------------------------------
 print("\n2. armed by the stall, not by failures:")
@@ -149,6 +159,49 @@ assert re.search(r"default:\s*\n\s*return true;", act), \
     "commands not listed default to NOT being activity, so a move command would\n" \
     "    fail to defer the restart and the hub could reboot mid-shot"
 print("   anything that changes something still defers it     OK")
+
+# ---- 4b. the burst bound: stop it happening, not just survive it ------------
+# Everything above measures the wedge and escalates on it. This is the first
+# thing on the hub meant to PREVENT it. The bench needed a blocked loop AND 3+
+# sends in flight; this hub had both on 2026-09-09 — loopmax 427 ms and 403 ms
+# at the two stalls, and five GET_CONFIG forwarded back to back every ~4 s.
+print("\n4b. the burst bound:")
+cap = int(re.search(r"#define ESPNOW_TX_INFLIGHT_CAP\s+(\d+)", HUB).group(1))
+assert cap == 2, f"the cap is {cap}; the bench proved 2"
+sat_fn = block("static inline bool espnow_tx_saturated(")
+assert "if (!ESPNOW_TX_INFLIGHT_CAP) return false;" in sat_fn, \
+    "cap 0 does not restore the old behaviour, so this cannot be A/B'd on the rig"
+assert "_cb_stall_active" in sat_fn, \
+    "a callback stall parks in_flight high for ever. Counting that would stop the\n" \
+    "    hub transmitting entirely at the moment it is already in trouble —\n" \
+    "    trading a leak that takes hours for an outage that takes effect now."
+
+pump = block("static void espnow_tx_pump(")
+assert "ESPNOW_TX_DEFER_MS" in pump, \
+    "no overdue escape: a busy radio could hold a command indefinitely"
+defer_ms = int(re.search(r"#define ESPNOW_TX_DEFER_MS\s+(\d+)", HUB).group(1))
+presence = 3 * int(re.search(r"#define MOUNT_STATUS_REFRESH_MS\s+(\d+)",
+                             (REPO / "firmware/shared/protocol.h").read_text()).group(1)) + 1000
+assert defer_ms * 10 < presence, \
+    f"a {defer_ms} ms hold eats too much of the {presence} ms presence timeout"
+print(f"   cap {cap}, escape {defer_ms} ms, stands aside on a stall   OK")
+
+# The queue must be drained from loop() as well as from the enqueue — otherwise
+# a frame held on the last command of a burst waits for the NEXT command, which
+# on an idle rig could be seconds.
+loop_body = HUB[HUB.index("void loop() {"):]
+loop_body = loop_body[:loop_body.index("eth_report_once_if_down")]
+assert "espnow_tx_pump(now);" in loop_body, \
+    "the ring is never drained from loop(), so a held frame waits for the next\n" \
+    "    command rather than the next pass"
+enq = block("static void espnow_send_if_present(")
+assert "espnow_tx_pump(now);" in enq, \
+    "an idle radio pays for the ring: without pumping first, a frame arriving\n" \
+    "    with nothing outstanding is queued instead of sent"
+assert "_entx_deferred++" in enq, \
+    "deferrals are not counted, so a hub that stops wedging cannot say whether\n" \
+    "    the bound had anything to do with it"
+print("   drained from loop() and on enqueue, and counted    OK")
 
 # ---- 5. the PC app makes the same distinction ------------------------------
 # The hub learned in its own firmware that a satellite-relayed mount is not

@@ -890,7 +890,9 @@ RTC_NOINIT_ATTR static uint32_t _sat_rst_streak;
 // longer exists by the time it is sent, and esp_now_send() then fails with
 // ESP_ERR_ESPNOW_NOT_FOUND.  Resolving the peer at SEND time means the check
 // and the send cannot disagree.
-struct DnFrame { uint8_t idx; uint16_t len; uint8_t data[PACKET_MAX_PAYLOAD + 16]; };
+// queued_ms is what the burst bound's escape reads — see dn_pump().
+struct DnFrame { uint32_t queued_ms; uint8_t idx; uint16_t len;
+                 uint8_t data[PACKET_MAX_PAYLOAD + 16]; };
 static DnFrame  _dn_q[DN_QUEUE_DEPTH];
 static uint8_t  _dn_head = 0, _dn_tail = 0;
 static uint32_t _dn_overflow = 0;
@@ -927,8 +929,9 @@ static void dn_enqueue(uint8_t idx, const uint8_t *frame, uint16_t len) {
         _dn_overflow++;
     }
     memcpy(_dn_q[_dn_head].data, frame, len);
-    _dn_q[_dn_head].len = len;
-    _dn_q[_dn_head].idx = idx;
+    _dn_q[_dn_head].len       = len;
+    _dn_q[_dn_head].idx       = idx;
+    _dn_q[_dn_head].queued_ms = millis();
     _dn_head = next;
 }
 
@@ -984,10 +987,61 @@ static void espnow_recover() {
     Serial.println("[DOWN] ESP-NOW reinitialised, peers restored");
 }
 
+// ── The burst bound ──────────────────────────────────────────────────────────
+//
+// The bench needed TWO conditions together and neither alone did it
+// (firmware/espnow_bench/README.md): a blocked loop AND three or more sends in
+// flight. load 40/100 uncapped lost all three buffers by 15.17 h; the same load
+// at cap 2 ran 23.18 h and 11.7 M sends clean.
+//
+// The pump below is the second condition by construction — it sends as many
+// frames as the radio will take, stopping only at NO_MEM, which is to say only
+// once the pool is ALREADY empty. Foyer wedged on 2026-09-09 after 12.6 h.
+//
+// This is NOT the old one-in-flight rule. That one waited for the callback
+// before sending anything else, and it shed 150 commands in a 30-second window
+// because enqueue was unbounded while dequeue was one. This holds at TWO, and
+// holds rather than sheds: the rest stay in the 32-deep ring for the next loop
+// pass, microseconds later. Nothing is dropped that was not dropped before.
+#ifndef ESPNOW_TX_INFLIGHT_CAP
+#define ESPNOW_TX_INFLIGHT_CAP 2       // 0 restores the old behaviour exactly
+#endif
+// A frame held indefinitely is an outage that starts now, traded for a leak
+// that takes hours. Past this it goes regardless of what is outstanding.
+#define DN_DEFER_MS     400UL
+// And if the callback has stopped altogether, in_flight parks high for ever and
+// a bound that counted it would take this relay off the air at the moment it is
+// already in trouble. Matches the hub's SELF_CB_STALL_MS.
+#define DN_CB_STALL_MS  3000UL
+
+static uint32_t _dn_deferred = 0;      // frames the bound actually held back
+
+// Takes the timestamp, not the frame: the Arduino builder hoists prototypes to
+// the top of the file, above the DnFrame declaration, so a DnFrame parameter
+// here fails to compile in a way that names neither this function nor the
+// struct.
+static inline bool dn_hold(uint32_t now, uint32_t queued_ms) {
+    if (!ESPNOW_TX_INFLIGHT_CAP) return false;
+    if (sat_in_flight() < (uint32_t)ESPNOW_TX_INFLIGHT_CAP) return false;
+    if (now - queued_ms >= DN_DEFER_MS) return false;             // overdue
+    if (_sat_cb_last_ms && (now - _sat_cb_last_ms) > DN_CB_STALL_MS)
+        return false;                                            // callback dead
+    return true;
+}
+
 static void dn_pump(uint32_t now) {
-    (void)now;
+    // Counted once per hold, not once per pass: the loop runs hundreds of times
+    // a second and a naive count would score one 400 ms hold as hundreds. The
+    // mount's first build made exactly that mistake and pegged at 255 within
+    // the hour while saying nothing about whether anything had ever waited.
+    static bool held = false;
     while (_dn_head != _dn_tail) {
         DnFrame &f = _dn_q[_dn_tail];
+        if (dn_hold(now, f.queued_ms)) {
+            if (!held) { held = true; _dn_deferred++; }
+            return;
+        }
+        held = false;
         // The mount may have aged out while this frame waited.  Drop it rather
         // than send to a peer that no longer exists: it cannot be delivered
         // either way, and holding it stalls everything behind it.
@@ -1355,12 +1409,18 @@ static void sat_send_downlink(uint32_t now) {
     // satellite would show its stall climbing for ever.
     uint32_t inf   = sat_in_flight();
     uint32_t stall = (_sat_cb_last_ms && inf) ? (now - _sat_cb_last_ms) : 0;
+    // Whether the burst bound ever ENGAGED. Without it a fortnight without a
+    // wedge says nothing: a bound that never fired and a bound that fixed the
+    // fault look identical from here.
+    uint32_t held  = _dn_deferred;
     if (leak  > 0xFFFF) leak  = 0xFFFF;
     if (stall > 0xFFFF) stall = 0xFFFF;
+    if (held  > 0xFFFF) held  = 0xFFFF;
     p[25] = (uint8_t)(cbt >> 24); p[26] = (uint8_t)(cbt >> 16);
     p[27] = (uint8_t)(cbt >>  8); p[28] = (uint8_t)(cbt);
     p[29] = (uint8_t)(leak  >> 8); p[30] = (uint8_t)(leak);
     p[31] = (uint8_t)(stall >> 8); p[32] = (uint8_t)(stall);
+    p[33] = (uint8_t)(held  >> 8); p[34] = (uint8_t)(held);
     uint8_t  frame[PKT_BUF_SIZE + 4];
     uint16_t fn = build_packet(frame, 0, ++_sat_health_seq,
                                CMD_SAT_DOWNLINK, p, sizeof(p));

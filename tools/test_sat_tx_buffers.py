@@ -120,17 +120,54 @@ assert rec.index("esp_now_init") < rec.index("_sat_cb_total   =") \
     "    is the only window where no callback can fire and change it underneath"
 print("   reconciled, high-water kept, in the safe window    OK")
 
+# ---- 4b. the burst bound ---------------------------------------------------
+# The pump is the bench's second condition by construction: it sends as many
+# frames as the radio will take, stopping only at NO_MEM — which is to say only
+# once the pool is ALREADY empty. Foyer wedged after 12.6 h on 2026-09-09.
+print("\n4b. the burst bound:")
+pump = block("static void dn_pump(")
+assert "dn_hold(" in pump, \
+    "the pump is unbounded again — it will send until the radio refuses, which\n" \
+    "    is the condition the bench needed to lose a buffer"
+hold = block("static inline bool dn_hold(")
+cap = int(re.search(r"#define ESPNOW_TX_INFLIGHT_CAP\s+(\d+)", SAT).group(1))
+assert cap == 2, f"the cap is {cap}; the bench proved 2, and 1 is the old rule that shed 150 commands"
+assert "if (!ESPNOW_TX_INFLIGHT_CAP) return false;" in hold, \
+    "setting the cap to 0 does not restore the old behaviour, so it cannot be A/B'd"
+# Three escapes, and all three matter. Without the overdue one a busy radio
+# stalls the relay; without the callback one a stalled callback parks in_flight
+# high for ever and takes the relay off the air at its worst moment.
+assert "DN_DEFER_MS" in hold, "no overdue escape — a frame could be held indefinitely"
+assert "_sat_cb_last_ms" in hold, \
+    "a stalled callback parks in_flight high for ever, so without this the bound\n" \
+    "    latches and the relay stops transmitting entirely — trading a leak that\n" \
+    "    takes hours for an outage that takes effect now"
+defer_ms = int(re.search(r"#define DN_DEFER_MS\s+(\d+)", SAT).group(1))
+base_ms  = int(re.search(r"#define BASE_HEARTBEAT_MS\s+(\d+)", HDR).group(1))
+assert defer_ms * 4 < base_ms, \
+    f"a {defer_ms} ms hold is not comfortably clear of the {base_ms} ms base heartbeat"
+print(f"   cap {cap}, escapes at {defer_ms} ms and on a dead callback   OK")
+
+# Nothing is DROPPED by the bound — it holds, and the ring keeps the rest.
+assert "return;" in pump and "_dn_tail" in pump, "the pump no longer holds position"
+assert "_dn_deferred++" in pump, "deferrals are not counted, so a satellite that\n" \
+    "    stops wedging cannot say whether the bound had anything to do with it"
+assert "static bool held" in pump and "if (!held)" in pump, \
+    "deferrals are counted once per loop pass rather than once per hold — the\n" \
+    "    mount's first build did that and pegged its counter within the hour"
+print("   holds rather than sheds, counted once per hold     OK")
+
 # ---- 5. the record grew without breaking the old one -----------------------
 print("\n5. the wire:")
 mn = int(re.search(r"#define SAT_DOWNLINK_MIN_LEN\s+(\d+)", HDR).group(1))
 ln = int(re.search(r"#define SAT_DOWNLINK_PAYLOAD_LEN\s+(\d+)", HDR).group(1))
-assert mn == 25 and ln == 33, f"lengths moved: min {mn}, long {ln}"
+assert mn == 25 and ln == 35, f"lengths moved: min {mn}, long {ln}"
 top = int(re.search(r"#define SAT_DOWNLINK_TOP_CMDS\s+(\d+)", HDR).group(1))
 assert 16 + top * 3 <= 25, \
     f"the top-command block ({top} x 3 from byte 16) now runs past byte 25 and " \
     f"collides with the appended counters"
 dn = block("static void sat_send_downlink(")
-for i in (25, 28, 29, 30, 31, 32):
+for i in (25, 28, 29, 30, 31, 32, 33, 34):
     assert f"p[{i}]" in dn, f"byte {i} of the appended block is never written"
 assert "if (leak  > 0xFFFF) leak  = 0xFFFF;" in dn, "the floor is not saturated at the wire"
 assert "_sat_cb_last_ms && inf" in dn, \
@@ -158,7 +195,7 @@ class _P:
         self.payload = payload
 
 
-def rec(offered, attempts, sent, refused, cb=None, leak=0, stall=0):
+def rec(offered, attempts, sent, refused, cb=None, leak=0, stall=0, held=None):
     p = bytearray()
     for v in (offered, attempts, sent, refused):
         p += v.to_bytes(4, "big")
@@ -167,6 +204,8 @@ def rec(offered, attempts, sent, refused, cb=None, leak=0, stall=0):
         p += cb.to_bytes(4, "big")
         p += leak.to_bytes(2, "big")
         p += stall.to_bytes(2, "big")
+        if held is not None:
+            p += held.to_bytes(2, "big")
     return bytes(p)
 
 
