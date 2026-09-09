@@ -54,16 +54,28 @@ for name, marker, occurrence in (("STATUS", "send_status_heartbeat();", "last"),
         f"    unguarded one puts the mount back to three sends in microseconds."
     print(f"   {name:<7} guarded                                    OK")
 
-anom = INO[INO.index("if (anomaly && (now - _health_anom_ms)"):]
+# The anomaly report is the one that MUST have the escape, not merely a guard.
+# A mount in permanent anomaly — txfail jumping, which is exactly what a wedging
+# mount looks like — takes this branch on every pass and never reaches the
+# normal health path below it. So an unbounded return here silences the mount's
+# health for as long as the fault lasts, which is to say for as long as it is
+# worth reading. cam1 ran two hours that way on 2026-09-09 while answering every
+# command at 100% and 64 ms, and the only reason anything came off it at all is
+# that RF sits ABOVE this branch and had the escape.
+anom = INO[INO.index("if (anomaly && anom_age >= HEALTH_ANOMALY_GAP_MS)"):]
 anom = anom[:anom.index("return;\n    }")]
-assert "espnow_tx_saturated()" in anom, \
-    "the anomaly health report is unguarded — it is a send like any other and\n" \
-    "    lands in the same burst"
+assert "periodic_held(" in anom, \
+    "the anomaly health report does not go through the BOUNDED guard, so it has\n" \
+    "    no overdue escape — and it is the one send whose branch is taken on\n" \
+    "    every pass while the fault lasts"
+assert not re.search(r"if \(espnow_tx_saturated\(\)\)\s*return;", anom), \
+    "the anomaly report still tests saturation directly. That is the unbounded\n" \
+    "    form: it must go through periodic_held so the overdue escape applies."
 assert "_health_anom_ms = now;" in anom and \
-       anom.index("espnow_tx_saturated") < anom.index("_health_anom_ms = now;"), \
+       anom.index("periodic_held") < anom.index("_health_anom_ms = now;"), \
     "the anomaly timestamp is stamped before the guard, so a deferred report is\n" \
     "    LOST rather than retried"
-print("   anomaly health guarded, and retried not dropped   OK")
+print("   anomaly health bounded, and retried not dropped   OK")
 
 # ---- 2. deferring must not lose the report ---------------------------------
 # Every caller's test is `age >= interval`; skipping the send leaves that true

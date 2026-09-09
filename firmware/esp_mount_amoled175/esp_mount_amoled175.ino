@@ -601,7 +601,18 @@ static volatile uint32_t _espnow_cb_total = 0;  // send callback fired, either w
 // in_flight bounces by one or two with every send; what matters is whether it
 // ever comes back DOWN. The floor over a window only rises, so a rising floor
 // is a leak and a flat one is sends in progress.
-static uint8_t  _espnow_leak_floor = 0;   // saturating: 255 is far past the pool
+//
+// Full width on purpose, and saturated ONLY where it is packed for the wire.
+// It was a saturating uint8_t, which quietly made it a control value that
+// could not do its job: espnow_tx_saturated() below subtracts it from
+// in_flight, so once in_flight passed 257 the floor could no longer track it,
+// live stayed >= the cap, and the guard read saturated for the rest of the
+// boot. cam1 spent 2026-09-09 08:56-10:56 answering every command at 100% and
+// 64 ms while sending no health at all for exactly that reason — it had come
+// up at 03:09 into the 14 h hub outage and run its in-flight count into the
+// hundreds transmitting at a hub that was not listening. A number whose width
+// is chosen for the report it prints must not also arm a guard.
+static uint32_t _espnow_leak_floor = 0;
 
 static inline uint32_t espnow_in_flight() {
     uint32_t i = _espnow_issued, c = _espnow_cb_total;
@@ -720,9 +731,9 @@ static void espnow_leak_poll() {
     if (now - win_ms < 5000UL) return;
     win_ms  = now;
     if (win_min != 0xFFFFFFFF && win_min > _espnow_leak_floor) {
-        _espnow_leak_floor = (win_min > 255) ? 255 : (uint8_t)win_min;
+        _espnow_leak_floor = win_min;   // saturated at node_u32, not here
         Serial.printf("[ESPNOW] LEAK floor %u — issued %lu, callbacks %lu\n",
-                      _espnow_leak_floor,
+                      (unsigned)_espnow_leak_floor,
                       (unsigned long)_espnow_issued,
                       (unsigned long)_espnow_cb_total);
     }
@@ -1186,7 +1197,8 @@ static void send_health(bool anomaly) {
     // a bound that fixed the fault look identical from here. Reinit gives up
     // its top byte for it; it has never exceeded 3, and both saturate.
     h.node_u32      = ((uint32_t)(_wedge_count > 255 ? 255 : _wedge_count) << 24) |
-                      ((uint32_t)_espnow_leak_floor << 16) |
+                      ((uint32_t)(_espnow_leak_floor > 255 ? 255
+                                  : _espnow_leak_floor) << 16) |
                       ((uint32_t)(_espnow_drain_deferred > 255 ? 255
                                   : _espnow_drain_deferred) << 8) |
                       (_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL));
@@ -1235,11 +1247,27 @@ static void health_check_bridge(uint32_t now) {
         (esp_get_free_heap_size() < HEALTH_LOW_HEAP_BYTES) ||
         (_health_loop_max_ms > HEALTH_LOOP_STALL_MS) ||
         (_espnow_fail_total - _health_last_txfail >= HEALTH_TXFAIL_JUMP);
-    if (anomaly && (now - _health_anom_ms) >= HEALTH_ANOMALY_GAP_MS) {
+    uint32_t anom_age = now - _health_anom_ms;
+    if (anomaly && anom_age >= HEALTH_ANOMALY_GAP_MS) {
         // Held back only while the radio is busy, and _health_anom_ms is left
         // alone so the next pass retries. An anomaly report is the one worth
         // waiting a few milliseconds for rather than adding to a burst.
-        if (espnow_tx_saturated()) return;
+        //
+        // BOUNDED, like every other guarded send on this mount. It was a bare
+        // saturation test with no way out, and that is a worse fault than the
+        // one it was guarding: a mount in permanent anomaly — txfail jumping,
+        // which is what a wedging mount looks like — takes this branch on
+        // every pass and never reaches the normal health path below, so an
+        // unbounded return here is a mount that stops reporting its health at
+        // the moment its health is worth reading. cam1 went two hours that way
+        // on 2026-09-09 while answering every command at 100% and 64 ms, and
+        // the only reason anything came off it at all is that RF sits above
+        // this branch and had the escape. The RF block twenty lines up already
+        // warns that a diagnostic which switches itself off when the fault
+        // appears is worse than none; this guard was added underneath that
+        // warning and did exactly what it warns about.
+        static bool anom_held = false;
+        if (periodic_held(anom_age, HEALTH_ANOMALY_GAP_MS, &anom_held)) return;
         _health_anom_ms = now;
         send_health(true);
         return;

@@ -60,10 +60,32 @@ poll = poll[:poll.index("\n}")]
 assert "win_min > _espnow_leak_floor" in poll, \
     "the floor is assigned from the window minimum without checking it ROSE, so\n" \
     "    a quiet moment would erase the evidence of a leak"
-assert "255" in poll, "the floor is not saturated, and it ships in one byte"
 assert re.search(r"now - win_ms < \d+UL", poll), \
     "the window is gone — a floor taken from a single sample is just in_flight"
-print("   rises only, saturates at 255, measured over a window  OK")
+print("   rises only, measured over a window                OK")
+
+# ---- 2b. the floor must not be clamped where it is USED --------------------
+# espnow_tx_saturated() subtracts this floor from in_flight, so the floor is a
+# control value and not only a report. It was stored as a saturating uint8_t,
+# which meant that once in_flight passed 257 the floor could no longer track it,
+# live stayed at or above the cap, and the guard read saturated for the rest of
+# the boot. cam1 came up on 2026-09-09 at 03:09 into the 14 h hub outage, ran
+# its in-flight count into the hundreds transmitting at a hub that was not
+# listening, and then sent no health at all for two hours while answering every
+# command at 100% and 64 ms. Width belongs to the measurement; saturation
+# belongs to the wire.
+print("\n2b. the floor is a control value, not just a report:")
+assert re.search(r"static uint32_t\s+_espnow_leak_floor", INO), \
+    "the floor is stored narrower than in_flight, so it cannot track it — and\n" \
+    "    espnow_tx_saturated() then latches true for the life of the boot"
+assert not re.search(r"_espnow_leak_floor\s*=[^;]*255", poll), \
+    "the leak poll clamps the floor. Clamp it where it is packed for the wire\n" \
+    "    and nowhere else, or the guard that reads it cannot recover."
+FLAT = re.sub(r"\s+", " ", INO)
+assert "(_espnow_leak_floor > 255 ? 255 : _espnow_leak_floor) << 16" in FLAT, \
+    "the floor is packed into node_u32 without saturating, so a floor above 255\n" \
+    "    wraps and a badly leaking mount reports a small number"
+print("   full width in the guard, saturated at node_u32     OK")
 
 # It measures and does nothing else, on purpose.
 for act in ("esp_restart", "espnow_wifi_restart", "_espnow_need_reinit"):
@@ -75,7 +97,11 @@ print("   and does not act on what it finds                 OK")
 
 # ---- 3. it reaches the operator ---------------------------------------------
 print("\n3. what the health line carries:")
-assert "((uint32_t)_espnow_leak_floor << 16)" in INO, \
+# Two UI_PROFILE builds pack node_u32 differently and come first in the file,
+# so this has to name the shipping one rather than take the first match.
+pack = FLAT[FLAT.index("h.node_u32 = ((uint32_t)(_wedge_count"):]
+pack = pack[:pack.index(";")]
+assert "_espnow_leak_floor" in pack, \
     "the floor is not in node_u32, so nothing carries it off the mount"
 assert "(_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL))" in INO, \
     "the reinit count is not in the low byte"
