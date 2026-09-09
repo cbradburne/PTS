@@ -111,6 +111,23 @@ assert "the send callback (hub-wide)" in lad, \
 assert lad.count("%s") >= 3, "not every rung names what it is escalating on"
 print("   all three rungs name the hub, not mount 1           OK")
 
+# ...and the EVENT must carry it too. The line above goes to Serial, which on a
+# rigged hub is inside the enclosure; the event is what reaches comms.log. This
+# check pinned only the Serial string and passed on 2026-09-09 while both real
+# callback stalls were logged to the operator as "TX wedge on mount 1".
+assert "uint8_t ev_mount = _cb_stall_active ? 0 :" in HUB, \
+    "the event has no hub-wide form, so a stall is reported against a mount id\n" \
+    "    in the ONE place the operator reads"
+for k in ("2", "3"):
+    assert f"send_hub_event({k}," in HUB, f"kind {k} event is gone"
+assert "send_hub_event(2, (uint8_t)(worst_i + 1)" not in HUB and \
+       "send_hub_event(3, (uint8_t)(worst_i + 1)" not in HUB, \
+    "a ladder event still sends worst_i + 1 directly, so it names mount 1 for a\n" \
+    "    hub-wide fault — the misattribution this whole rung exists to end"
+assert HUB.count("send_hub_event(2, ev_mount") + HUB.count("send_hub_event(3, ev_mount") == 3, \
+    "not all three ladder events use the hub-wide-aware mount id"
+print("   and the EVENT carries it, not just Serial           OK")
+
 # ---- 4. the backstop can actually fire -------------------------------------
 print("\n4. the maintenance restart:")
 act = block("static inline bool cmd_is_client_activity(")
@@ -132,5 +149,51 @@ assert re.search(r"default:\s*\n\s*return true;", act), \
     "commands not listed default to NOT being activity, so a move command would\n" \
     "    fail to defer the restart and the hub could reboot mid-shot"
 print("   anything that changes something still defers it     OK")
+
+# ---- 5. the PC app makes the same distinction ------------------------------
+# The hub learned in its own firmware that a satellite-relayed mount is not
+# evidence about THIS radio. The PC app's copy of that judgement never got the
+# exclusion, so on 2026-09-09 it read cam4's ACK — cam4 being via Foyer, over
+# Ethernet — as proof the hub was fine, at the exact moment the hub was
+# reinitialising its stalled radio.
+print("\n5. the PC app's verdict:")
+import os, sys, threading
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, str(REPO / "pc_app"))
+from comms.bridge import Bridge
+
+assert Bridge._wedge_who(0) != Bridge._wedge_who(1), \
+    "mount 0 and mount 1 render identically, so a hub-wide stall still reads\n" \
+    "    as a mount fault in the log"
+assert "hub-wide" in Bridge._wedge_who(0), "mount 0 is not named as hub-wide"
+assert "mount 4" == Bridge._wedge_who(4), f"a real mount id changed: {Bridge._wedge_who(4)}"
+print("   mount 0 renders as hub-wide, others unchanged      OK")
+
+
+def proven(route, acked, exclude=1):
+    b = Bridge.__new__(Bridge)
+    b._diag_lock = threading.Lock()
+    b._mount_route = route
+    b._mount_last_ack = {m: 1000.0 for m in acked}
+    return Bridge._hub_tx_proven_ok(b, 1000.0, exclude)
+
+
+# The 2026-09-09 case exactly: cam1 silent, cam4 and cam5 both via Foyer.
+assert proven([0, 0, 0, 2, 2], acked=[4]) == 0, \
+    "a satellite-relayed mount's ACK is still read as proof the hub's radio\n" \
+    "    works. Its commands never touch that radio."
+# A direct mount still proves it, which is the whole point of the check.
+assert proven([0, 0, 0, 2, 2], acked=[2, 4]) == 2, \
+    "a mount on the hub's own radio no longer counts as proof"
+# Unknown route (older hub, or the first seconds) must behave as before.
+assert proven([0, 0, 0, 0, 0], acked=[4]) == 4, \
+    "an all-direct route table suppresses the verdict, so a PC app that has not\n" \
+    "    yet heard MOUNT_ROUTE would never blame a mount again"
+# Every other mount on a satellite: nothing here can separate hub from mount.
+assert proven([0, 2, 2, 2, 2], acked=[2, 3, 4, 5]) == 0, \
+    "with every other mount relayed, the hub's radio is unproven — saying\n" \
+    "    MOUNT-SIDE there is the error that sent someone to power-cycle a\n" \
+    "    healthy mount while the hub was reinitialising itself"
+print("   satellite ACKs excluded, direct ACKs still count   OK")
 
 print("\nALL CHECKS PASSED")

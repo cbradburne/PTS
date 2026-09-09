@@ -45,8 +45,13 @@ _lg.setLevel(logging.INFO)
 
 
 def verdict(*, bytes_arriving: bool, diag_fresh: bool, peer_acking: bool,
-            mount: int = 1) -> str:
-    """Drive the real classifier with the three things it can observe."""
+            mount: int = 1, peer_via_sat: bool = False) -> str:
+    """Drive the real classifier with the four things it can observe.
+
+    peer_via_sat is the 2026-09-09 case: the ACKing peer is reached THROUGH a
+    satellite, so its reply travelled over Ethernet and says nothing about this
+    hub's radio.
+    """
     import threading, time
     b = Bridge.__new__(Bridge)
     b._diag_lock = threading.Lock()
@@ -58,6 +63,8 @@ def verdict(*, bytes_arriving: bool, diag_fresh: bool, peer_acking: bool,
     # not arriving.
     b._hub_rx_last_advance_t = now - (0.5 if bytes_arriving else 9.0)
     b._mount_last_ack = {4: now - 0.5} if peer_acking else {}
+    # Route table: mount 4 direct, or via satellite slot 2 (Foyer).
+    b._mount_route = [0, 0, 0, 2 if peer_via_sat else 0, 0]
     BUF.truncate(0); BUF.seek(0)
     b._log_wedge_side(now, mount)
     return BUF.getvalue().strip()
@@ -103,6 +110,28 @@ line = verdict(bytes_arriving=True, diag_fresh=False, peer_acking=True)
 assert "INCONCLUSIVE" in line, \
     f"a verdict was reached on a counter we cannot trust: {line}"
 print("   INCONCLUSIVE — the counter itself is not current     OK")
+
+# ---- 4b. the ACKing peer is behind a satellite -------------------------------
+# 2026-09-09, twice: the hub's send callback stalled, cam4 was via Foyer, and
+# this said "hub TX is healthy, so this is mount-side. Not touching the hub;
+# mount 1 likely needs a power cycle." cam4's ACK crossed Ethernet to the
+# satellite and never touched the hub's radio, so it was evidence about nothing.
+# The hub's own detector was reinitialising that radio at the same moment.
+print("\n4b. the only other mount is satellite-relayed:")
+line = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True,
+               peer_via_sat=True)
+# Not a substring test: the correct fallback verdict is "HUB-SIDE OR
+# MOUNT-SIDE", which contains "MOUNT-SIDE" and would pass one.
+assert "so the hub forwards fine" not in line, \
+    f"a satellite-relayed ACK is still read as proof the hub's radio works: {line}"
+assert "no other mount is ACKing either" in line, \
+    f"the verdict does not fall back to 'cannot separate them': {line}"
+# And the same peer, reached directly, must still settle it — otherwise this
+# fix has simply disabled the check.
+direct = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True)
+assert "MOUNT-SIDE" in direct and "mount 4 is still ACKing" in direct, \
+    f"a DIRECT peer no longer proves the hub's radio: {direct}"
+print("   via a satellite proves nothing; direct still does    OK")
 
 # ---- 5. every verdict is a WARNING and names the mount ----------------------
 print("\n5. every path:")

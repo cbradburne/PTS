@@ -3497,13 +3497,26 @@ static void check_self_recovery(uint32_t now) {
     else
         snprintf(who, sizeof(who), "mount %d", worst_i + 1);
 
+    // ...and the EVENT has to carry it too, not just the line above.
+    //
+    // That line goes to Serial, which on a rigged hub is inside the enclosure
+    // and read by nobody; the event is what reaches comms.log and the operator.
+    // Sending worst_i + 1 regardless meant a hub-wide callback stall was logged
+    // as "TX wedge on mount 1" — the exact misattribution this rung exists to
+    // end, printed in the one place anyone would see it. It happened twice on
+    // 2026-09-09 and read as a mount fault both times.
+    //
+    // 0 is "no particular mount": a stalled callback is this radio failing to
+    // report its own transmissions, and no mount is implicated.
+    uint8_t ev_mount = _cb_stall_active ? 0 : (uint8_t)(worst_i + 1);
+
     // Stage 1: full ESP-NOW reinit (shared cooldown with the PC-commanded path,
     // so with a PC attached its ~3 s reinit suppresses a duplicate here).
     if (worst_age >= SELF_REINIT_AFTER_MS &&
             (now - _last_reinit_ms) >= SELF_REINIT_COOLDOWN_MS) {
         Serial.printf("[SELF] Wedge on %s for %lu ms — full ESP-NOW reinit\n",
                       who, (unsigned long)worst_age);
-        send_hub_event(2, (uint8_t)(worst_i + 1), 0, wsec8, _espnow_fail_run[worst_i]);
+        send_hub_event(2, ev_mount, 0, wsec8, _espnow_fail_run[worst_i]);
         hub_espnow_full_reinit();
         return;
     }
@@ -3516,7 +3529,7 @@ static void check_self_recovery(uint32_t now) {
             (now - _last_wifi_reinit_ms) >= SELF_WIFI_REINIT_COOLDOWN_MS) {
         Serial.printf("[SELF] Wedge on %s for %lu ms despite ESP-NOW reinit "
                       "— bouncing WiFi\n", who, (unsigned long)worst_age);
-        send_hub_event(2, (uint8_t)(worst_i + 1), 0, wsec8, _espnow_fail_run[worst_i]);
+        send_hub_event(2, ev_mount, 0, wsec8, _espnow_fail_run[worst_i]);
         hub_wifi_full_reinit();
         return;
     }
@@ -3538,7 +3551,7 @@ static void check_self_recovery(uint32_t now) {
         }
         Serial.printf("[SELF] Wedge on %s for %lu ms despite reinit — "
                       "restarting hub\n", who, (unsigned long)worst_age);
-        send_hub_event(3, (uint8_t)(worst_i + 1), 0, wsec8, 0);
+        send_hub_event(3, ev_mount, 0, wsec8, 0);
         _self_restart_streak++;
         Serial.flush();
         delay(50);

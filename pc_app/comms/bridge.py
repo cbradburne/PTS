@@ -37,6 +37,7 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_RX,
                        HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL,
                        HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names,
+                       decode_mount_route, NUM_MOUNTS,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
                        decode_mount_outage)
@@ -340,6 +341,10 @@ class Bridge:
         # Satellite slot → name, so a satellite's health line can be headed
         # "Foyer" rather than "SAT 1".  Empty until the hub sends SAT_NAMES.
         self._sat_names: dict[int, str] = {}
+        # Which base each mount is on: 0 = this hub's radio, >0 = satellite slot.
+        # All-zero until the hub sends MOUNT_ROUTE, which reads as "direct" and
+        # so keeps the pre-existing verdict rather than suppressing it.
+        self._mount_route: list[int] = [0] * NUM_MOUNTS
         # Last cumulative downlink ledger per satellite, so each line can be
         # reported as a delta rather than an ever-growing total.
         self._sat_dn_prev: dict[str, tuple] = {}
@@ -602,6 +607,7 @@ class Bridge:
         self._note_hub_diag(pkt)
         self._note_hub_event(pkt)
         self._note_sat_names(pkt)
+        self._note_mount_route(pkt)
         self._note_sat_downlink(pkt)
         self._note_mount_outage(pkt)
         self._note_node_health(pkt)
@@ -777,6 +783,35 @@ class Bridge:
         fn = log.warning if (d_ref or tx) else log.info
         fn("SAT DOWNLINK %-12s offered %d, sent %d, refused %d (%d send calls)%s%s%s",
            who, d_off, d_sent, d_ref, d_att, note, tx, breakdown)
+
+    @staticmethod
+    def _wedge_who(mount: int) -> str:
+        """Who the hub is escalating on — a mount, or its own radio.
+
+        mount 0 means the send callback stopped firing, which is hub-wide: no
+        mount can be acknowledging while it is happening, and none is implicated.
+        Older hubs cannot say this — they sent worst_i + 1 whatever the cause —
+        so a "mount 1" here from one of those may still be the hub.  On
+        2026-09-09 the callback stalled twice and both were logged as mount 1.
+        """
+        if mount == 0:
+            return "the SEND CALLBACK (hub-wide — txfail cannot see this)"
+        return "mount %d" % mount
+
+    def _note_mount_route(self, pkt: Packet) -> None:
+        """Track which base each mount is on, for _hub_tx_proven_ok().
+
+        MountManager already decodes this for the UI, but the wedge verdict is
+        made down here and was reading every mount's ACK as equal evidence.
+        They are not: a satellite-relayed mount answers over Ethernet, so its
+        ACK says nothing whatever about this hub's radio.
+        """
+        if pkt.cmd != Cmd.MOUNT_ROUTE:
+            return
+        try:
+            self._mount_route = decode_mount_route(pkt.payload)
+        except Exception as e:                        # pragma: no cover
+            log.warning("MOUNT_ROUTE decode failed in bridge: %s", e)
 
     def _note_sat_names(self, pkt: Packet) -> None:
         """Learn satellite names here rather than borrowing MountManager's copy.
@@ -1107,14 +1142,14 @@ class Bridge:
                         "state=%s flags=0x%02X | hub uptime %.1fh (%ds) | total ghost drops=%d",
                         mount, rssi, sname, flags, hrs, uptime, self._hub_ghost_drops)
         elif kind == 2:
-            log.warning("HUB EVENT: hub SELF-REINIT of ESP-NOW — TX wedge on mount %d "
+            log.warning("HUB EVENT: hub SELF-REINIT of ESP-NOW — TX wedge on %s "
                         "for %ds (fail run %d) | hub uptime %.1fh",
-                        mount, state, flags, hrs)
+                        self._wedge_who(mount), state, flags, hrs)
         elif kind == 3:
-            log.warning("HUB EVENT: hub SELF-RESTART imminent — TX wedge on mount %d "
+            log.warning("HUB EVENT: hub SELF-RESTART imminent — TX wedge on %s "
                         "persisted %ds despite reinit | hub uptime %.1fh "
                         "(brief disconnect expected)",
-                        mount, state, hrs)
+                        self._wedge_who(mount), state, hrs)
         elif kind == 4:
             log.info("HUB EVENT: hub MAINTENANCE RESTART at %dh uptime (system idle) "
                      "— brief disconnect expected", state)
@@ -1528,13 +1563,30 @@ class Bridge:
 
     def _hub_tx_proven_ok(self, now: float, exclude_mount: int) -> int:
         """Return a mount_id (other than exclude_mount) that has ACKed inside
-        MOUNT_ACK_STALE_S, or 0 if none has.
+        MOUNT_ACK_STALE_S over the HUB'S OWN RADIO, or 0 if none has.
 
-        An ACK from any other mount is proof the hub's ESP-NOW transmit path
-        works — the command reached that mount and its reply came back.  So a
-        single unreachable mount alongside a healthy one is a MOUNT-side fault,
-        and no hub-level recovery can help: reinit and restart both take every
-        other mount down for nothing.
+        An ACK from another mount on this radio is proof the hub's ESP-NOW
+        transmit path works — the command reached that mount and its reply came
+        back.  So a single unreachable mount alongside a healthy one is a
+        MOUNT-side fault, and no hub-level recovery can help: reinit and restart
+        both take every other mount down for nothing.
+
+        A SATELLITE-RELAYED mount is not that proof and never was.  Its commands
+        go out over Ethernet to the satellite, which transmits them on its own
+        radio; the hub's ESP-NOW path is not involved at any point, so its ACK
+        is silent on the only question being asked.  On 2026-09-09 the hub's
+        send callback stalled twice, and both times this said:
+
+            Mount 1 unreachable 8.5s, but mount 4 is still ACKing —
+            hub TX is healthy, so this is mount-side.  Not touching the hub;
+            mount 1 likely needs a power cycle.
+
+        cam4 was via Foyer.  The verdict was exactly backwards, and the hub's own
+        detector — which does make this distinction — was reinitialising its
+        radio at that moment.  The hub firmware learned it the same way, after a
+        rig logged 61 escalations all naming the satellite-attached mount
+        (esp32_hub_eth.ino, "A satellite-relayed mount is NOT judged by this
+        radio"); this copy of the judgement never got the exclusion.
 
         Seen 2026-07-30 14:37: mount 4 went silent (bridge and Teensy together,
         never returned, needed a power cycle) while mounts 1 and 5 sat at 100%
@@ -1544,8 +1596,14 @@ class Bridge:
         """
         with self._diag_lock:
             for mt, t in self._mount_last_ack.items():
-                if mt != exclude_mount and (now - t) < self.MOUNT_ACK_STALE_S:
-                    return mt
+                if mt == exclude_mount or (now - t) >= self.MOUNT_ACK_STALE_S:
+                    continue
+                # Unknown route reads as direct: that is what an older hub, or
+                # the first seconds of a session, look like, and it keeps the
+                # old behaviour rather than silently answering 0 for everything.
+                if 1 <= mt <= len(self._mount_route) and self._mount_route[mt - 1]:
+                    continue                       # via a satellite — not our radio
+                return mt
         return 0
 
     def _monitor_loop(self) -> None:
