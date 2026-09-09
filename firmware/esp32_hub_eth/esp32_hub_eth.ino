@@ -489,7 +489,34 @@ static volatile uint32_t _espnow_fail_total = 0;
 // for as long as it runs.
 static volatile uint32_t _espnow_fail_cum[NUM_MOUNTS] = {};
 
+// issued - callbacks, on the hub.
+//
+// The mounts got this after the bench showed the pool leaking; the hub did not,
+// and on 2026-09-08 the hub's own transmitter stopped at 6.00 h up and stayed
+// stopped for FOURTEEN HOURS. Every mount on its radio went deaf while their
+// health kept arriving, so the app showed them connected and not answering.
+// The one mount reached through a satellite never noticed.
+//
+// Its self-rescue never fired because every rung is armed by a run of send
+// FAILURES, and a callback that stops firing produces none: txfail sat at 83,
+// unchanged, from the first minute to the last. A failure count cannot report
+// the failure of the thing that reports failures. This can.
+static volatile uint32_t _espnow_issued   = 0;   // esp_now_send() returned ESP_OK
+static volatile uint32_t _espnow_cb_total = 0;   // callback fired, either status
+static volatile uint32_t _espnow_cb_last_ms = 0; // ...and when it last did
+
+static inline uint32_t espnow_in_flight() {
+    uint32_t i = _espnow_issued, c = _espnow_cb_total;
+    return (i >= c) ? (i - c) : 0;
+}
+
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
+    // Before the per-mount work and outside it: the point of this counter is to
+    // notice the callback not arriving at all, so it must be stamped for every
+    // callback, including ones for a MAC no longer in the table.
+    _espnow_cb_total   = _espnow_cb_total + 1;
+    _espnow_cb_last_ms = millis();
+
     const uint8_t *mac_addr = info->des_addr;
     for (int i = 0; i < NUM_MOUNTS; i++) {
         if (!mount_mac_valid(i) || memcmp(mac_addr, _mount_mac[i], 6) != 0) continue;
@@ -607,6 +634,19 @@ static inline bool mount_is_active(int i, uint32_t now) {
 #define SELF_WIFI_REINIT_COOLDOWN_MS 90000UL
 #define SELF_REINIT_COOLDOWN_MS  30000UL  // min gap between reinits (PC- or self-triggered)
 #define SELF_RESTART_AFTER_MS    25000UL  // wedge age → esp_restart()
+
+// The rung the 14-hour outage needed.
+//
+// Everything above is armed by a run of send failures. The fault that actually
+// took the rig down produces none: the send callback stops firing, so nothing
+// is ever reported as failed and txfail freezes at whatever it already was.
+// This arms on the callback going QUIET instead — sends accepted by the stack,
+// nothing coming back — which is the one symptom that fault does have.
+//
+// 3 s is far longer than a send takes to complete even with retries (about a
+// millisecond on air, tens with the MAC retrying), and short enough that the
+// existing 6 s reinit rung still runs first when it can.
+#define SELF_CB_STALL_MS         3000UL
 #define SELF_RESTART_MAX_STREAK  3        // boot-loop guard: max consecutive self-restarts
 #define HEALTHY_CLEAR_MS         600000UL // 10 min wedge-free clears the restart streak
 
@@ -624,6 +664,8 @@ static inline bool mount_is_active(int i, uint32_t now) {
 RTC_NOINIT_ATTR static uint32_t _self_restart_streak;
 
 static uint32_t _tx_wedge_since_ms[NUM_MOUNTS] = {};  // 0 = no wedge clock running
+static uint32_t _cb_stall_since_ms = 0;   // 0 = callbacks are arriving
+static bool     _cb_stall_active   = false;
 static uint32_t _last_reinit_ms       = 0;   // stamped by hub_espnow_full_reinit()
 static uint32_t _last_wifi_reinit_ms  = 0;   // stamped by hub_wifi_full_reinit()
 static uint32_t _last_wedge_ms        = 0;   // last time any wedge clock was active
@@ -977,7 +1019,13 @@ static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
     if (seen == 0 || (millis() - seen) > MOUNT_PRESENT_MS) return;   // not here
 
     esp_err_t e = esp_now_send(_mount_mac[idx], raw, len);
-    if (e == ESP_OK) return;
+    if (e == ESP_OK) {
+        // Counted only on ESP_OK: a rejected send never took a buffer, so
+        // counting it would read as an outstanding send that will never
+        // complete — the very thing being watched for.
+        _espnow_issued = _espnow_issued + 1;
+        return;
+    }
 
     // A REJECTED send never becomes a transmission, so it is invisible in the
     // txfail counter — which counts sends that failed on air.  That is exactly
@@ -1670,8 +1718,29 @@ static void demo_tick() {
 #endif  // DEMO_MODE
 
 
+// GET_CONFIG is the PC app's keepalive: read-only, ack-tracked, and sent to
+// every connected mount every ~3 s for as long as the app is open. Counting it
+// as "a client is doing something" meant the 20-minute quiet window never
+// opened and the 8 h maintenance restart could not fire AT ALL while the app
+// was running — which is exactly when it is needed. The hub that wedged for
+// fourteen hours had this backstop and it was disabled by a poll.
+//
+// Read-only requests are excluded here rather than at the call site so a new
+// one cannot quietly re-disable it.
+static inline bool cmd_is_client_activity(uint8_t cmd) {
+    switch (cmd) {
+        case CMD_GET_CONFIG:
+        case CMD_GET_STATUS:
+        case CMD_GET_SUBJECTS:
+        case CMD_PING:
+            return false;      // polling, not activity
+        default:
+            return true;
+    }
+}
+
 static void forward_to_mounts(const ParsedPacket &pkt) {
-    _last_client_cmd_ms = millis();   // any client traffic defers the maintenance restart
+    if (cmd_is_client_activity(pkt.cmd)) _last_client_cmd_ms = millis();
     if (handle_pairing_cmd(pkt)) return;   // hub-scoped pairing — handled here, not sent to mounts
 #if DEMO_MODE
     if (demo_consume_cmd(pkt.mount_id, pkt.cmd, pkt.payload, pkt.payload_len)) return;
@@ -3349,6 +3418,37 @@ static void check_self_recovery(uint32_t now) {
             _restart_block_logged  = false;
         }
     }
+    // Hub-wide, and checked before the per-mount verdict below.
+    //
+    // A stalled callback cannot be a mount's fault: it is this radio failing to
+    // report its own transmissions, and no mount can be acknowledging while it
+    // is happening. So this deliberately skips the tx_proven_ok test that
+    // follows, which exists to stop the hub rebooting over one deaf mount.
+    uint32_t cb_stall = 0;
+    if (_espnow_cb_last_ms && espnow_in_flight() > 0)
+        cb_stall = now - _espnow_cb_last_ms;
+    if (cb_stall > SELF_CB_STALL_MS) {
+        if (!_cb_stall_since_ms) {
+            _cb_stall_since_ms = now ? now : 1;
+            Serial.printf("[SELF] SEND CALLBACK STALLED — %lu sends outstanding, "
+                          "nothing acknowledged for %lu ms. txfail cannot see "
+                          "this; escalating on the stall itself.\n",
+                          (unsigned long)espnow_in_flight(),
+                          (unsigned long)cb_stall);
+        }
+        _last_wedge_ms = now;
+        uint32_t age = now - _cb_stall_since_ms;
+        if (age >= worst_age) { worst_age = age; worst_i = 0; }
+        // Fall through to the ladder with tx_proven_ok forced false.
+        _cb_stall_active = true;
+    } else if (_cb_stall_since_ms) {
+        Serial.printf("[SELF] send callback recovered after %lu ms\n",
+                      (unsigned long)(now - _cb_stall_since_ms));
+        _cb_stall_since_ms = 0;
+        _cb_stall_active   = false;
+        _restart_block_logged = false;
+    }
+
     if (worst_i < 0) return;
 
     // Is it us, or is it that mount?  Any OTHER live mount with no run of send
@@ -3363,8 +3463,10 @@ static void check_self_recovery(uint32_t now) {
     // own receivers were dead, taking a healthy satellite-attached mount down
     // with it each time.  The PC app already makes exactly this distinction
     // before it escalates; the hub was still escalating blind.
+    // ...unless the callback itself has stalled, in which case no mount can be
+    // acknowledging and "another mount is fine" would be reading stale state.
     bool tx_proven_ok = false;
-    for (int k = 0; k < NUM_MOUNTS; k++) {
+    for (int k = 0; k < NUM_MOUNTS && !_cb_stall_active; k++) {
         if (k == worst_i) continue;
         bool k_alive = mount_is_active(k, now);
         if (k_alive && _espnow_fail_run[k] == 0) { tx_proven_ok = true; break; }
@@ -3385,12 +3487,22 @@ static void check_self_recovery(uint32_t now) {
     uint32_t wsec = worst_age / 1000UL;
     uint8_t  wsec8 = (wsec > 255) ? 255 : (uint8_t)wsec;
 
+    // A callback stall is hub-wide and borrows worst_i = 0 to reach the ladder.
+    // Without this the log would name mount 1 for a fault that has nothing to
+    // do with mount 1 — and the whole reason this rung exists is that the last
+    // outage was misread for fourteen hours.
+    char who[48];
+    if (_cb_stall_active)
+        snprintf(who, sizeof(who), "the send callback (hub-wide)");
+    else
+        snprintf(who, sizeof(who), "mount %d", worst_i + 1);
+
     // Stage 1: full ESP-NOW reinit (shared cooldown with the PC-commanded path,
     // so with a PC attached its ~3 s reinit suppresses a duplicate here).
     if (worst_age >= SELF_REINIT_AFTER_MS &&
             (now - _last_reinit_ms) >= SELF_REINIT_COOLDOWN_MS) {
-        Serial.printf("[SELF] Wedge on mount %d for %lu ms — full ESP-NOW reinit\n",
-                      worst_i + 1, (unsigned long)worst_age);
+        Serial.printf("[SELF] Wedge on %s for %lu ms — full ESP-NOW reinit\n",
+                      who, (unsigned long)worst_age);
         send_hub_event(2, (uint8_t)(worst_i + 1), 0, wsec8, _espnow_fail_run[worst_i]);
         hub_espnow_full_reinit();
         return;
@@ -3402,8 +3514,8 @@ static void check_self_recovery(uint32_t now) {
     // rebooting the hub.  Costs a brief AP dropout; mounts don't notice.
     if (worst_age >= SELF_WIFI_REINIT_AFTER_MS &&
             (now - _last_wifi_reinit_ms) >= SELF_WIFI_REINIT_COOLDOWN_MS) {
-        Serial.printf("[SELF] Wedge on mount %d for %lu ms despite ESP-NOW reinit "
-                      "— bouncing WiFi\n", worst_i + 1, (unsigned long)worst_age);
+        Serial.printf("[SELF] Wedge on %s for %lu ms despite ESP-NOW reinit "
+                      "— bouncing WiFi\n", who, (unsigned long)worst_age);
         send_hub_event(2, (uint8_t)(worst_i + 1), 0, wsec8, _espnow_fail_run[worst_i]);
         hub_wifi_full_reinit();
         return;
@@ -3424,8 +3536,8 @@ static void check_self_recovery(uint32_t now) {
             }
             return;
         }
-        Serial.printf("[SELF] Wedge on mount %d for %lu ms despite reinit — "
-                      "restarting hub\n", worst_i + 1, (unsigned long)worst_age);
+        Serial.printf("[SELF] Wedge on %s for %lu ms despite reinit — "
+                      "restarting hub\n", who, (unsigned long)worst_age);
         send_hub_event(3, (uint8_t)(worst_i + 1), 0, wsec8, 0);
         _self_restart_streak++;
         Serial.flush();
