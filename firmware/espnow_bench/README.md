@@ -201,30 +201,51 @@ before it wedged read zero.
 |---|---|---|---|---|---|
 | `…0905-1822` | rate 50, cap 0, no load | 3.0 h | 542,067 | 0 | clean |
 | `…0905-2313` | rate 200 + poll 20, cap 0, no load | 13.3 h | 10,512,753 | 0 | clean |
-| `…0906-1238` | **the same, plus `load 40 100`** | 20.0 h | 10,075,316 | **0 → 3** | **LEAKED** |
+| `…0906-1238` | **the same, plus `load 40 100`** | 20.1 h | 10,123,186 | **0 → 4** | **LEAKED** |
 | `…0907-0851` | `load 100 200`, cap 0 | 6.8 h | 2,944,102 | 0 | clean (short) |
-| `…0907-1558` | **`load 40 100` + `cap 2`** | **23.2 h** | **11,682,437** | 0 | **clean** |
+| `…0907-1558` | **`load 40 100` + `cap 2`** | **53.3 h** | **26,868,324** | 0 | **clean** |
 
 The third differs from the second in one thing: 40 ms of blocked loop in every
 100. Same cap, same PHY, same peer, same boards, 10 million sends either way.
 
-The fifth differs from the third in one thing: `cap 2`. Same load, same
-140 sends/s, same 101 overlaps per 1000 against 98 — peak `in_flight` held at 2
-instead of 6, for every one of its 83,457 samples.
+The fifth differs from the third in one thing: `cap 2`. Same load, same rate to
+within 1% (140.0 sends/s against 138.6), same boards, same PHY.
 
-It has now run **longer than the leak run and sent more frames**: 23.2 h and
-11.7 M sends against 20.0 h and 10.1 M, with the floor at 0 and the heap
-unmoved at 265,724. Three events in the shorter run, none in the longer one —
-about 3.5 expected, so **p ≈ 0.03**. On the bench, bounding in-flight sends
-prevents the leak.
+**Run to 2026-09-09, 53.32 h, one continuous session:**
+
+| | uncapped `…0906-1238` | `cap 2` `…0907-1558` |
+|---|---|---|
+| ran for | 20.09 h | **53.32 h** |
+| sends | 10,123,186 | **26,868,324** |
+| peak in flight | **7** | **2** |
+| overlaps / 1000 sends | 43 | **101** |
+| buffers lost | **4** | **0** |
+| heap drift | **−832 B** | **0 B** |
+| `cb_fail` / `refused` / `nomem` | — | **0 / 0 / 0** |
+
+Not one callback missing in 26.9 million sends, and the heap ended on the same
+byte it started: 265,724 → 265,724.
+
+The uncapped run lost a buffer every 2.53 M sends. At that rate the capped run
+should have lost **10.6**. It lost none: **p ≈ 2.4 × 10⁻⁵**, about 1 in 42,000.
+
+And note the overlap column, because it answers the obvious objection. `cap 2`
+did not win by transmitting less concurrently — it overlapped sends **more than
+twice as often per send** as the run that leaked (101 per 1000 against 43). What
+it bounded was the DEPTH. Sends overlapping is not the fault; three or more
+overlapping is.
+
+It has also now gone **8.9× the sends the uncapped run needed to lose its first
+buffer** (3.0 M) without losing one. That is prevention, not delay — as far as
+53 hours can show it.
 
 ### It needs BOTH, and that is the mechanism
 
 | | load | peak in flight | result |
 |---|---|---|---|
 | 13.3 h | none | 5 | clean |
-| 16.8 h | 40/100 | **2** | clean |
-| 20.0 h | 40/100 | **6** | **3 buffers gone** |
+| **53.3 h** | 40/100 | **2** | clean |
+| 20.1 h | 40/100 | **7** | **4 buffers gone** |
 
 Blocking alone does not do it. Concurrency alone does not do it. Both together
 do — and on the mount they are not independent, because **the block is what
@@ -260,12 +281,14 @@ mechanism is visible in the bridge's source.
 | floor 0 → 1 | 5.97 h | 265,516 | **−208 B** |
 | floor 1 → 2 | 6.28 h | 265,308 | **−208 B** |
 | floor 2 → 3 | 15.17 h | 265,100 | **−208 B** |
+| floor 3 → 4 | 20.04 h | 264,892 | **−208 B** |
 
-**Exactly 208 bytes per lost buffer, three times, never returned.** For the last
-hour of the run `in_flight` never once dropped below 3 — it took values 3 and 4
-and nothing else. Three buffers are simply gone.
+**Exactly 208 bytes per lost buffer, four times, never returned** — 832 bytes
+gone by the end of the run.
 
-The control's heap moved 24 bytes in 13.3 hours and its floor never left 0.
+The control's heap moved 24 bytes in 13.3 hours and its floor never left 0. The
+`cap 2` run did better still: **0 bytes in 53.3 hours**, ending on the same byte
+it started.
 
 This is what the field data pointed at all along: cam1 wedged twice on the
 **strongest link on the rig** (−33 dBm) while cam4 sat at −68 dBm through a
