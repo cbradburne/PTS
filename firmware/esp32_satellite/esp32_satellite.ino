@@ -585,6 +585,37 @@ static uint32_t _sat_dn_sent_total = 0;   // ...of which returned ESP_OK
 // what it is, and guessing at it from the hub's source was wrong twice.
 static uint16_t _sat_dn_by_cmd[256] = {};
 static uint32_t _sat_unacked_total = 0;   // downlink sends no mount acked, since boot
+// The other half of the subtraction, which this box has never had.
+//
+// It counts what the radio ACCEPTED (_sat_dn_sent_total) and what the mount
+// never acked (_sat_unacked_total), and neither can see the fault that actually
+// stops a satellite: the send callback ceasing to fire at all. esp_now_send()
+// takes a buffer from a small pool and the callback is what returns it
+// (espressif/esp-idf#18682); when the callback stops, the pool empties and every
+// later send is refused with NO_MEM. That is what Foyer did on 2026-09-09 —
+// refused 600 of 641 send calls in one window — and all the log could say was
+// REFUSING, which is the symptom. "The radio is busy" and "the buffers are gone"
+// look identical from a refusal count, and they want opposite responses.
+//
+//     in_flight = accepted - callbacks
+//
+// The floor of that over a window only rises, so a rising floor is buffers not
+// coming back and a flat one is sends in progress.
+//
+// Full width on purpose. On the mount this same floor was a saturating uint8_t
+// AND the subtrahend in a send guard, so once in_flight passed 257 the guard
+// latched for the rest of the boot and cam1 stopped reporting its health for two
+// hours while answering every command. Saturate at the wire, never in the
+// measurement.
+static volatile uint32_t _sat_cb_total   = 0;   // send callbacks, either status
+static volatile uint32_t _sat_cb_last_ms = 0;   // when the last one arrived
+static uint32_t _sat_leak_floor = 0;      // lowest in_flight seen over a window
+static uint32_t _sat_leak_worst = 0;      // high-water, kept across a stack rebuild
+
+static inline uint32_t sat_in_flight() {
+    uint32_t s = _sat_dn_sent_total, c = _sat_cb_total;
+    return (s >= c) ? (s - c) : 0;
+}
 // Worst single pass SINCE THE LAST HEALTH REPORT, which is what the shared
 // PayloadHealth says this field is: "worst loop/task iteration since the last
 // report".  It used to be since boot and was never cleared, and that quietly
@@ -872,6 +903,12 @@ static uint32_t _dn_overflow = 0;
 // healthy and the mount being at fault.
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
     (void)info;
+    // First, and before the status is looked at. BOTH outcomes return the
+    // buffer to the pool; the fault being measured is the callback not arriving
+    // at all, so counting it on one status only would miss exactly the case it
+    // exists for.
+    _sat_cb_total   = _sat_cb_total + 1;
+    _sat_cb_last_ms = millis();
     if (status == ESP_NOW_SEND_SUCCESS) _dn_acked++;
     else                              { _dn_unacked++; _sat_unacked_total++; }
 }
@@ -920,6 +957,18 @@ static void espnow_recover() {
         Serial.println("[DOWN] ESP-NOW reinit FAILED — will retry");
         return;
     }
+    // The rebuild hands the whole buffer pool back, so an in-flight count and a
+    // floor measured against the OLD pool describe something that no longer
+    // exists. Carried across, they would read as a permanent leak on a stack
+    // that had just been fixed — and this box rebuilds itself on every NO_MEM
+    // burst, so that would not be a rare mistake. The high-water is kept, so
+    // reconciling does not erase the evidence of what provoked the rebuild.
+    //
+    // Done here, between init and re-registering the callback, because that is
+    // the one window in which no callback can fire and change these underneath.
+    if (_sat_leak_floor > _sat_leak_worst) _sat_leak_worst = _sat_leak_floor;
+    _sat_cb_total   = _sat_dn_sent_total;   // in_flight -> 0 against a fresh pool
+    _sat_leak_floor = 0;
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);
     for (int i = 0; i < NUM_MOUNTS; i++) {
@@ -1245,6 +1294,28 @@ static void sat_send_health(uint32_t now) {
 // next door are windowed and cannot be.
 static uint32_t _sat_dn_report_ms = 0;
 
+// Called every loop pass, on its own clock, and it does nothing but measure.
+// The floor is the LOWEST in_flight seen across a 5 s window and it is only ever
+// allowed to rise: in_flight itself bounces with every send, so a single sample
+// says nothing, and a floor that could fall would let one quiet moment erase the
+// evidence of buffers that never came back.
+static void sat_leak_poll(uint32_t now) {
+    static uint32_t win_ms  = 0;
+    static uint32_t win_min = 0xFFFFFFFF;
+    uint32_t inf = sat_in_flight();
+    if (inf < win_min) win_min = inf;
+    if (now - win_ms < 5000UL) return;
+    win_ms = now;
+    if (win_min != 0xFFFFFFFF && win_min > _sat_leak_floor) {
+        _sat_leak_floor = win_min;
+        Serial.printf("[DOWN] LEAK floor %lu — accepted %lu, callbacks %lu\n",
+                      (unsigned long)_sat_leak_floor,
+                      (unsigned long)_sat_dn_sent_total,
+                      (unsigned long)_sat_cb_total);
+    }
+    win_min = 0xFFFFFFFF;
+}
+
 static void sat_send_downlink(uint32_t now) {
     if (!_uplink.connected()) return;
     // Its own clock, deliberately.  Hung off the end of sat_send_health() this
@@ -1273,6 +1344,23 @@ static void sat_send_downlink(uint32_t now) {
         p[16 + slot*3 + 2] = (uint8_t)(_sat_dn_by_cmd[best]);
         _sat_dn_by_cmd[best] = 0;          // taken; find the next
     }
+    // Appended at [25..32], so a PC app that predates this reads the first 25
+    // bytes and is none the wiser. Saturated HERE — the wire is the only place
+    // these get clamped, because the same numbers arm nothing and only report.
+    uint32_t cbt   = _sat_cb_total;
+    uint32_t leak  = (_sat_leak_floor > _sat_leak_worst) ? _sat_leak_floor
+                                                        : _sat_leak_worst;
+    // Only meaningful with sends outstanding: with none, the callback is not
+    // late, there is simply nothing for it to report. Without that test an idle
+    // satellite would show its stall climbing for ever.
+    uint32_t inf   = sat_in_flight();
+    uint32_t stall = (_sat_cb_last_ms && inf) ? (now - _sat_cb_last_ms) : 0;
+    if (leak  > 0xFFFF) leak  = 0xFFFF;
+    if (stall > 0xFFFF) stall = 0xFFFF;
+    p[25] = (uint8_t)(cbt >> 24); p[26] = (uint8_t)(cbt >> 16);
+    p[27] = (uint8_t)(cbt >>  8); p[28] = (uint8_t)(cbt);
+    p[29] = (uint8_t)(leak  >> 8); p[30] = (uint8_t)(leak);
+    p[31] = (uint8_t)(stall >> 8); p[32] = (uint8_t)(stall);
     uint8_t  frame[PKT_BUF_SIZE + 4];
     uint16_t fn = build_packet(frame, 0, ++_sat_health_seq,
                                CMD_SAT_DOWNLINK, p, sizeof(p));
@@ -1520,6 +1608,12 @@ void loop() {
     SMARK(SSEC_WS_FLUSH);
 
     downlink_report(now);
+    // Above the two report calls below, not hung off the end of either: both
+    // have early returns (an unconnected uplink, an interval not yet elapsed),
+    // and a measurement behind one of those switches itself off exactly when
+    // the box is in trouble. That is how the mount's RF report ended up
+    // disabled on the only mount that had the fault.
+    sat_leak_poll(now);
     sat_restart_streak_poll(now);
     if (_hello_pending && _uplink.connected()) uplink_send_hello();
     sat_send_health(now);

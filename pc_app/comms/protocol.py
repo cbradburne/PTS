@@ -1771,7 +1771,12 @@ MOUNT_PRESENCE_TIMEOUT_MS = 3 * MOUNT_STATUS_REFRESH_MS + 1000
 # in silence before scanning for another base.  Three missed heartbeats.
 BASE_HEARTBEAT_MS         = 2000
 BASE_SILENT_MS            = 3 * BASE_HEARTBEAT_MS
-SAT_DOWNLINK_PAYLOAD_LEN  = 25
+# 25 was offered/attempts/sent/refused + three top commands; 33 since the
+# send-callback counters were appended at [25..32].  Require the MIN and read
+# the tail only when it is there, so a satellite and a PC app updated at
+# different times still talk.
+SAT_DOWNLINK_MIN_LEN      = 25
+SAT_DOWNLINK_PAYLOAD_LEN  = 33
 SAT_DOWNLINK_TOP_CMDS     = 3
 MOUNT_EVENT_ISOLATED      = 1
 MOUNT_EVENT_TX_WEDGE      = 2

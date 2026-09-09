@@ -37,7 +37,8 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_RX,
                        HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL,
                        HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names,
-                       SAT_DOWNLINK_PAYLOAD_LEN, MOUNT_OUTAGE_PAYLOAD_LEN,
+                       SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
+                       MOUNT_OUTAGE_PAYLOAD_LEN,
                        decode_mount_outage)
 
 log = logging.getLogger(__name__)
@@ -711,15 +712,22 @@ class Bridge:
         these lines answers it directly, so the traffic question stops being an
         argument and becomes a subtraction.
         """
-        if pkt.cmd != Cmd.SAT_DOWNLINK or len(pkt.payload) < SAT_DOWNLINK_PAYLOAD_LEN:
+        if pkt.cmd != Cmd.SAT_DOWNLINK or len(pkt.payload) < SAT_DOWNLINK_MIN_LEN:
             return
         b = bytes(pkt.payload)
         offered, attempts, sent, refused = (
             int.from_bytes(b[i:i+4], "big") for i in (0, 4, 8, 12))
+        # The tail is optional.  A satellite from before the send-callback
+        # counters sends 25 bytes, and everything above it still reads.
+        cb = leak = stall = None
+        if len(b) >= SAT_DOWNLINK_PAYLOAD_LEN:
+            cb    = int.from_bytes(b[25:29], "big")
+            leak  = (b[29] << 8) | b[30]
+            stall = (b[31] << 8) | b[32]
         slot = pkt.mount_id - SAT_ADDR_BASE
         who  = self._sat_names.get(slot) or f"SAT {slot}"
         prev = self._sat_dn_prev.get(who)
-        self._sat_dn_prev[who] = (offered, attempts, sent, refused)
+        self._sat_dn_prev[who] = (offered, attempts, sent, refused, cb)
         if prev is None:
             return                        # nothing to difference against yet
         d_off, d_att, d_sent, d_ref = (a - b_ for a, b_ in
@@ -747,9 +755,28 @@ class Bridge:
         if d_ref:
             note = (" | REFUSING — %d retries per frame offered"
                     % (d_att // max(1, d_off)) if d_off else " | REFUSING")
-        fn = log.warning if d_ref else log.info
-        fn("SAT DOWNLINK %-12s offered %d, sent %d, refused %d (%d send calls)%s%s",
-           who, d_off, d_sent, d_ref, d_att, note, breakdown)
+        # Why it is refusing, which the refusal count alone cannot say.  A radio
+        # that is merely busy still returns its buffers; a radio whose callback
+        # has stopped never does, and every send after the pool empties is
+        # refused with NO_MEM.  Foyer refused 600 of 641 send calls on
+        # 2026-09-09 and the log could only report the refusals.
+        d_cb = None
+        if cb is not None and len(prev) >= 5 and prev[4] is not None:
+            d_cb = cb - prev[4]
+            if d_cb < 0:                  # rebooted, or the stack was rebuilt
+                d_cb = None
+        tx = ""
+        if leak:
+            tx += " | TX BUFFERS NOT RETURNED %d%s" % (leak,
+                                                       "+" if leak >= 0xFFFF else "")
+        if stall:
+            tx += " | no send callback for %.1fs" % (stall / 1000.0)
+        if d_cb is not None and d_sent and not d_cb:
+            tx += (" | %d sends accepted and NOT ONE callback — the pool is emptying"
+                   % d_sent)
+        fn = log.warning if (d_ref or tx) else log.info
+        fn("SAT DOWNLINK %-12s offered %d, sent %d, refused %d (%d send calls)%s%s%s",
+           who, d_off, d_sent, d_ref, d_att, note, tx, breakdown)
 
     def _note_sat_names(self, pkt: Packet) -> None:
         """Learn satellite names here rather than borrowing MountManager's copy.
