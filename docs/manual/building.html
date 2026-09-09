@@ -68,8 +68,12 @@ tools/build.sh flash hub [port]  # compile + upload one target</code></pre>
     <code>changeme123</code>, and it exists only so a fresh build comes up on the
     air. Bake your own at flash time instead, where it is never committed:
     <pre><code>AP_PASSWORD=yourpassword tools/build.sh flash hubeth</code></pre>
-    Use the same value for the hub and for every satellite, or the satellites
-    will not join. It must be <strong>at least 8 characters</strong> and contain
+    Nothing on the rig itself needs this password: a mount <em>scans</em> for the
+    AP and takes its BSSID as the ESP-NOW address without ever joining, and a
+    satellite reaches the hub over Ethernet. It gates the phone, tablet or laptop
+    you use for the web UI — so the rig keeps running whatever you set it to, and
+    using one value across the hub and every satellite is convenience rather than
+    a requirement. It must be <strong>at least 8 characters</strong> and contain
     no spaces or quotes — <code>build.sh</code> checks all three, because WPA2
     silently rejects a short password and <code>softAP()</code> then brings the
     access point up <strong>open</strong> rather than failing. The
