@@ -184,7 +184,21 @@
 #define HUB_NAME_MAX    12
 static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Hub";
 
-#define AP_PASSWORD  "camctrl123"
+// The AP password is NOT a secret in this repository and must not be one.
+//
+// This is a public tree, so anything committed here is published: changing the
+// literal only publishes a different password. The real one is baked at build
+// time instead —
+//
+//     AP_PASSWORD=yourpassword tools/build.sh flash hubeth
+//
+// — and never committed. What is left here is a placeholder that gets a rig on
+// the air out of the box and is meant to be replaced. WPA2 needs at least 8
+// characters: shorter and softAP() refuses the password, which does not fail
+// loudly, it just brings the AP up OPEN.
+#ifndef AP_PASSWORD
+#define AP_PASSWORD  "changeme123"
+#endif
 #define AP_CHANNEL   1
 
 // Static soft-AP network config.  Clients (phone/tablet/laptop over WS/TCP)

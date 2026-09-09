@@ -62,12 +62,19 @@ tools/build.sh flash hub [port]  # compile + upload one target</code></pre>
       first contact (<a href="pairing.html">Pairing &amp; identity</a>).</li>
     </ol>
 
-    <div class="warn"><b>Set your own WiFi credentials before deploying</b> The hub
-    creates the <code>CamMount</code> access point from an SSID and password defined
-    near the top of <code>firmware/esp32_hub/esp32_hub.ino</code>. Change the
-    <strong>SSID</strong> and especially the <strong>password</strong> to your own
-    before using the rig anywhere real — the repo ships with a placeholder, and
-    anyone who knows it can join your camera network.</div>
+    <div class="warn"><b>Set your own WiFi password before deploying</b> This
+    repository is public, so the password in the source is published and is
+    therefore no password at all — it is the placeholder
+    <code>changeme123</code>, and it exists only so a fresh build comes up on the
+    air. Bake your own at flash time instead, where it is never committed:
+    <pre><code>AP_PASSWORD=yourpassword tools/build.sh flash hubeth</code></pre>
+    Use the same value for the hub and for every satellite, or the satellites
+    will not join. It must be <strong>at least 8 characters</strong> and contain
+    no spaces or quotes — <code>build.sh</code> checks all three, because WPA2
+    silently rejects a short password and <code>softAP()</code> then brings the
+    access point up <strong>open</strong> rather than failing. The
+    <strong>SSID</strong> is set separately: the hub's from its own web page,
+    a satellite's with <code>SAT_NAME</code>.</div>
 
     <h2>Running the PC app</h2>
     <pre><code>cd pc_app

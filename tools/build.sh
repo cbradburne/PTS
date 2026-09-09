@@ -32,6 +32,21 @@ case "${CAM_NAME:-}" in
           exit 1 ;;
 esac
 
+# Same whitespace trap, and two more that only bite here.  A password is the one
+# value nobody sees until a phone fails to join, so all three are caught now
+# rather than at the venue.
+case "${AP_PASSWORD:-}" in
+    "")   ;;                       # unset is fine — the placeholder applies
+    *\ *) echo "AP_PASSWORD must not contain spaces (it is passed as a compiler flag)."
+          exit 1 ;;
+    *\"*) echo "AP_PASSWORD must not contain a double quote."
+          exit 1 ;;
+    ?|??|???|????|?????|??????|???????)
+          echo "AP_PASSWORD must be at least 8 characters — WPA2 rejects shorter,"
+          echo "  and softAP() then brings the access point up OPEN rather than failing."
+          exit 1 ;;
+esac
+
 FQBN_HUB="esp32:esp32:XIAO_ESP32S3:USBMode=default,CDCOnBoot=default,PartitionScheme=default_8MB,FlashSize=8M"
 FQBN_DISPLAY="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
 FQBN_AMOLED="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
@@ -121,6 +136,17 @@ fqbn_for() {
 # are never gated either way, so a quiet build still says when something breaks.
 props_for() {
     _f=""
+    # The WiFi AP password, for every target that raises an AP.  Applied here
+    # rather than per-target because a hub and its satellites must agree on it.
+    #
+    # The repository is public, so the password cannot live in it: the source
+    # carries a placeholder and the real one is baked at flash time.  Without
+    # this the AP comes up as "changeme123", which is published and therefore
+    # no password at all.
+    case "$1" in
+        hub|hubeth|hubdemo|sat)
+            [ -n "${AP_PASSWORD:-}" ] && _f="$_f -DAP_PASSWORD=\"$AP_PASSWORD\"" ;;
+    esac
     case "$1" in
         hubdemo) _f="$_f -DDEMO_MODE=1" ;;
         # arduino-cli hands extra_flags to the compiler verbatim — it does no
