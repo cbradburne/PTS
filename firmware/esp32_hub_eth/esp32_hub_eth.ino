@@ -2248,7 +2248,24 @@ static void send_own_health(bool anomaly) {
     h.tx_fail       = (uint16_t)_espnow_fail_total;
     h.rssi          = 0;
     h.flags         = anomaly ? 0x01 : 0x00;
-    h.node_u32      = _ghost_rx_drops;
+    // sends held back(8) | ring overflows(8) | ghost drops(16).
+    //
+    // The whole uint32 was ghost drops, which have read 0 on every rig for
+    // weeks, while the number that says whether the TX burst bound ever
+    // ENGAGED had nowhere to go — a counter that exists and reports nowhere,
+    // which is the same fault as not having it. Without this, a hub that stops
+    // wedging cannot say whether the bound had anything to do with it: the
+    // bound working and the fault simply not recurring look identical.
+    //
+    // Ghosts stay in the LOW half deliberately. A hub running older firmware
+    // sends the bare count in the whole word, so with the new fields on top it
+    // still decodes as exactly that many ghosts and nothing else — put them
+    // high instead and an old hub reporting 5 ghosts reads as five discarded
+    // commands, a fault it does not have.
+    h.node_u32      = ((uint32_t)(_entx_deferred > 255 ? 255 : _entx_deferred) << 24) |
+                      ((uint32_t)(_entx_dropped  > 255 ? 255 : _entx_dropped)  << 16) |
+                      (_ghost_rx_drops > 0xFFFF ? 0xFFFFUL
+                                                : (uint32_t)_ghost_rx_drops);
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_health(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq, &h);
     // To all clients, not only Serial.  This carries uptime, heap, loop time

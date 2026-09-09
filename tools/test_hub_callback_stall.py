@@ -203,6 +203,20 @@ assert "_entx_deferred++" in enq, \
     "    the bound had anything to do with it"
 print("   drained from loop() and on enqueue, and counted    OK")
 
+# A counter that reports nowhere is the same as not having one. The first build
+# of this had _entx_deferred incrementing and reaching nothing at all, so the
+# morning's log would have shown "no wedge" and been unable to say whether the
+# bound engaged — which is the whole question.
+hh = HUB[HUB.index("h.node_u32      = ((uint32_t)(_entx_deferred"):]
+hh = hh[:hh.index(";")]
+assert "_entx_deferred" in hh and "_entx_dropped" in hh and "_ghost_rx_drops" in hh, \
+    "the hub's node_u32 does not carry all three, so the burst bound is invisible"
+assert hh.index("_ghost_rx_drops") > hh.index("_entx_dropped"), \
+    "ghost drops are not in the LOW half. A hub on older firmware sends the bare\n" \
+    "    ghost count in the whole word: with ghosts high, its 5 ghosts decode as\n" \
+    "    5 discarded commands — a fault it does not have."
+print("   and node_u32 carries it, old hubs still readable   OK")
+
 # ---- 5. the PC app makes the same distinction ------------------------------
 # The hub learned in its own firmware that a satellite-relayed mount is not
 # evidence about THIS radio. The PC app's copy of that judgement never got the

@@ -1077,6 +1077,26 @@ class Bridge:
             if h.loop_max_ms >= self._SAT_LOOP_NOTE_MS:
                 n32txt += " | worst section '%s'" % self._SAT_SECTION_NAMES.get(
                     sect, str(sect))
+        elif who == "hub":
+            # sends held back(8) | ring overflows(8) | ghost drops(16).
+            #
+            # "held back" is not a fault — it is the TX burst bound doing its
+            # job, and it is here because a hub that stops wedging while this
+            # reads 0 did not stop because of the bound.  Ghosts are in the LOW
+            # half so a hub running older firmware, which sends the bare count
+            # in the whole word, still reads as exactly that many ghosts.
+            ghosts = n32 & 0xFFFF
+            gheld  = (n32 >> 24) & 0xFF
+            gdrop  = (n32 >> 16) & 0xFF
+            n32txt = "n32 %d" % ghosts
+            if gheld:
+                n32txt += " | sends held back %d%s" % (gheld,
+                                                       "+" if gheld == 255 else "")
+            # This one IS a fault: sixteen deep behind a 400 ms escape means the
+            # radio stopped entirely, and a command was thrown away.
+            if gdrop:
+                n32txt += " | TX QUEUE OVERFLOWED %d%s" % (gdrop,
+                                                           "+" if gdrop == 255 else "")
         else:
             n32txt = "n32 %d" % n32
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "
