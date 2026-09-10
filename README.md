@@ -5,7 +5,7 @@ self-healing, and controllable from everything in the booth: a PC app with
 joystick and CV tracking, phones, a 7″ touchscreen, Stream Decks via Bitfocus
 Companion, and QLab cue stacks.
 
-> 📷 *TODO: hero photo of a mount / the rig in use*
+![The rig in production — five mounts, hub console, one operator.](docs/assets/img/hero.jpg)
 
 🌐 **[Project site](https://cbradburne.github.io/PTS/)** ·
 📄 **[Two-page overview + OSC reference (PDF)](docs/PTS_Overview.pdf)** ·
@@ -78,9 +78,10 @@ Identity, pairing and calibration live in NVS/EEPROM, set from touchscreens.
 
 ## Hardware
 
-> 🔧 *TODO — mechanics, motors and gearing, wiring diagrams, BOM, power.*
+> 🔧 *TODO — mechanics, motors and gearing, wiring diagrams, power.*
 >
 > In the repo already:
+> - [**Bill of materials**](https://cbradburne.github.io/PTS/manual/bom.html) — parts and fasteners
 > - [`Print Files/`](Print%20Files) — STEP models (PT mount, slider)
 > - [`PTS_4_PCB_2026-05-26.zip`](PTS_4_PCB_2026-05-26.zip) — PCB fabrication files
 

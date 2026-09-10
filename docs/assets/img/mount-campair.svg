@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" width="900" height="900" font-family="Poppins, Montserrat, 'Avenir Next', 'Helvetica Neue', Arial, sans-serif">
+<title>Mount AMOLED — CAMERA PAIRING screen</title>
+<circle cx="450" cy="450" r="430" fill="#000000"/>
+<circle cx="450" cy="450" r="430" fill="none" stroke="#2A2A2A" stroke-width="3"/>
+<text x="450" y="124" text-anchor="middle" fill="#FFFFFF" font-size="26" font-weight="600" letter-spacing="1.5">CAMERA PAIRING</text>
+<text x="450" y="170" text-anchor="middle" fill="#888888" font-size="22" font-weight="500">Enter the code on the camera</text>
+<text x="450" y="240" text-anchor="middle" fill="#FFFFFF" font-size="44" font-weight="600" letter-spacing="6">1 2 3 - - -</text>
+<rect x="200.9" y="271.0" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="280.2" y="336.9" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">1</text>
+<rect x="368.8" y="271.0" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="448.1" y="336.9" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">2</text>
+<rect x="536.7" y="271.0" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="616.1" y="336.9" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">3</text>
+<rect x="200.9" y="389.1" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="280.2" y="455.0" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">4</text>
+<rect x="368.8" y="389.1" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="448.1" y="455.0" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">5</text>
+<rect x="536.7" y="389.1" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="616.1" y="455.0" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">6</text>
+<rect x="200.9" y="507.2" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="280.2" y="573.0" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">7</text>
+<rect x="368.8" y="507.2" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="448.1" y="573.0" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">8</text>
+<rect x="536.7" y="507.2" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="616.1" y="573.0" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">9</text>
+<rect x="200.9" y="625.3" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="280.2" y="688.4" text-anchor="middle" fill="#FFFFFF" font-size="22" font-weight="500">BACK</text>
+<rect x="368.8" y="625.3" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="448.1" y="691.1" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">0</text>
+<rect x="536.7" y="625.3" width="158.7" height="110.7" rx="15" fill="#1E1E1E" stroke="#555555" stroke-width="2"/>
+<text x="616.1" y="691.1" text-anchor="middle" fill="#FFFFFF" font-size="30" font-weight="500">⌫</text>
+<rect x="42.1" y="330.0" width="99.7" height="239.9" rx="15" fill="#B71C1C" stroke="#00000000" stroke-width="0"/>
+<text x="92.0" y="449.9" text-anchor="middle" fill="#FFFFFF" font-size="22" font-weight="600" letter-spacing="1" transform="rotate(-90 92.0 449.9)">FORGET</text>
+<rect x="758.2" y="330.0" width="99.7" height="239.9" rx="15" fill="#2E7D32" stroke="#00000000" stroke-width="0"/>
+<path d="M 786.1 449.9 l 16 17 l 30 -34" fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -52,6 +52,55 @@
     first time it hears from it — it binds on first contact. There's nothing to
     enter on the hub side. Repeat the steps above for each mount.</div>
 
+    <h2>Pairing a camera</h2>
+    <p>A mount can also pair over Bluetooth to a <strong>Blackmagic camera</strong>
+    mounted on it, which is what lets the console drive iris, focus, zoom, gain
+    and white balance. It's optional and per-mount — a rig can have one camera
+    paired or five, and a mount with no camera never scans for one.</p>
+
+    <div class="warn"><b>The mount goes off the air while pairing</b> Bluetooth
+    pairing needs the radio to itself, so the mount stops WiFi for the duration
+    and cannot be driven from anything. It comes back on the air when you leave
+    the screen — either by tapping <strong>BACK</strong>, or by leaving it alone
+    for two minutes, after which it exits on its own. Pair before a show, not
+    during one.</div>
+
+    <ol class="steps">
+      <li><strong>Put the camera into pairing mode</strong> — on a Blackmagic
+      body that's <em>Setup → Bluetooth</em>, and it will show a six-digit
+      code.</li>
+      <li>On the mount, <strong>touch and hold for about 1.5 seconds</strong> to
+      open Setup, then <strong>hold again</strong> to reach CAMERA PAIRING. It's
+      chained behind Setup deliberately: it's a once-per-mount commissioning job
+      for whoever builds the rig, not something an operator needs to find.</li>
+      <li>The mount scans, and the line under the title tells you where it is —
+      <em>Searching for a camera…</em>, then <em>Enter the code on the
+      camera</em> once it has found one. <em>No camera in range</em> means the
+      scan came back empty; check the camera is actually advertising.</li>
+      <li>Type the <strong>six-digit code</strong> on the keypad. Digits fill the
+      dashes left to right, and <strong>⌫</strong> takes one back.</li>
+      <li>Press the <strong>green tick</strong>. It only submits on a full six
+      digits, so a short code does nothing rather than failing. The status goes
+      green and reads <strong>PAIRED</strong>, or <em>Pairing FAILED — try
+      again</em>, which usually means the code was mistyped or the camera stopped
+      advertising while you typed.</li>
+    </ol>
+
+    <figure class="shot round" data-file="mount-campair.svg">
+      <img src="../assets/img/mount-campair.svg" alt="The mount's CAMERA PAIRING screen"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>CAMERA PAIRING on the mount, mid-entry. The status line under
+      the title is the thing to read; the red <strong>FORGET</strong> lobe drops
+      an existing pairing, and <strong>BACK</strong> leaves without changing
+      anything and puts the mount back on the air.</figcaption>
+    </figure>
+
+    <div class="note"><b>Forgetting a camera</b> <strong>FORGET</strong> clears
+    the bond so the mount stops trying to reach that camera. Worth doing before
+    a body moves to another mount — otherwise two mounts believe they own the
+    same camera, and only one of them is right. A mount with no bond never scans,
+    so forgetting also puts its Bluetooth back to fully idle.</div>
+
     <h2>Renumbering</h2>
     <p>To change a mount's camera number, open Setup again and pick a different
     number. The hub picks up the change on the mount's next contact — renumbering
