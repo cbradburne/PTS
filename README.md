@@ -82,12 +82,20 @@ Identity, pairing and calibration live in NVS/EEPROM, set from touchscreens.
 
 ## Hardware
 
-> 🔧 *TODO — mechanics, motors and gearing, wiring diagrams, power.*
->
-> In the repo already:
-> - [**Bill of materials**](https://cbradburne.github.io/PTS/manual/bom.html) — parts and fasteners
-> - [`Print Files/`](Print%20Files) — STEP models (PT mount, slider)
-> - [`PTS_4_PCB_2026-05-26.zip`](PTS_4_PCB_2026-05-26.zip) — PCB fabrication files
+Motion is NEMA 17 and NEMA 14 pancake steppers on TMC2209 drivers, geared with
+GT2 belts and pulleys, off a single 12 V 8 A supply. The
+[**bill of materials**](https://cbradburne.github.io/PTS/manual/bom.html) lists
+every part with a buy link, broken down by assembly — circuit, mount, slider,
+hub, display — including both the HDMI and SDI variants.
+
+| | |
+|---|---|
+| [Bill of materials](https://cbradburne.github.io/PTS/manual/bom.html) | Motors, drivers, belts, pulleys, power, connectors, fasteners |
+| [`Print Files/`](Print%20Files) | STEP models — PT mount and slider |
+| [`PTS_4_PCB_2026-05-26.zip`](PTS_4_PCB_2026-05-26.zip) | PCB fabrication files |
+
+> 🔧 *Still to write: assembly instructions, and a wiring diagram. The parts and
+> the board are documented; how they physically go together is not.*
 
 ## Building the firmware
 
