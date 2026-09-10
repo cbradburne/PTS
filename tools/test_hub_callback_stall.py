@@ -217,6 +217,23 @@ assert hh.index("_ghost_rx_drops") > hh.index("_entx_dropped"), \
     "    5 discarded commands — a fault it does not have."
 print("   and node_u32 carries it, old hubs still readable   OK")
 
+# It has to be a RATE, not a total. Cumulative, this read 249 at 2.4 minutes of
+# uptime and saturated at four: proof the bound engages and nothing else ever
+# again — no rate, no change in rate, nothing to line up against a stall. The
+# mount's own counter comment describes that trap; the hub hit it 15x faster
+# because it defers ~100 times a minute against the mount's ~6 an hour.
+hs = block("static void send_own_health(")
+assert "_entx_deferred      = 0;" in hs, \
+    "the held-back count is not cleared per health report, so it saturates four\n" \
+    "    minutes into a boot and stops carrying information"
+assert hs.index("h.node_u32") < hs.index("_entx_deferred      = 0;"), \
+    "the counter is cleared before it is packed, so every report reads 0"
+# Overflows are a fault and stay cumulative — a rate would hide a single drop.
+assert "_entx_dropped" not in hs.split("_entx_deferred      = 0;")[1], \
+    "ring overflows are being windowed too. A dropped command is rare and is a\n" \
+    "    FAULT: the total is what matters, and a per-window count loses it."
+print("   held-back windowed, overflows cumulative           OK")
+
 # ---- 5. the PC app makes the same distinction ------------------------------
 # The hub learned in its own firmware that a satellite-relayed mount is not
 # evidence about THIS radio. The PC app's copy of that judgement never got the

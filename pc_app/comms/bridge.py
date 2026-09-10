@@ -1089,9 +1089,13 @@ class Bridge:
             gheld  = (n32 >> 24) & 0xFF
             gdrop  = (n32 >> 16) & 0xFF
             n32txt = "n32 %d" % ghosts
+            # Windowed, unlike the mount's, and it has to SAY so: cumulative it
+            # saturated four minutes into a boot, and a reader who takes a
+            # windowed 17 for a since-boot total concludes the bound is barely
+            # firing when it is firing constantly.
             if gheld:
-                n32txt += " | sends held back %d%s" % (gheld,
-                                                       "+" if gheld == 255 else "")
+                n32txt += " | sends held back %d%s per 10s" % (
+                    gheld, "+" if gheld == 255 else "")
             # This one IS a fault: sixteen deep behind a 400 ms escape means the
             # radio stopped entirely, and a command was thrown away.
             if gdrop:

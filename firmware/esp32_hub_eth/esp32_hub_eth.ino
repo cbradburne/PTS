@@ -583,7 +583,7 @@ struct EspNowTxFrame {
 };
 static EspNowTxFrame _entx_q[ESPNOW_TX_QUEUE_DEPTH];
 static uint8_t  _entx_head = 0, _entx_tail = 0;
-static uint32_t _entx_deferred = 0;   // frames the bound actually held back
+static uint32_t _entx_deferred = 0;   // held back THIS health window (see send_own_health)
 static uint32_t _entx_dropped  = 0;   // ring full — see enqueue
 
 // Saturation is measured on live sends only.
@@ -2276,7 +2276,8 @@ static void send_own_health(bool anomaly) {
     h.tx_fail       = (uint16_t)_espnow_fail_total;
     h.rssi          = 0;
     h.flags         = anomaly ? 0x01 : 0x00;
-    // sends held back(8) | ring overflows(8) | ghost drops(16).
+    // sends held back THIS WINDOW(8) | ring overflows since boot(8) |
+    // ghost drops since boot(16).
     //
     // The whole uint32 was ghost drops, which have read 0 on every rig for
     // weeks, while the number that says whether the TX burst bound ever
@@ -2284,6 +2285,17 @@ static void send_own_health(bool anomaly) {
     // which is the same fault as not having it. Without this, a hub that stops
     // wedging cannot say whether the bound had anything to do with it: the
     // bound working and the fault simply not recurring look identical.
+    //
+    // The held-back count is WINDOWED, cleared with loop_max_ms below, and that
+    // is not a detail either. Cumulative, it read 249 at 2.4 minutes of uptime
+    // and saturated four minutes in: proof the bound engages, and nothing else
+    // ever again — no rate, no change in rate, nothing to line up against a
+    // stall. Which is the exact trap the mount's own counter comment describes,
+    // reproduced here fifteen times faster. Per 10 s window it sits around 17
+    // on this traffic, so it fits a byte with room and stays readable.
+    //
+    // Overflows stay cumulative on purpose: a dropped command is a fault, it is
+    // rare, and the total is what matters rather than the rate.
     //
     // Ghosts stay in the LOW half deliberately. A hub running older firmware
     // sends the bare count in the whole word, so with the new fields on top it
@@ -2310,6 +2322,7 @@ static void send_own_health(bool anomaly) {
     _ws.binaryAll(buf, (size_t)n);
     _health_last_ms     = millis();
     _health_loop_max_ms = 0;
+    _entx_deferred      = 0;    // windowed with loop_max_ms — see node_u32 above
     _health_last_txfail = _health_fail_live;
     _health_first_sent  = true;
 }
