@@ -774,7 +774,7 @@ static inline bool mount_is_active(int i, uint32_t now) {
 // 3 s is far longer than a send takes to complete even with retries (about a
 // millisecond on air, tens with the MAC retrying), and short enough that the
 // existing 6 s reinit rung still runs first when it can.
-#define SELF_CB_STALL_MS         3000UL
+#define SELF_CB_STALL_MS         CB_STALL_MS
 #define SELF_RESTART_MAX_STREAK  3        // boot-loop guard: max consecutive self-restarts
 #define HEALTHY_CLEAR_MS         600000UL // 10 min wedge-free clears the restart streak
 

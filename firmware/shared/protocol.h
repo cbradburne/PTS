@@ -574,6 +574,15 @@ typedef enum : uint8_t {
 
 // Uniform health cadence / anomaly thresholds (shared by all nodes)
 #define HEALTH_INTERVAL_MS        10000UL
+// How long a send callback may be missing, with sends outstanding, before it
+// counts as a STALL rather than ordinary in-flight latency.
+//
+// Shared because three places had to agree and two of them were hand-copied:
+// the hub's ladder, the satellite's TX bound, and the PC app's log line. The
+// app had no threshold at all and printed every non-zero figure, so ten of the
+// first twelve it reported were 0.0-0.7 s of normal latency raised to WARNING,
+// and the one real 65.5 s event sat among them looking identical.
+#define CB_STALL_MS               3000UL
 #define HEALTH_ANOMALY_GAP_MS      2000UL   // min spacing between anomaly-triggered sends
 #define HEALTH_JOG_DEFER_MS         300UL   // hold a send this long after jog traffic
 #define HEALTH_LOW_HEAP_BYTES     30720UL   // free heap below this → anomaly

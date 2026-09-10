@@ -242,6 +242,15 @@ bad = feed(rec(100, 100, 100, 0, cb=100),
 assert bad.startswith("WARNING"), f"the wedge is not raised to a warning: {bad}"
 assert "TX BUFFERS NOT RETURNED 7" in bad, f"the floor is not reported: {bad}"
 assert "no send callback for 4.2s" in bad, f"the stall is not reported: {bad}"
+# ...but ordinary in-flight latency must NOT be. Ten of the first twelve this
+# reported were 0.0-0.7 s of normal latency raised to WARNING, with the one real
+# 65.5 s event sitting among them looking identical.
+from comms.protocol import CB_STALL_MS
+noise = feed(rec(100, 100, 100, 0, cb=100),
+             rec(200, 200, 200, 0, cb=200, stall=CB_STALL_MS - 1))[1]
+assert "no send callback" not in noise, \
+    f"ordinary in-flight latency is reported as a stall: {noise}"
+assert noise.startswith("INFO"), f"and it raised a warning over nothing: {noise}"
 assert "40 sends accepted and NOT ONE callback" in bad, \
     f"sends completing with no callbacks at all is not called out: {bad}"
 print("   a wedging relay says which of the two it is        OK")

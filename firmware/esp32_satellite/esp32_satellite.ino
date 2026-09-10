@@ -1040,7 +1040,7 @@ static void espnow_recover() {
 // And if the callback has stopped altogether, in_flight parks high for ever and
 // a bound that counted it would take this relay off the air at the moment it is
 // already in trouble. Matches the hub's SELF_CB_STALL_MS.
-#define DN_CB_STALL_MS  3000UL
+#define DN_CB_STALL_MS  CB_STALL_MS
 
 static uint32_t _dn_deferred = 0;      // frames the bound actually held back
 

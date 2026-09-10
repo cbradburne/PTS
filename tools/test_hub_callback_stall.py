@@ -74,8 +74,13 @@ print("   sends counted on ESP_OK only, one send path         OK")
 
 # ---- 2. the rung that the outage needed ------------------------------------
 print("\n2. armed by the stall, not by failures:")
-assert re.search(r"#define SELF_CB_STALL_MS\s+(\d+)", HUB), "no stall threshold"
-stall_ms = int(re.search(r"#define SELF_CB_STALL_MS\s+(\d+)", HUB).group(1))
+assert "SELF_CB_STALL_MS" in HUB, "no stall threshold"
+# The value lives in shared/protocol.h now — three places had to agree and
+# two were hand-copied. Read it from the canonical file, not the hub.
+PROT = (REPO / "firmware/shared/protocol.h").read_text()
+stall_ms = int(re.search(r"#define CB_STALL_MS\s+(\d+)", PROT).group(1))
+assert "#define SELF_CB_STALL_MS         CB_STALL_MS" in HUB, \
+    "the hub redefines the stall threshold instead of taking the shared one"
 reinit_ms = int(re.search(r"#define SELF_REINIT_AFTER_MS\s+(\d+)", HUB).group(1))
 assert stall_ms < reinit_ms, \
     f"the stall clock ({stall_ms} ms) starts no sooner than the first ladder rung " \

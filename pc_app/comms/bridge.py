@@ -37,7 +37,7 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_RX,
                        HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL,
                        HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names,
-                       decode_mount_route, NUM_MOUNTS,
+                       decode_mount_route, NUM_MOUNTS, CB_STALL_MS,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
                        decode_mount_outage)
@@ -778,7 +778,15 @@ class Bridge:
         if leak:
             tx += " | TX BUFFERS NOT RETURNED %d%s" % (leak,
                                                        "+" if leak >= 0xFFFF else "")
-        if stall:
+        # Only when it is actually a STALL.  Any outstanding send has some
+        # latency, so the raw figure is non-zero most of the time: of the first
+        # twelve this reported, ten were between 0.0 s and 0.7 s — ordinary
+        # in-flight time — and one was 65.5 s, which is the real event.  Printed
+        # unfiltered it raised a WARNING on nothing eleven times out of twelve,
+        # and a diagnostic that cries wolf teaches the operator to skim past the
+        # line that matters.  The threshold is the hub's SELF_CB_STALL_MS, so
+        # both nodes call a stall the same thing.
+        if stall is not None and stall >= CB_STALL_MS:
             tx += " | no send callback for %.1fs" % (stall / 1000.0)
         if d_cb is not None and d_sent and not d_cb:
             tx += (" | %d sends accepted and NOT ONE callback — the pool is emptying"
