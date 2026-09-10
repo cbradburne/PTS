@@ -260,6 +260,17 @@ noise = feed(rec(100, 100, 100, 0, cb=100),
 assert "no send callback" not in noise, \
     f"ordinary in-flight latency is reported as a stall: {noise}"
 assert noise.startswith("INFO"), f"and it raised a warning over nothing: {noise}"
+# A PINNED 0xFFFF with nothing corroborating it is the pre-2026-09-10 underflow
+# bug, still live on satellites that cannot be reflashed yet. Suppressed unless
+# a leak floor or a refusal backs it up.
+bogus = feed(rec(100, 100, 100, 0, cb=100),
+             rec(200, 200, 200, 0, cb=200, stall=0xFFFF))[1]
+assert "no send callback" not in bogus, \
+    f"a pinned 65.5s with no leak and no refusals is still reported: {bogus}"
+real = feed(rec(100, 100, 100, 0, cb=100),
+            rec(200, 200, 200, 0, cb=200, stall=0xFFFF, leak=4))[1]
+assert "no send callback for 65.5s+" in real, \
+    f"a corroborated stall is suppressed, or does not say it saturated: {real}"
 assert "40 sends accepted and NOT ONE callback" in bad, \
     f"sends completing with no callbacks at all is not called out: {bad}"
 print("   a wedging relay says which of the two it is        OK")

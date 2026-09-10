@@ -787,7 +787,19 @@ class Bridge:
         # line that matters.  The threshold is the hub's SELF_CB_STALL_MS, so
         # both nodes call a stall the same thing.
         if stall is not None and stall >= CB_STALL_MS:
-            tx += " | no send callback for %.1fs" % (stall / 1000.0)
+            # 0xFFFF is the firmware's ceiling, not a measurement. Until
+            # 2026-09-10 the satellite computed this with an unsigned
+            # subtraction, so a callback landing just after 'now' was sampled
+            # underflowed and pinned it there — reported twice as a flat
+            # "65.5s" on a relay passing every frame. The firmware is fixed but
+            # the satellites cannot be reflashed for some days, so a pinned
+            # reading is suppressed here unless something corroborates it: a
+            # real stall long enough to saturate would also have stopped
+            # buffers coming back, or started refusals, or both.
+            pinned = stall >= 0xFFFF and not leak and not d_ref
+            if not pinned:
+                tx += " | no send callback for %.1fs%s" % (
+                    stall / 1000.0, "+" if stall >= 0xFFFF else "")
         if d_cb is not None and d_sent and not d_cb:
             tx += (" | %d sends accepted and NOT ONE callback — the pool is emptying"
                    % d_sent)
