@@ -50,28 +50,32 @@ flowchart TB
         DISP[7in hub touchscreen]
         OSC[Companion / QLab - OSC]
     end
-    HUB[HUB - XIAO ESP32-S3<br/>WiFi AP CamMount · TCP · WebSocket · OSC<br/>USB serial · display UART]
-    PC -- USB / TCP --> HUB
+    HUB[HUB - Waveshare ESP32-S3-ETH<br/>Ethernet W5500 · WiFi AP PTS-name<br/>TCP 7777 · WebSocket · OSC 9700 · display UART]
+    PC -- TCP / USB --> HUB
     WEB -- WebSocket --> HUB
     DISP -- UART --> HUB
     OSC -- UDP 9700 --> HUB
-    HUB -- ESP-NOW star --> M1 & M2 & M3 & M4 & M5
+    HUB -- ESP-NOW star --> M1 & M2 & M3
+    HUB -- Ethernet --> SAT[Satellite ESP32-S3-ETH<br/>one per distant room]
+    SAT -- ESP-NOW --> M4 & M5
     subgraph mount [Each mount]
         M1[Bridge ESP32<br/>1.75in AMOLED]
         T1[Teensy 4.1 + TMC2209<br/>pan · tilt · slider · zoom]
         M1 -- UART --> T1
     end
-    M2[CAM 2] ~~~ M3[CAM 3] ~~~ M4[CAM 4] ~~~ M5[CAM 5]
+    M2[CAM 2] ~~~ M3[CAM 3]
+    M4[CAM 4] ~~~ M5[CAM 5]
 ```
 
 | Part | Hardware | Firmware |
 |---|---|---|
-| Hub | Seeed XIAO ESP32-S3 | [`firmware/esp32_hub`](firmware/esp32_hub) |
+| Hub | Waveshare ESP32-S3-ETH (W5500 Ethernet, PoE variant) | [`firmware/esp32_hub_eth`](firmware/esp32_hub_eth) |
+| Satellite | Waveshare ESP32-S3-ETH — extends ESP-NOW to another room over the wire | [`firmware/esp32_satellite`](firmware/esp32_satellite) |
 | Hub display | Waveshare ESP32-S3 Touch LCD 7″ (800×480, LVGL 9) | [`firmware/esp32_display`](firmware/esp32_display) |
 | Mount bridge | Waveshare ESP32-S3 Touch AMOLED 1.75″ (466×466 round, LVGL 9) | [`firmware/esp_mount_amoled175`](firmware/esp_mount_amoled175) |
 | Motion controller | Teensy 4.1 @ 600 MHz, TMC2209 ×4, TeensyStep4 | [`firmware/teensy41_mount`](firmware/teensy41_mount) |
 | PC app | Python 3.11+, PyQt6, OpenCV (+ optional YOLO) | [`pc_app`](pc_app) |
-| Web app | Served by the hub itself — join the `CamMount` WiFi | embedded in [`web_app.h`](firmware/esp32_hub/web_app.h) |
+| Web app | Served by the hub itself — join its `PTS-<name>` WiFi | embedded in [`web_app.h`](firmware/esp32_hub/web_app.h) |
 
 One binary per board type — **no per-unit configuration anywhere in source**.
 Identity, pairing and calibration live in NVS/EEPROM, set from touchscreens.
@@ -95,12 +99,12 @@ into your Arduino libraries directory.
 one command compiles everything against the repo-pinned libraries:
 
 ```sh
-tools/build.sh                   # all four targets
-tools/build.sh hub display       # a subset
-tools/build.sh flash hub [port]  # compile + upload
+tools/build.sh                      # every target
+tools/build.sh hubeth display       # a subset
+tools/build.sh flash hubeth [port]  # compile + upload
 ```
 
-First-time bring-up: flash hub and mounts, power up, then pair each mount
+First-time bring-up: flash hubeth and the mounts, power up, then pair each mount
 from its own screen (hold ~1.5 s → CAM number → pick hub → SAVE). The hub
 needs no action. See the pairing sections in the firmware sources.
 
@@ -155,7 +159,9 @@ PC app machine — same `/pts/...` addresses on both, full reference in
 ```
 firmware/
   shared/               canonical protocol + display UART framing
-  esp32_hub/            hub: ESP-NOW star, AP, TCP/WS/OSC, web app, self-recovery
+  esp32_hub_eth/        hub: Ethernet, ESP-NOW star, AP, TCP/WS/OSC, self-recovery
+  esp32_satellite/      relay: extends ESP-NOW to another room over Ethernet
+  esp32_hub/            WiFi-only hub — superseded, kept for its web app
   esp32_display/        7" hub touchscreen (LVGL 9)
   esp_mount_amoled175/  mount bridge + round touchscreen, pairing UI
   teensy41_mount/       motion control: TMC2209, StallGuard, look-at solver
