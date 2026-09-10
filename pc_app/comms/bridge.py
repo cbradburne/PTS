@@ -1085,9 +1085,10 @@ class Bridge:
             # reads 0 did not stop because of the bound.  Ghosts are in the LOW
             # half so a hub running older firmware, which sends the bare count
             # in the whole word, still reads as exactly that many ghosts.
-            ghosts = n32 & 0xFFFF
+            ghosts = n32 & 0xFF
             gheld  = (n32 >> 24) & 0xFF
             gdrop  = (n32 >> 16) & 0xFF
+            gleak  = (n32 >> 8) & 0xFF
             n32txt = "n32 %d" % ghosts
             # Windowed, unlike the mount's, and it has to SAY so: cumulative it
             # saturated four minutes into a boot, and a reader who takes a
@@ -1101,6 +1102,12 @@ class Bridge:
             if gdrop:
                 n32txt += " | TX QUEUE OVERFLOWED %d%s" % (gdrop,
                                                            "+" if gdrop == 255 else "")
+            # Buffers the radio took and never returned. It is subtracted from
+            # in_flight before the bound is applied, so a rising floor is a
+            # permanent loss and NOT a reason for the cap to hold everything.
+            if gleak:
+                n32txt += " | TX BUFFERS LEAKED %d%s" % (gleak,
+                                                         "+" if gleak == 255 else "")
         else:
             n32txt = "n32 %d" % n32
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "

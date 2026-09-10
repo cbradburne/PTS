@@ -234,6 +234,26 @@ assert "_entx_dropped" not in hs.split("_entx_deferred      = 0;")[1], \
     "    FAULT: the total is what matters, and a per-window count loses it."
 print("   held-back windowed, overflows cumulative           OK")
 
+# The bound must measure ABOVE the leaked floor. A stall leaks buffers and the
+# reinit that ends it does not give them back, so in_flight keeps a permanent
+# floor; counting it as live traffic makes the cap true on nearly every send and
+# every frame then waits out the 400 ms escape. Measured on 2026-09-10: ACK p90
+# went 78 ms -> 469 ms after one stall, and held-back tripled and stayed there.
+sat_fn2 = block("static inline bool espnow_tx_saturated(")
+assert "_espnow_leak_floor" in sat_fn2, \
+    "the bound counts leaked buffers as outstanding sends, so after one stall it\n" \
+    "    holds nearly every frame for the full escape — the bound then costs more\n" \
+    "    than the fault it guards"
+assert re.search(r"live\s*=\s*\(inf > gone\)", sat_fn2), \
+    "the subtraction is gone; the floor must be taken OFF in_flight, not compared"
+lp = block("static void espnow_leak_poll(")
+assert "win_min > _espnow_leak_floor" in lp, "the floor can fall, so a quiet moment erases it"
+assert re.search(r"static uint32_t\s+_espnow_leak_floor", HUB), \
+    "the floor is narrower than in_flight — the mount's uint8_t latch, again"
+for act in ("esp_restart", "hub_espnow_full_reinit", "_cb_stall_since_ms"):
+    assert act not in lp, f"the leak poll calls {act}; it is an instrument, not a remedy"
+print("   bound measures above the leaked floor               OK")
+
 # ---- 5. the PC app makes the same distinction ------------------------------
 # The hub learned in its own firmware that a satellite-relayed mount is not
 # evidence about THIS radio. The PC app's copy of that judgement never got the

@@ -593,10 +593,49 @@ static uint32_t _entx_dropped  = 0;   // ring full — see enqueue
 // trouble — trading a leak that takes hours for an outage that takes effect at
 // once. The stall has its own detector and its own ladder; while it is active
 // this bound stands aside and lets everything through.
+// Lowest in_flight seen over a window, and it only ever rises: buffers the
+// radio took and never gave back. Full width, saturated only at the wire.
+static uint32_t _espnow_leak_floor = 0;
+
+// Called every loop pass; measures and does nothing else.
+static void espnow_leak_poll(uint32_t now) {
+    static uint32_t win_ms  = 0;
+    static uint32_t win_min = 0xFFFFFFFF;
+    uint32_t inf = espnow_in_flight();
+    if (inf < win_min) win_min = inf;
+    if (now - win_ms < 5000UL) return;
+    win_ms = now;
+    if (win_min != 0xFFFFFFFF && win_min > _espnow_leak_floor) {
+        _espnow_leak_floor = win_min;
+        Serial.printf("[ESPNOW] LEAK floor %lu — issued %lu, callbacks %lu\n",
+                      (unsigned long)_espnow_leak_floor,
+                      (unsigned long)_espnow_issued,
+                      (unsigned long)_espnow_cb_total);
+    }
+    win_min = 0xFFFFFFFF;
+}
+
+// Measured ABOVE the leaked floor, and that is the whole point.
+//
+// A stall leaks buffers and the reinit that ends it does NOT give them back:
+// callbacks resume, but in_flight keeps a new permanent floor. Counting that
+// floor as live traffic means the cap reads saturated on nearly every send for
+// the rest of the boot, and every frame then waits out the 400 ms escape.
+//
+// That is not hypothetical. On 2026-09-10 the hub stalled at 2.95 h uptime;
+// held-back went from a median of 30 per 10 s to 84 and never came back, and
+// ACK round-trip p90 went from 78 ms to 469 ms. The bound was doing more damage
+// than the fault it was guarding — exactly what the mount's own version of this
+// comment warns about, on a node I built without the protection it describes.
+//
+// Only what is ABOVE the floor is a send that will actually complete.
 static inline bool espnow_tx_saturated() {
     if (!ESPNOW_TX_INFLIGHT_CAP) return false;
     if (_cb_stall_active) return false;
-    return espnow_in_flight() >= (uint32_t)ESPNOW_TX_INFLIGHT_CAP;
+    uint32_t inf  = espnow_in_flight();
+    uint32_t gone = _espnow_leak_floor;
+    uint32_t live = (inf > gone) ? (inf - gone) : 0;
+    return live >= (uint32_t)ESPNOW_TX_INFLIGHT_CAP;
 }
 
 static void on_espnow_sent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
@@ -2302,10 +2341,17 @@ static void send_own_health(bool anomaly) {
     // still decodes as exactly that many ghosts and nothing else — put them
     // high instead and an old hub reporting 5 ghosts reads as five discarded
     // commands, a fault it does not have.
+    // held back/10s(8) | ring overflows(8) | LEAK FLOOR(8) | ghost drops(8).
+    //
+    // The floor took a byte off ghosts, which have read 0 on every rig for
+    // weeks. It has to be here: without it the leak was only visible as a step
+    // in the held-back RATE, which is a proxy nobody should have to reason from
+    // — and the step is what told us the bound had started hurting the rig.
     h.node_u32      = ((uint32_t)(_entx_deferred > 255 ? 255 : _entx_deferred) << 24) |
                       ((uint32_t)(_entx_dropped  > 255 ? 255 : _entx_dropped)  << 16) |
-                      (_ghost_rx_drops > 0xFFFF ? 0xFFFFUL
-                                                : (uint32_t)_ghost_rx_drops);
+                      ((uint32_t)(_espnow_leak_floor > 255 ? 255
+                                  : _espnow_leak_floor) << 8) |
+                      (_ghost_rx_drops > 255 ? 255UL : (uint32_t)_ghost_rx_drops);
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_health(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq, &h);
     // To all clients, not only Serial.  This carries uptime, heap, loop time
@@ -3762,6 +3808,9 @@ void loop() {
     // above every early return below.  A held frame is worth microseconds, and
     // this is the path that carries commands to the mounts.
     espnow_tx_pump(now);
+    // Measures only, and above every early return below — the floor is what
+    // keeps the bound from reading leaked buffers as live traffic.
+    espnow_leak_poll(now);
 
     // One-shot if the wire never comes up.  Silence here would look exactly
     // like a satellite that is switched off, so it is worth a line in the log.

@@ -64,10 +64,21 @@ _log_handlers: list[logging.Handler] = [logging.StreamHandler()]
 try:
     _log_dir = Path(__file__).resolve().parent / "logs"
     _log_dir.mkdir(exist_ok=True)
-    # 10 MB × 10 files ≈ a couple of weeks of 24/7 logs — enough to catch a
-    # sporadic wedge — and utf-8 so the →/←/— glyphs write cleanly on Windows.
+    # 10 MB × 60 files ≈ 10 days of 24/7 logs, and utf-8 so the →/←/— glyphs
+    # write cleanly on Windows.
+    #
+    # This said "10 files ≈ a couple of weeks" and had drifted badly: measured
+    # 2026-09-10, one 10 MB file covers 4.15 HOURS, so ten of them held 1.9 days,
+    # not fourteen. The rig talks far more than when that was written — five
+    # mounts, two satellites, 50 PINGs per 10 s per node, and health lines that
+    # have grown several fields. Left alone, a four-day trip would have
+    # overwritten the first fifty hours, which on this rig is exactly where a
+    # sporadic wedge tends to be.
+    #
+    # 60 files is 600 MB. Sized for the fault, not the quiet case: a stalling
+    # run logs roughly twice as fast, and it still covers five days at that rate.
     _log_handlers.append(logging.handlers.RotatingFileHandler(
-        _log_dir / "comms.log", maxBytes=10 * 1024 * 1024, backupCount=10,
+        _log_dir / "comms.log", maxBytes=10 * 1024 * 1024, backupCount=60,
         encoding="utf-8"))
 except OSError as e:
     # A logging-setup failure must never stop the app launching.
