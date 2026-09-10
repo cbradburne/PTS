@@ -1142,14 +1142,14 @@ static void send_to_mount_routed(int idx, const uint8_t *raw, uint16_t len) {
 
 // The actual send. Everything reaches the radio through here, and nothing else
 // calls esp_now_send() on this node.
-static void espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
+static bool espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
     esp_err_t e = esp_now_send(_mount_mac[idx], raw, len);
     if (e == ESP_OK) {
         // Counted only on ESP_OK: a rejected send never took a buffer, so
         // counting it would read as an outstanding send that will never
         // complete — the very thing being watched for.
         _espnow_issued = _espnow_issued + 1;
-        return;
+        return true;
     }
 
     // A REJECTED send never becomes a transmission, so it is invisible in the
@@ -1159,9 +1159,11 @@ static void espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
     // buffers.  Rate-limited per mount so a persistent fault cannot bury the log.
     static uint32_t last_log[NUM_MOUNTS] = {};
     uint32_t now = millis();
-    if (now - last_log[idx] < 2000) return;
-    last_log[idx] = now;
-    Serial.printf("[ESPNOW] send to mount %d REJECTED: %s\n", idx + 1, esp_err_to_name(e));
+    if (now - last_log[idx] >= 2000) {
+        last_log[idx] = now;
+        Serial.printf("[ESPNOW] send to mount %d REJECTED: %s\n", idx + 1, esp_err_to_name(e));
+    }
+    return false;
 }
 
 // Drain the ring, stopping as soon as enough sends are already outstanding.
@@ -1185,6 +1187,47 @@ static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
     if (len > sizeof(_entx_q[0].data)) return;
 
     uint32_t now = millis();
+
+    // An operator action never queues behind housekeeping.
+    //
+    // The ring is FIFO, so without this a JOG sits behind whatever is already
+    // in it — and what is in it is almost entirely keepalive. Fifty PINGs and
+    // a dozen GET_CONFIGs reach each satellite every 10 s; the mount has no
+    // handler for PING at all and answers it from the generic ACK path. Making
+    // a move wait on that is the one latency the rig can actually feel, and it
+    // is indefensible when the traffic ahead of it is read-only polling.
+    //
+    // cmd_is_client_activity() already draws exactly this line for the
+    // maintenance restart: read-only polls are not activity, everything else
+    // is, and an unlisted command defaults to activity. Byte 6 is CMD —
+    // AA 55 LEN MOUNT SEQ_HI SEQ_LO CMD ...
+    //
+    // Sent straight out, bypassing the cap. The cap guards against a burst of
+    // three or more in flight; operator commands are sparse and the frames they
+    // would have waited behind are not worth a millisecond of a move.
+    bool urgent = (len > 6) && cmd_is_client_activity(raw[6]);
+    if (urgent) {
+        if (espnow_send_now(idx, raw, len)) return;
+        // The stack refused it, which means the pool is empty — the wedge, and
+        // the stall detector is already escalating. Put it at the FRONT of the
+        // queue rather than losing it: it goes on the next pass, ahead of the
+        // housekeeping it was never meant to wait for.
+        uint8_t prev = (uint8_t)((_entx_tail + ESPNOW_TX_QUEUE_DEPTH - 1)
+                                 % ESPNOW_TX_QUEUE_DEPTH);
+        if (prev == _entx_head) {          // full — the oldest gives way
+            _entx_head = (uint8_t)((_entx_head + ESPNOW_TX_QUEUE_DEPTH - 1)
+                                   % ESPNOW_TX_QUEUE_DEPTH);
+            _entx_dropped++;
+        }
+        EspNowTxFrame &uf = _entx_q[prev];
+        uf.queued_ms = now;
+        uf.idx       = (uint8_t)idx;
+        uf.len       = len;
+        memcpy(uf.data, raw, len);
+        _entx_tail   = prev;
+        return;
+    }
+
     // The common case is an idle radio: pump first, and if nothing is waiting
     // and nothing is outstanding this sends immediately, exactly as before.
     espnow_tx_pump(now);

@@ -56,7 +56,7 @@ print("   callbacks counted first, and timestamped            OK")
 
 # espnow_send_now() is the one place esp_now_send() is called on this node; the
 # queue and the bound sit in front of it.
-snd = block("static void espnow_send_now(")
+snd = block("static bool espnow_send_now(")   # returns whether the stack took it
 assert re.search(r"_espnow_issued\s*=\s*_espnow_issued \+ 1;", snd), \
     "sends are not counted"
 assert snd.index("e == ESP_OK") < snd.index("_espnow_issued"), \
@@ -253,6 +253,30 @@ assert re.search(r"static uint32_t\s+_espnow_leak_floor", HUB), \
 for act in ("esp_restart", "hub_espnow_full_reinit", "_cb_stall_since_ms"):
     assert act not in lp, f"the leak poll calls {act}; it is an instrument, not a remedy"
 print("   bound measures above the leaked floor               OK")
+
+# An operator action must never queue behind housekeeping. The ring is FIFO and
+# is almost entirely keepalive — 50 PINGs and a dozen GET_CONFIGs reach each
+# satellite every 10 s, and the mount has no CMD_PING handler at all. A JOG
+# waiting on that is the one latency the rig can feel.
+print("\n4c. operator commands jump the queue:")
+enq2 = block("static void espnow_send_if_present(")
+assert "cmd_is_client_activity(raw[6])" in enq2, \
+    "frames are not classified, so a jog queues behind every keepalive ahead of it"
+assert enq2.index("cmd_is_client_activity") < enq2.index("espnow_tx_pump"), \
+    "the classification happens after the queue is consulted, so an urgent frame\n" \
+    "    has already been put behind the housekeeping"
+urg = enq2[enq2.index("bool urgent"):enq2.index("// The common case")]
+assert "espnow_send_now(idx, raw, len)" in urg, "an urgent frame is not sent directly"
+assert "espnow_tx_saturated" not in urg, \
+    "the urgent path still consults the cap, so a jog can still be held for the\n" \
+    "    full 400 ms escape behind traffic nothing reads"
+# On refusal it goes to the FRONT, which means moving tail backwards. Moving
+# head instead would append it — the exact bug this path exists to avoid.
+assert "_entx_tail   = prev;" in urg, \
+    "a refused urgent frame is not placed at the front of the queue"
+assert "_entx_tail + ESPNOW_TX_QUEUE_DEPTH - 1" in urg, \
+    "the front-insert does not step the tail BACK, so the frame is appended"
+print("   classified first, sent direct, front on refusal     OK")
 
 # ---- 5. the PC app makes the same distinction ------------------------------
 # The hub learned in its own firmware that a satellite-relayed mount is not
