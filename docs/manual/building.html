@@ -20,7 +20,7 @@
     <p class="subtitle">Boards, pinned libraries and flashing — one binary per board
     type, no per-unit configuration.</p>
 
-    <p>There are four firmware targets. Each builds to a single binary that runs on
+    <p>There are six firmware targets. Each builds to a single binary that runs on
     every unit of that type — identity, pairing and calibration live in
     NVS/EEPROM, set from the touchscreens, so there's nothing per-unit in
     source.</p>
@@ -28,7 +28,8 @@
     <h2>The boards</h2>
     <table>
       <tr><th style="width:24%">Part</th><th style="width:40%">Hardware</th><th>Firmware</th></tr>
-      <tr><td><strong>Hub</strong></td><td>Seeed XIAO ESP32-S3</td><td><code>firmware/esp32_hub</code></td></tr>
+      <tr><td><strong>Hub</strong></td><td>Waveshare ESP32-S3-ETH (W5500)</td><td><code>firmware/esp32_hub_eth</code></td></tr>
+      <tr><td><strong>Satellite</strong></td><td>Waveshare ESP32-S3-ETH (W5500)</td><td><code>firmware/esp32_satellite</code></td></tr>
       <tr><td><strong>Hub display</strong></td><td>Waveshare ESP32-S3 Touch LCD 7″ (800×480, LVGL 9)</td><td><code>firmware/esp32_display</code></td></tr>
       <tr><td><strong>Mount bridge</strong></td><td>Waveshare ESP32-S3 Touch AMOLED 1.75″ (466×466 round, LVGL 9)</td><td><code>firmware/esp_mount_amoled175</code></td></tr>
       <tr><td><strong>Motion controller</strong></td><td>Teensy 4.1 @ 600 MHz, TMC2209 ×4, TeensyStep4</td><td><code>firmware/teensy41_mount</code></td></tr>
@@ -46,16 +47,17 @@
     (<code>brew install arduino-cli</code>), one script compiles every target
     against the pinned libraries — board FQBNs are baked in, so there's no
     Tools-menu state to get wrong:</p>
-    <pre><code>tools/build.sh                   # compile all four targets
-tools/build.sh hub display       # compile a subset
-tools/build.sh flash hub [port]  # compile + upload one target</code></pre>
+    <pre><code>tools/build.sh                      # compile every target
+tools/build.sh hubeth display       # compile a subset
+tools/build.sh flash hubeth [port]  # compile + upload one target</code></pre>
     <p>It needs the esp32 (3.x) and Teensy cores, which <code>arduino-cli</code>
     shares with an existing Arduino IDE 2.x install — so an existing setup needs
     nothing extra. Build output goes to <code>.build/</code> (gitignored).</p>
 
     <h2>First bring-up</h2>
     <ol class="steps">
-      <li>Flash the <strong>hub</strong> and the <strong>mounts</strong>.</li>
+      <li>Flash the <strong>hub</strong> (<code>hubeth</code>), any
+      <strong>satellites</strong>, and the <strong>mounts</strong>.</li>
       <li>Power everything up.</li>
       <li><strong>Pair each mount</strong> from its own screen: hold ~1.5 s → pick
       CAM 1–5 → pick your hub → Save. The hub needs no action — it learns mounts on
@@ -111,7 +113,7 @@ python3 main.py</code></pre>
     with stored positions; recalls flash amber while "travelling" for 15 s, then
     settle green on arrival:</p>
     <pre><code>tools/build.sh flash hubdemo     # demo hub: five simulated mounts
-tools/build.sh flash hub         # back to a real rig</code></pre>
+tools/build.sh flash hubeth      # back to a real rig</code></pre>
     <div class="note"><b>Why this works everywhere at once</b> The hub is the
     switchboard, so the simulated mounts reach the 7″ display, the PC app and the
     web app through the normal path — all three agree, with no changes to any of

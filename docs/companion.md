@@ -1,8 +1,8 @@
 # Bitfocus Companion (and QLab) control
 
 **The hub is the OSC server.** One server, on the hub, UDP port **9700** —
-`192.168.4.1` on the CamMount AP, reachable from the LAN through a WiFi→LAN
-bridge joined to that AP, or from any machine joined to CamMount directly. No
+`192.168.4.1` on the hub's `PTS-` AP, reachable from the LAN through a WiFi→LAN
+bridge joined to that AP, or from any machine joined to it directly. No
 PC needed: hub + display + mounts + Stream Deck is a complete rig.
 
 There used to be a second server inside the PC app on the same port and the
@@ -18,7 +18,7 @@ lamp or a record cue no longer depends on anyone's PC app being open.
 ## Companion connection
 
 1. Companion → **Connections** → add **Generic: OSC**
-2. **Target IP** = the hub (`192.168.4.1` on the CamMount AP) ·
+2. **Target IP** = the hub (`192.168.4.1` on its `PTS-` AP) ·
    **Target port** = `9700`
 3. Use the connection's **"Send message"** actions on buttons as below.
    Argument type matters: use **integer** arguments (floats also accepted).
