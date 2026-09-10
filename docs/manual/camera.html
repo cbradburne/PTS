@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blackmagic camera control — PTS Manual</title>
+<link rel="stylesheet" href="../assets/manual.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎥</text></svg>">
+</head>
+<body>
+<button id="menu-toggle">☰  Manual contents</button>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="brand" href="../index.html">P<span>T</span>S</a>
+    <a class="home" href="../index.html">← Project home</a>
+  </aside>
+
+  <main class="doc">
+    <h1>Blackmagic camera control</h1>
+    <p class="subtitle">Pairing a camera to a mount, and driving iris, focus,
+    zoom and colour from the console, the hub screen or a cue stack.</p>
+
+    <p>Each mount can hold a Bluetooth bond to the <strong>Blackmagic camera
+    sitting on it</strong>, and relays control commands to it over that link. It
+    is optional and per-mount: a rig can have one camera paired or five, and a
+    mount with no bond never scans for one.</p>
+
+    <p>Because the camera belongs to the mount, there is no "current camera" to
+    select anywhere — every surface addresses cameras by their mount number,
+    the same 1–5 you already use for everything else.</p>
+
+    <div class="warn"><b>Two limits, and they come from the protocol</b> The
+    Blackmagic control protocol has <strong>no acknowledgement of any kind</strong>
+    and <strong>no way to ask the camera anything</strong>. The mount confirms it
+    relayed the packet; the camera never says whether it acted. So every control
+    shows what was <em>sent</em>, not what the camera holds. Where the camera
+    volunteers a value — it reports most of them unprompted — the display follows
+    it, and that is the only real confirmation available. For a setting the
+    camera never mentions, the honest feedback is the lens visibly hunting.</div>
+
+    <h2>Pairing a camera to a mount</h2>
+    <p>Done on the mount's own round touchscreen, not from the console.</p>
+
+    <div class="warn"><b>The mount goes off the air while pairing</b> Bluetooth
+    pairing needs the radio to itself, so the mount stops WiFi for the duration
+    and cannot be driven from anything. It comes back when you leave the screen —
+    either by tapping <strong>BACK</strong>, or by leaving it alone for two
+    minutes, after which it exits on its own. Pair before a show, not during
+    one.</div>
+
+    <ol class="steps">
+      <li><strong>Put the camera into pairing mode</strong> — on a Blackmagic
+      body that's <em>Setup → Bluetooth</em>, and it will show a six-digit
+      code.</li>
+      <li>On the mount, <strong>touch and hold for about 1.5 seconds</strong> to
+      open Setup, then <strong>hold again</strong> to reach CAMERA PAIRING. It is
+      chained behind Setup deliberately: pairing is a once-per-mount
+      commissioning job for whoever builds the rig, not something an operator
+      needs to find.</li>
+      <li>The mount scans, and the line under the title says where it is —
+      <em>Searching for a camera…</em>, then <em>Enter the code on the
+      camera</em> once it has found one. <em>No camera in range</em> means the
+      scan came back empty; check the camera is actually advertising.</li>
+      <li>Type the <strong>six-digit code</strong> on the keypad. Digits fill the
+      dashes left to right, and <strong>⌫</strong> takes one back.</li>
+      <li>Press the <strong>green tick</strong>. It only submits on a full six
+      digits, so a short code does nothing rather than failing. The status turns
+      green and reads <strong>PAIRED</strong>, or <em>Pairing FAILED — try
+      again</em>, which usually means a mistyped code or a camera that stopped
+      advertising while you typed.</li>
+    </ol>
+
+    <figure class="shot round" data-file="mount-campair.svg">
+      <img src="../assets/img/mount-campair.svg" alt="The mount's CAMERA PAIRING screen"
+           onerror="this.closest('figure').classList.add('missing')">
+      <figcaption>CAMERA PAIRING on the mount, mid-entry. The status line under
+      the title is the thing to read; the red <strong>FORGET</strong> lobe drops
+      an existing pairing, and <strong>BACK</strong> leaves without changing
+      anything and puts the mount back on the air.</figcaption>
+    </figure>
+
+    <div class="note"><b>Forgetting a camera</b> <strong>FORGET</strong> clears
+    the bond so the mount stops trying to reach that camera. Worth doing before a
+    body moves to another mount — otherwise two mounts believe they own the same
+    camera, and only one of them is right. A mount with no bond never scans, so
+    forgetting also puts its Bluetooth back to fully idle.</div>
+
+    <h2>Camera Control — the everyday panel</h2>
+    <p>In the PC app, the <strong>◎ CC</strong> button opens Camera Control. It
+    is modeless and stays where you put it: pressing autofocus while watching the
+    shot is the whole point, and a dialog that sat on top of the picture would be
+    working against you.</p>
+
+    <p>One row per camera, each with the controls you reach for during a show:</p>
+    <ul>
+      <li><strong>Auto Focus</strong> — one instantaneous autofocus.</li>
+      <li><strong>ISO − / +</strong> — step the camera's sensitivity.</li>
+      <li><strong>Record</strong> — start and stop the camera's own recording.</li>
+      <li><strong>Advanced…</strong> — the full surface, below.</li>
+    </ul>
+
+    <p>A button flashes to confirm the command was <em>sent</em> and claims
+    nothing more, for the reason in the warning above.</p>
+
+    <h3>What a row tells you when it cannot help</h3>
+    <p>Four states, spelled out rather than left as a greyed button — they look
+    identical when disabled and each needs a completely different response:</p>
+    <table>
+      <tr><th>Row says</th><th>What to do</th></tr>
+      <tr><td><code>no camera support</code></td>
+          <td>That mount is running firmware from before camera support.
+          Nothing here works until it is reflashed.</td></tr>
+      <tr><td><code>camera off</code></td>
+          <td>Firmware is current but there is no link — the camera is off,
+          asleep, or out of range. Go and look at the camera.</td></tr>
+      <tr><td><code>no camera paired</code></td>
+          <td>No bond on this mount, so it never reaches for a camera at all.
+          The normal state for a mount without one, <em>not</em> a fault. Pair it
+          on the mount if it should have a camera.</td></tr>
+      <tr><td><code>camera ready</code></td>
+          <td>Paired and linked — the buttons will do something.</td></tr>
+    </table>
+
+    <p>Link state rides on the health record every mount already sends every ten
+    seconds, so a row can be up to that far behind. That is deliberate: a faster
+    path would be plumbing for an update rate nobody can perceive.</p>
+
+    <h2>Advanced — the full surface</h2>
+    <p>Reached from <strong>Advanced…</strong>. This is the panel for
+    <em>setting a camera up</em>, not for operating it during a show — the
+    everyday four stay on the ordinary dialog for that.</p>
+
+    <p>It is laid out after <strong>ATEM Software Control</strong>, because that
+    is the reference an operator already knows: camera settings down the left,
+    the three correction wheels across the top right, and the paired sliders
+    beneath them.</p>
+
+    <table>
+      <tr><th>Group</th><th>Controls</th></tr>
+      <tr><td><strong>Camera</strong></td>
+          <td>ISO, Shutter, Gain, White&nbsp;Balance, Tint, Filter&nbsp;(ND),
+          plus Auto&nbsp;WB</td></tr>
+      <tr><td><strong>Lens</strong></td>
+          <td>Iris, Focus, Zoom, plus Auto&nbsp;Focus and Auto&nbsp;Iris</td></tr>
+      <tr><td><strong>Color Correction</strong></td>
+          <td>Lift, Gamma and Gain wheels; then Contrast, Pivot, Saturation, Hue
+          and Lum&nbsp;Mix</td></tr>
+    </table>
+
+    <p><strong>There is no Apply button.</strong> Commands go out as a control is
+    used. With no acknowledgement and no read-back, an Apply button would offer a
+    confidence the system cannot support.</p>
+
+    <div class="note"><b>Sliders send on release</b> Dragging a slider sends one
+    command when you let go rather than one per pixel — forty packets became one
+    — while the handle and the number track your finger the whole way. Everything
+    else, including a tap on a slider's groove or an arrow key, sends
+    immediately, because nothing is coming later to trigger it.</div>
+
+    <div class="note"><b>Where the panel opens from</b> For a control the camera
+    reports, the panel opens on the camera's own value rather than a default —
+    the iris seeds from the real lens position when the panel opens and on each
+    camera change, and is yours alone after that. It used to open at 50% against
+    a lens that was shut.</div>
+
+    <h2>FOCUS on the hub display</h2>
+    <p>On the per-camera screen of the 7″ hub display, a <strong>FOCUS</strong>
+    button sits on the <em>CLEAR / SET</em> row, the same size as those two, over
+    the zoom fader below. It fires one instantaneous autofocus on that mount's
+    camera — the same command as Auto&nbsp;Focus in the app, for when nobody is
+    at the console.</p>
+
+    <div class="note"><b>Hidden, not greyed</b> The button does not appear at all
+    on a mount with no camera connected. There is nothing to focus, and a dead
+    button only invites a press and a question. If you expected FOCUS and it is
+    not there, the mount has no camera link — check Camera Control in the app,
+    which will say which of the four states it is in.</div>
+
+    <h2>From a cue stack or a Stream Deck</h2>
+    <p>Autofocus and zoom are exposed over OSC by the hub, so they can be fired
+    from Bitfocus Companion or QLab without the PC app running at all:</p>
+    <pre><code>/pts/cam/N/autofocus</code></pre>
+    <p>See <a href="companion.html">Companion &amp; QLab</a> for the full OSC
+    reference and the port to aim at.</p>
+
+    <p>Next: <a href="pairing.html">Pairing &amp; identity</a> for how a mount
+    finds its number and its hub, or <a href="pc-app.html">the PC app</a> for
+    everything else on the console.</p>
+  </main>
+</div>
+<script src="manual.js"></script>
+</body>
+</html>
