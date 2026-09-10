@@ -95,7 +95,20 @@ chk = chk[:chk.index("if (worst_i < 0) return;")]
 assert "espnow_in_flight() > 0" in chk, \
     "the stall fires with nothing outstanding, so an idle hub with no mounts\n" \
     "    powered would restart itself on a timer"
-assert "_espnow_cb_last_ms &&" in chk, \
+# SIGNED difference. now is captured at the top of the loop pass and
+# _espnow_cb_last_ms is written by the WiFi task, so a callback landing between
+# them makes last > now; unsigned, that underflows to ~4.29e9 ms and clears
+# every rung of the ladder instantly. The hub then reinits over a race lasting
+# microseconds, and the deinit orphans whatever was in flight — which is how a
+# healthy radio ends up reporting a leak floor of 32.
+assert re.search(r"int32_t d = \(int32_t\)\(now - cb_last\);", chk), \
+    "the stall clock uses an unsigned subtraction, so a callback arriving after\n" \
+    "    'now' was sampled reads as a 49-day stall and fires the whole ladder"
+assert "if (d > 0) cb_stall" in chk, "a negative difference is not discarded"
+assert "cb_last  = _espnow_cb_last_ms;" in chk, \
+    "the timestamp is read twice instead of latched, so it can change between\n" \
+    "    the guard and the subtraction"
+assert "cb_last &&" in chk, \
     "the clock runs before the first callback has ever arrived, so a hub that\n" \
     "    has not yet sent anything reads as stalled at boot"
 assert "_cb_stall_since_ms = 0;" in chk, "the stall never clears when it recovers"

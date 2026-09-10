@@ -1052,8 +1052,11 @@ static inline bool dn_hold(uint32_t now, uint32_t queued_ms) {
     if (!ESPNOW_TX_INFLIGHT_CAP) return false;
     if (sat_in_flight() < (uint32_t)ESPNOW_TX_INFLIGHT_CAP) return false;
     if (now - queued_ms >= DN_DEFER_MS) return false;             // overdue
-    if (_sat_cb_last_ms && (now - _sat_cb_last_ms) > DN_CB_STALL_MS)
-        return false;                                            // callback dead
+    uint32_t cbl = _sat_cb_last_ms;
+    if (cbl) {                       // signed: see sat_send_downlink()
+        int32_t d = (int32_t)(now - cbl);
+        if (d > (int32_t)DN_CB_STALL_MS) return false;            // callback dead
+    }
     return true;
 }
 
@@ -1436,7 +1439,19 @@ static void sat_send_downlink(uint32_t now) {
     // late, there is simply nothing for it to report. Without that test an idle
     // satellite would show its stall climbing for ever.
     uint32_t inf   = sat_in_flight();
-    uint32_t stall = (_sat_cb_last_ms && inf) ? (now - _sat_cb_last_ms) : 0;
+    // SIGNED, for the same reason the hub's is: now comes from the top of the
+    // loop pass and _sat_cb_last_ms is written by the WiFi task, so a callback
+    // landing between them makes last > now and an unsigned subtraction
+    // underflows to ~4.29e9 — saturating to 0xFFFF and reporting a flat
+    // "65.5s" stall on a relay that is passing every frame. It did exactly
+    // that twice on 2026-09-10, on a satellite with no leak floor and zero
+    // refusals, and I read both as real.
+    uint32_t cb_last = _sat_cb_last_ms;
+    uint32_t stall   = 0;
+    if (cb_last && inf) {
+        int32_t d = (int32_t)(now - cb_last);
+        if (d > 0) stall = (uint32_t)d;
+    }
     // Whether the burst bound ever ENGAGED. Without it a fortnight without a
     // wedge says nothing: a bound that never fired and a bound that fixed the
     // fault look identical from here.

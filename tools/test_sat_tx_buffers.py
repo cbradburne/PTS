@@ -170,9 +170,18 @@ dn = block("static void sat_send_downlink(")
 for i in (25, 28, 29, 30, 31, 32, 33, 34):
     assert f"p[{i}]" in dn, f"byte {i} of the appended block is never written"
 assert "if (leak  > 0xFFFF) leak  = 0xFFFF;" in dn, "the floor is not saturated at the wire"
-assert "_sat_cb_last_ms && inf" in dn, \
+assert "if (cb_last && inf)" in dn, \
     "the callback stall is reported without checking anything is outstanding, so\n" \
     "    an idle satellite would show its stall climbing for ever"
+# SIGNED, like the hub's. now comes from the top of the loop pass and
+# _sat_cb_last_ms is written by the WiFi task; unsigned, a callback landing
+# between them underflows to ~4.29e9, saturates at 0xFFFF and reports a flat
+# "65.5s" stall on a relay passing every frame. It did that twice on
+# 2026-09-10 and I read both as real faults.
+assert re.search(r"int32_t d = \(int32_t\)\(now - cb_last\);", dn), \
+    "unsigned subtraction: a callback arriving after 'now' was sampled reads as\n" \
+    "    a 49-day stall, which saturates to a convincing-looking 65.5s"
+assert "if (d > 0) stall" in dn, "a negative difference is not discarded"
 print(f"   {mn}-byte form still valid, tail at [25..{ln-1}]         OK")
 
 # ---- 6. the PC app reads both lengths --------------------------------------

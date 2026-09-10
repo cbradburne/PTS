@@ -3677,9 +3677,22 @@ static void check_self_recovery(uint32_t now) {
     // report its own transmissions, and no mount can be acknowledging while it
     // is happening. So this deliberately skips the tx_proven_ok test that
     // follows, which exists to stop the hub rebooting over one deaf mount.
+    // SIGNED difference, and that is not a style choice.
+    //
+    // now is captured at the top of the loop pass; _espnow_cb_last_ms is
+    // written by the WiFi task from its own millis(). A callback landing in
+    // between makes last > now, and an unsigned subtraction then underflows to
+    // ~4.29e9 ms — instantly past every rung of the ladder. The hub reinits its
+    // stack over a race that lasted microseconds, and the deinit orphans
+    // whatever was in flight, which is how a healthy radio acquires a leak
+    // floor of 32. It also survives the 49-day millis() rollover, which the
+    // unsigned form did not.
     uint32_t cb_stall = 0;
-    if (_espnow_cb_last_ms && espnow_in_flight() > 0)
-        cb_stall = now - _espnow_cb_last_ms;
+    uint32_t cb_last  = _espnow_cb_last_ms;
+    if (cb_last && espnow_in_flight() > 0) {
+        int32_t d = (int32_t)(now - cb_last);
+        if (d > 0) cb_stall = (uint32_t)d;
+    }
     if (cb_stall > SELF_CB_STALL_MS) {
         if (!_cb_stall_since_ms) {
             _cb_stall_since_ms = now ? now : 1;
