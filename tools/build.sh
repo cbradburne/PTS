@@ -223,6 +223,21 @@ compile_one() {
     else
         printf '   flags  (none — plain build)\n'
     fi
+    # ap_secret.h is reached through __has_include, and arduino-cli cannot see
+    # that: the sketch's recorded dependencies come from the LAST build, so a
+    # header that did not exist then is not on the list and its appearance
+    # triggers no rebuild.  The result is the one failure this file exists to
+    # prevent — you create the password header, flash, and the binary still
+    # carries the published placeholder, silently.  Cheap to rule out: if the
+    # header is newer than what we built, build it again from nothing.
+    _sec="$REPO/firmware/shared/ap_secret.h"
+    _bin="$(out_for "$t")/$(basename "$sk").bin"
+    if [ -f "$_sec" ] && [ ! -f "$_bin" -o "$_sec" -nt "$_bin" ]; then
+        if [ -d "$(out_for "$t")" ]; then
+            printf '   note   ap_secret.h is newer than the last build — rebuilding clean\n'
+            rm -rf "$(out_for "$t")"
+        fi
+    fi
     if [ -n "$props" ]; then
         arduino-cli compile \
             --fqbn "$(fqbn_for "$t")" \

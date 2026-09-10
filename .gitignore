@@ -47,3 +47,8 @@ docs/assets/img/movingRail.mp4
 # Camera-original HEICs — web JPGs are committed instead
 docs/assets/img/Mount Hero/
 bench-logs/
+
+# The rig's real WiFi AP password. The repo is public: this file holds the
+# value, the .example beside it holds the instructions, and only the .example
+# is ever committed.
+firmware/shared/ap_secret.h

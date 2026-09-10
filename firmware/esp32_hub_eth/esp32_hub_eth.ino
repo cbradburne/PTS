@@ -196,6 +196,20 @@ static char AP_SSID[5 + HUB_NAME_MAX] = AP_SSID_PREFIX "Hub";
 // the air out of the box and is meant to be replaced. WPA2 needs at least 8
 // characters: shorter and softAP() refuses the password, which does not fail
 // loudly, it just brings the AP up OPEN.
+//
+// Two ways to set it, because the build scripts are not equal. A local header
+// works on both and is the one to reach for: it is set once per machine rather
+// than remembered on every flash, and forgetting an environment variable does
+// not fail loudly — it quietly puts the rig back on the published placeholder.
+//
+//   firmware/shared/ap_secret.h     (gitignored; copy the .example beside it)
+//   AP_PASSWORD=... tools/build.sh  (sh only — build.bat cannot pass a quoted
+//                                    string through cmd, arduino-cli and gcc)
+//
+// Precedence: -D on the command line, then the header, then the placeholder.
+#if __has_include("../shared/ap_secret.h")
+#include "../shared/ap_secret.h"
+#endif
 #ifndef AP_PASSWORD
 #define AP_PASSWORD  "changeme123"
 #endif

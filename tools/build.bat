@@ -21,6 +21,20 @@ REM through cmd, arduino-cli and gcc needs escaping that differs from sh, and
 REM shipping an untested version of it would silently bake the quote characters
 REM into the SSID.  Use tools\build.sh on macOS, or uncomment the SAT_NAME define
 REM in esp32_satellite.ino.
+REM
+REM The WiFi AP password is NOT set that way and does not need to be.  Put it in
+REM firmware\shared\ap_secret.h (copy the .example beside it); every target that
+REM raises an access point picks it up, on both build scripts, with no quoting to
+REM get wrong.  ONE CATCH, and it is silent: arduino-cli reads the sketch's
+REM dependencies from the LAST build, so a header that did not exist then does
+REM not trigger a rebuild - you would flash the published placeholder and only
+REM find out when a phone will not join.  After CREATING or EDITING ap_secret.h,
+REM clear the target once:
+REM
+REM     rmdir /s /q "%%OUT%%\<target>"
+REM
+REM build.sh does this automatically; the cmd equivalent is not shipped here
+REM untested, for the same reason SAT_NAME is not.
 
 setlocal enabledelayedexpansion
 
@@ -82,6 +96,14 @@ if not exist "%KEEP%" mkdir "%KEEP%"
 copy /y "%OUT%\%TARGET%\%SKETCHNAME%.elf" "%KEEP%\" >nul 2>&1
 copy /y "%OUT%\%TARGET%\%SKETCHNAME%.bin" "%KEEP%\" >nul 2>&1
 echo    kept ELF + bin in %KEEP%
+
+REM A password nobody sees until a phone fails to join is worth one line here.
+if exist "%REPO%\firmware\shared\ap_secret.h" (
+    echo    AP password from firmware\shared\ap_secret.h
+) else (
+    echo    AP password NOT SET - using the published placeholder "changeme123"
+    echo           copy firmware\shared\ap_secret.h.example firmware\shared\ap_secret.h
+)
 
 if not defined DO_FLASH goto :done
 

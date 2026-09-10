@@ -66,8 +66,21 @@ tools/build.sh flash hub [port]  # compile + upload one target</code></pre>
     repository is public, so the password in the source is published and is
     therefore no password at all — it is the placeholder
     <code>changeme123</code>, and it exists only so a fresh build comes up on the
-    air. Bake your own at flash time instead, where it is never committed:
-    <pre><code>AP_PASSWORD=yourpassword tools/build.sh flash hubeth</code></pre>
+    air. Put your own in a local file instead, which is gitignored and never
+    committed — copy the example beside it and edit the one line:
+    <pre><code>cp firmware/shared/ap_secret.h.example firmware/shared/ap_secret.h
+copy firmware\shared\ap_secret.h.example firmware\shared\ap_secret.h</code></pre>
+    Every target that raises an access point picks it up, on both build scripts,
+    and each machine that flashes needs its own copy. <b>After creating or
+    editing it, clear that target's build once</b> — arduino-cli reads the
+    sketch's dependencies from the previous build, so a header that did not
+    exist then triggers no rebuild and you would flash the placeholder without
+    being told. <code>tools/build.sh</code> does this for you;
+    <code>tools\build.bat</code> prints which password it is using, and on
+    Windows you clear it by hand with
+    <code>rmdir /s /q ".build\hubeth"</code>. For a one-off build,
+    <code>AP_PASSWORD=... tools/build.sh</code> overrides the header (sh only —
+    <code>build.bat</code> cannot pass a quoted string through cmd).
     Nothing on the rig itself needs this password: a mount <em>scans</em> for the
     AP and takes its BSSID as the ESP-NOW address without ever joining, and a
     satellite reaches the hub over Ethernet. It gates the phone, tablet or laptop
