@@ -82,9 +82,21 @@ assert not re.search(r"_espnow_leak_floor\s*=[^;]*255", poll), \
     "the leak poll clamps the floor. Clamp it where it is packed for the wire\n" \
     "    and nowhere else, or the guard that reads it cannot recover."
 FLAT = re.sub(r"\s+", " ", INO)
-assert "(_espnow_leak_floor > 255 ? 255 : _espnow_leak_floor) << 16" in FLAT, \
+# What is packed is no longer the live floor: a stack rebuild clears that, so
+# the report takes the larger of it and the high-water mark (see
+# test_leak_floor_reconciles). The property under test is unchanged — whatever
+# goes on the wire saturates at 255 rather than wrapping — so the assertion
+# reads the shape and not one spelling of the variable.
+packed = re.search(r"\(\s*(\w+) > 255 \? 255 : \1\s*\) << 16", FLAT)
+assert packed, \
     "the floor is packed into node_u32 without saturating, so a floor above 255\n" \
     "    wraps and a badly leaking mount reports a small number"
+assert re.search(rf"{packed.group(1)}\s*=.*_espnow_leak_floor.*\?|"
+                 rf"{packed.group(1)}\s*=\s*_espnow_leak_floor",
+                 FLAT) or packed.group(1) == "_espnow_leak_floor", \
+    f"node_u32 packs '{packed.group(1)}', which is not derived from the floor at\n" \
+    "    all — the health report would be carrying some other number under the\n" \
+    "    leak field's name"
 print("   full width in the guard, saturated at node_u32     OK")
 
 # It measures and does nothing else, on purpose.
@@ -101,8 +113,16 @@ print("\n3. what the health line carries:")
 # so this has to name the shipping one rather than take the first match.
 pack = FLAT[FLAT.index("h.node_u32 = ((uint32_t)(_wedge_count"):]
 pack = pack[:pack.index(";")]
-assert "_espnow_leak_floor" in pack, \
-    "the floor is not in node_u32, so nothing carries it off the mount"
+assert packed.group(1) in pack, \
+    "the leak figure is not in node_u32, so nothing carries it off the mount"
+# And it has to be the larger of the live floor and the high-water mark. A
+# rebuild clears the floor — that is deliberate, it is what stops a hub restart
+# reading as lost buffers — so packing the floor alone would now hide a real
+# leak behind the recovery that followed it.
+assert re.search(rf"{packed.group(1)}\s*=\s*\(?\s*_espnow_leak_floor\s*>\s*"
+                 rf"_espnow_leak_worst", FLAT), \
+    "the reported figure is not max(floor, worst), so the first stack rebuild\n" \
+    "    after a genuine leak erases it from the health line"
 assert "(_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL))" in INO, \
     "the reinit count is not in the low byte"
 assert "_espnow_drain_deferred > 255 ? 255" in INO, \

@@ -634,6 +634,32 @@ static volatile uint32_t _espnow_cb_total = 0;  // send callback fired, either w
 // hundreds transmitting at a hub that was not listening. A number whose width
 // is chosen for the report it prints must not also arm a guard.
 static uint32_t _espnow_leak_floor = 0;
+// High-water mark, kept across a stack rebuild. The floor itself has to be
+// cleared by a rebuild (see espnow_reconcile_after_rebuild); without somewhere
+// to put the old value first, clearing it would erase the history too.
+static uint32_t _espnow_leak_worst = 0;
+
+// Deinit discards whatever is queued WITHOUT firing its callbacks, so those
+// sends are counted as outstanding for ever and the floor never returns.
+//
+// Measured on the rig, 2026-09-10/11. cam1's reported floor stepped 10 -> 11 ->
+// 14 -> 15 -> 16 -> 17 and cam2's 11 -> 12 -> 13 -> 14 -> 15 -> 16, and every
+// step landed on the moment the HUB went away — its 23:02 flash, its 07:02
+// maintenance restart, its 10:33 reflash, its 21:50 and 09:00 stall recoveries.
+// cam4 is the control: it is relayed by a satellite and its floor ignored all of
+// those, stepping instead at 10:55 and 18:01, which are Foyer's two restarts.
+//
+// So the counter was largely tallying the upstream node's outages, not buffers
+// this mount had lost, while reporting under a name that says otherwise.
+//
+// The satellite has had this reconcile since its counter was written and the hub
+// gained it on 2026-09-11. This is the third of three.
+static inline void espnow_reconcile_after_rebuild() {
+    if (_espnow_leak_floor > _espnow_leak_worst)
+        _espnow_leak_worst = _espnow_leak_floor;
+    _espnow_cb_total   = _espnow_issued;
+    _espnow_leak_floor = 0;
+}
 
 static inline uint32_t espnow_in_flight() {
     uint32_t i = _espnow_issued, c = _espnow_cb_total;
@@ -1217,9 +1243,14 @@ static void send_health(bool anomaly) {
     // it a fortnight without wedges says nothing — a bound that never fires and
     // a bound that fixed the fault look identical from here. Reinit gives up
     // its top byte for it; it has never exceeded 3, and both saturate.
+    // The floor is now cleared by a stack rebuild, so report whichever is
+    // larger: the live floor, or the worst seen before the last rebuild. Without
+    // the second term a reinit would erase the evidence it was called to deal
+    // with, which is the opposite failure to the one just fixed.
+    uint32_t leak_rep = (_espnow_leak_floor > _espnow_leak_worst)
+                        ? _espnow_leak_floor : _espnow_leak_worst;
     h.node_u32      = ((uint32_t)(_wedge_count > 255 ? 255 : _wedge_count) << 24) |
-                      ((uint32_t)(_espnow_leak_floor > 255 ? 255
-                                  : _espnow_leak_floor) << 16) |
+                      ((uint32_t)(leak_rep > 255 ? 255 : leak_rep) << 16) |
                       ((uint32_t)(_espnow_drain_deferred > 255 ? 255
                                   : _espnow_drain_deferred) << 8) |
                       (_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL));
@@ -1391,6 +1422,7 @@ static void espnow_full_reinit() {
     if (!_cfg_valid) return;   // nothing to rebuild toward while unpaired
     Serial.println("[ESP-NOW] Full stack reinit start");
     esp_now_deinit();
+    espnow_reconcile_after_rebuild();
     delay(100);
     if (esp_now_init() != ESP_OK) {
         Serial.println("[ESP-NOW] reinit FAILED — will retry next cycle");
@@ -1435,6 +1467,7 @@ static bool espnow_wifi_restart() {
     if (!_cfg_valid) return false;
     Serial.println("[ESP-NOW] WiFi teardown start");
     esp_now_deinit();
+    espnow_reconcile_after_rebuild();
 
     // WiFi.mode(WIFI_OFF), not esp_wifi_stop().
     //
