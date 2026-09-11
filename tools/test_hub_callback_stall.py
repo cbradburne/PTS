@@ -272,6 +272,34 @@ for act in ("esp_restart", "hub_espnow_full_reinit", "_cb_stall_since_ms"):
     assert act not in lp, f"the leak poll calls {act}; it is an instrument, not a remedy"
 print("   bound measures above the leaked floor               OK")
 
+# A rebuild deinits the stack, which orphans every outstanding send: their
+# callbacks never arrive, issued stays ahead of callbacks for ever, and the
+# floor takes a permanent step. Measured twice on 2026-09-10/11 — exactly 32
+# both times, which is not the WiFi static TX pool (8 on this build) but the
+# number of sends that pile up between the callback stopping and the ladder
+# firing, with the bound standing aside because _cb_stall_active. The satellite
+# has reconciled since its counter was written; the hub did not.
+rb = block("static bool hub_espnow_rebuild(")
+assert "_espnow_cb_total   = _espnow_issued;" in rb, \
+    "the rebuild does not reconcile in_flight, so every reinit leaves its own\n" \
+    "    discarded sends counted as leaked for the rest of the boot"
+assert "_espnow_leak_floor = 0;" in rb, "the floor survives a rebuild that invalidated it"
+assert rb.index("esp_now_init") < rb.index("_espnow_cb_total   =") \
+       < rb.index("esp_now_register_send_cb"), \
+    "the reconcile is not between init and re-registering the callback — the one\n" \
+    "    window where no callback can fire and change it underneath"
+assert "_espnow_leak_worst" in rb and \
+       rb.index("_espnow_leak_worst") < rb.index("_espnow_leak_floor = 0;"), \
+    "reconciling erases the evidence: keep the high-water, and take it BEFORE\n" \
+    "    the floor is cleared or it always reads 0"
+# ...and the high-water is what goes on the wire, or a hub that leaked and then
+# rebuilt reports a clean floor for ever after.
+hh = block("static void send_own_health(")
+assert "_espnow_leak_worst" in hh, \
+    "node_u32 reports the live floor, which a rebuild has just reset — so a hub\n" \
+    "    that leaked and recovered reads 0 and the evidence is gone"
+print("   rebuild reconciles, high-water kept and reported    OK")
+
 # An operator action must never queue behind housekeeping. The ring is FIFO and
 # is almost entirely keepalive — 50 PINGs and a dozen GET_CONFIGs reach each
 # satellite every 10 s, and the mount has no CMD_PING handler at all. A JOG

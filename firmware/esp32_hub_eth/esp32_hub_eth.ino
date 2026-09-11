@@ -596,6 +596,9 @@ static uint32_t _entx_dropped  = 0;   // ring full — see enqueue
 // Lowest in_flight seen over a window, and it only ever rises: buffers the
 // radio took and never gave back. Full width, saturated only at the wire.
 static uint32_t _espnow_leak_floor = 0;
+// Highest floor seen before a rebuild reset it — reconciling must not erase the
+// evidence of what provoked the rebuild.
+static uint32_t _espnow_leak_worst = 0;
 
 // Called every loop pass; measures and does nothing else.
 static void espnow_leak_poll(uint32_t now) {
@@ -2384,6 +2387,11 @@ static void send_own_health(bool anomaly) {
     // still decodes as exactly that many ghosts and nothing else — put them
     // high instead and an old hub reporting 5 ghosts reads as five discarded
     // commands, a fault it does not have.
+    // The floor REPORTED is the high-water, not the live value: a rebuild
+    // resets the live one against a fresh pool, and without the high-water a
+    // hub that had leaked and recovered would read a clean 0 for ever after.
+    uint32_t lk = (_espnow_leak_floor > _espnow_leak_worst)
+                  ? _espnow_leak_floor : _espnow_leak_worst;
     // held back/10s(8) | ring overflows(8) | LEAK FLOOR(8) | ghost drops(8).
     //
     // The floor took a byte off ghosts, which have read 0 on every rig for
@@ -2392,8 +2400,7 @@ static void send_own_health(bool anomaly) {
     // — and the step is what told us the bound had started hurting the rig.
     h.node_u32      = ((uint32_t)(_entx_deferred > 255 ? 255 : _entx_deferred) << 24) |
                       ((uint32_t)(_entx_dropped  > 255 ? 255 : _entx_dropped)  << 16) |
-                      ((uint32_t)(_espnow_leak_floor > 255 ? 255
-                                  : _espnow_leak_floor) << 8) |
+                      ((uint32_t)(lk > 255 ? 255 : lk) << 8) |
                       (_ghost_rx_drops > 255 ? 255UL : (uint32_t)_ghost_rx_drops);
     uint8_t buf[PKT_BUF_SIZE + 4];
     uint16_t n = build_health(buf, 0xFE /*hub sentinel*/, ++_usb_diag_seq, &h);
@@ -2487,6 +2494,25 @@ static void send_hub_event(uint8_t kind, uint8_t mount_id, int8_t rssi,
 // recovery paths below.
 static bool hub_espnow_rebuild() {
     if (esp_now_init() != ESP_OK) return false;
+    // Reconcile in_flight against the fresh pool, BEFORE the callback is
+    // re-registered — the one window in which nothing can change these
+    // underneath.
+    //
+    // Without this the deinit above orphans every outstanding send: their
+    // callbacks never come, issued stays ahead of callbacks for ever, and the
+    // leak floor takes a permanent step. Measured twice on 2026-09-10/11, the
+    // step was exactly 32 both times — not an ESP-IDF buffer leak at all, just
+    // this hub counting its own discarded sends and never letting them go. The
+    // WiFi static TX pool on this build is 8 buffers, so 32 was never the pool
+    // size either; it is how many sends pile up between the callback stopping
+    // and the ladder firing, with the burst bound standing aside because
+    // _cb_stall_active.
+    //
+    // The satellite has had this since its counter was written. The hub did
+    // not, which is the whole reason its floor kept climbing.
+    if (_espnow_leak_floor > _espnow_leak_worst) _espnow_leak_worst = _espnow_leak_floor;
+    _espnow_cb_total   = _espnow_issued;
+    _espnow_leak_floor = 0;
     esp_now_register_recv_cb(on_espnow_recv);
     esp_now_register_send_cb(on_espnow_sent);
     for (int i = 0; i < NUM_MOUNTS; i++) {
