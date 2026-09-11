@@ -161,6 +161,36 @@ static uint32_t _t_start_ms     = 0;
 static uint32_t _t_first_ref_ms = 0;   // when the FIRST refusal happened
 static uint32_t _t_wedge_ms     = 0;   // when refusals became continuous
 static uint32_t _consec_refused = 0;
+
+// ── Did the frame actually go out? ───────────────────────────────────────────
+//
+// The whole point of this pair of counters. When a callback never arrives, two
+// completely different things could have happened, and nothing measured so far
+// tells them apart:
+//
+//   the frame WAS transmitted and only the completion notification was lost
+//       -> the fault is in the driver's callback bookkeeping
+//   the frame was never transmitted at all, despite esp_now_send() saying OK
+//       -> the fault is in the TX path itself
+//
+// They want opposite investigations. TX already stamps its _issued counter into
+// payload bytes 0-3; the RX side threw it away and only counted frames. Now it
+// tracks the sequence and reports GAPS.
+//
+// The combination is what decides it, and cb_fail is why it works:
+//
+//   callback FAIL + a gap          ordinary loss on air. Accounted for, boring.
+//   no callback   + a gap          the frame never went out.
+//   no callback   + NO gap         it went out; the callback was lost.
+//
+// On this bench cb_fail has been 0 over 53 h, so the link loses nothing on air
+// and a gap means something.
+static uint32_t _rx_seq_next  = 0;      // sequence expected next
+static bool     _rx_seq_armed = false;  // seen a first frame to sync from
+static uint32_t _rx_gaps      = 0;      // sequences that never arrived
+#define RX_GAP_LOG 32
+static uint32_t _rx_gap_seq[RX_GAP_LOG] = {};
+static uint8_t  _rx_gap_n = 0;
 // Set only by the ceiling probe: lifts the cap for one deliberate burst so the
 // driver's real limit can be found. bench_send() stays the only send site.
 static bool _probe_uncapped = false;
@@ -219,6 +249,24 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
     // the ACK goes out from the main loop. Sending from the WiFi task would be
     // testing a bug the rig does not have.
     if (len > 4 && data && data[4] == FRAME_CMD) _cmd_rx = _cmd_rx + 1;
+    // Sequence from bytes 0-3, big-endian, as the TX side stamps it. Only
+    // DATA frames carry a meaningful one — ACK and CMD are the other
+    // direction's traffic and would corrupt the sequence if counted.
+    if (len > 4 && data && data[4] == FRAME_DATA) {
+        uint32_t seq = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+                       ((uint32_t)data[2] <<  8) |  (uint32_t)data[3];
+        if (!_rx_seq_armed || seq < _rx_seq_next) {
+            _rx_seq_armed = true;        // first frame, or TX counters were reset
+        } else if (seq > _rx_seq_next) {
+            uint32_t missing = seq - _rx_seq_next;
+            _rx_gaps += missing;
+            // Keep the first few so they can be matched against the TX log by
+            // number rather than by eye.
+            for (uint32_t m = _rx_seq_next; m < seq && _rx_gap_n < RX_GAP_LOG; m++)
+                _rx_gap_seq[_rx_gap_n++] = m;
+        }
+        _rx_seq_next = seq + 1;
+    }
     _rx_count = _rx_count + 1;
     _rx_bytes = _rx_bytes + (uint32_t)len;
 }
@@ -432,7 +480,7 @@ static void report(uint32_t now) {
     Serial.printf(
         "t=%lus issued=%lu cb_ok=%lu cb_fail=%lu refused=%lu nomem=%lu "
         "in_flight=%lu floor=%lu max=%lu rx=%lu heap=%lu err=0x%lX "
-        "cmd=%lu ack=%lu ovl=%lu\n",
+        "cmd=%lu ack=%lu ovl=%lu gaps=%lu\n",
         (unsigned long)((now - _t_start_ms) / 1000UL),
         (unsigned long)_issued, (unsigned long)_cb_ok, (unsigned long)_cb_fail,
         (unsigned long)_refused, (unsigned long)_nomem,
@@ -440,7 +488,7 @@ static void report(uint32_t now) {
         (unsigned long)_max_in_flight, (unsigned long)_rx_count,
         (unsigned long)ESP.getFreeHeap(), (unsigned long)_last_err,
         (unsigned long)_cmd_rx, (unsigned long)_cmd_acked,
-        (unsigned long)_overlaps);
+        (unsigned long)_overlaps, (unsigned long)_rx_gaps);
 }
 
 static void counters_reset() {
@@ -499,6 +547,9 @@ static void counters_reset() {
     // commands that arrived before the run started.
     _cmd_rx = 0; _cmd_acked = 0;
     _max_in_flight = _in_flight_floor = _consec_refused = _overlaps = 0;
+    _rx_gaps = _rx_gap_n = 0;
+    _rx_seq_armed = false;   // TX sequence restarts too — resync rather than
+                             // counting the whole old stream as one huge gap
     _t_start_ms = millis();
     _t_first_ref_ms = _t_wedge_ms = 0;
 }
@@ -532,6 +583,7 @@ static void print_help() {
       "   reset                zero the counters\n"
       "   stats                print one line now\n"
       "   mac                  this board's MAC\n"
+      "   gaps                 RX: which sequences never arrived\n"
       "   ceiling              fire uncapped until refused; how many, and do\n"
       "                        they come back? (TX side, stops the run)\n"
       "\n in_flight = issued - callbacks. It is the leaked-buffer count.\n"
@@ -555,6 +607,16 @@ static void handle_line(char *line) {
 
     if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) { print_help(); return; }
     if (!strcmp(cmd, "ceiling")) { cmd_ceiling(); return; }
+    if (!strcmp(cmd, "gaps")) {
+        Serial.printf("[gaps] %lu sequence(s) never arrived; next expected %lu\n",
+                      (unsigned long)_rx_gaps, (unsigned long)_rx_seq_next);
+        if (!_rx_gap_n) Serial.println("[gaps] none recorded — the stream is complete");
+        for (uint8_t i = 0; i < _rx_gap_n; i++)
+            Serial.printf("[gaps]   missing seq %lu\n", (unsigned long)_rx_gap_seq[i]);
+        if (_rx_gap_n >= RX_GAP_LOG)
+            Serial.println("[gaps] (list full — count above is still exact)");
+        return;
+    }
     if (!strcmp(cmd, "mac")) {
         uint8_t m[6]; esp_wifi_get_mac(WIFI_IF_STA, m); mac_str(m, buf);
         Serial.printf("[bench] my MAC %s  channel %u\n", buf, _cfg.channel);
@@ -856,13 +918,22 @@ void loop() {
             // never came back, and the memory it took with it. The first
             // reproduction stepped 0->1->2->3 and dropped exactly 208 bytes
             // each time.
+            // issued and the callback totals are printed EXACTLY, because the
+            // sequence window of the lost frames is issued-minus-callbacks and
+            // it has to be computable against the RX board's gap list later.
+            // Without them this line says a buffer went missing and gives no
+            // way to find out which one.
             Serial.printf("[bench] *** LEAK — floor %lu -> %lu at t=%lus, "
-                          "heap %lu, issued %lu\n",
+                          "heap %lu, issued %lu, cb_ok %lu, cb_fail %lu, "
+                          "outstanding seq %lu..%lu\n",
                           (unsigned long)_in_flight_floor,
                           (unsigned long)floor_min,
                           (unsigned long)((now - _t_start_ms) / 1000UL),
                           (unsigned long)ESP.getFreeHeap(),
-                          (unsigned long)_issued);
+                          (unsigned long)_issued,
+                          (unsigned long)_cb_ok, (unsigned long)_cb_fail,
+                          (unsigned long)(_cb_ok + _cb_fail),
+                          (unsigned long)(_issued ? _issued - 1 : 0));
             _in_flight_floor = floor_min;
         }
         floor_min = 0xFFFFFFFF;

@@ -50,10 +50,15 @@ LINE = re.compile(
     r"cb_fail=(?P<cb_fail>\d+) refused=(?P<refused>\d+) nomem=(?P<nomem>\d+) "
     r"in_flight=(?P<in_flight>\d+) floor=(?P<floor>\d+) max=(?P<max>\d+) "
     r"rx=(?P<rx>\d+) heap=(?P<heap>\d+) err=(?P<err>0x[0-9A-Fa-f]+)"
-    r"(?: cmd=(?P<cmd>\d+) ack=(?P<ack>\d+))?(?: ovl=(?P<ovl>\d+))?")
+    r"(?: cmd=(?P<cmd>\d+) ack=(?P<ack>\d+))?(?: ovl=(?P<ovl>\d+))?"
+    # gaps: sequences the RX board never received. Optional like the two
+    # groups above, so a board running older firmware still logs every other
+    # column instead of failing the match outright.
+    r"(?: gaps=(?P<gaps>\d+))?")
 
 FIELDS = ("t", "issued", "cb_ok", "cb_fail", "refused", "nomem",
-          "in_flight", "floor", "max", "rx", "heap", "err", "cmd", "ack", "ovl")
+          "in_flight", "floor", "max", "rx", "heap", "err", "cmd", "ack", "ovl",
+          "gaps")
 
 
 def open_port(dev: str, baud: int, fatal: bool = True):
