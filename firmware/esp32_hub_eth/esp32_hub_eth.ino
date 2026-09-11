@@ -2500,13 +2500,18 @@ static bool hub_espnow_rebuild() {
     //
     // Without this the deinit above orphans every outstanding send: their
     // callbacks never come, issued stays ahead of callbacks for ever, and the
-    // leak floor takes a permanent step. Measured twice on 2026-09-10/11, the
-    // step was exactly 32 both times — not an ESP-IDF buffer leak at all, just
-    // this hub counting its own discarded sends and never letting them go. The
-    // WiFi static TX pool on this build is 8 buffers, so 32 was never the pool
-    // size either; it is how many sends pile up between the callback stopping
-    // and the ladder firing, with the burst bound standing aside because
-    // _cb_stall_active.
+    // leak floor takes a permanent step, and it stepped to exactly 32 twice.
+    //
+    // I explained that 32 as sends piling up between the callback stopping and
+    // the ladder firing. The bench says otherwise: esp_now_send() accepts
+    // exactly ESPNOW_TX_QUEUE_CEILING before refusing, reached in under a
+    // millisecond with nothing stalled, and all of them drain. 32 is where
+    // in_flight STOPS, not where it happened to get to — which is also why the
+    // same number turned up twice rather than that being a coincidence.
+    //
+    // The reconcile below is still needed: deinit discards what is queued
+    // without callbacks, so those really would be counted for ever. What is
+    // wrong is only the story about the number.
     //
     // The satellite has had this since its counter was written. The hub did
     // not, which is the whole reason its floor kept climbing.

@@ -583,6 +583,26 @@ typedef enum : uint8_t {
 // first twelve it reported were 0.0-0.7 s of normal latency raised to WARNING,
 // and the one real 65.5 s event sat among them looking identical.
 #define CB_STALL_MS               3000UL
+
+// How many sends esp_now_send() will accept before refusing with NO_MEM.
+//
+// MEASURED on the bench 2026-09-11, not inferred: the ceiling probe filled it
+// back to back in under a millisecond and it stopped at exactly 32 in every
+// configuration — payload 8 bytes and 240 bytes both, long-range PHY and
+// default both. Invariant to size, which makes it a fixed-count descriptor
+// queue rather than a byte budget. All 32 callbacks came back every time, in
+// 30-90 ms, so the send path does not leak.
+//
+// It is NOT CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM, which is 8 on this build —
+// this queue sits above those buffers. Reasoning from that config line alone
+// said "32 is not a pool", which was the wrong conclusion from the right line.
+//
+// Why it matters to the health line: an in-flight floor AT this value means the
+// queue filled and stayed full — saturation. It cannot mean anything else,
+// because in_flight physically cannot climb past it however long a stall runs.
+// So 32 carries no information about how long the stall lasted or how much was
+// lost, and must not be reported as a count of leaked buffers.
+#define ESPNOW_TX_QUEUE_CEILING     32
 #define HEALTH_ANOMALY_GAP_MS      2000UL   // min spacing between anomaly-triggered sends
 #define HEALTH_JOG_DEFER_MS         300UL   // hold a send this long after jog traffic
 #define HEALTH_LOW_HEAP_BYTES     30720UL   // free heap below this → anomaly

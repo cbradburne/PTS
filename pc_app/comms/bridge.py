@@ -38,6 +38,7 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        HEALTH_FLAG_CAM_UNPAIRED, HEALTH_FLAG_CAM_CACHE_FULL,
                        HEALTH_NODE_SATELLITE, SAT_ADDR_BASE, decode_sat_names,
                        decode_mount_route, NUM_MOUNTS, CB_STALL_MS,
+                       ESPNOW_TX_QUEUE_CEILING,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
                        decode_mount_outage)
@@ -1125,9 +1126,15 @@ class Bridge:
             # Buffers the radio took and never returned. It is subtracted from
             # in_flight before the bound is applied, so a rising floor is a
             # permanent loss and NOT a reason for the cap to hold everything.
-            if gleak:
-                n32txt += " | TX BUFFERS LEAKED %d%s" % (gleak,
-                                                         "+" if gleak == 255 else "")
+            # AT the ceiling this is saturation, not loss: the bench measured
+            # esp_now_send() refusing at exactly that many, with all of them
+            # draining, so in_flight cannot climb past it however long a stall
+            # runs. Calling a full queue "leaked" invited exactly the wrong
+            # reading — that the hub had lost 32 buffers, when it had lost none.
+            if gleak >= ESPNOW_TX_QUEUE_CEILING:
+                n32txt += " | TX QUEUE SATURATED (%d, the ceiling)" % gleak
+            elif gleak:
+                n32txt += " | TX BUFFERS OUTSTANDING %d" % gleak
         else:
             n32txt = "n32 %d" % n32
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "

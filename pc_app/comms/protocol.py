@@ -1770,6 +1770,10 @@ MOUNT_PRESENCE_TIMEOUT_MS = 3 * MOUNT_STATUS_REFRESH_MS + 1000
 # Base presence — how often a hub/satellite beats, and how long a mount waits
 # in silence before scanning for another base.  Three missed heartbeats.
 CB_STALL_MS               = 3000   # a missing send callback this long is a STALL
+# Measured on the bench 2026-09-11: esp_now_send() accepts exactly 32 before
+# NO_MEM, size- and PHY-invariant, and all 32 drain. A floor AT this value is
+# SATURATION, not a leak count — in_flight cannot exceed it.
+ESPNOW_TX_QUEUE_CEILING   = 32
 BASE_HEARTBEAT_MS         = 2000
 BASE_SILENT_MS            = 3 * BASE_HEARTBEAT_MS
 # 25 was offered/attempts/sent/refused + three top commands; 33 since the
