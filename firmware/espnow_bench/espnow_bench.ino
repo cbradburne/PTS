@@ -161,6 +161,9 @@ static uint32_t _t_start_ms     = 0;
 static uint32_t _t_first_ref_ms = 0;   // when the FIRST refusal happened
 static uint32_t _t_wedge_ms     = 0;   // when refusals became continuous
 static uint32_t _consec_refused = 0;
+// Set only by the ceiling probe: lifts the cap for one deliberate burst so the
+// driver's real limit can be found. bench_send() stays the only send site.
+static bool _probe_uncapped = false;
 
 // A leak is in_flight that never comes back down.  Tracked as the floor it has
 // not returned below, because the instantaneous value bounces with every send.
@@ -305,7 +308,11 @@ static void radio_start() {
 // bench that retries where the rig does not is measuring its own behaviour.
 static bool bench_send(const uint8_t *peer, uint8_t type, uint16_t len,
                        uint32_t now) {
-    if (_cfg.cap && in_flight() >= _cfg.cap) return false;
+    // The ceiling probe is the one caller allowed past the cap, and it says so
+    // by name. The cap clause below is otherwise untouched: it must apply to
+    // every stream, or `cap 1` bounds one and not the others.
+    if (!_probe_uncapped)
+        if (_cfg.cap && in_flight() >= _cfg.cap) return false;
 
     static uint8_t pay[240];
     pay[0] = (uint8_t)(_issued >> 24); pay[1] = (uint8_t)(_issued >> 16);
@@ -353,6 +360,67 @@ static bool bench_send(const uint8_t *peer, uint8_t type, uint16_t len,
                       "not the wedge.\n", espnow_err_name(e));
     }
     return false;
+}
+
+// ── ceiling: how many sends can be outstanding at once ───────────────────────
+//
+// The hub's leak floor stepped to exactly 32 at a stall, twice. Two candidates
+// for a round repeatable number — a buffer pool, or something structural — and
+// the pool was ruled out from sdkconfig (STATIC_TX_BUFFER_NUM is 8, not 32).
+// This measures the real ceiling instead of inferring it.
+//
+// Fires back to back with NO cap and NO pacing until esp_now_send() refuses,
+// which is the only way to find where the driver actually stops. Then it waits
+// and reports how many callbacks come back, because that is the question the
+// step never answered: a ceiling that drains is a queue, and a ceiling that
+// does not is a leak.
+//
+// Bounded at 512 so a board that never refuses cannot hang the console, and it
+// leaves the run stopped so the numbers are not immediately overwritten.
+static void cmd_ceiling() {
+    if (_cfg.role != 1) {            // 1 = tx, see Cfg.role
+        Serial.println("[ceiling] this is the TX side's probe — run it there");
+        return;
+    }
+    if (!esp_now_is_peer_exist(_cfg.peer)) {
+        Serial.println("[ceiling] no peer — set one with 'peer <mac>' first");
+        return;
+    }
+    _cfg.running = 0;                      // no background traffic in the way
+
+    uint32_t before_issued = _issued, before_cb = _cb_ok + _cb_fail;
+    uint32_t accepted = 0, peak = 0;
+    uint32_t now = millis();
+
+    Serial.println("[ceiling] firing with no cap until the driver refuses...");
+    _probe_uncapped = true;
+    for (int i = 0; i < 512; i++) {
+        if (!bench_send(_cfg.peer, FRAME_DATA, _cfg.size, now)) break;
+        accepted++;
+        uint32_t f = in_flight();
+        if (f > peak) peak = f;
+    }
+    _probe_uncapped = false;
+    Serial.printf("[ceiling] accepted %lu before %s, peak in_flight %lu\n",
+                  (unsigned long)accepted, espnow_err_name((esp_err_t)_last_err),
+                  (unsigned long)peak);
+
+    // Now the part that matters: do they come back?
+    uint32_t waited = 0;
+    while (in_flight() > 0 && waited < 3000) { delay(10); waited += 10; }
+    uint32_t returned = (_cb_ok + _cb_fail) - before_cb;
+    Serial.printf("[ceiling] after %lu ms: %lu of %lu callbacks returned, "
+                  "in_flight %lu\n",
+                  (unsigned long)waited, (unsigned long)returned,
+                  (unsigned long)(_issued - before_issued),
+                  (unsigned long)in_flight());
+    if (in_flight() == 0)
+        Serial.println("[ceiling] VERDICT: every buffer came back — that ceiling "
+                       "is a queue depth, not a leak.");
+    else
+        Serial.printf("[ceiling] VERDICT: %lu never came back — those are LEAKED.\n",
+                      (unsigned long)in_flight());
+    Serial.println("[ceiling] run stopped. 'reset' then 'go' to resume.");
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +532,8 @@ static void print_help() {
       "   reset                zero the counters\n"
       "   stats                print one line now\n"
       "   mac                  this board's MAC\n"
+      "   ceiling              fire uncapped until refused; how many, and do\n"
+      "                        they come back? (TX side, stops the run)\n"
       "\n in_flight = issued - callbacks. It is the leaked-buffer count.\n"
       " If it ratchets up and never returns, you are watching the leak.\n");
 }
@@ -484,6 +554,7 @@ static void handle_line(char *line) {
     char buf[20];
 
     if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) { print_help(); return; }
+    if (!strcmp(cmd, "ceiling")) { cmd_ceiling(); return; }
     if (!strcmp(cmd, "mac")) {
         uint8_t m[6]; esp_wifi_get_mac(WIFI_IF_STA, m); mac_str(m, buf);
         Serial.printf("[bench] my MAC %s  channel %u\n", buf, _cfg.channel);
