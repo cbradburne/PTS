@@ -54,11 +54,15 @@ LINE = re.compile(
     # gaps: sequences the RX board never received. Optional like the two
     # groups above, so a board running older firmware still logs every other
     # column instead of failing the match outright.
-    r"(?: gaps=(?P<gaps>\d+))?")
+    r"(?: gaps=(?P<gaps>\d+))?"
+    # sta: stations associated to the board's own AP, when it is running one.
+    # Optional for the same reason as the rest — a board on older firmware
+    # logs every other column rather than failing the match outright.
+    r"(?: sta=(?P<sta>\d+))?")
 
 FIELDS = ("t", "issued", "cb_ok", "cb_fail", "refused", "nomem",
           "in_flight", "floor", "max", "rx", "heap", "err", "cmd", "ack", "ovl",
-          "gaps")
+          "gaps", "sta")
 
 
 def open_port(dev: str, baud: int, fatal: bool = True):

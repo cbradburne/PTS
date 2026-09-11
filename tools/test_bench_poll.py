@@ -51,6 +51,21 @@ assert d["heap"] == "284512" and d["err"] == "0x0", \
     "an optional group ate part of the line before it"
 print("   new line -> cmd/ack/ovl read, nothing else disturbed  OK")
 
+# Every optional group appended since has to leave the ones before it alone,
+# and the board that does not print them has to keep parsing. Both directions,
+# because a run is lost either way: a full line misread, or a board on older
+# firmware dropped into the notes as free text.
+FULL = NEW + " gaps=3 sta=1"
+m = bench_log.LINE.search(FULL)
+assert m, "the current line does not parse at all"
+d = m.groupdict()
+assert d["gaps"] == "3" and d["sta"] == "1", f"gaps/sta misread: {d}"
+assert d["ovl"] == "47" and d["heap"] == "284512" and d["err"] == "0x0", \
+    "a later optional group ate part of the line before it"
+assert bench_log.LINE.search(NEW).groupdict()["sta"] is None, \
+    "a board that prints no sta= must still parse, with the column blank"
+print("   gaps/sta read, and absent on an older board          OK")
+
 # The header the reader writes must match the row width, or every column after
 # the break is silently misaligned.
 hdr = ("wall_iso,side," + ",".join(bench_log.FIELDS)).split(",")

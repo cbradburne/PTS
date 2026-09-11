@@ -113,9 +113,29 @@ struct Cfg {
     // Appended, so a blob saved by the previous build still loads: getBytes
     // fills what it has and anything past it keeps the initialiser below.
     uint16_t poll_hz;       // RX only: commands per second sent AT the TX
+    uint8_t  ap_iface;      // 0 = station (the default), 1 = SoftAP, as the hub
 };
 
-static Cfg _cfg = { 0, {0,0,0,0,0,0}, 50, 32, 0, 0, 0, 0, 1, 1, 0, 0 };
+static Cfg _cfg = { 0, {0,0,0,0,0,0}, 50, 32, 0, 0, 0, 0, 1, 1, 0, 0, 0 };
+
+// Which 802.11 interface this board uses for everything: the peer entry, the
+// MAC it reports, the protocol bits. One accessor, because getting it right in
+// four places and wrong in the fifth is how a run measures the interface it was
+// not testing.
+static inline wifi_interface_t bench_if() {
+    return _cfg.ap_iface ? WIFI_IF_AP : WIFI_IF_STA;
+}
+static inline const char *bench_if_name() {
+    return _cfg.ap_iface ? "AP" : "STA";
+}
+
+// The bench's own access point, and deliberately NOT the rig's. It exists to
+// put the radio in the mode the hub transmits from; it is not meant to be
+// joined by anything that matters. The literal below is why: it must never be
+// changed to the real one, which lives in an untracked header precisely so it
+// is never committed.
+#define BENCH_AP_SSID "PTS-Bench"
+#define BENCH_AP_PASS "benchbench"
 
 static void cfg_save() {
     _prefs.begin("bench", false);
@@ -132,6 +152,7 @@ static void cfg_load() {
     if (_cfg.channel < 1 || _cfg.channel > 13)    _cfg.channel = 1;
     if (_cfg.role > 2)                            _cfg.role    = 0;
     if (_cfg.poll_hz > 2000)                      _cfg.poll_hz = 0;
+    if (_cfg.ap_iface > 1)                        _cfg.ap_iface = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +329,7 @@ static bool peer_add(const uint8_t *mac) {
     esp_now_peer_info_t p = {};
     memcpy(p.peer_addr, mac, 6);
     p.channel = _cfg.channel;
-    p.ifidx   = WIFI_IF_STA;
+    p.ifidx   = bench_if();
     p.encrypt = false;
     esp_err_t e = esp_now_add_peer(&p);
     if (e != ESP_OK) {
@@ -332,12 +353,37 @@ static void peer_rate_long(const uint8_t *mac) {
     esp_now_set_peer_rate_config(mac, &r);
 }
 
+// The hub does not transmit the way this bench has been measuring.
+//
+// Every result so far — 53 h clean at cap 2, the ceiling of 32, the peer-drop
+// null — was taken with this board in station mode, peers on WIFI_IF_STA, no
+// access point and nothing associated. The hub runs WiFi.softAP() and registers
+// its mounts on WIFI_IF_AP. That is a different transmit path in the driver: an
+// AP beacons on a fixed interval whatever else it is doing, and it buffers
+// frames for any associated station that goes to sleep, out of the same pool
+// the sends come from.
+//
+// That difference is worth a switch rather than an argument, because it would
+// produce the hub's exact signature and this bench cannot currently make it:
+// frames that SIT rather than FAIL leave txfail flat while callbacks stop, and
+// txfail flat at 83 through a fourteen-hour outage is what the hub logged.
+//
+// `iface sta` is the default and is byte-for-byte what every run so far used,
+// so the baselines stay comparable.
 static void radio_start() {
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
+    if (_cfg.ap_iface) {
+        WiFi.mode(WIFI_AP);
+        // Channel here as well as below: softAP() sets its own, and a peer
+        // registered on one channel while the radio sits on another is a
+        // silent link that looks like a wiring fault.
+        WiFi.softAP(BENCH_AP_SSID, BENCH_AP_PASS, _cfg.channel);
+    } else {
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect();
+    }
     esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_set_max_tx_power(84);
-    esp_wifi_set_protocol(WIFI_IF_STA,
+    esp_wifi_set_protocol(bench_if(),
         WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     esp_wifi_set_channel(_cfg.channel, WIFI_SECOND_CHAN_NONE);
 
@@ -612,9 +658,14 @@ static void cmd_peerdrop(uint32_t n) {
 static void report(uint32_t now) {
     uint32_t inf = in_flight();   // max/overlap are tracked in loop(), at loop rate
     Serial.printf(
+        // sta: associated stations, and 0 in station mode. An AP holds frames
+        // for a client that goes to sleep, out of the same pool these sends
+        // come from — so when a run in AP mode behaves differently, the first
+        // question is whether anything was attached, and a column is the only
+        // way to answer it hours later.
         "t=%lus issued=%lu cb_ok=%lu cb_fail=%lu refused=%lu nomem=%lu "
         "in_flight=%lu floor=%lu max=%lu rx=%lu heap=%lu err=0x%lX "
-        "cmd=%lu ack=%lu ovl=%lu gaps=%lu\n",
+        "cmd=%lu ack=%lu ovl=%lu gaps=%lu sta=%lu\n",
         (unsigned long)((now - _t_start_ms) / 1000UL),
         (unsigned long)_issued, (unsigned long)_cb_ok, (unsigned long)_cb_fail,
         (unsigned long)_refused, (unsigned long)_nomem,
@@ -622,7 +673,8 @@ static void report(uint32_t now) {
         (unsigned long)_max_in_flight, (unsigned long)_rx_count,
         (unsigned long)ESP.getFreeHeap(), (unsigned long)_last_err,
         (unsigned long)_cmd_rx, (unsigned long)_cmd_acked,
-        (unsigned long)_overlaps, (unsigned long)_rx_gaps);
+        (unsigned long)_overlaps, (unsigned long)_rx_gaps,
+        (unsigned long)(_cfg.ap_iface ? WiFi.softAPgetStationNum() : 0));
 }
 
 static void counters_reset() {
@@ -713,6 +765,10 @@ static void print_help() {
       "   load <ms> <period>   block the loop <ms> every <period> ms (fake LVGL)\n"
       "   scan <s>             WiFi scan every <s> seconds; 0 = never\n"
       "   phy lr|def           1 Mbps long preamble (the rig) or default\n"
+      "   iface sta|ap         which interface to send from. sta is the default\n"
+      "                        and every run so far; ap runs a SoftAP and puts\n"
+      "                        peers on it, as the HUB does. Changes this\n"
+      "                        board's MAC — reboots, comes back stopped.\n"
       "   go | stop            start / stop sending\n"
       "   reset                zero the counters\n"
       "   stats                print one line now\n"
@@ -761,9 +817,28 @@ static void handle_line(char *line) {
         return;
     }
     if (!strcmp(cmd, "mac")) {
-        uint8_t m[6]; esp_wifi_get_mac(WIFI_IF_STA, m); mac_str(m, buf);
-        Serial.printf("[bench] my MAC %s  channel %u\n", buf, _cfg.channel);
+        uint8_t m[6]; esp_wifi_get_mac(bench_if(), m); mac_str(m, buf);
+        Serial.printf("[bench] my MAC %s  channel %u  iface %s\n",
+                      buf, _cfg.channel, bench_if_name());
         return;
+    }
+    if (!strcmp(cmd, "iface") && a1) {
+        uint8_t want = !strcmp(a1, "ap") ? 1 : !strcmp(a1, "sta") ? 0 : 255;
+        if (want == 255) { Serial.println("[bench] iface ap|sta"); return; }
+        _cfg.ap_iface = want;
+        _cfg.running  = 0;
+        cfg_save();
+        // Same shape as `role`: reboot to apply, and come back stopped. The
+        // extra warning is the MAC — this board's address changes with the
+        // interface, so the OTHER board's peer is now wrong and every send
+        // will go nowhere in the way that looks exactly like a dead radio.
+        Serial.printf("[bench] iface %s — rebooting to apply cleanly. It comes "
+                      "back STOPPED.\n        MY MAC CHANGES WITH THE "
+                      "INTERFACE: read the new one off the boot line and set it "
+                      "as\n        the peer on the other board before `go`.\n",
+                      a1);
+        delay(100);
+        ESP.restart();
     }
     if (!strcmp(cmd, "role") && a1) {
         _cfg.role = !strcmp(a1, "tx") ? 1 : !strcmp(a1, "rx") ? 2 : 0;
@@ -788,7 +863,7 @@ static void handle_line(char *line) {
         // is the RECEIVER's MAC. Point it at yourself and every send goes
         // nowhere, in a way that looks exactly like a dead radio.
         uint8_t mine[6];
-        esp_wifi_get_mac(WIFI_IF_STA, mine);
+        esp_wifi_get_mac(bench_if(), mine);
         if (!memcmp(want, mine, 6)) {
             Serial.println("[bench] that is MY OWN MAC. 'peer' is who this board "
                            "sends TO —\n        on the TX board that is the RX "
@@ -908,11 +983,15 @@ void setup() {
     cfg_load();
     radio_start();
 
-    uint8_t m[6]; esp_wifi_get_mac(WIFI_IF_STA, m);
+    uint8_t m[6]; esp_wifi_get_mac(bench_if(), m);
     char buf[20]; mac_str(m, buf);
-    Serial.printf("\n[bench] up. role=%s MAC=%s chan=%u\n",
+    // The interface is printed beside the MAC because switching it CHANGES the
+    // MAC — the AP and station addresses of one chip differ — and the other
+    // board is still holding the old one as its peer. A silent link after an
+    // `iface` is that, every time.
+    Serial.printf("\n[bench] up. role=%s iface=%s MAC=%s chan=%u\n",
                   _cfg.role == 1 ? "TX" : _cfg.role == 2 ? "RX" : "idle",
-                  buf, _cfg.channel);
+                  bench_if_name(), buf, _cfg.channel);
     if (_cfg.role == 1) {
         mac_str(_cfg.peer, buf);
         Serial.printf("[bench] sending TO %s | rate=%uHz size=%u cap=%u "
@@ -1110,7 +1189,7 @@ void loop() {
     if (_cfg.role == 2 && !_rx_first_ms && now > 15000UL &&
             (now - nagged) > 30000UL) {
         nagged = now;
-        uint8_t m[6]; esp_wifi_get_mac(WIFI_IF_STA, m);
+        uint8_t m[6]; esp_wifi_get_mac(bench_if(), m);
         Serial.printf("[bench] nothing received in %lus. I am "
                       "%02X:%02X:%02X:%02X:%02X:%02X on channel %u — check the TX "
                       "board has that MAC as its peer, and the same channel.\n",
