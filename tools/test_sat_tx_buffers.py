@@ -222,6 +222,9 @@ def feed(*records):
     b = Bridge.__new__(Bridge)
     b._sat_dn_prev = {}
     b._sat_names = {1: "Foyer"}
+    # Stamped whenever a downlink is refused, and read by the wedge verdict so a
+    # mount behind a refusing relay is not blamed for it.
+    b._sat_refusing_t = {}
     out = []
     for r in records:
         BUF.truncate(0); BUF.seek(0)

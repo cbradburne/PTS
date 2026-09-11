@@ -45,7 +45,8 @@ _lg.setLevel(logging.INFO)
 
 
 def verdict(*, bytes_arriving: bool, diag_fresh: bool, peer_acking: bool,
-            mount: int = 1, peer_via_sat: bool = False) -> str:
+            mount: int = 1, peer_via_sat: bool = False,
+            mount_via_sat: str = "", relay_refused_s: float | None = None) -> str:
     """Drive the real classifier with the four things it can observe.
 
     peer_via_sat is the 2026-09-09 case: the ACKing peer is reached THROUGH a
@@ -63,8 +64,16 @@ def verdict(*, bytes_arriving: bool, diag_fresh: bool, peer_acking: bool,
     # not arriving.
     b._hub_rx_last_advance_t = now - (0.5 if bytes_arriving else 9.0)
     b._mount_last_ack = {4: now - 0.5} if peer_acking else {}
-    # Route table: mount 4 direct, or via satellite slot 2 (Foyer).
+    # Route table: mount 4 direct, or via satellite slot 2 (Basement).  The
+    # WEDGED mount routes through slot 3 when mount_via_sat names it, which is
+    # the separate question of whether the mount in trouble is on our radio.
     b._mount_route = [0, 0, 0, 2 if peer_via_sat else 0, 0]
+    b._sat_names = {2: "Basement", 3: mount_via_sat or "Foyer"}
+    b._sat_refusing_t = {}
+    if mount_via_sat:
+        b._mount_route[mount - 1] = 3
+        if relay_refused_s is not None:
+            b._sat_refusing_t[mount_via_sat] = now - relay_refused_s
     BUF.truncate(0); BUF.seek(0)
     b._log_wedge_side(now, mount)
     return BUF.getvalue().strip()
@@ -132,6 +141,47 @@ direct = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True)
 assert "MOUNT-SIDE" in direct and "mount 4 is still ACKing" in direct, \
     f"a DIRECT peer no longer proves the hub's radio: {direct}"
 print("   via a satellite proves nothing; direct still does    OK")
+
+# ---- 4c. the WEDGED mount is the one behind a satellite ----------------------
+# The other half of 4b, and it cost ten wrong lines on 2026-09-11 17:40. Foyer
+# relays cam4 and cam5 and was refusing every frame offered — "offered 72,
+# sent 0, refused 72" in the same second — while the verdict said mount 4 was
+# the fault and likely needed a power cycle. Mount 1 is direct, so its ACK does
+# prove the hub's radio works; nothing reaches mount 4 by that radio, so the
+# conclusion does not follow. The advice costs a truss climb, a re-home and a
+# recalibration for a mount that recovered on its own when Foyer restarted.
+print("\n4c. the wedged mount is behind a satellite:")
+line = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True,
+               mount=1, mount_via_sat="Foyer", relay_refused_s=1.2)
+assert "SATELLITE-SIDE" in line, \
+    f"a relayed mount is still blamed for its relay's refusal: {line}"
+assert "Foyer" in line, \
+    f"the verdict does not name the relay, which is the thing to go and look " \
+    f"at: {line}"
+assert "likely needs a power cycle" not in line and "is the fault" not in line, \
+    f"the expensive advice survives on the case it was wrong about: {line}"
+assert "1.2s ago" in line, \
+    f"the refusal is not dated, so it reads as a guess about the relay rather " \
+    f"than an observation of it: {line}"
+print("   SATELLITE-SIDE, names the relay and dates it        OK")
+
+# A relay that has NOT been seen refusing still takes the verdict — the route
+# alone settles who the witness can speak for — but must not invent a refusal.
+quiet = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True,
+                mount=1, mount_via_sat="Foyer")
+assert "SATELLITE-SIDE" in quiet and "has not been seen refusing" in quiet, \
+    f"a quiet relay either loses the verdict or gains a refusal it never had: {quiet}"
+# Only the verdict half: the WEDGE header always carries its own "Ns ago" for
+# the hub counters, so the whole line is the wrong thing to look in.
+assert "last refused a downlink" not in quiet.split("→")[-1], \
+    f"a refusal time was reported that does not exist: {quiet}"
+print("   a quiet relay is still the right place to look      OK")
+
+# And a DIRECT mount must still get the old verdict, or this has just disabled it.
+direct = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True, mount=1)
+assert "MOUNT-SIDE" in direct and "SATELLITE-SIDE" not in direct, \
+    f"a direct mount no longer reaches the mount-side verdict: {direct}"
+print("   a direct mount is unaffected                        OK")
 
 # ---- 5. every verdict is a WARNING and names the mount ----------------------
 print("\n5. every path:")

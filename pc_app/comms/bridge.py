@@ -349,6 +349,10 @@ class Bridge:
         # Last cumulative downlink ledger per satellite, so each line can be
         # reported as a delta rather than an ever-growing total.
         self._sat_dn_prev: dict[str, tuple] = {}
+        # When each satellite last refused a downlink frame.  The wedge verdict
+        # needs it: a mount behind a refusing relay is not a mount at fault, and
+        # the two were being reported as the same thing.
+        self._sat_refusing_t: dict[str, float] = {}
         # Same thing across restarts of THIS app: {node: {uptime_s, reset, at}}.
         self._node_state_prev: dict = self._node_state_load()
         self._node_state_cur:  dict = {}
@@ -763,6 +767,7 @@ class Bridge:
         breakdown = ("  [" + ", ".join(tops) + "]") if tops else ""
         note = ""
         if d_ref:
+            self._sat_refusing_t[who] = time.monotonic()
             note = (" | REFUSING — %d retries per frame offered"
                     % (d_att // max(1, d_off)) if d_off else " | REFUSING")
         # Why it is refusing, which the refusal count alone cannot say.  A radio
@@ -843,6 +848,43 @@ class Bridge:
             self._mount_route = decode_mount_route(pkt.payload)
         except Exception as e:                        # pragma: no cover
             log.warning("MOUNT_ROUTE decode failed in bridge: %s", e)
+
+    def _mount_relay(self, mount: int) -> str:
+        """The satellite a mount is reached through, or "" if it is on our radio.
+
+        The counterpart to the exclusion in _hub_tx_proven_ok(), and the half
+        that was missing.  That one stops a satellite-relayed mount being used
+        as EVIDENCE that this hub's radio works.  This one stops the same fact
+        being ignored about the mount actually in trouble.
+
+        Costed on 2026-09-11 17:40.  Foyer relays cam4 and cam5 and was refusing
+        every frame it was offered — "offered 72, sent 0, refused 72" logged in
+        the same second — while the verdict read:
+
+            Mount 4 unreachable 8.8s, but mount 1 is still ACKing — hub TX is
+            healthy, so this is mount-side. Not touching the hub; mount 4
+            likely needs a power cycle.
+
+        Mount 1 is direct, so its ACK proves the hub's radio works, and that is
+        exactly the wrong question: nothing reaches mount 4 by that radio.  The
+        advice it produced costs a trip to a truss, a re-home and a full
+        recalibration, for a mount that was answering fine the moment its relay
+        came back.  Ten of those went out today.
+        """
+        if 1 <= mount <= len(self._mount_route):
+            slot = self._mount_route[mount - 1]
+            if slot:
+                return self._sat_names.get(slot) or f"SAT {slot}"
+        return ""
+
+    def _relay_refusing_age(self, name: str, now: float) -> float:
+        """Seconds since that satellite last refused a downlink, or -1 if never.
+
+        Turns "check the relay" into "the relay was refusing a second ago",
+        which is the difference between a direction to look in and an answer.
+        """
+        t = self._sat_refusing_t.get(name)
+        return (now - t) if t is not None else -1.0
 
     def _note_sat_names(self, pkt: Packet) -> None:
         """Learn satellite names here rather than borrowing MountManager's copy.
@@ -1428,8 +1470,22 @@ class Bridge:
             verdict = ("HOST-SIDE — our bytes are NOT reaching the hub "
                        "(Windows USB-CDC OUT halt); fix is host port/cable/driver")
         else:
-            peer = self._hub_tx_proven_ok(now, mount) if mount else 0
-            if peer:
+            peer  = self._hub_tx_proven_ok(now, mount) if mount else 0
+            relay = self._mount_relay(mount) if mount else ""
+            if relay:
+                # The route decides this before any ACK does.  Another mount
+                # ACKing proves the hub's radio works, and this mount is not on
+                # it — the frames go out over Ethernet to the relay and onto a
+                # different radio entirely.
+                age = self._relay_refusing_age(relay, now)
+                when = (f"and {relay} last refused a downlink {age:.1f}s ago"
+                        if age >= 0 else
+                        f"and {relay} has not been seen refusing, so check its "
+                        f"downlink line anyway")
+                verdict = (f"SATELLITE-SIDE — our bytes reach the hub, but mount "
+                           f"{mount} is relayed by {relay} and not by this hub's "
+                           f"radio, {when}. Check {relay} before the mount")
+            elif peer:
                 verdict = (f"MOUNT-SIDE — our bytes reach the hub, and mount {peer} "
                            f"is still ACKing, so the hub forwards fine. Mount {mount} "
                            "is the fault; check its bridge, not the hub")
@@ -1713,16 +1769,34 @@ class Bridge:
                 # the hub's accept path to reach a mount whose own radio is the
                 # fault.  Reconnecting cannot fix a mount-side problem on any
                 # transport, so the discrimination must not be transport-specific.
-                if self._hub_tx_proven_ok(now, wedged_mount):
+                witness = self._hub_tx_proven_ok(now, wedged_mount)
+                if witness:
                     # Another mount is ACKing, so the hub can transmit.  This is
                     # one dead mount, not a hub wedge; no hub-level action can
                     # reach it and every rung below would drop the healthy mounts
                     # too — including, on TCP, whatever a satellite is relaying.
-                    log.warning("Mount %d unreachable %.1fs, but mount %d is still "
-                                "ACKing — hub TX is healthy, so this is mount-side. "
-                                "Not touching the hub; mount %d likely needs a power "
-                                "cycle.", wedged_mount, oldest,
-                                self._hub_tx_proven_ok(now, wedged_mount), wedged_mount)
+                    #
+                    # Unless this mount is not on that radio at all.  See
+                    # _mount_relay(): the witness proves the hub's own transmit
+                    # path, and a relayed mount is not reached by it, so the
+                    # conclusion does not follow and the advice it gave —
+                    # power-cycle the mount — is expensive and wrong.
+                    relay = self._mount_relay(wedged_mount)
+                    if relay:
+                        age = self._relay_refusing_age(relay, now)
+                        log.warning("Mount %d unreachable %.1fs. It is relayed by %s, "
+                                    "not by the hub's radio, so mount %d still ACKing "
+                                    "proves nothing about this path%s. Check %s's "
+                                    "downlink before touching the mount.",
+                                    wedged_mount, oldest, relay, witness,
+                                    (" — and %s last refused a downlink %.1fs ago"
+                                     % (relay, age)) if age >= 0 else "",
+                                    relay)
+                    else:
+                        log.warning("Mount %d unreachable %.1fs, but mount %d is still "
+                                    "ACKing — hub TX is healthy, so this is mount-side. "
+                                    "Not touching the hub; mount %d likely needs a power "
+                                    "cycle.", wedged_mount, oldest, witness, wedged_mount)
                 elif is_tcp:
                     # TCP: reconnecting re-runs the hub's accept() path, which
                     # refreshes the mount ESP-NOW peers — a real recovery action,
