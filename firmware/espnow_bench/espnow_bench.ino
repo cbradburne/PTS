@@ -177,14 +177,24 @@ static uint32_t _consec_refused = 0;
 // payload bytes 0-3; the RX side threw it away and only counted frames. Now it
 // tracks the sequence and reports GAPS.
 //
-// The combination is what decides it, and cb_fail is why it works:
+// The combination is what decides it:
 //
 //   callback FAIL + a gap          ordinary loss on air. Accounted for, boring.
+//   callback FAIL + NO gap         the frame arrived; only its ACK was lost.
 //   no callback   + a gap          the frame never went out.
 //   no callback   + NO gap         it went out; the callback was lost.
 //
-// On this bench cb_fail has been 0 over 53 h, so the link loses nothing on air
-// and a gap means something.
+// The second row was added after measuring it, and it replaces the premise this
+// probe was written on. That premise was "cb_fail has been 0 over 53 h, so the
+// link loses nothing on air" — which made a FAIL mean a lost frame. On
+// 2026-09-11 at t=18906s cb_fail went 0 -> 18 over three and a half minutes and
+// RX gaps stayed at 0: eighteen sends reported failure and all eighteen
+// sequence numbers arrived. A FAIL here means the MAC-layer acknowledgement was
+// lost, NOT the frame.
+//
+// So do not write a gap off as ordinary air loss just because a FAIL sits next
+// to it. The gap counter below is independent of cb_fail and is the ground
+// truth; cb_fail is not.
 static uint32_t _rx_seq_next  = 0;      // sequence expected next
 static bool     _rx_seq_armed = false;  // seen a first frame to sync from
 static uint32_t _rx_gaps      = 0;      // sequences that never arrived
@@ -425,6 +435,30 @@ static bool bench_send(const uint8_t *peer, uint8_t type, uint16_t len,
 //
 // Bounded at 512 so a board that never refuses cannot hang the console, and it
 // leaves the run stopped so the numbers are not immediately overwritten.
+//
+// The fill and the drain are shared with the peer-drop probe below. They stay
+// out of the cap's way by the same flag and by no other means, so there is
+// still exactly one place a frame can leave this board.
+static uint32_t probe_fill(uint32_t limit, uint32_t *peak_out) {
+    uint32_t accepted = 0, peak = 0, now = millis();
+    _probe_uncapped = true;
+    for (uint32_t i = 0; i < limit; i++) {
+        if (!bench_send(_cfg.peer, FRAME_DATA, _cfg.size, now)) break;
+        accepted++;
+        uint32_t f = in_flight();
+        if (f > peak) peak = f;
+    }
+    _probe_uncapped = false;
+    if (peak_out) *peak_out = peak;
+    return accepted;
+}
+
+static uint32_t probe_drain(uint32_t ms) {
+    uint32_t waited = 0;
+    while (in_flight() > 0 && waited < ms) { delay(10); waited += 10; }
+    return waited;
+}
+
 static void cmd_ceiling() {
     if (_cfg.role != 1) {            // 1 = tx, see Cfg.role
         Serial.println("[ceiling] this is the TX side's probe — run it there");
@@ -437,25 +471,16 @@ static void cmd_ceiling() {
     _cfg.running = 0;                      // no background traffic in the way
 
     uint32_t before_issued = _issued, before_cb = _cb_ok + _cb_fail;
-    uint32_t accepted = 0, peak = 0;
-    uint32_t now = millis();
+    uint32_t peak = 0;
 
     Serial.println("[ceiling] firing with no cap until the driver refuses...");
-    _probe_uncapped = true;
-    for (int i = 0; i < 512; i++) {
-        if (!bench_send(_cfg.peer, FRAME_DATA, _cfg.size, now)) break;
-        accepted++;
-        uint32_t f = in_flight();
-        if (f > peak) peak = f;
-    }
-    _probe_uncapped = false;
+    uint32_t accepted = probe_fill(512, &peak);
     Serial.printf("[ceiling] accepted %lu before %s, peak in_flight %lu\n",
                   (unsigned long)accepted, espnow_err_name((esp_err_t)_last_err),
                   (unsigned long)peak);
 
     // Now the part that matters: do they come back?
-    uint32_t waited = 0;
-    while (in_flight() > 0 && waited < 3000) { delay(10); waited += 10; }
+    uint32_t waited = probe_drain(3000);
     uint32_t returned = (_cb_ok + _cb_fail) - before_cb;
     Serial.printf("[ceiling] after %lu ms: %lu of %lu callbacks returned, "
                   "in_flight %lu\n",
@@ -469,6 +494,115 @@ static void cmd_ceiling() {
         Serial.printf("[ceiling] VERDICT: %lu never came back — those are LEAKED.\n",
                       (unsigned long)in_flight());
     Serial.println("[ceiling] run stopped. 'reset' then 'go' to resume.");
+}
+
+// ── peerdrop: does the hub's own recovery eat the queue? ─────────────────────
+//
+// The hub deletes and re-adds a peer after ESPNOW_MAX_CONSEC_FAILS consecutive
+// send failures, and on a client connecting it refreshes every bound mount
+// unconditionally before querying them. Both were written when a failure was
+// believed to mean a lost frame.
+//
+// It does not. The gap counter above measured eighteen failures against zero
+// missing sequence numbers — the frames arrived and the acknowledgements were
+// what went missing. The refreshes therefore fire on links that are working,
+// and they fire during exactly the episodes when the queue is deepest: in that
+// same three minutes the depth went from 2 to 24 of the 32 the driver allows,
+// because a frame awaiting retries holds its descriptor longer.
+//
+// So the question is what a delete does to the frames already outstanding for
+// that peer. Two things could be lost and they are not the same:
+//
+//   the callback        in_flight never comes back down and the board reports
+//                       a leak floor it does not have
+//   the descriptor      the queue is permanently shallower, and enough of them
+//                       leaves the send path with nothing to allocate
+//
+// The first makes the instrument lie. The second is a fault that ends in a
+// wedge. This measures the queue depth before and after, which is the only way
+// to tell them apart: a returned buffer refills the queue whether or not
+// anyone was told about it.
+static void cmd_peerdrop(uint32_t n) {
+    if (_cfg.role != 1) {
+        Serial.println("[peerdrop] this is the TX side's probe — run it there");
+        return;
+    }
+    if (!esp_now_is_peer_exist(_cfg.peer)) {
+        Serial.println("[peerdrop] no peer — set one with 'peer <mac>' first");
+        return;
+    }
+    _cfg.running = 0;
+
+    probe_drain(3000);
+    if (in_flight() > 0) {
+        Serial.printf("[peerdrop] %lu already outstanding before we start — this "
+                      "board has leaked, and every number below would be measured "
+                      "from it. Reboot both boards and run this first.\n",
+                      (unsigned long)in_flight());
+        return;
+    }
+
+    // 1. the queue as it stands, and proof it is clean
+    uint32_t before = probe_fill(512, nullptr);
+    uint32_t waited = probe_drain(3000);
+    if (in_flight() > 0) {
+        Serial.printf("[peerdrop] baseline is dirty: %lu of %lu never came back "
+                      "with the peer untouched. Nothing below would mean "
+                      "anything.\n",
+                      (unsigned long)in_flight(), (unsigned long)before);
+        return;
+    }
+    Serial.printf("[peerdrop] queue before: %lu accepted, all back in %lu ms\n",
+                  (unsigned long)before, (unsigned long)waited);
+
+    // 2. delete and re-add with sends still outstanding — the hub's own action
+    if (n < 1) n = 1;
+    if (n > before) n = before;
+    uint32_t cb_before = _cb_ok + _cb_fail;
+    uint32_t fired = probe_fill(n, nullptr);
+    uint32_t at_drop = in_flight();
+    peer_add(_cfg.peer);                 // del_peer + add_peer, as the hub does
+    if (_cfg.phy_lr) peer_rate_long(_cfg.peer);
+    waited = probe_drain(3000);
+    uint32_t returned = (_cb_ok + _cb_fail) - cb_before;
+    uint32_t orphaned = (fired > returned) ? fired - returned : 0;
+    Serial.printf("[peerdrop] dropped the peer with %lu in flight: %lu of %lu "
+                  "callbacks back in %lu ms, %lu orphaned\n",
+                  (unsigned long)at_drop, (unsigned long)returned,
+                  (unsigned long)fired, (unsigned long)waited,
+                  (unsigned long)orphaned);
+
+    // 3. the queue afterwards. This is the measurement.
+    uint32_t after = probe_fill(512, nullptr);
+    probe_drain(3000);
+    Serial.printf("[peerdrop] queue after:  %lu accepted (was %lu)\n",
+                  (unsigned long)after, (unsigned long)before);
+
+    if (orphaned == 0 && after >= before) {
+        Serial.println("[peerdrop] VERDICT: harmless. Every callback came back "
+                       "and the queue is as deep as it was. The hub's peer "
+                       "refresh is not what makes its leak floor.");
+    } else if (orphaned > 0 && after + orphaned <= before) {
+        Serial.printf("[peerdrop] VERDICT: the refresh CONSUMED %lu descriptor(s) "
+                      "— no callback, and the queue came back %lu shallower. "
+                      "Enough of these and the send path has nothing left to "
+                      "allocate, which is a wedge. This is the fault.\n",
+                      (unsigned long)orphaned,
+                      (unsigned long)(before - after));
+    } else if (orphaned > 0) {
+        Serial.printf("[peerdrop] VERDICT: %lu callback(s) never arrived, but the "
+                      "queue is still %lu deep — the buffers returned and only "
+                      "the notification was lost. The hub's leak floor is an "
+                      "artefact of its own recovery, not a leak.\n",
+                      (unsigned long)orphaned, (unsigned long)after);
+    } else {
+        Serial.printf("[peerdrop] VERDICT: every callback returned but the queue "
+                      "went %lu -> %lu. Unexpected — run it again before "
+                      "believing it.\n",
+                      (unsigned long)before, (unsigned long)after);
+    }
+    Serial.println("[peerdrop] run stopped. Reboot both boards before any timed "
+                   "run — the counters carry this probe's damage.");
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +720,10 @@ static void print_help() {
       "   gaps                 RX: which sequences never arrived\n"
       "   ceiling              fire uncapped until refused; how many, and do\n"
       "                        they come back? (TX side, stops the run)\n"
+      "   peerdrop [n]         measure the queue, delete and re-add the peer\n"
+      "                        with n sends outstanding (default 16), then\n"
+      "                        measure it again. Does the hub's own recovery\n"
+      "                        cost buffers? (TX side, stops the run)\n"
       "\n in_flight = issued - callbacks. It is the leaked-buffer count.\n"
       " If it ratchets up and never returns, you are watching the leak.\n");
 }
@@ -607,6 +745,11 @@ static void handle_line(char *line) {
 
     if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) { print_help(); return; }
     if (!strcmp(cmd, "ceiling")) { cmd_ceiling(); return; }
+    if (!strcmp(cmd, "peerdrop")) {
+        int want = a1 ? atoi(a1) : 16;
+        cmd_peerdrop(want > 0 ? (uint32_t)want : 16);
+        return;
+    }
     if (!strcmp(cmd, "gaps")) {
         Serial.printf("[gaps] %lu sequence(s) never arrived; next expected %lu\n",
                       (unsigned long)_rx_gaps, (unsigned long)_rx_seq_next);
