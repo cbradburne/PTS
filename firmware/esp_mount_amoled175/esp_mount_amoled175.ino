@@ -214,6 +214,27 @@ static void cfg_load() {
 #define TOUCH_RST   40
 #define TOUCH_ADDR  0x5A
 
+// 43 and 44 are the S3's native UART0 pins, free for the Teensy ONLY because
+// the console is on the USB Serial/JTAG peripheral instead — a separate block
+// on the USB D-/D+ pins, not a UART at all. Which of the two `Serial` means is
+// decided by one Tools-menu item, and getting it wrong is silent here rather
+// than loud:
+//
+//   USB CDC On Boot ENABLED   Serial = USB Serial/JTAG.  43/44 are the Teensy's.
+//   USB CDC On Boot disabled  Serial = UART0 ON 43/44 — every console print in
+//                             this file is then injected into the Teensy's RX
+//                             line, and the Teensy's replies collide with it.
+//
+// tools/build.sh pins CDCOnBoot=cdc in the FQBN, so a repo build cannot get
+// this wrong. A build from the Arduino IDE with that menu item set the other
+// way can, and the failure would look like a flaky Teensy link rather than a
+// board setting. esp32_hub_eth carries the same guard; it matters more here,
+// because a display resynchronises on a magic byte and a motor controller is
+// being told where to move.
+#if !ARDUINO_USB_CDC_ON_BOOT
+  #error "Tools -> 'USB CDC On Boot' must be ENABLED. Otherwise Serial is UART0 on GPIO43/44, which is the Teensy link."
+#endif
+
 #define TEENSY_TX    43
 #define TEENSY_RX    44
 #define TEENSY_BAUD  115200

@@ -50,6 +50,15 @@
 #include <errno.h>          // why a non-blocking send refused, not just that it did
 #include <ESPAsyncWebServer.h>
 
+// Serial must be the USB Serial/JTAG peripheral, not UART0. With the Tools menu
+// item off it falls back to UART0 on GPIO43/44 and the console leaves the chip
+// on two pins instead of the USB port — less destructive here than on the mount,
+// which has the Teensy on those pins, but it turns "I get no output" into a
+// hardware hunt. tools/build.sh pins CDCOnBoot=cdc; an IDE build can not.
+#if !ARDUINO_USB_CDC_ON_BOOT
+  #error "Tools -> 'USB CDC On Boot' must be ENABLED (otherwise Serial is UART0 on GPIO43/44, not USB)."
+#endif
+
 #include "../shared/protocol.h"
 #define ETH_HOSTNAME "pts-sat"
 

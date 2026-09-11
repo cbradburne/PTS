@@ -75,6 +75,28 @@ if fail:
         print("  - " + f)
     sys.exit(1)
 
+# ---------------------------------------------------------------------------
+# ...and `Serial` must actually BE the USB peripheral
+# ---------------------------------------------------------------------------
+# The USB Serial/JTAG block and UART0 are different hardware, and one Tools-menu
+# item decides which one `Serial` is. With CDC On Boot off it falls back to
+# UART0 — GPIO43/44 — where the mount has the TEENSY. Every console print would
+# then be injected into the motor controller's receive line, silently, and the
+# symptom would look like a flaky Teensy link rather than a board setting.
+# build.sh pins CDCOnBoot=cdc so a repo build is safe; an Arduino IDE build is
+# not, which is what the compile-time guard is for.
+print("\n`Serial` cannot fall back to UART0:")
+for rel in TARGETS:
+    src = (REPO / rel).read_text()
+    name = rel.split("/")[-1]
+    guard = re.search(r"#if\s+!ARDUINO_USB_CDC_ON_BOOT\s*\n\s*#error", src)
+    assert guard, (
+        f"{name} has no compile-time guard on USB CDC On Boot. Built with that\n"
+        f"    menu item off, Serial becomes UART0 on GPIO43/44 and the console\n"
+        f"    leaves the chip on two pins — which on the mount are the Teensy's."
+    )
+    print(f"   {name:<28} guarded at compile time       OK")
+
 # The bench is the instrument, so it carries the extra requirement: a ring big
 # enough that ordinary reporting is never dropped. Dropping a sample is honest
 # (the t= column jumps and says so) but it should not happen during normal

@@ -92,6 +92,15 @@
 #include <esp_wifi.h>
 #include <Preferences.h>
 
+// Serial must be the USB Serial/JTAG peripheral, not UART0. With the Tools menu
+// item off it falls back to UART0 on GPIO43/44, and the run file then goes out
+// of two pins nothing is connected to — a night of sending with no data, which
+// is the one failure this bench cannot afford. tools/build.sh pins
+// CDCOnBoot=cdc; a build from the IDE can get it wrong.
+#if !ARDUINO_USB_CDC_ON_BOOT
+  #error "Tools -> 'USB CDC On Boot' must be ENABLED (otherwise Serial is UART0 on GPIO43/44, not USB)."
+#endif
+
 // ---------------------------------------------------------------------------
 // Settings — all live in NVS so an experiment survives a power cycle
 // ---------------------------------------------------------------------------
