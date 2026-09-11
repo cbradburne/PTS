@@ -1546,6 +1546,16 @@ static void uplink_service(uint32_t now) {
 
 void setup() {
     Serial.begin(115200);
+    // Non-blocking USB console — see the same call in esp32_hub_eth.ino, which
+    // needed it first. HWCDC::write() waits on the TX ring for 100 ms at a time,
+    // twenty times over, so one print can hold loop() for two seconds while the
+    // board is still plugged in and the host has simply stopped reading.
+    //
+    // A blocked loop is the condition the bench proved leaks ESP-NOW buffers,
+    // and this node relays every frame its mounts send. Nothing is framed over
+    // USB here — the hub link is Ethernet — so a dropped print costs console
+    // text and nothing else.
+    Serial.setTxTimeoutMs(0);
     delay(200);
     Serial.println("\n=== PTS satellite ===");
     // Restart-streak guard.  RTC_NOINIT holds whatever was in RAM after a

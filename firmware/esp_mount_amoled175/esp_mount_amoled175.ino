@@ -3056,6 +3056,26 @@ static void ui_update() {
 
 void setup() {
     Serial.begin(115200);
+    // Make the USB console non-blocking, as esp32_hub_eth already does.
+    //
+    // Serial here is the native USB CDC, and HWCDC::write() blocks on the TX
+    // ring with a 100 ms default timeout, up to twenty consecutive times — so
+    // ONE Serial.print() can hold loop() for two seconds. The core's own comment
+    // names the case: the board is still plugged in, the host has stopped
+    // reading, and the plug detector keeps saying connected, so the only thing
+    // that ends the wait is the deadline.
+    //
+    // That matters more here than it looks. A blocked loop is the one condition
+    // the bench PROVED leaks ESP-NOW buffers — floor stepping 0->1->2->3 with a
+    // synthetic block, dead clean without one at the same rate. An unguarded
+    // two-second stall in loop() is that condition, arriving whenever a laptop
+    // is attached and something stops draining the port.
+    //
+    // Cost of the fix: with timeout 0 a print is DROPPED rather than waited on
+    // when the ring is full. Nothing here frames packets over USB — the Teensy
+    // is on Serial1 — so the only casualty is console text, and only while
+    // nobody is reading it.
+    Serial.setTxTimeoutMs(0);
     delay(200);
     crash_report_print();   // report the previous panic, if any
 

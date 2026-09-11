@@ -978,7 +978,25 @@ static void poll_serial() {
 // ---------------------------------------------------------------------------
 
 void setup() {
+    // The console must not be able to stall this board, because a stalled loop
+    // is the thing being measured.
+    //
+    // HWCDC::write() waits on the TX ring for 100 ms at a time, up to twenty
+    // times, whenever the host stops draining while still plugged in. This bench
+    // has already produced that fault against itself: a run was discarded after
+    // the logger was restarted, nothing held the port for 37 seconds, and the
+    // in-flight floor stepped 0 -> 1 inside that window. The board was not
+    // leaking. It was blocked on its own console, which is exactly the condition
+    // `load` exists to apply DELIBERATELY.
+    //
+    // So the ring is enlarged first and the wait then removed, as the hub does.
+    // One report line is about 180 bytes at one a second, so 8 KB is roughly
+    // forty seconds of host hiccup absorbed with nothing dropped, and a drop
+    // beyond that is visible in the run file as a jump in the t= column — where
+    // a self-inflicted stall was invisible.
+    Serial.setTxBufferSize(8192);
     Serial.begin(115200);
+    Serial.setTxTimeoutMs(0);
     delay(400);
     cfg_load();
     radio_start();
