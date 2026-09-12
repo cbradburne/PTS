@@ -228,6 +228,24 @@ class MountFlag(IntEnum):
     LOOK_AT_MODE    = 0x80   # v2: slider uses 3D triangulation mode
 
 
+class EspnowRejectCode(IntEnum):
+    """Why the hub's esp_now_send() refused a frame.
+
+    A rejected send never becomes a transmission, so it moves no txfail counter.
+    The hub logged this to Serial only, inside an enclosure, which is how the
+    2026-09-12 outage ran 2 h 40 m with every counter that left the hub reading
+    normal. NO_MEM, NOT_FOUND and IF are three different faults; the byte
+    distinguishes them because a bare count cannot.
+    """
+    OTHER     = 0x00
+    NO_MEM    = 0x01
+    NOT_FOUND = 0x02
+    IF        = 0x03
+    ARG       = 0x04
+    INTERNAL  = 0x05
+    NOT_INIT  = 0x06
+
+
 class NackError(IntEnum):
     BAD_CRC       = 0x01
     BAD_LENGTH    = 0x02

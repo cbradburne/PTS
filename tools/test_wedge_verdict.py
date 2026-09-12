@@ -46,7 +46,8 @@ _lg.setLevel(logging.INFO)
 
 def verdict(*, bytes_arriving: bool, diag_fresh: bool, peer_acking: bool,
             mount: int = 1, peer_via_sat: bool = False,
-            mount_via_sat: str = "", relay_refused_s: float | None = None) -> str:
+            mount_via_sat: str = "", relay_refused_s: float | None = None,
+            direct_silent: tuple = ()) -> str:
     """Drive the real classifier with the four things it can observe.
 
     peer_via_sat is the 2026-09-09 case: the ACKing peer is reached THROUGH a
@@ -64,6 +65,11 @@ def verdict(*, bytes_arriving: bool, diag_fresh: bool, peer_acking: bool,
     # not arriving.
     b._hub_rx_last_advance_t = now - (0.5 if bytes_arriving else 9.0)
     b._mount_last_ack = {4: now - 0.5} if peer_acking else {}
+    # Direct mounts that HAVE ACKed this session and have now gone stale. The
+    # hub-radio verdict counts these, and one is not enough — see
+    # _direct_mounts_silent().
+    for mt in direct_silent:
+        b._mount_last_ack[mt] = now - 99.0
     # Route table: mount 4 direct, or via satellite slot 2 (Basement).  The
     # WEDGED mount routes through slot 3 when mount_via_sat names it, which is
     # the separate question of whether the mount in trouble is on our radio.
@@ -182,6 +188,40 @@ direct = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True, mount=1
 assert "MOUNT-SIDE" in direct and "SATELLITE-SIDE" not in direct, \
     f"a direct mount no longer reaches the mount-side verdict: {direct}"
 print("   a direct mount is unaffected                        OK")
+
+# ---- 4d. the hub's own radio, which ran 2 h 40 m being called ambiguous -----
+# 2026-09-12: cam1/2/3 are direct and took 0 of 81, 0 of 80 and 0 of 78 commands
+# each. cam4 and cam5 go through Foyer and ran 100% for the whole of it. The
+# verdict said "nothing here separates a hub that has stopped forwarding from a
+# mount that has stopped answering" — while the route table separated them
+# completely. It ended because the hub was reflashed for an unrelated reason.
+#
+# A relayed ACK crosses Ethernet and never touches the radio, so it cannot prove
+# the radio works (4b) — but it does prove the hub, its link and its relay path
+# are alive, and that is the other half of the inference.
+print("\n4d. several direct mounts silent, a relayed one answering:")
+line = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True,
+               mount=1, peer_via_sat=True, direct_silent=(1, 2, 3))
+assert "HUB RADIO" in line, \
+    f"three direct mounts down together with the relay clean is still being\n" \
+    f"    called ambiguous: {line}"
+assert "mount 4 is still ACKing" in line or "mount 4" in line, \
+    f"the verdict does not name the relayed mount that proves the hub is up: {line}"
+assert "No mount needs touching" in line, \
+    f"it does not say the thing that saves a trip to the truss: {line}"
+print("   HUB RADIO, and says no mount needs touching        OK")
+
+# ONE direct mount silent must NOT reach that verdict. It is equally that
+# mount's own radio, which is the common case on this rig — and claiming the
+# hub on a single silent mount would send someone to reboot a healthy hub and
+# drop the four mounts that were working.
+one = verdict(bytes_arriving=True, diag_fresh=True, peer_acking=True,
+              mount=1, peer_via_sat=True, direct_silent=(1,))
+assert "HUB RADIO" not in one, \
+    f"a single silent direct mount is enough to blame the hub's radio: {one}"
+assert "no other mount is ACKing either" in one, \
+    f"the ambiguous verdict no longer fires where it is still the right one: {one}"
+print("   one silent mount stays ambiguous, as it must       OK")
 
 # ---- 5. every verdict is a WARNING and names the mount ----------------------
 print("\n5. every path:")

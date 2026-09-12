@@ -41,7 +41,7 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        ESPNOW_TX_QUEUE_CEILING,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
-                       decode_mount_outage)
+                       decode_mount_outage, EspnowRejectCode)
 
 log = logging.getLogger(__name__)
 
@@ -849,6 +849,53 @@ class Bridge:
         except Exception as e:                        # pragma: no cover
             log.warning("MOUNT_ROUTE decode failed in bridge: %s", e)
 
+    def _direct_mounts_silent(self, now: float) -> int:
+        """How many mounts on the hub's OWN radio have stopped acknowledging.
+
+        Counted only among mounts that have ACKed at some point this session, so
+        a slot that was never populated and a mount that is simply switched off
+        and was never seen do not inflate it.
+
+        The count is what makes the hub-radio verdict safe. ONE direct mount
+        silent while a relayed one answers is genuinely ambiguous — it is equally
+        that mount's own radio, which is the common case on this rig and the
+        reason the old fallback existed. TWO or more failing at the same moment,
+        on the same radio, while the relay path runs clean, is not a coincidence
+        worth entertaining: on 2026-09-12 it was three of three, at 0 of 81, 0 of
+        80 and 0 of 78 commands, for 2 h 40 m.
+        """
+        n = 0
+        with self._diag_lock:
+            for mt, t in self._mount_last_ack.items():
+                if (now - t) < self.MOUNT_ACK_STALE_S:
+                    continue                   # still answering
+                if 1 <= mt <= len(self._mount_route) and self._mount_route[mt - 1]:
+                    continue                   # relayed — not our radio
+                n += 1
+        return n
+
+    def _relay_still_acking(self, now: float) -> int:
+        """A satellite-relayed mount that is answering, or 0 if none is.
+
+        The mirror of _hub_tx_proven_ok(). That one looks for a DIRECT mount
+        ACKing, to prove the hub's radio works. This looks for a RELAYED one, to
+        prove the hub itself does — its Ethernet, its queues, its relay path —
+        while saying nothing about the radio, because a relayed ACK never
+        touches it.
+
+        Together they answer a question neither can alone: a relayed mount
+        answering while every direct one is silent means the fault is the hub's
+        radio specifically, and no mount is at fault. That state ran for 2 h 40 m
+        on 2026-09-12 and the verdict called it "nothing here separates them".
+        """
+        with self._diag_lock:
+            for mt, t in self._mount_last_ack.items():
+                if (now - t) >= self.MOUNT_ACK_STALE_S:
+                    continue
+                if 1 <= mt <= len(self._mount_route) and self._mount_route[mt - 1]:
+                    return mt                  # relayed, and answering
+        return 0
+
     def _mount_relay(self, mount: int) -> str:
         """The satellite a mount is reached through, or "" if it is on our radio.
 
@@ -1382,6 +1429,35 @@ class Bridge:
             log.warning("HUB PAIRING: cam%d %s — %s | this resets the hub's "
                         "last-seen, so the next STATUS looks like a new connect",
                         pkt.payload[1], acts.get(pkt.payload[2], f"action {pkt.payload[2]}"), mac)
+        elif kind == 15:
+            # The hub's radio refused a frame outright.
+            #
+            # This never reached anyone before. A rejected send is not a failed
+            # send: it never becomes a transmission, so txfail cannot move and
+            # every counter that leaves the hub reads normal. On 2026-09-12 all
+            # three directly-radioed mounts took 0 of ~85 commands each for
+            # 2 h 40 m, the two reached through a satellite ran at 100%
+            # throughout, and the hub reported txfail flat at 23, nothing held
+            # back, no overflow, a steady leak floor and a 10-20 ms loop. The
+            # only line that said otherwise went to a serial port inside an
+            # enclosure.
+            #
+            # The error name is the point. NO_MEM is the TX-buffer wedge;
+            # NOT_FOUND means the peer entry is gone, which a peer refresh
+            # fixes and a reboot is overkill for; IF means the interface is
+            # down. They are not the same fault and the count alone cannot
+            # separate them.
+            code = pkt.payload[3]
+            runs = pkt.payload[4]
+            try:
+                why = EspnowRejectCode(code).name
+            except ValueError:          # a hub newer than this app
+                why = "code %d" % code
+            more = (" (+%d%s since the last report)"
+                    % (runs, "+" if runs == 255 else "")) if runs else ""
+            log.warning("HUB EVENT: ESP-NOW REFUSED a send to cam%d — %s%s. "
+                        "A refused send never goes on air, so txfail cannot "
+                        "see this.", mount, why, more)
         elif kind == 14:
             # One outage, as it ends.  The duration is the gap in that mount's
             # own traffic — last packet before it went quiet to first packet
@@ -1499,6 +1575,31 @@ class Bridge:
                 verdict = (f"MOUNT-SIDE — our bytes reach the hub, and mount {peer} "
                            f"is still ACKing, so the hub forwards fine. Mount {mount} "
                            "is the fault; check its bridge, not the hub")
+            elif (mount and self._relay_still_acking(now)
+                    and self._direct_mounts_silent(now) >= 2):
+                # Several mounts on the hub's OWN radio are silent at once while
+                # one reached through a satellite is answering. The relayed ACK
+                # crosses Ethernet and never touches the radio, so it proves the
+                # hub, its link and its relay path are all fine — and the only
+                # thing left that every silent mount shares is the radio.
+                #
+                # 2026-09-12 is what this is for. cam1/2/3 are direct and took
+                # 0 of 81, 0 of 80 and 0 of 78 commands; cam4 and cam5 go through
+                # Foyer and ran 100% throughout. It lasted 2 h 40 m and this line
+                # said "nothing here separates them" for all of it, while the
+                # route table separated them completely.
+                #
+                # The >= 2 is the whole safety of it. One direct mount silent is
+                # equally its own radio — the common case here — which is why
+                # the ambiguous verdict below still exists and still fires.
+                who_ok = self._relay_still_acking(now)
+                n_out  = self._direct_mounts_silent(now)
+                verdict = (f"HUB RADIO — {n_out} mounts on the hub's own radio have "
+                           f"stopped answering together, while mount {who_ok} is "
+                           f"still ACKing through a satellite. That reply crosses "
+                           f"Ethernet and never touches the radio, so the hub, its "
+                           f"link and its relay path are all fine and the radio is "
+                           f"what they share. No mount needs touching")
             elif mount:
                 verdict = ("HUB-SIDE OR MOUNT-SIDE — our bytes reach the hub, but no "
                            "other mount is ACKing either, so nothing here separates a "

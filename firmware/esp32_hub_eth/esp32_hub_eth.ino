@@ -1145,6 +1145,22 @@ static void send_to_mount_routed(int idx, const uint8_t *raw, uint16_t len) {
 
 // The actual send. Everything reaches the radio through here, and nothing else
 // calls esp_now_send() on this node.
+// esp_err_t -> the one byte the event carries. The values live in
+// shared/protocol.h so the app decodes the same numbers this encodes; putting
+// them here instead is how two firmwares end up disagreeing about a literal
+// that no protocol check compares.
+static uint8_t espnow_err_code(esp_err_t e) {
+    switch (e) {
+        case ESP_ERR_ESPNOW_NO_MEM:    return ESPNOW_REJ_NO_MEM;
+        case ESP_ERR_ESPNOW_NOT_FOUND: return ESPNOW_REJ_NOT_FOUND;
+        case ESP_ERR_ESPNOW_IF:        return ESPNOW_REJ_IF;
+        case ESP_ERR_ESPNOW_ARG:       return ESPNOW_REJ_ARG;
+        case ESP_ERR_ESPNOW_INTERNAL:  return ESPNOW_REJ_INTERNAL;
+        case ESP_ERR_ESPNOW_NOT_INIT:  return ESPNOW_REJ_NOT_INIT;
+        default:                       return ESPNOW_REJ_OTHER;
+    }
+}
+
 static bool espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
     esp_err_t e = esp_now_send(_mount_mac[idx], raw, len);
     if (e == ESP_OK) {
@@ -1160,11 +1176,39 @@ static bool espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
     // what a frozen txfail looks like, so this is the line that would identify
     // the wedge: ESP_ERR_ESPNOW_NO_MEM here means the stack has run out of TX
     // buffers.  Rate-limited per mount so a persistent fault cannot bury the log.
+    //
+    // AND IT WENT ONLY TO SERIAL, ON A BOX IN AN ENCLOSURE.  On 2026-09-12 all
+    // three directly-radioed mounts took 0 of ~85 commands each for 2 h 40 m
+    // while the two reached through a satellite ran at 100%, and every counter
+    // that leaves this hub read normal throughout: txfail flat at 23, no
+    // overflow, nothing held back, leak floor steady, loop 10-20 ms. The one
+    // line that would have said what was happening is the one above, and
+    // nobody could read it. It ended because the hub was reflashed for an
+    // unrelated reason.
+    //
+    // So it goes to the clients as well. The ERROR NAME is the diagnostic part
+    // and the reason this is an event rather than a counter: NO_MEM means the
+    // TX buffers are gone, NOT_FOUND means the peer entry has vanished, IF
+    // means the wrong interface — three different faults needing three
+    // different answers, and a bare count cannot tell them apart.
     static uint32_t last_log[NUM_MOUNTS] = {};
+    static uint32_t last_evt[NUM_MOUNTS] = {};
+    static uint16_t rej_run[NUM_MOUNTS]  = {};
     uint32_t now = millis();
+    if (rej_run[idx] < 0xFFFF) rej_run[idx]++;
     if (now - last_log[idx] >= 2000) {
         last_log[idx] = now;
         Serial.printf("[ESPNOW] send to mount %d REJECTED: %s\n", idx + 1, esp_err_to_name(e));
+    }
+    // First rejection of a run goes out at once; after that once per
+    // ESPNOW_REJECT_EVENT_MS, carrying how many happened in between. A fault
+    // this size would otherwise be thousands of identical lines, and the count
+    // is what carries the magnitude.
+    if (!last_evt[idx] || now - last_evt[idx] >= ESPNOW_REJECT_EVENT_MS) {
+        last_evt[idx] = now ? now : 1;
+        send_hub_event(15, (uint8_t)(idx + 1), 0, espnow_err_code(e),
+                       (uint8_t)(rej_run[idx] > 255 ? 255 : rej_run[idx]));
+        rej_run[idx] = 0;
     }
     return false;
 }

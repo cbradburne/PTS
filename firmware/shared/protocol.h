@@ -706,6 +706,36 @@ typedef enum : uint8_t {
 #define FLAG_LOOK_AT_MODE   0x80   // v2: slider uses 3D triangulation mode
 
 // ---------------------------------------------------------------------------
+// Why esp_now_send() refused a frame
+// ---------------------------------------------------------------------------
+// A rejected send never becomes a transmission, so it moves no txfail counter
+// and leaves no trace on the wire. The hub reported it to Serial only, on a box
+// that lives in an enclosure — and on 2026-09-12 that cost 2 h 40 m during which
+// all three directly-radioed mounts took 0 of ~85 commands each while the two
+// reached through a satellite ran at 100%, with every counter that leaves the
+// hub reading normal.
+//
+// An esp_err_t does not fit the byte available, and the exact value matters
+// less than which KIND of failure it is: NO_MEM means the TX buffers are gone,
+// NOT_FOUND means the peer entry has vanished, IF means the wrong interface.
+// Those need different answers, so they are enumerated rather than counted.
+typedef enum : uint8_t {
+    ESPNOW_REJ_OTHER     = 0x00,   // anything not below — read the serial log
+    ESPNOW_REJ_NO_MEM    = 0x01,   // TX buffers exhausted — THE wedge
+    ESPNOW_REJ_NOT_FOUND = 0x02,   // peer not registered
+    ESPNOW_REJ_IF        = 0x03,   // peer on an interface that is not up
+    ESPNOW_REJ_ARG       = 0x04,   // bad argument — a caller bug, not a fault
+    ESPNOW_REJ_INTERNAL  = 0x05,   // driver internal
+    ESPNOW_REJ_NOT_INIT  = 0x06,   // esp_now_init() has not run, or deinit did
+} EspnowRejectCode;
+
+// One rejection per mount reaches the clients immediately; after that, one per
+// this interval carrying how many happened in between. A fault the size of the
+// 2026-09-12 outage would otherwise be thousands of identical lines, and the
+// count is what carries the magnitude.
+#define ESPNOW_REJECT_EVENT_MS    30000UL
+
+// ---------------------------------------------------------------------------
 // NACK error codes
 // ---------------------------------------------------------------------------
 
