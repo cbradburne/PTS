@@ -214,17 +214,26 @@ static uint32_t _consec_refused = 0;
 //   no callback   + a gap          the frame never went out.
 //   no callback   + NO gap         it went out; the callback was lost.
 //
-// The second row was added after measuring it, and it replaces the premise this
-// probe was written on. That premise was "cb_fail has been 0 over 53 h, so the
-// link loses nothing on air" — which made a FAIL mean a lost frame. On
-// 2026-09-11 at t=18906s cb_fail went 0 -> 18 over three and a half minutes and
-// RX gaps stayed at 0: eighteen sends reported failure and all eighteen
-// sequence numbers arrived. A FAIL here means the MAC-layer acknowledgement was
-// lost, NOT the frame.
+// Both cb_fail rows have now been measured, one per run, and they point
+// opposite ways:
 //
-// So do not write a gap off as ordinary air loss just because a FAIL sits next
-// to it. The gap counter below is independent of cb_fail and is the ground
-// truth; cb_fail is not.
+//   run 1, t=18906s   cb_fail 0 -> 18, gaps 0    all eighteen delivered; the
+//                                                acknowledgements were lost
+//   run 2, t=78068s   cb_fail 0 ->  1, gaps 1    seq 9368115, inside the second
+//                                                the failure landed in. Genuinely
+//                                                lost on air.
+//
+// So a FAIL means neither one reliably. The two episodes are indistinguishable
+// from this board alone — same signature, opposite ground truth — and the first
+// of them falsified the premise this probe was written on ("cb_fail has been 0
+// over 53 h, so the link loses nothing on air"). The correction to that premise
+// then overshot in the other direction: a FAIL is not evidence of delivery
+// either.
+//
+// Which is the actual point, and it survives both runs: the gap counter below
+// is the ground truth BECAUSE it is the one measurement that does not depend on
+// cb_fail. Row one's "accounted for, ignore" is safe only once a gap has
+// independently confirmed the loss — never from the failure alone.
 static uint32_t _rx_seq_next  = 0;      // sequence expected next
 static bool     _rx_seq_armed = false;  // seen a first frame to sync from
 static uint32_t _rx_gaps      = 0;      // sequences that never arrived
