@@ -1179,11 +1179,21 @@ class Bridge:
                 n32txt += " | TX BUFFERS OUTSTANDING %d" % gleak
         else:
             n32txt = "n32 %d" % n32
+        # The hub has no link RSSI to report and has always sent 0 there, so it
+        # carries its associated-station count in that field instead — see the
+        # note at the assignment in esp32_hub_eth.ino. Printed under its real
+        # meaning, because "rssi 2" on a hub is worse than useless.
+        #
+        # Written to survive a hub that predates it: such a hub sends 0, which
+        # prints "stations 0", and that is true of it as well — it had no way to
+        # have any. Nothing here can tell the two apart, so nothing here claims
+        # to.
+        rssi_txt = ("stations %d" % h.rssi) if who == "hub" else ("rssi %d" % h.rssi)
         line = ("NODE HEALTH %-12s up %6.2fh | heap %5dk (min %5dk) | "
-                "loopmax %4dms | txfail %d | rssi %d | %s | reset %d%s") % (
+                "loopmax %4dms | txfail %d | %s | %s | reset %d%s") % (
             who, h.uptime_s / 3600.0,
             h.free_heap // 1024, h.min_free_heap // 1024,
-            h.loop_max_ms, h.tx_fail, h.rssi, n32txt, h.reset_reason, ble)
+            h.loop_max_ms, h.tx_fail, rssi_txt, n32txt, h.reset_reason, ble)
         # Any node whose uptime goes BACKWARDS has restarted.  Derived from
         # CMD_HEALTH rather than the hub's USB byte counter, so it works on
         # every transport and for every node — the counter-based HUB REBOOTED

@@ -2359,7 +2359,25 @@ static void send_own_health(bool anomaly) {
     h.min_free_heap = (uint32_t)esp_get_minimum_free_heap_size();
     h.loop_max_ms   = _health_loop_max_ms;
     h.tx_fail       = (uint16_t)_espnow_fail_total;
-    h.rssi          = 0;
+    // Stations associated to our SoftAP, carried in the field a hub has no use
+    // for. This is not tidy and it is deliberate: the health payload is a fixed
+    // 24 bytes, uniform across every node type, so adding a field means
+    // reflashing the mounts and satellites too — and the whole reason this is
+    // wanted now is that those cannot be reached. rssi is documented as "where
+    // meaningful, else 0", the hub has always sent 0, and nothing but the app's
+    // print consumes it, so this is the one place a hub-only number fits
+    // without touching the wire format. node_u32 is already full: sends held
+    // back, ring overflows, leak floor and ghost drops take a byte each.
+    //
+    // Why it is worth a field at all. An access point holds frames for an
+    // associated station that goes to sleep, out of the same buffer pool the
+    // ESP-NOW sends draw on, and the hub transmits from an AP where every bench
+    // measurement to date was taken station-to-station. That difference is
+    // under test on the bench right now. If it turns out to matter, this is
+    // what lets the rig's own logs be read back against it — and if it does
+    // not, this says so just as cheaply.
+    uint32_t ap_sta = WiFi.softAPgetStationNum();
+    h.rssi          = (int8_t)(ap_sta > 127 ? 127 : ap_sta);
     h.flags         = anomaly ? 0x01 : 0x00;
     // sends held back THIS WINDOW(8) | ring overflows since boot(8) |
     // ghost drops since boot(16).
