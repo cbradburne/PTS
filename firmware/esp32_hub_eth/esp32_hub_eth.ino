@@ -537,6 +537,12 @@ static volatile uint32_t _espnow_cb_last_ms = 0; // ...and when it last did
 // callback state before it is ladder state.
 static uint32_t _cb_stall_since_ms = 0;   // 0 = callbacks are arriving
 static bool     _cb_stall_active   = false;
+// The OTHER way this radio dies, and the one that was measured on 2026-09-12:
+// esp_now_send() itself refusing with NO_MEM. Set on the first refusal, cleared
+// by ANY accepted send — so a queue that briefly fills and drains (30-90 ms on
+// the bench) never arms anything, and only a sustained inability to hand the
+// driver a single frame does.
+static uint32_t _nomem_since_ms    = 0;   // 0 = the stack is accepting sends
 
 static inline uint32_t espnow_in_flight() {
     uint32_t i = _espnow_issued, c = _espnow_cb_total;
@@ -778,6 +784,24 @@ static inline bool mount_is_active(int i, uint32_t now) {
 // millisecond on air, tens with the MAC retrying), and short enough that the
 // existing 6 s reinit rung still runs first when it can.
 #define SELF_CB_STALL_MS         CB_STALL_MS
+
+// The rung the 2026-09-12 outages needed, and the reason the one above did not
+// fire for either of them.
+//
+// The callback rung arms on sends accepted with nothing coming back. This fault
+// is the next state along: the pool is already empty, so esp_now_send() REFUSES
+// and there is nothing outstanding to be waiting on — espnow_in_flight() sits
+// at its floor and cb_stall never starts. Measured, with the rejection events
+// added that morning: NO_MEM to all three directly-radioed mounts, about 100
+// refusals per mount per 30 s, continuously from 19:49 with the ladder silent
+// throughout. The same shape ran 2 h 40 m earlier the same day and 14 hours on
+// 2026-09-08. Every one of them ended because a human rebooted the hub.
+//
+// Cleared by any accepted send, so the threshold only has to exceed a genuine
+// transient: the bench drains a full 32-deep queue in 30-90 ms, and three
+// seconds without the driver taking a single frame is two orders beyond that.
+// Shares CB_STALL_MS because it is the same judgement about the same radio.
+#define SELF_NOMEM_STALL_MS      CB_STALL_MS
 #define SELF_RESTART_MAX_STREAK  3        // boot-loop guard: max consecutive self-restarts
 #define HEALTHY_CLEAR_MS         600000UL // 10 min wedge-free clears the restart streak
 
@@ -1168,6 +1192,10 @@ static bool espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
         // counting it would read as an outstanding send that will never
         // complete — the very thing being watched for.
         _espnow_issued = _espnow_issued + 1;
+        // One accepted frame proves the pool is not exhausted. The pool is a
+        // single global resource, so this is cleared by a send to ANY mount,
+        // not only the one that was refused.
+        _nomem_since_ms = 0;
         return true;
     }
 
@@ -1196,6 +1224,10 @@ static bool espnow_send_now(int idx, const uint8_t *raw, uint16_t len) {
     static uint16_t rej_run[NUM_MOUNTS]  = {};
     uint32_t now = millis();
     if (rej_run[idx] < 0xFFFF) rej_run[idx]++;
+    // Start the clock the ladder escalates on. NO_MEM only: NOT_FOUND is one
+    // unbound peer and IF is a configuration mistake, and neither is cured by
+    // rebooting the hub and dropping every mount that is working.
+    if (e == ESP_ERR_ESPNOW_NO_MEM && !_nomem_since_ms) _nomem_since_ms = now ? now : 1;
     if (now - last_log[idx] >= 2000) {
         last_log[idx] = now;
         Serial.printf("[ESPNOW] send to mount %d REJECTED: %s\n", idx + 1, esp_err_to_name(e));
@@ -3805,6 +3837,37 @@ static void check_self_recovery(uint32_t now) {
                       (unsigned long)(now - _cb_stall_since_ms));
         _cb_stall_since_ms = 0;
         _cb_stall_active   = false;
+        _restart_block_logged = false;
+    }
+
+    // The stack refusing outright — the state after the one above, where the
+    // pool is already empty so nothing is outstanding and cb_stall cannot
+    // start. Signed for the same reason cb_stall is: _nomem_since_ms is
+    // stamped from the send path, which runs on both the loop and, through the
+    // relay, whatever calls it.
+    static bool nomem_said = false;          // one line per episode, not per pass
+    if (_nomem_since_ms) {
+        int32_t d = (int32_t)(now - _nomem_since_ms);
+        uint32_t nomem_age = (d > 0) ? (uint32_t)d : 0;
+        if (nomem_age > SELF_NOMEM_STALL_MS) {
+            if (!nomem_said) {
+                nomem_said = true;
+                Serial.printf("[SELF] ESP-NOW REFUSING EVERY SEND — NO_MEM for "
+                              "%lu ms with nothing accepted. txfail cannot see a "
+                              "refused send; escalating on the refusal itself.\n",
+                              (unsigned long)nomem_age);
+            }
+            _last_wedge_ms = now;
+            if (nomem_age >= worst_age) { worst_age = nomem_age; worst_i = 0; }
+            // Same suppression as a callback stall: while the stack will not
+            // take a frame, no mount can be ACKing, so "another mount is fine"
+            // is stale state and must not veto the ladder.
+            _cb_stall_active = true;
+        }
+    } else if (nomem_said) {
+        // Cleared by an accepted send, which is the only thing that clears it.
+        nomem_said = false;
+        Serial.println("[SELF] ESP-NOW accepting sends again");
         _restart_block_logged = false;
     }
 
