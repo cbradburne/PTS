@@ -1146,7 +1146,14 @@ class Bridge:
             wedges = (n32 >> 24) & 0xFF
             leak   = (n32 >> 16) & 0xFF
             defer  = (n32 >> 8) & 0xFF
-            n32txt = "n32 %d" % (n32 & 0xFF)
+            # The low byte is the ESP-NOW reinit count, and it SATURATES at 255
+            # in the firmware — so it has to say when it has, or a reader takes
+            # a cap for a measurement. Not hypothetical: on 2026-09-12 cam1 went
+            # from 22 to 252 in 2 h 40 m of a hub-side outage its own reinits
+            # could not fix, and cam3 reached 247. The next such event on those
+            # mounts is invisible to this number until they reboot.
+            reinit = n32 & 0xFF
+            n32txt = "n32 %d%s" % (reinit, "+ (at cap)" if reinit == 255 else "")
             if wedges:
                 n32txt += " | WEDGES %d" % wedges
             # Whether the burst bound ever engaged. A mount that stops wedging
