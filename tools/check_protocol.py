@@ -97,6 +97,11 @@ ENUM_MAP = [
     ("AXIS_",  "Axis"),
     ("GROUP_", "AxisGroup"),
     ("CALIB_", "CalibPrompt"),
+    # The hub encodes one of these into a hub-event byte and the app decodes it
+    # back to a name. Declaring them in both files is not the same as them
+    # agreeing, and a silent disagreement here would misname the fault in the
+    # one log line written to explain it.
+    ("ESPNOW_REJ_", "EspnowRejectCode"),
 ]
 
 # C scalar constant → (python attribute, required)
