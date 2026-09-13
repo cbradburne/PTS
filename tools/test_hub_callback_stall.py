@@ -185,7 +185,22 @@ print("   anything that changes something still defers it     OK")
 # at the two stalls, and five GET_CONFIG forwarded back to back every ~4 s.
 print("\n4b. the burst bound:")
 cap = int(re.search(r"#define ESPNOW_TX_INFLIGHT_CAP\s+(\d+)", HUB).group(1))
-assert cap == 2, f"the cap is {cap}; the bench proved 2"
+# ONE on this node, and the reason it is not the bench's 2 matters.
+#
+# The bench justified 2 and justified it well — 53.3 h and 26.9 M sends clean
+# against four buffers lost in 20 h uncapped. But it never reproduced THIS hub's
+# fault in ~140 hours, so it was answering about its own leak, not this one.
+#
+# What answers about this one is a resolved field report on the same IDF family,
+# same symptom, whose author settled on exactly one frame in flight clocked by
+# the send callback — the documented pattern, and the shape of Espressif's own
+# metronome example. 2 was a compromise with nothing behind it for this failure.
+#
+# The mount and the satellite are still 2 on purpose: one node changes at a
+# time, and this is the one that can be flashed and watched.
+assert cap == 1, \
+    f"the hub's cap is {cap}. It is deliberately 1 — see the note above it in\n" \
+    "    the firmware. If this is being raised, say what evidence moved it."
 sat_fn = block("static inline bool espnow_tx_saturated(")
 assert "if (!ESPNOW_TX_INFLIGHT_CAP) return false;" in sat_fn, \
     "cap 0 does not restore the old behaviour, so this cannot be A/B'd on the rig"
@@ -313,9 +328,23 @@ assert enq2.index("cmd_is_client_activity") < enq2.index("espnow_tx_pump"), \
     "    has already been put behind the housekeeping"
 urg = enq2[enq2.index("bool urgent"):enq2.index("// The common case")]
 assert "espnow_send_now(idx, raw, len)" in urg, "an urgent frame is not sent directly"
-assert "espnow_tx_saturated" not in urg, \
-    "the urgent path still consults the cap, so a jog can still be held for the\n" \
-    "    full 400 ms escape behind traffic nothing reads"
+# It must consult the cap. This assertion is the REVERSE of what it said when
+# the priority path was written, and the reversal is deliberate.
+#
+# The original reasoning was that consulting the cap could hold a jog for the
+# full 400 ms escape. That is true only when callbacks have stopped — which is
+# the wedge, where the old code's direct send was refused and front-inserted
+# anyway, so the outcome is identical. In the normal case the cap clears on the
+# next callback, about a millisecond, and that millisecond is the entire cost.
+#
+# Against it: a jog stream is the one thing on this rig that fires repeatedly in
+# consecutive loop passes, and the exception sat exactly there. A cap with an
+# exception for the busiest case is not a cap, and a resolved field report on
+# this IDF family puts unpaced bursts at the centre of the same failure.
+assert "espnow_tx_saturated" in urg, \
+    "the operator path sends without consulting the cap. A jog stream can then\n" \
+    "    put any number of frames in flight at once, which is the one case the\n" \
+    "    bound exists for — see the note above it in the firmware."
 # On refusal it goes to the FRONT, which means moving tail backwards. Moving
 # head instead would append it — the exact bug this path exists to avoid.
 assert "_entx_tail   = prev;" in urg, \

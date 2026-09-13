@@ -571,8 +571,26 @@ static inline uint32_t espnow_in_flight() {
 // holding the frame: the packet is consumed by the time it reaches the radio,
 // so a caller cannot be asked to try again. Nothing is dropped — the rest wait
 // for the next loop pass, microseconds later.
+// ONE, not two, on this node.
+//
+// The bench justified 2: 53.3 h and 26.9 M sends clean where uncapped lost four
+// buffers in 20 h. But the bench never once reproduced THIS hub's fault in ~140
+// hours, so that result speaks to the bench's leak and not to this one.
+//
+// What speaks to this one is a resolved field report on the same IDF family
+// (5.5.4) with the same symptom, whose author settled on exactly one frame in
+// flight, clocked by the send callback — the pattern the ESP-NOW documentation
+// recommends and the shape of Espressif's own metronome example, which does not
+// wedge on that version. Against that, our 2 is a compromise with no evidence
+// behind it for this failure.
+//
+// Cost is bounded: at 1 Mbps long preamble a callback returns in about a
+// millisecond typically and tens of milliseconds with the MAC retrying, so even
+// a pessimistic 30 ms gives ~33 frames/s against a hub that sends a small
+// fraction of that. Changed here only — the mount and the satellite keep 2
+// until this one has run long enough to say whether it helped.
 #ifndef ESPNOW_TX_INFLIGHT_CAP
-#define ESPNOW_TX_INFLIGHT_CAP 2       // 0 restores the old behaviour exactly
+#define ESPNOW_TX_INFLIGHT_CAP 1       // 0 restores the old behaviour exactly
 #endif
 // Deep enough for a broadcast to all five plus a burst behind it.
 #define ESPNOW_TX_QUEUE_DEPTH 16
@@ -1281,16 +1299,28 @@ static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
     // is, and an unlisted command defaults to activity. Byte 6 is CMD —
     // AA 55 LEN MOUNT SEQ_HI SEQ_LO CMD ...
     //
-    // Sent straight out, bypassing the cap. The cap guards against a burst of
-    // three or more in flight; operator commands are sparse and the frames they
-    // would have waited behind are not worth a millisecond of a move.
+    // It jumps the QUEUE. It no longer jumps the CAP.
+    //
+    // This used to go straight out, bypassing the in-flight limit entirely, on
+    // the reasoning that operator commands are sparse. That left the pacing with
+    // a hole exactly where traffic is burstiest — a jog stream is the one thing
+    // on this rig that fires repeatedly in consecutive loop passes, and it was
+    // the one thing allowed past the bound. A cap with an exception for the
+    // busiest case is not a cap.
+    //
+    // The latency that exception was protecting is preserved by the
+    // front-insertion below, which is what actually stops a jog waiting behind
+    // fifty PINGs. What it waits for now is one callback, not a queue.
     bool urgent = (len > 6) && cmd_is_client_activity(raw[6]);
     if (urgent) {
-        if (espnow_send_now(idx, raw, len)) return;
-        // The stack refused it, which means the pool is empty — the wedge, and
-        // the stall detector is already escalating. Put it at the FRONT of the
-        // queue rather than losing it: it goes on the next pass, ahead of the
-        // housekeeping it was never meant to wait for.
+        if (!espnow_tx_saturated() && espnow_send_now(idx, raw, len)) return;
+        // Held, for one of two reasons, and both end here. Either the cap is
+        // engaged — a send is in flight and this waits one callback, which is
+        // the normal case — or the stack refused it outright, which means the
+        // pool is empty and the stall detector is already escalating.
+        //
+        // Either way it goes to the FRONT of the queue rather than being lost:
+        // next pass, ahead of the housekeeping it was never meant to wait for.
         uint8_t prev = (uint8_t)((_entx_tail + ESPNOW_TX_QUEUE_DEPTH - 1)
                                  % ESPNOW_TX_QUEUE_DEPTH);
         if (prev == _entx_head) {          // full — the oldest gives way
