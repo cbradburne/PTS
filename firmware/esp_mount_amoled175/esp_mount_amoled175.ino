@@ -3125,10 +3125,28 @@ void setup() {
     // two-second stall in loop() is that condition, arriving whenever a laptop
     // is attached and something stops draining the port.
     //
-    // Cost of the fix: with timeout 0 a print is DROPPED rather than waited on
-    // when the ring is full. Nothing here frames packets over USB — the Teensy
-    // is on Serial1 — so the only casualty is console text, and only while
-    // nobody is reading it.
+    // Cost of the fix, corrected after measuring it. I wrote that the only
+    // casualty was console text while nobody was reading. On the bench, running
+    // this same change under sustained load, the CDC endpoint stopped delivering
+    // ALTOGETHER — twice in one day, 96 minutes once and permanently the second
+    // time, with a freshly opened port reading zero bytes in five seconds. That
+    // is the peripheral going away, not a ring dropping text, and the only way
+    // back is a reset.
+    //
+    // Whether this change causes that or merely coincided with it is not
+    // established. What is established, from an independent receiver counting
+    // frames throughout both episodes, is that the board kept transmitting at
+    // exactly its nominal rate: loop() was protected, which is the whole point.
+    //
+    // Kept here anyway, and the reasoning matters. A mount runs on its own
+    // supply with nothing on USB, and the not-connected path does not block, so
+    // this is inert in normal operation. It earns its place only while a laptop
+    // IS attached — which is exactly the window the two-second stall above would
+    // otherwise land in. The risk it carries lands in that same window and costs
+    // a reset, not a shot.
+    //
+    // Nothing here frames packets over USB — the Teensy is on Serial1 — so no
+    // protocol desynchronises either way.
     Serial.setTxTimeoutMs(0);
     delay(200);
     crash_report_print();   // report the previous panic, if any

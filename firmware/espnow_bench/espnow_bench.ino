@@ -1012,6 +1012,21 @@ void setup() {
     // forty seconds of host hiccup absorbed with nothing dropped, and a drop
     // beyond that is visible in the run file as a jump in the t= column — where
     // a self-inflicted stall was invisible.
+    //
+    // What the ring does NOT cover, learned on 2026-09-13: the CDC endpoint
+    // itself can stop delivering. Twice in one day on the TX board — 96 minutes
+    // and then permanently, with a freshly opened port reading zero bytes in
+    // five seconds. The receiving board proved the sender was completely healthy
+    // throughout, 120 frames/s with no gaps, so this is the console going away
+    // and not the radio.
+    //
+    // It matters more here than anywhere else on this rig: floor, refused and
+    // nomem are TX-side only, so a dead console leaves the run blind on its
+    // primary signal while it continues to look like it is recording. And the
+    // only recovery is a reset, which zeroes the very counters worth reading.
+    // Check each board's freshness separately — a staleness check on the file
+    // saw nothing wrong, because the RX side kept writing every second while the
+    // TX side was gone.
     Serial.setTxBufferSize(8192);
     Serial.begin(115200);
     Serial.setTxTimeoutMs(0);

@@ -1561,9 +1561,19 @@ void setup() {
     // board is still plugged in and the host has simply stopped reading.
     //
     // A blocked loop is the condition the bench proved leaks ESP-NOW buffers,
-    // and this node relays every frame its mounts send. Nothing is framed over
-    // USB here — the hub link is Ethernet — so a dropped print costs console
-    // text and nothing else.
+    // and this node relays every frame its mounts send.
+    //
+    // "A dropped print costs console text and nothing else" is what this said,
+    // and it was wrong. Measured on the bench under sustained load with the same
+    // change: the CDC endpoint stopped delivering entirely, twice in one day,
+    // the second time permanently — a freshly opened port read zero bytes in
+    // five seconds. Recovery is a reset. Whether the change causes that or
+    // coincided with it is not established; that the board kept transmitting at
+    // its nominal rate throughout, measured by an independent receiver, is.
+    //
+    // These run on PoE and see USB only while being flashed, when a host is
+    // draining, so this is close to inert here. Nothing is framed over USB
+    // either — the hub link is Ethernet — so no protocol desynchronises.
     Serial.setTxTimeoutMs(0);
     delay(200);
     Serial.println("\n=== PTS satellite ===");
