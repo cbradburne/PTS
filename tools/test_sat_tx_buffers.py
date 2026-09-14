@@ -104,7 +104,11 @@ print("   from loop(), above both reporting functions        OK")
 # longer exists — and this box rebuilds on every NO_MEM burst, so carrying it
 # across would not be a rare mistake.
 print("\n4. across a stack rebuild:")
-rec = block("static void espnow_recover(")
+# The reconcile lives in the SHARED rebuild, so both recovery paths get it —
+# the ESP-NOW-only reinit and the WiFi bounce below. A copy in one of them would
+# drift from the other, and the path without it would report a permanent leak on
+# a stack it had just fixed.
+rec = block("static bool espnow_rebuild_after_init(")
 assert "_sat_cb_total   = _sat_dn_sent_total;" in rec, \
     "in_flight is not reconciled after the rebuild, so a stack that was just\n" \
     "    FIXED reports a permanent leak"
@@ -114,11 +118,39 @@ assert "_sat_leak_worst" in rec, \
     "    destroys the reading that provoked it"
 assert rec.index("_sat_leak_worst") < rec.index("_sat_leak_floor = 0;"), \
     "the high-water is taken after the floor is cleared, so it always reads 0"
-assert rec.index("esp_now_init") < rec.index("_sat_cb_total   =") \
-       < rec.index("esp_now_register_send_cb"), \
-    "the reconcile is not between init and re-registering the callback — that\n" \
-    "    is the only window where no callback can fire and change it underneath"
+assert rec.index("_sat_cb_total   =") < rec.index("esp_now_register_send_cb"), \
+    "the reconcile is not before the send callback is re-registered — that is\n" \
+    "    the only window where no callback can fire and change it underneath"
+# ...and every caller must init the stack before handing over to it.
+for caller in ("static void espnow_recover(", "static bool sat_wifi_full_reinit("):
+    c = block(caller)
+    assert c.index("esp_now_init") < c.index("espnow_rebuild_after_init"), \
+        f"{caller.split()[-1]} rebuilds peers before esp_now_init(), so the peer\n" \
+        "    table is written into a stack that does not exist yet"
 print("   reconciled, high-water kept, in the safe window    OK")
+
+# ---- 4a. the rung this node did not have -----------------------------------
+# espnow_recover() rebuilds ESP-NOW and nothing else, which espressif/esp-idf
+# #18682 reports as insufficient: the buffers are held in the Wi-Fi TX pool, not
+# in ESP-NOW's own state. This node's ladder went from five of those straight to
+# a chip restart, which is why Foyer's history is a column of self-restarts.
+print("\n4a. the WiFi bounce, which is the layer the pool lives in:")
+wf = block("static bool sat_wifi_full_reinit(")
+for step in ("esp_now_deinit()", "WiFi.mode(WIFI_OFF)", "WiFi.mode(WIFI_AP)",
+             "esp_now_init()"):
+    assert step in wf, f"the bounce does not {step} — it is not a full teardown,\n" \
+                       "    and a partial one is the recovery already known not to work"
+assert wf.index("WiFi.mode(WIFI_OFF)") < wf.index("WiFi.mode(WIFI_AP)"), \
+    "the AP is brought up before it is taken down"
+# It must sit BETWEEN the rebuilds and the restart, or it is either never
+# reached or it replaces the restart that is the last resort.
+lad = SAT[SAT.index("if (now - _dn_last_recover_ms > DN_NOMEM_RECOVER_MS)"):]
+lad = lad[:lad.index("esp_restart();") + 20]
+assert lad.index("espnow_recover()") < lad.index("sat_wifi_full_reinit()") \
+       < lad.index("esp_restart()"), \
+    "the ladder order is wrong. It must be: cheap ESP-NOW rebuild, then the WiFi\n" \
+    "    bounce that actually releases the pool, then a restart as last resort."
+print("   full teardown, ordered rebuild -> bounce -> restart  OK")
 
 # ---- 4b. the burst bound ---------------------------------------------------
 # The pump is the bench's second condition by construction: it sends as many
@@ -131,7 +163,22 @@ assert "dn_hold(" in pump, \
     "    is the condition the bench needed to lose a buffer"
 hold = block("static inline bool dn_hold(")
 cap = int(re.search(r"#define ESPNOW_TX_INFLIGHT_CAP\s+(\d+)", SAT).group(1))
-assert cap == 2, f"the cap is {cap}; the bench proved 2, and 1 is the old rule that shed 150 commands"
+# ONE since 2026-09-14, and the reason this is not the old rule that shed 150
+# commands in 30 seconds is the RING, not the number.
+#
+# That rule waited for the callback before sending anything, with unbounded
+# enqueue against a dequeue of one, and dropped what would not fit. This holds
+# in a 32-deep ring with a 400 ms escape — it holds rather than sheds, and the
+# depth is what makes the bound safe at any value.
+#
+# Headroom, measured: this relay is offered 62 frames per 10 s (6.2/s) and the
+# ring is 32 deep. One in flight gives ~33 frames/s even at a pessimistic 30 ms
+# callback, so five times the offered rate, and filling the ring would need five
+# seconds of total stall against an escape that fires at 0.4.
+assert cap == 1, \
+    f"the satellite's cap is {cap}. It is deliberately 1, matching the hub — see\n" \
+    "    the note above it in the firmware. If this is being raised, say what\n" \
+    "    evidence moved it, and check the ring depth still covers the offered rate."
 assert "if (!ESPNOW_TX_INFLIGHT_CAP) return false;" in hold, \
     "setting the cap to 0 does not restore the old behaviour, so it cannot be A/B'd"
 # Three escapes, and all three matter. Without the overdue one a busy radio

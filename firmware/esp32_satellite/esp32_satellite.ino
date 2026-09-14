@@ -989,14 +989,9 @@ static void dn_enqueue(uint8_t idx, const uint8_t *frame, uint16_t len) {
 // Rebuild the ESP-NOW stack and re-register the peers we know about.  The
 // satellite had no recovery at all: if the driver stopped accepting frames it
 // stayed that way, and the only symptom was a downlink that went quiet.
-static void espnow_recover() {
-    Serial.println("[DOWN] ESP-NOW stalled — reinitialising the stack");
-    esp_now_deinit();
-    delay(50);
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[DOWN] ESP-NOW reinit FAILED — will retry");
-        return;
-    }
+// The rebuild half, split out so the WiFi bounce below can reuse it rather than
+// keeping a second copy of the peer loop that would drift from this one.
+static bool espnow_rebuild_after_init() {
     // The rebuild hands the whole buffer pool back, so an in-flight count and a
     // floor measured against the OLD pool describe something that no longer
     // exists. Carried across, they would read as a permanent leak on a stack
@@ -1021,7 +1016,53 @@ static void espnow_recover() {
         esp_now_add_peer(&info);
         espnow_peer_long_range(_peer[i].mac);
     }
+    return true;
+}
+
+static void espnow_recover() {
+    Serial.println("[DOWN] ESP-NOW stalled — reinitialising the stack");
+    esp_now_deinit();
+    delay(50);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[DOWN] ESP-NOW reinit FAILED — will retry");
+        return;
+    }
+    espnow_rebuild_after_init();
     Serial.println("[DOWN] ESP-NOW reinitialised, peers restored");
+}
+
+// The rung this node never had, and the one that actually works.
+//
+// espnow_recover() above rebuilds ESP-NOW and nothing else, which is exactly
+// the recovery espressif/esp-idf#18682 reports as INSUFFICIENT: the buffers are
+// held in the Wi-Fi TX pool, not in ESP-NOW's own state, so tearing ESP-NOW down
+// cannot release them. This node's ladder went from five of those straight to a
+// chip restart, which is why Foyer's history is a column of self-restarts —
+// the restart was the only step in it that could work.
+//
+// The sequence below is the one #18682 identifies as the reliable recovery, and
+// it is what esp32_hub_eth.ino already does at its own middle rung. It drops the
+// AP for a moment: mounts ride that out easily against their 10 s hub-silence
+// watchdog, and the ETHERNET uplink to the hub is untouched, so the satellite
+// stays reachable throughout.
+static bool sat_wifi_full_reinit() {
+    Serial.println("[DOWN] Full WiFi + ESP-NOW reinit — start");
+    esp_now_deinit();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(200);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    delay(100);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[DOWN] ESP-NOW init FAILED after WiFi bounce");
+        return false;
+    }
+    espnow_rebuild_after_init();
+    Serial.printf("[DOWN] Full reinit — done (AP %s ch %d)\n",
+                  WiFi.softAPIP().toString().c_str(), AP_CHANNEL);
+    return true;
 }
 
 // ── The burst bound ──────────────────────────────────────────────────────────
@@ -1040,8 +1081,19 @@ static void espnow_recover() {
 // because enqueue was unbounded while dequeue was one. This holds at TWO, and
 // holds rather than sheds: the rest stay in the 32-deep ring for the next loop
 // pass, microseconds later. Nothing is dropped that was not dropped before.
+// ONE, matching the hub since 2026-09-13.
+//
+// The bench justified 2 and never reproduced this node's fault in ~140 hours,
+// so it was answering about its own leak. One frame in flight clocked by the
+// send callback is the documented pattern, the shape of Espressif's metronome
+// example, and what a resolved field report on this IDF family settled on.
+//
+// This node can afford it more easily than the hub: its traffic is flat polling
+// — about 62 frames per 10 s, never a burst — so a bound of 1 costs it almost
+// nothing. The hub took this change first and ran clean through the window in
+// which this node accumulated 1,814 refusals.
 #ifndef ESPNOW_TX_INFLIGHT_CAP
-#define ESPNOW_TX_INFLIGHT_CAP 2       // 0 restores the old behaviour exactly
+#define ESPNOW_TX_INFLIGHT_CAP 1       // 0 restores the old behaviour exactly
 #endif
 // A frame held indefinitely is an outage that starts now, traded for a leak
 // that takes hours. Past this it goes regardless of what is outstanding.
@@ -1119,10 +1171,19 @@ static void dn_pump(uint32_t now) {
                     _dn_recover_run++;
                     espnow_recover();
                 } else if (_dn_recover_run == DN_RECOVER_MAX) {
+                    // The rung between a rebuild that cannot work and a restart
+                    // that is a sledgehammer. Tried once: if the Wi-Fi TX pool
+                    // is where the buffers are held, this releases them, and if
+                    // it does not the restart below still follows.
+                    _dn_recover_run++;
+                    Serial.printf("[DOWN] %d ESP-NOW rebuilds did not clear it — "
+                                  "bouncing WiFi, which is the layer the pool "
+                                  "lives in\n", DN_RECOVER_MAX);
+                    sat_wifi_full_reinit();
+                } else if (_dn_recover_run == DN_RECOVER_MAX + 1) {
                     _dn_recover_run++;              // say this once
-                    Serial.printf("[DOWN] %d rebuilds did not clear the stall — "
-                                  "restarting in %lus if it does not clear\n",
-                                  DN_RECOVER_MAX,
+                    Serial.printf("[DOWN] the WiFi bounce did not clear it either "
+                                  "— restarting in %lus if it does not clear\n",
                                   (unsigned long)(DN_RESTART_AFTER_MS / 1000UL));
                 } else if (now - _dn_last_ok_ms > DN_RESTART_AFTER_MS) {
                     // Nothing has been accepted by the radio for a full minute
