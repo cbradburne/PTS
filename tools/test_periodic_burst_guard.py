@@ -133,6 +133,30 @@ assert re.search(r"if \(!ESPNOW_TX_INFLIGHT_CAP\) return false;", INO), \
     "setting the cap to 0 does not disable the guard"
 print("   cap 0 restores the old behaviour exactly           OK")
 
+# ONE, as the hub has been since 2026-09-13 and the satellites since the 15th.
+#
+# The rig ran this comparison itself. By the morning of the 16th the hub had
+# gone ~75 h without a refused send and Foyer 22 h without a restart, while
+# these mounts — the only node type left at 2 — had rebooted six times in 22
+# hours to clear TX wedges.
+#
+# And that 2 had never actually engaged here. espnow_tx_saturated() computes
+# live = in_flight - leak_floor, and until 979883b the floor sat pinned at its
+# ceiling because hub restarts were counted as lost buffers. live came out ~0 on
+# every pass, so these mounts ran uncapped while appearing bounded. Fixing the
+# floor turned the bound on for the first time; this sets it to the value the
+# other two nodes are on.
+#
+# Headroom: the cap gates the receive drain and so command ACKs. The drain stops
+# at the bound and resumes next pass, and loop() here is 9-11 ms — roughly 100
+# ACKs/s against 0.4/s idle and ~10/s busy.
+cap = int(re.search(r"#define ESPNOW_TX_INFLIGHT_CAP\s+(\d+)", INO).group(1))
+assert cap == 1, \
+    f"the mount's cap is {cap}. It is deliberately 1, matching the hub and the\n" \
+    "    satellites — see the note above it in the firmware. If this is being\n" \
+    "    raised, say what evidence moved it."
+print(f"   cap {cap}, matching the hub and the satellites      OK")
+
 # ---- 3b. the counter counts deferrals, not loop passes ---------------------
 # The guard is re-tested every pass while a report waits and the loop runs about
 # a hundred times a second, so a naive count scores one 400 ms hold as forty.

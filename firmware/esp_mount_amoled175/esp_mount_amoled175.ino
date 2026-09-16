@@ -688,8 +688,27 @@ static inline uint32_t espnow_in_flight() {
 //
 // Set to 0 to restore exactly the old behaviour, which is how to A/B this on
 // the rig without reverting the commit.
+//
+// ONE, last of the three nodes to take it, and the rig ran the comparison
+// itself. The hub went to 1 on 2026-09-13 and the satellites on the 15th; by
+// the morning of the 16th the hub had gone ~75 h without a single refused send
+// and Foyer 22 h without a restart — its second-best run on record — while these
+// mounts, the only node type left at 2, rebooted six times in 22 hours to clear
+// TX wedges.
+//
+// Worth recording what that 2 was actually doing here, because it was doing
+// nothing. espnow_tx_saturated() computes live = in_flight - leak_floor, and
+// until 979883b the floor was pinned at its ceiling by hub restarts the mount
+// counted as lost buffers. live came out ~0 on every pass, so the cap never
+// engaged: these mounts were running uncapped while appearing to be bounded.
+// Fixing the floor turned the bound on for the first time. This sets it to the
+// value the other two nodes are now on.
+//
+// Headroom, since the cap gates the receive drain and therefore command ACKs:
+// the drain stops at the bound and resumes next pass, and loop() here runs at
+// 9-11 ms, so roughly 100 ACKs/s against 0.4/s idle and ~10/s busy.
 #ifndef ESPNOW_TX_INFLIGHT_CAP
-#define ESPNOW_TX_INFLIGHT_CAP 2
+#define ESPNOW_TX_INFLIGHT_CAP 1
 #endif
 
 // Sends the bound actually held back, on EITHER path — a queued command left
