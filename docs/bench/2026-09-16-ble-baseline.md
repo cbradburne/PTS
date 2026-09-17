@@ -1,93 +1,119 @@
-# Baseline before the cameras go on: four mounts without BLE, one with
+# What a paired camera actually costs: 18 KB of heap, and nothing else
 
-Recorded 2026-09-16, because it is about to become unrepeatable. Four Blackmagic
-cameras are going onto the remaining mounts over the coming days, starting with
-one tomorrow, and at that point the rig stops having a no-BLE arm.
+Rewritten 2026-09-17. The first version of this file recorded a baseline and
+proposed an experiment to find out whether BLE degrades the ESP-NOW link. The
+experiment ran the same day and the answer is no — the two mounts that appeared
+to show it were both suffering antenna obstruction, and both were fixed by hand
+in under an hour.
 
-Right now all five mounts run **identical firmware** — flashed 10:18 on
-2026-09-16 — on the same hub, in the same building, over the same window. Only
-cam5 has a camera paired. That is as close to a controlled comparison as this rig
-will get, and it exists by accident rather than design.
+The original version is in the history if the reasoning is wanted. What follows
+is what is actually true.
 
-## The numbers
-
-Uptime 12.2–12.4 h on every mount, no reboots since the flash.
+## The finding
 
 ```
-        txfail/h   reinits   rssi     min heap   loopmax   camera
-cam1       3.5        2      -36 dBm   8198k       9 ms    none
-cam2       2.6        2      -50 dBm   8196k       9 ms    none
-cam3       1.0        0      -48 dBm   8197k      11 ms    none
-cam4       4.4        1      -64 dBm   8199k       9 ms    none
-cam5      28.8        4      -49 dBm   8182k      16 ms    PAIRED, subscribed,
-                                                            reporting
+                min heap    camera
+cam1              8198k     none
+cam2              8196k     none
+cam3              8197k     none
+cam4              8180k     PAIRED      (8199k before pairing)
+cam5              8180k     PAIRED
 ```
 
-cam5 is roughly **ten times the mean of the other four** on failed sends, and it
-is high on three further measures at the same time: twice the stack reinits of
-any other mount, 14–17 KB less minimum heap, and the worst loop pass.
+Pairing a Blackmagic camera costs **about 18 KB of heap**, permanently, and that
+is the whole measurable cost. cam4 dropped 8199k → 8180k within minutes of
+pairing and landed on cam5's figure to the kilobyte. Three cameraless mounts sit
+at 8196–8198k.
 
-Delivery was 100 % on all five throughout, so none of this is currently costing
-commands. It is a difference in how hard the node is working, not in what it
-delivers.
+With ~8.2 MB free on these boards it is not a constraint. It is worth knowing
+only because it is real, repeatable and instant — which made it easy to mistake
+for the start of something worse.
 
-## What the table already excludes
+## What it does NOT cost
 
-Three obvious explanations are ruled out by the baseline itself, which is most of
-why it is worth writing down:
+Nothing measurable in the radio. After both antennas were corrected, with
+cameras still paired and reporting:
 
-- **Not signal.** cam5 sits at −49 dBm. cam4 is the weakest link on the rig at
-  −64 dBm and is the second *cleanest* at 4.4/h. The correlation runs the wrong
-  way for an RF explanation.
-- **Not routing.** cam4 and cam5 are both relayed through the Foyer satellite;
-  cam1–3 are direct. cam4 is at 4.4/h and cam5 at 28.8/h, so the shared path is
-  not what separates them.
-- **Not firmware or timing.** Same binary, same 12-hour window, same hub.
+```
+cam4   txfail frozen at 151 for 2.5 h   — not one failed send since
+cam5   txfail frozen at 111 for 2.25 h  — not one failed send since
+cam1/2/3 (no camera) continued their usual trickle over 31.8 h
+```
 
-What remains is the one thing only cam5 has. That is a hypothesis, not a finding
-— a single node differing on a single attribute is exactly the shape of evidence
-that looks conclusive and often is not.
+The two mounts with cameras are currently the cleanest on the rig.
 
-## The experiment the cameras make possible
+## The two false positives, because they are the useful part
 
-Converter stock means one camera goes on tomorrow rather than four at once,
-which is better for this than having them all. Staggering turns a before/after
-into a sequence.
+Both mounts looked like clear evidence that BLE degrades the link. Both were
+antenna obstruction.
 
-**Put the first camera on cam4.** It is the only other mount relayed through
-Foyer, so pairing it holds routing constant against cam5 and changes only the
-camera. It also has a clean 4.4/h baseline to move from.
+**cam4.** Paired at 10:45, and within three hours its failure rate went from
+2.9/h — over a clean 22.5-hour baseline — to 43/h. Its RSSI had also moved
+−64 → −71 dBm, which was noted as a confound and then argued around. A cable had
+been laid near the antenna while fitting the camera. Moving it restored −64 dBm
+and the failure count stopped dead.
 
-**Keep cam3 without a camera for as long as is tolerable.** It is the quietest
-node on the rig — 1.0/h, zero reinits — and a control that stays untouched is
-what separates "BLE does this" from "something changed that week". Without one,
-a rig-wide drift would be indistinguishable from the thing being tested.
+**cam5.** Running 20–29/h for days at a comfortable −50 dBm, which is why RF had
+been discounted: the signal looked fine. It looked fine because the wrong
+direction was being measured.
 
-**Read it on txfail per hour, not on wedges.** Wedges are rare and noisy; the
-failed-send rate is continuous, already differs tenfold, and moves within hours.
-Minimum heap and reinit count are the corroborating measures — if cam4's heap
-drops toward cam5's 8182k as its txfail climbs, that is two independent signals
-agreeing.
+```
+          what the mount HEARS     what the relay hears FROM it     gap
+cam1          -36 dBm                    -30 to -29                  +6
+cam2          -49                        -57 to -51                  -5
+cam3          -49                        -50 to -47                   0
+cam4          -64                        -78 to -70                 -10
+cam5          -51                        -89 to -79                 -32
+```
 
-**The baseline improves with every quiet day.** It is twelve hours old here. If
-the mounts stay up until the camera goes on, it will be around twenty-four, and
-a week would be considerably stronger. Nothing needs doing to collect it except
-not rebooting them.
+cam5's antenna had no line of sight to its satellite. It heard the relay at
+−51 dBm and the relay heard it at −79 to −89 — around 7 dB above the noise
+floor, against cam3's 42 dB. Standing the antenna vertical and clear of
+obstructions gained ~5 dB on the forward path and stopped the failures outright.
 
-## Why this matters beyond curiosity
+## The lesson, stated so it discriminates
 
-The ESP32-S3 shares one 2.4 GHz radio between WiFi and BLE, and pairing has to
-stop WiFi outright. Contention between the two is real and documented. It was
-examined and set aside early in the ESP-NOW investigation — correctly, on the
-evidence then: the transmit wedge predates the Blackmagic code existing at all,
-and cam1 was the node wedging while cam5 was the only one with a camera.
+**`txfail` counts transmissions that were not acknowledged. It is therefore a
+question about the RECEIVER, and the sender's own RSSI is the wrong number to
+look at.** A mount can report an excellent signal and be nearly inaudible at the
+other end; cam5 was 32 dB asymmetric and every instrument on the mount said it
+was healthy.
 
-That argument still holds for the *wedge*. It says nothing about the steady
-tenfold difference in failed sends visible here, which is a separate question and
-was not what was being asked at the time.
+The reverse path is visible in the `mount N ONLINE — rssi=` events, which is what
+the hub or satellite heard. That comparison took one query and would have found
+both faults immediately.
 
-If pairing a second camera moves cam4 onto cam5's numbers, then BLE coexistence
-is a real cost on this hardware and it is worth knowing before all five mounts
-carry cameras. If cam4 does not move, cam5 is simply an outlier for some other
-reason and this table stops being interesting — which is also worth knowing, and
-cheaper to establish now than to argue about later.
+**But "suspect RF first" is only right for the right symptom**, and it would have
+been wrong earlier in this project:
+
+```
+txfail CLIMBING steadily          an RF question. Check the reverse path first.
+txfail FLAT while sends stop      NOT RF. Nothing on air can freeze a counter
+                                  of on-air failures — that is the ESP-NOW
+                                  TX wedge, see 2026-09-12-hub-nomem.md.
+```
+
+Days went into RF, range and antennas for the wedge before it was ruled out, and
+correctly ruled out — a mount ran clean for hours at −80 to −85 dBm. The
+distinguishing fact is whether the counter is moving.
+
+## For the remaining cameras
+
+Three more are to be fitted. On this evidence the procedure is short:
+
+1. **Check the antenna has clear air before fitting**, and check nothing has been
+   laid across it afterwards. That single step accounts for everything this
+   investigation found.
+2. **Compare both directions after pairing**, not just the mount's own RSSI — the
+   table above is the check, and an asymmetry beyond ~10 dB is worth acting on.
+3. **Expect ~18 KB of heap to go** and nothing else. If the failure rate climbs
+   and stays climbing with a clear antenna and a symmetric link, that would be
+   new and worth reporting.
+
+## One note on how this was found
+
+The logs pointed at BLE twice and were wrong twice. Both causes were found
+physically, by inspection, within an hour — after this document had proposed a
+multi-day experiment to test the wrong hypothesis. The reverse-path data that
+would have settled it was already in the log the whole time and was not being
+read.
