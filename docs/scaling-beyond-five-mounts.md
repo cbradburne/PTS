@@ -79,6 +79,23 @@ per-mount state dicts, look-at subject tracking and arrow state. Those become
 `for slot in visible_slots()` returning mount ids. That is the bulk of the work
 and it is mostly mechanical once the map exists.
 
+## The right model is a composable panel, not a view filter
+
+Each control surface is an independent five-mount panel, and you add surfaces to
+get capacity. PC app and hub display side by side gives ten mounts at one
+position; add the web app on an iPad and it is fifteen.
+
+That is a better model than "choose which five to show", and it simplifies
+things: surfaces never need to agree, so there is nothing to coordinate, nothing
+to push and nothing to reconcile.
+
+It has one consequence worth acting on early. **Do not bake 5 in as a new
+constant.** Once the slot-to-mount indirection exists, panel width is a property
+of the surface, not of the rig — a PC app on a wide screen could run eight where
+the hub's 7-inch panel runs five or four. Writing `PANEL_SLOTS` per surface costs
+nothing now; discovering later that 5 is welded into three UIs costs what this
+whole exercise is trying to avoid.
+
 ## The visible map is PER CLIENT
 
 The deployment is two rooms. A PC app in the concert hall shows five mounts; a
@@ -215,3 +232,26 @@ but the RF geometry might be: the reverse path is what governs delivery, and
 adding five mounts to one hub radio concentrates that. Worth deciding which
 mounts sit behind which satellite by signal rather than by convenience — see
 2026-09-16-ble-baseline.md for why the reverse path is the number that matters.
+
+## Load, measured, because the TX path was only just stabilised
+
+A satellite relaying two mounts is offered **62 frames per 10 s**, so roughly
+**3.1 frames/s per mount** of steady keepalive and polling. Fifteen mounts is
+therefore about 47 frames/s — if they all hang off one radio.
+
+Against that, the in-flight cap is 1 and the bench measured a full 32-deep queue
+draining in 30-90 ms, so around 1-3 ms per callback: several hundred sends per
+second of capacity. 47/s is a comfortable fraction of it.
+
+So the arithmetic is fine, but it is a threefold increase on a transmit path that
+spent a week wedging and has only been quiet since 13 September. Two things
+follow:
+
+- **Measure rather than assume.** `sends held back per 10 s` on the hub and
+  `offered / sent / refused` on each satellite are the numbers that would show
+  the cap starting to bind. They are already in every health line.
+- **Distribute across satellites rather than concentrating on the hub.** Five
+  direct plus ten relayed puts only five mounts' worth of ESP-NOW on the hub's
+  own radio, and the 20-peer ceiling points the same way. Hanging fifteen off the
+  hub would work on paper and would make the hub the single point that has
+  historically been the one to fail.
