@@ -96,6 +96,59 @@ the hub's 7-inch panel runs five or four. Writing `PANEL_SLOTS` per surface cost
 nothing now; discovering later that 5 is welded into three UIs costs what this
 whole exercise is trying to avoid.
 
+## Fewer than five, too — and it is the same change
+
+A panel shows however many mounts are assigned to it: one, two, three, four or
+five. Nothing is drawn for the rest. No cam buttons across the top for mounts
+that do not exist, no empty location boxes in the position grid, no dead rows in
+the config screens.
+
+This matters beyond neatness. The repository is public and someone building one
+or two of these mounts should not open the app to five tabs with four of them
+dead. That is the first impression the project makes.
+
+**It is not extra work — it is the same work.** Both requirements reduce to the
+same thing:
+
+```
+today        for mid in range(1, 6):
+after        for mid in self._panel_mounts:
+```
+
+"Which five of ten" and "only show two" are both "iterate a list of mount ids
+instead of a fixed range". Doing one gets the other free.
+
+The scope, measured:
+
+```
+pc_app/ui/widgets/position_grid.py   16 sites   the mount location boxes
+pc_app/ui/main_window.py             12         cam buttons, per-mount state
+pc_app/ui/dialogs/config_dialog.py    8
+pc_app/motion/command_dispatcher.py   2
+four other files                      4
+                                     42 total
+```
+
+### Sequence it in two halves
+
+Land the indirection with the list fixed at `[1,2,3,4,5]`, confirm nothing on
+screen has changed, and only then allow shorter lists. The first half is a large
+mechanical edit whose correctness is easy to check precisely because nothing
+should look different; the second half is small and its effect is obvious.
+
+### Defaults, so a small rig needs no configuration
+
+- **Fresh install, nothing configured:** populate the panel from whatever mounts
+  the hub reports as bound, up to the surface maximum. Someone with one mount
+  opens the app and sees one mount.
+- **A new mount is bound while the panel has room:** add it. Otherwise a user
+  pairs their second mount and nothing appears, which looks like a fault.
+- **Nothing bound at all:** an explicit empty state pointing at the mounts
+  screen. Not a blank grid — a blank grid is indistinguishable from a broken one.
+
+Once a panel is full, or once the operator has deliberately curated it, the
+auto-add stops applying and the list is theirs.
+
 ## The visible map is PER CLIENT
 
 The deployment is two rooms. A PC app in the concert hall shows five mounts; a
@@ -174,10 +227,16 @@ Each step ships on its own and is testable before the next.
 **1. Derive the payload lengths, at NUM_MOUNTS = 5.** No behaviour change, no
 visible difference, flashes normally. De-risks everything after it.
 
-**2. Introduce the slot-to-mount map, still at 5.** The map is the identity
-function, so nothing changes on screen. All three UIs start resolving through it.
-This is the largest code change and it lands while the rig still behaves exactly
-as it does today — which is the point.
+**2. Introduce the panel list, still at 5.** The list is `[1,2,3,4,5]`, so
+nothing changes on screen. All three UIs stop iterating a fixed range and start
+iterating the list — 42 sites in the PC app alone. The largest code change, and
+it lands while the rig behaves exactly as it does today, which is what makes it
+checkable.
+
+**2b. Allow the list to be shorter.** Small change, obvious effect, and it ships
+a real benefit on its own: anyone with one or two mounts gets an app that fits
+their rig, whether or not the rest of this is ever built. Worth having even if
+ten mounts never happens.
 
 **3. Raise NUM_MOUNTS to 10.** The whole-rig flash. Ten slots exist; only five
 can be filled until step 4, which is a usable intermediate state rather than a
