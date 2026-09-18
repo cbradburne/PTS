@@ -79,26 +79,76 @@ per-mount state dicts, look-at subject tracking and arrow state. Those become
 `for slot in visible_slots()` returning mount ids. That is the bulk of the work
 and it is mostly mechanical once the map exists.
 
-## The decision that matters most: who owns the selection
+## The visible map is PER CLIENT
 
-**The visible map must be rig-wide, owned by the hub, and pushed to every
-client. Not per-client.**
+The deployment is two rooms. A PC app in the concert hall shows five mounts; a
+second PC app in the foyer next door shows five different ones; and either can
+reach the other's cameras when needed.
 
-This is a safety argument, not a tidiness one. A physical joystick binds to a
-slot. If the PC app thinks slot 2 is mount 7 and the hub display thinks it is
-mount 3, then pushing the stick moves a camera the operator is not looking at.
-Two operators, two screens, one rig, and no way to tell from either screen that
-they disagree.
+That makes the map a property of the client, not of the rig. Each app stores its
+own, and the hub does not need to know or care.
 
-So it needs a command pair alongside `CMD_MOUNT_ROUTE`:
+**An earlier draft of this note argued the opposite** — that the map had to be
+rig-wide, on the grounds that a joystick binds to a slot and two screens
+disagreeing about slot 2 would move the wrong camera. That reasoning assumed one
+control surface shared between screens. It is not: each PC app has its own
+joystick, so "slot 2" resolves inside the app the stick is plugged into and is
+never ambiguous. The argument was for a deployment that does not exist.
+
+So:
 
 ```
-CMD_SET_VISIBLE   client -> hub   5 bytes: slot 1..5 -> mount id (0 = empty)
-CMD_VISIBLE_MAP   hub -> clients  5 bytes, pushed on change and on request
+PC app          map in local config, per install. Survives restart. Hub uninvolved.
+Web app         map in browser storage, per device.
+Hub display     its own map, stored in hub NVS — see below.
 ```
 
-Same shape as the existing route and table pushes, persisted in hub NVS so it
-survives a restart.
+No new protocol commands are needed for any of this, which also removes the
+persistence and push machinery the rig-wide version would have required.
+
+### The hub display is the exception
+
+It is a single physical panel with its own touch controls, so "per client" means
+"the one there is". Its map belongs in hub NVS because that is where the display's
+other settings live — but it is the display's map, not the rig's, and nothing
+else should read it.
+
+It is also the surface most likely to surprise someone: an operator in the
+concert hall has no way to see what the panel by the rack is showing, or that
+somebody is standing at it.
+
+## Concurrent control, which the two-room setup makes real
+
+Cross-control is the requirement, so this needs stating plainly: **there is no
+arbitration today, and there never has been.**
+
+```
+MAX_CLIENTS   4 TCP slots, plus WebSocket, plus serial, plus the display, plus OSC
+ownership     none
+arbitration   none — last command wins
+notification  none — no client is told another has taken a mount
+```
+
+`_last_client_cmd_ms` exists but is rig-wide and only defers the maintenance
+restart. Nothing records which client last commanded which mount.
+
+With one operator this never bites. With two rooms and deliberate cross-control
+it will: the foyer operator takes cam3 for a shot, the concert hall operator jogs
+the same camera a second later, and neither screen shows the other.
+
+**The fix is visibility, not locking.** In live production an operator must be
+able to take a camera immediately — a lock that has to be released by someone in
+another room is worse than the collision it prevents. What is missing is that
+nobody can *see* the collision.
+
+The minimum useful version: the hub records which client last commanded each
+mount and when, and pushes it with the rest of the mount state. A UI can then
+show "cam3 — driven from Foyer, 2 s ago" and the operator decides. That is a
+per-mount client id and timestamp, a few bytes, and no behaviour change to the
+control path at all.
+
+Worth building alongside the multi-mount work rather than after it, because
+cross-control is one of the reasons for doing it.
 
 ## Build order
 
