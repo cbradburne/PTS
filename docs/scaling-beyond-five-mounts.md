@@ -292,6 +292,41 @@ adding five mounts to one hub radio concentrates that. Worth deciding which
 mounts sit behind which satellite by signal rather than by convenience — see
 2026-09-16-ble-baseline.md for why the reverse path is the number that matters.
 
+**A coordinator hub with no ESP-NOW at all**, with every mount reached through
+satellites. Held in reserve, not recommended now.
+
+The argument for it is fault isolation, not congestion — congestion was
+considered and does not hold, since Foyer wedges at a 1 ms loop time and the
+mounts wedge too. #18682 leaks a buffer roughly once in 2,400 sends regardless of
+how busy a node is, so removing the hub's radio relocates the fault rather than
+removing it. What it would buy is that **the hub never needs to reboot for a
+radio fault**, and today a hub reboot takes the PC app link, the display, OSC and
+the web UI with it.
+
+Against it, and why it waits:
+
+- The NO_MEM rung already turns that 2 h 40 m outage into about 25 seconds
+  without anyone present. Re-architecting around a failure that now has a
+  25-second automatic recovery is a lot of hardware for a marginal gain.
+- It concentrates every mount on the satellites, and Foyer has the worst history
+  on the rig — eight self-restarts in 54 hours before the 15 September flash.
+  Basement is pristine but currently relays nothing.
+- It conflicts with the small-build case above: one or two mounts would need a
+  hub *and* a satellite where the hub alone does it today. Direct attach should
+  stay supported whatever this rig ends up doing.
+
+**The trigger that would justify it:** the hub refusing sends again despite cap 1
+and the rung — particularly if the rung fires and does not clear it. At that
+point "the hub must never reboot for a radio fault" stops being tidiness and
+becomes the fix.
+
+It can be tested for nothing before it is built, but **not yet**. Binding every
+mount to a satellite makes the hub ESP-NOW-silent with no code change at all —
+`send_to_mount_routed()` returns after the TCP write and never reaches
+`espnow_send_if_present()`. That is a free experiment, and it would also confound
+the one currently running, which is whether cap 1 and the rungs work. Let those
+report first.
+
 ## Load, measured, because the TX path was only just stabilised
 
 A satellite relaying two mounts is offered **62 frames per 10 s**, so roughly
