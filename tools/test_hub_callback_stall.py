@@ -165,6 +165,25 @@ assert act.index("return false") < act.index("default:"), \
     "the polls fall through to the default and still count"
 print("   read-only polls do not count as activity            OK")
 
+# 0 must DISABLE the restart, and the guard has to come before the uptime test.
+#
+# The uptime test is `now < MAINT_RESTART_UPTIME_MS`. With the interval at 0 that
+# is false on the very first pass, so a bare 0 does not switch the restart off —
+# it makes the hub restart the moment it goes idle, for ever. The obvious way to
+# disable this feature is the dangerous one, which is exactly why it needs a test
+# rather than a comment.
+mr = block("static void check_maintenance_restart(")
+assert "if (!MAINT_RESTART_UPTIME_MS) return;" in mr, \
+    "0 does not disable the maintenance restart. Without this guard, setting the\n" \
+    "    interval to zero restarts the hub every time it goes idle — the opposite\n" \
+    "    of what the person setting it to zero intended."
+assert mr.index("if (!MAINT_RESTART_UPTIME_MS) return;") \
+       < mr.index("if (now < MAINT_RESTART_UPTIME_MS) return;"), \
+    "the disable guard is AFTER the uptime test, so it never runs on the pass\n" \
+    "    that matters"
+hours = int(re.search(r"#define MAINT_RESTART_HOURS\s+(\d+)", HUB).group(1))
+print(f"   interval {hours} h, and 0 genuinely disables it      OK")
+
 fwd = block("static void forward_to_mounts(const ParsedPacket &pkt)")
 assert "if (cmd_is_client_activity(pkt.cmd)) _last_client_cmd_ms = millis();" in fwd, \
     "forward_to_mounts still stamps the activity clock unconditionally, so the\n" \

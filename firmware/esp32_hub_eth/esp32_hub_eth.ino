@@ -825,9 +825,27 @@ static inline bool mount_is_active(int i, uint32_t now) {
 
 // Proactive maintenance restart: every long-uptime pathology seen so far
 // (TX wedge, ghost RX frames) is cured by a reboot and develops after ~12 h.
-// Restart deliberately at 8 h uptime — but only when nothing is happening:
+// Restart deliberately at this uptime — but only when nothing is happening:
 // no client command for 20 min AND every connected mount reports IDLE.
-#define MAINT_RESTART_UPTIME_MS  (8UL * 3600UL * 1000UL)
+//
+// ONE NUMBER, and 0 DISABLES IT. That second part needs the guard in
+// maintenance_restart_check(), because the test there is `now < UPTIME_MS`:
+// with 0 that is false on the first pass, so a bare 0 would restart the hub the
+// moment it went idle rather than never. The obvious way to switch this off is
+// the dangerous one.
+//
+// 96 h for the week of 2026-09-19, deliberately and temporarily. The premise
+// above is in doubt: the hub restarted 21 times in the seven days since its last
+// refused send, each costing 2-5% of commands for a few minutes, insuring
+// against something that has not happened — and on 2026-09-12 the fault arrived
+// 61 minutes after a maintenance restart, so uptime was not what drove it.
+//
+// 96 h answers "how long can it stay up" to twelve times the old interval and
+// still lands its restart on Wednesday night, leaving a fresh hub for Friday's
+// production without anyone remembering to do it. RESTORE TO 8 (or decide on a
+// new value) once that week's evidence is in.
+#define MAINT_RESTART_HOURS      96UL
+#define MAINT_RESTART_UPTIME_MS  (MAINT_RESTART_HOURS * 3600UL * 1000UL)
 #define MAINT_RESTART_IDLE_MS    (20UL * 60UL * 1000UL)
 
 // Survives esp_restart() (not power-on/brownout): consecutive self-restart
@@ -4017,6 +4035,11 @@ static void check_self_recovery(uint32_t now) {
 // the WiFi-driver pathologies (TX wedge, ghost RX frames) start appearing.
 // Mounts ride through it: the hub is back well inside their 10 s E-STOP window.
 static void check_maintenance_restart(uint32_t now) {
+    // 0 disables. This has to come FIRST: the uptime test below is `now <
+    // UPTIME_MS`, which with 0 is false on the very first pass — so without this
+    // line, setting the interval to zero would restart the hub as soon as it
+    // went idle instead of never doing it at all.
+    if (!MAINT_RESTART_UPTIME_MS) return;
     if (now < MAINT_RESTART_UPTIME_MS) return;
     if (_last_client_cmd_ms && (now - _last_client_cmd_ms) < MAINT_RESTART_IDLE_MS) return;
     for (int i = 0; i < NUM_MOUNTS; i++) {
