@@ -154,13 +154,15 @@ def health_line(n32):
     return BUF.getvalue().strip()
 
 
-clean = health_line(1)                   # reinit 1, never wedged
+# The low byte is reinit(4) | worst section(4) since 2026-09-20, so reinit 1
+# is 1 << 4. A bare 1 here would now be "reinit 0, section 1".
+clean = health_line(1 << 4)              # reinit 1, never wedged
 assert clean, "the health line did not log at all"
 assert "WEDGES" not in clean, \
     f"a bridge that has never wedged still says so: {clean}"
 assert "n32 1" in clean, f"the reinit count moved: {clean}"
 
-worn = health_line((3 << 24) | 1)        # three wedges, reinit 1
+worn = health_line((3 << 24) | (1 << 4)) # three wedges, reinit 1
 assert "WEDGES 3" in worn, f"three wedges do not read as three: {worn}"
 assert "n32 1" in worn, \
     f"the reinit count changed when the top byte did — the fields are not\n" \

@@ -1005,6 +1005,18 @@ class Bridge:
     # Below this a "worst section" is noise — see where it is used.
     _SAT_LOOP_NOTE_MS = 100
 
+    # A mount reporting a slow pass says which of these it was inside; the order
+    # here IS the wire encoding, so it must not be reordered. Mirrors MSEC_NAME
+    # in esp_mount_amoled175.ino.
+    _MOUNT_SECTION_NAMES = {
+        0: "top",     1: "teensy",  2: "lvgl",  3: "teensy2",
+        4: "ui",      5: "espnow",  6: "wedge", 7: "hub",
+        8: "wdt",     9: "rx",     10: "tail",
+    }
+    # A mount idles at 9-11 ms, so this is well clear of the noise and well
+    # below the 414 ms stalls that prompted the whole measurement.
+    _MOUNT_LOOP_NOTE_MS = 50
+
     # esp_reset_reason() codes (ESP-IDF) → name, for the hub reboot log.
     _RESET_REASON_NAMES = {
         0: "UNKNOWN", 1: "POWERON", 2: "EXT", 3: "SW(esp_restart)",
@@ -1152,8 +1164,21 @@ class Bridge:
             # from 22 to 252 in 2 h 40 m of a hub-side outage its own reinits
             # could not fix, and cam3 reached 247. The next such event on those
             # mounts is invisible to this number until they reboot.
-            reinit = n32 & 0xFF
-            n32txt = "n32 %d%s" % (reinit, "+ (at cap)" if reinit == 255 else "")
+            # Low byte is reinit(4) | worst loop section(4). It was reinit alone
+            # in eight bits until 2026-09-20; nothing else in node_u32 had room
+            # and the reinit count has never exceeded 3, so four bits with
+            # saturation lose nothing.
+            reinit = (n32 >> 4) & 0x0F
+            sect   = n32 & 0x0F
+            n32txt = "n32 %d%s" % (reinit, "+ (at cap)" if reinit == 15 else "")
+            # Which part of the loop owned the worst pass. Only worth printing
+            # when the pass was slow enough to mean something: on a 9 ms loop
+            # the winning section is whichever one took 3 ms instead of 2, which
+            # is noise dressed as a finding. Above the threshold it is the one
+            # number that says what a 414 ms stall actually was.
+            if h.loop_max_ms >= self._MOUNT_LOOP_NOTE_MS:
+                n32txt += " | worst section '%s'" % self._MOUNT_SECTION_NAMES.get(
+                    sect, str(sect))
             if wedges:
                 n32txt += " | WEDGES %d" % wedges
             # Whether the burst bound ever engaged. A mount that stops wedging

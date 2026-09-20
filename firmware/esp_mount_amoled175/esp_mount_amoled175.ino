@@ -970,6 +970,31 @@ static uint32_t _last_jog_fwd_ms    = 0;          // last CMD_JOG forwarded → 
 static uint32_t _health_last_ms     = 0;
 static uint32_t _health_anom_ms     = 0;
 static uint16_t _health_loop_max_ms = 0;
+
+// WHICH PART of the loop owned the worst pass.
+//
+// loop_max_ms says a pass took 414 ms and stops there. That number is the
+// bench's proven fault condition arriving on the rig — a blocked loop with
+// sends in flight is what leaks ESP-NOW buffers — and it has now been caught
+// three times on cam5 at 414, 415 and 416 ms, each time with txfail frozen,
+// heap flat and RSSI steady right up to the stall, and a wedge immediately
+// after. Three occurrences within two milliseconds of each other is not
+// jitter; something with a fixed duration is doing it, and nothing here can
+// say what.
+//
+// The hub and the satellite both time their sections and name the worst one,
+// and on the hub that found the OSC cost in a single query. The mount never
+// got the same treatment. This is that, and nothing more: it measures and
+// changes no behaviour.
+//
+// The order IS the wire encoding — see the node_u32 note at send_own_health().
+// Do not reorder without changing the decoder.
+enum { MSEC_TOP, MSEC_TEENSY, MSEC_LVGL, MSEC_TEENSY2, MSEC_UI, MSEC_ESPNOW,
+       MSEC_WEDGE, MSEC_HUB, MSEC_WDT, MSEC_RX, MSEC_TAIL, MSEC_N };
+static const char *const MSEC_NAME[MSEC_N] = {
+    "top", "teensy", "lvgl", "teensy2", "ui", "espnow",
+    "wedge", "hub", "wdt", "rx", "tail" };
+static uint32_t _msec_max[MSEC_N] = {};   // microseconds, worst per section
 static uint32_t _health_last_txfail = 0;
 static bool     _health_first_sent  = false;
 
@@ -1268,17 +1293,35 @@ static void send_health(bool anomaly) {
     // with, which is the opposite failure to the one just fixed.
     uint32_t leak_rep = (_espnow_leak_floor > _espnow_leak_worst)
                         ? _espnow_leak_floor : _espnow_leak_worst;
+    // The low byte is now reinit(4) | worst loop section(4), where it used to be
+    // reinit alone in eight bits.
+    //
+    // Nothing else in node_u32 had room and this is the field that can spare
+    // it: the reinit count is documented as never having exceeded 3, so four
+    // bits with saturation lose nothing, and MSEC_N is 11 so the section index
+    // fits with room left. What it buys is the only question loop_max_ms could
+    // not answer — a 414 ms pass, three times, and no way to say what was
+    // inside it.
+    int worst_sec = 0;
+    for (int i = 1; i < MSEC_N; i++)
+        if (_msec_max[i] > _msec_max[worst_sec]) worst_sec = i;
+    uint32_t reinit_sat = (_reinit_count > 15) ? 15 : _reinit_count;
     h.node_u32      = ((uint32_t)(_wedge_count > 255 ? 255 : _wedge_count) << 24) |
                       ((uint32_t)(leak_rep > 255 ? 255 : leak_rep) << 16) |
                       ((uint32_t)(_espnow_drain_deferred > 255 ? 255
                                   : _espnow_drain_deferred) << 8) |
-                      (_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL));
+                      ((reinit_sat & 0x0FUL) << 4) |
+                      ((uint32_t)worst_sec & 0x0FUL);
 #endif
     uint8_t p[24];
     encode_health_payload(p, &h);
     send_to_hub(CMD_HEALTH, p, 24);   // no-op while unpaired (send_to_hub guards)
     _health_last_ms     = millis();
     _health_loop_max_ms = 0;
+    // Cleared with loop_max_ms and in the same place, or the worst section
+    // would be a since-boot figure sitting beside a windowed one and the two
+    // would stop describing the same pass.
+    for (int i = 0; i < MSEC_N; i++) _msec_max[i] = 0;
 #if UI_PROFILE
     _ui_lvgl_max_ms = _ui_flush_max_ms = 0;
 #if UI_PROFILE >= 2
@@ -3411,6 +3454,12 @@ static inline void drain_teensy_serial() {
 }
 
 void loop() {
+    // MARK(x) charges everything since the previous mark to section x, so the
+    // whole pass is accounted for and nothing hides between the sections. Same
+    // pattern as the hub and the satellite.
+    uint32_t _mark = micros();
+    #define MARK(sec) do { uint32_t n_ = micros(); uint32_t d_ = n_ - _mark; \
+                           if (d_ > _msec_max[sec]) _msec_max[sec] = d_; _mark = n_; } while (0)
     esp_task_wdt_reset();
     ble_cam_poll();
 
@@ -3426,9 +3475,11 @@ void loop() {
         _prev_loop_ms2 = nowh;
     }
 
+    MARK(MSEC_TOP);
     // ── Teensy serial — drain BEFORE rendering so commands are never stale
     drain_teensy_serial();
 
+    MARK(MSEC_TEENSY);
     // ── LVGL tick + render (may block up to ~50 ms on full redraws) ──────
     static uint32_t _prev_ms = 0;
     const uint32_t now = millis();
@@ -3456,10 +3507,12 @@ void loop() {
     }
 #endif
 
+    MARK(MSEC_LVGL);
     // ── Teensy serial — drain AFTER rendering to catch bytes that arrived
     //    while LVGL was flushing to the display
     drain_teensy_serial();
 
+    MARK(MSEC_TEENSY2);
     // ── Touch & hold (~1.5 s): main -> SETUP -> CAMERA PAIRING ───────────
     // Chained rather than given a button of its own: SETUP has no room left,
     // and pairing is a once-per-mount commissioning job for whoever built the
@@ -3491,6 +3544,7 @@ void loop() {
         update_level_screen();
     }
 
+    MARK(MSEC_UI);
     // ── ESP-NOW peer refresh / full reinit (flagged from the send callback,
     //    actioned here — esp_now_*() must never run in the WiFi task)
     if (_espnow_need_refresh) {
@@ -3518,6 +3572,7 @@ void loop() {
         }
     }
 
+    MARK(MSEC_ESPNOW);
     // ── One-way transmit wedge ───────────────────────────────────────────
     // Watched on the RATE of send failures, not on silence, so a mount that is
     // still receiving is not excused.  See TXWEDGE_FAILS_PER_S.
@@ -3630,6 +3685,7 @@ void loop() {
         }
     }
 
+    MARK(MSEC_WEDGE);
     // ── Hub connection state ─────────────────────────────────────────────
     bool hub_ok = (millis() - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
     // Contact restored — hand back the full quota, so a mount that recovers
@@ -3759,6 +3815,7 @@ void loop() {
         }
     }
 
+    MARK(MSEC_HUB);
     // ── Watchdog ─────────────────────────────────────────────────────────
     // The run's own deadman, ahead of the blunt one below.  The round trip this
     // replaced was accidentally a deadman: a run advanced only while the PC
@@ -3777,6 +3834,7 @@ void loop() {
         send_estop_to_teensy();
     }
 
+    MARK(MSEC_WDT);
     // ── Drain ESP-NOW RX queue ───────────────────────────────────────────
     // Bounded by sends already in flight, not by a count of packets: spacing
     // the ACKs over loop passes would not help, because a pass takes
@@ -3805,6 +3863,7 @@ void loop() {
         }
     }
 
+    MARK(MSEC_RX);
     // ── RSSI label refresh (every 2 s) ───────────────────────────────────
     if (_lbl_rssi && (now - _last_rssi_update_ms >= 2000)) {
         _last_rssi_update_ms = now;
@@ -3863,4 +3922,6 @@ void loop() {
     }
     // No delay() — lv_timer_handler() self-limits; removing the 5 ms dead
     // time keeps Serial1 latency well below the FIFO fill time (~11 ms).
+    MARK(MSEC_TAIL);
+    #undef MARK
 }

@@ -123,12 +123,22 @@ assert re.search(rf"{packed.group(1)}\s*=\s*\(?\s*_espnow_leak_floor\s*>\s*"
                  rf"_espnow_leak_worst", FLAT), \
     "the reported figure is not max(floor, worst), so the first stack rebuild\n" \
     "    after a genuine leak erases it from the health line"
-assert "(_reinit_count > 255 ? 255UL : (_reinit_count & 0xFFUL))" in INO, \
-    "the reinit count is not in the low byte"
+# The low byte is reinit(4) | worst loop section(4) since 2026-09-20. It was
+# reinit alone in eight bits; nothing else in node_u32 had room, and the reinit
+# count is documented as never having exceeded 3, so four bits with saturation
+# lose nothing while the section index needs only enough for MSEC_N = 11.
+assert "((reinit_sat & 0x0FUL) << 4)" in INO, \
+    "the reinit count is not in the high nibble of the low byte"
+assert "((uint32_t)worst_sec & 0x0FUL)" in INO, \
+    "the worst loop section is not in the low nibble, so loop_max_ms still\n" \
+    "    reports a 414 ms pass with no way to say what was inside it"
+assert "_reinit_count > 15" in INO, \
+    "the reinit count is not saturated at 15, so a 16th reinit wraps to 0 and\n" \
+    "    reads as a mount that has never rebuilt its stack"
 assert "_espnow_drain_deferred > 255 ? 255" in INO, \
     "the drain-deferral count is not carried, so a mount that stops wedging\n" \
     "    cannot say whether the bound had anything to do with it"
-print("   wedges(8) | leak(8) | deferrals(8) | reinit(8)     OK")
+print("   wedges(8)|leak(8)|deferrals(8)|reinit(4)|sect(4)  OK")
 
 BUF = io.StringIO()
 _h = logging.StreamHandler(BUF); _h.setFormatter(logging.Formatter("%(message)s"))
@@ -159,26 +169,29 @@ def health(n32):
     return BUF.getvalue().strip()
 
 
-clean = health(1)
+# reinit 1 is now 1 << 4 — the low nibble belongs to the loop section.
+clean = health(1 << 4)
 assert "LEAKED" not in clean and "WEDGES" not in clean, \
     f"a healthy bridge is reporting a fault: {clean}"
 assert "n32 1" in clean, f"the reinit count is not where it was: {clean}"
 print("   healthy bridge says neither                       OK")
 
-leaking = health((7 << 16) | 1)
+leaking = health((7 << 16) | (1 << 4))
 assert "TX BUFFERS LEAKED 7" in leaking, f"a leak of 7 does not read as one: {leaking}"
 assert "n32 1" in leaking, f"the reinit count moved: {leaking}"
 
-both = health((2 << 24) | (7 << 16) | 1)
+both = health((2 << 24) | (7 << 16) | (1 << 4))
 for want in ("WEDGES 2", "TX BUFFERS LEAKED 7", "n32 1"):
     assert want in both, f"missing {want!r}: {both}"
 print("   7 leaked reads as 7, beside 2 wedges and reinit 1  OK")
 
-# All FOUR fields are independent — a packing mistake shows as one moving the
-# others, and this is the only thing holding the two ends of that field together.
-for w, lk, df, ri in ((0, 0, 0, 3), (1, 0, 0, 1), (0, 64, 0, 2),
-                      (0, 0, 9, 1), (2, 7, 40, 5), (255, 255, 255, 255)):
-    line = health((w << 24) | (lk << 16) | (df << 8) | ri)
+# All FIVE fields are independent — a packing mistake shows as one moving the
+# others, and this is the only thing holding the two ends of that field
+# together. The section now shares the low byte with reinit, so it is varied
+# here too: a nibble boundary is exactly where a shift error hides.
+for w, lk, df, ri, sc in ((0, 0, 0, 3, 0), (1, 0, 0, 1, 2), (0, 64, 0, 2, 9),
+                          (0, 0, 9, 1, 10), (2, 7, 40, 5, 3), (255, 255, 255, 15, 15)):
+    line = health((w << 24) | (lk << 16) | (df << 8) | (ri << 4) | sc)
     assert f"n32 {ri}" in line, \
         f"reinit {ri} lost when wedges={w} leak={lk} defer={df}: {line}"
     if lk:
@@ -190,7 +203,7 @@ for w, lk, df, ri in ((0, 0, 0, 3), (1, 0, 0, 1), (0, 64, 0, 2),
     else:
         assert "sends held back" not in line, \
             f"a bound that never engaged is reported as if it had: {line}"
-print("   all four independent across the range             OK")
+print("   all five independent across the range             OK")
 
 # The distinction the whole counter exists for: a mount that has stopped
 # wedging while this reads 0 did not stop because of the bound.
