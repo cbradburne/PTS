@@ -973,14 +973,22 @@ static uint16_t _health_loop_max_ms = 0;
 
 // WHICH PART of the loop owned the worst pass.
 //
-// loop_max_ms says a pass took 414 ms and stops there. That number is the
-// bench's proven fault condition arriving on the rig — a blocked loop with
-// sends in flight is what leaks ESP-NOW buffers — and it has now been caught
-// three times on cam5 at 414, 415 and 416 ms, each time with txfail frozen,
-// heap flat and RSSI steady right up to the stall, and a wedge immediately
-// after. Three occurrences within two milliseconds of each other is not
-// jitter; something with a fixed duration is doing it, and nothing here can
-// say what.
+// This was built to name a 414 ms pass on the belief that it came BEFORE a
+// wedge — the bench's blocked-loop fault arriving on the rig. It came after.
+// A 414-416 ms pass is espnow_wifi_restart() itself: two delay(200) calls
+// around the mode switches, which is why it never varied by more than 2 ms.
+// Of the 21 in the logs to 2026-09-22 (cam4 and cam5, never cam1-3), 20 are in
+// the first health report after this mount's own "RECOVERED A ONE-WAY TX
+// WEDGE with a WiFi-level restart" event. That report's window contains the
+// recovery, so the recovery's cost read as the trigger — the same misreading
+// as the hub's 427 ms on 2026-09-10. Check the event order before calling any
+// loop_max_ms a cause. A WiFi-level restart now reads as ~415 ms in 'wedge'.
+//
+// What it did find, on its first day on all five mounts: 'lvgl' at ~218 ms
+// around jogs — 12 of 13 health windows holding a jog, 31 of ~15,000 without.
+// That fits the status ring: one 460 px object whose border colour follows the
+// jog state, so each change redraws its whole bounding box, which is most of
+// the screen (UI_PROFILE above found the same cost). No wedge followed any.
 //
 // The hub and the satellite both time their sections and name the worst one,
 // and on the hub that found the OSC cost in a single query. The mount never
@@ -1297,11 +1305,12 @@ static void send_health(bool anomaly) {
     // reinit alone in eight bits.
     //
     // Nothing else in node_u32 had room and this is the field that can spare
-    // it: the reinit count is documented as never having exceeded 3, so four
-    // bits with saturation lose nothing, and MSEC_N is 11 so the section index
-    // fits with room left. What it buys is the only question loop_max_ms could
-    // not answer — a 414 ms pass, three times, and no way to say what was
-    // inside it.
+    // it. The reinit count had never exceeded 3 when this was written; cam4
+    // reached 7 in 27 h on 2026-09-22, so saturation at 15 is reachable on a
+    // long uptime. The app prints "(at cap)" there, so the figure goes vague
+    // rather than wrong. MSEC_N is 11, so the section index fits with room
+    // left. What it buys is the name of the section that owned the worst pass
+    // — see MSEC_NAME for what that has and has not turned out to mean.
     int worst_sec = 0;
     for (int i = 1; i < MSEC_N; i++)
         if (_msec_max[i] > _msec_max[worst_sec]) worst_sec = i;

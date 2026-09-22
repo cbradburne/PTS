@@ -1014,7 +1014,8 @@ class Bridge:
         8: "wdt",     9: "rx",     10: "tail",
     }
     # A mount idles at 9-11 ms, so this is well clear of the noise and well
-    # below the 414 ms stalls that prompted the whole measurement.
+    # below both slow passes seen so far: the ~218 ms LVGL redraw around a jog,
+    # and the ~415 ms of the mount's own WiFi-level restart.
     _MOUNT_LOOP_NOTE_MS = 50
 
     # esp_reset_reason() codes (ESP-IDF) → name, for the hub reboot log.
@@ -1175,7 +1176,9 @@ class Bridge:
             # when the pass was slow enough to mean something: on a 9 ms loop
             # the winning section is whichever one took 3 ms instead of 2, which
             # is noise dressed as a finding. Above the threshold it is the one
-            # number that says what a 414 ms stall actually was.
+            # number that says what a slow pass actually was — the 414 ms ones
+            # turned out to be the recovery, not a precursor; see MSEC_NAME in
+            # the mount firmware.
             if h.loop_max_ms >= self._MOUNT_LOOP_NOTE_MS:
                 n32txt += " | worst section '%s'" % self._MOUNT_SECTION_NAMES.get(
                     sect, str(sect))

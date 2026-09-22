@@ -124,9 +124,10 @@ assert re.search(rf"{packed.group(1)}\s*=\s*\(?\s*_espnow_leak_floor\s*>\s*"
     "the reported figure is not max(floor, worst), so the first stack rebuild\n" \
     "    after a genuine leak erases it from the health line"
 # The low byte is reinit(4) | worst loop section(4) since 2026-09-20. It was
-# reinit alone in eight bits; nothing else in node_u32 had room, and the reinit
-# count is documented as never having exceeded 3, so four bits with saturation
-# lose nothing while the section index needs only enough for MSEC_N = 11.
+# reinit alone in eight bits; nothing else in node_u32 had room. Four bits
+# saturate at 15 — reachable, since cam4 reached 7 in 27 h on 2026-09-22 — and
+# the app says "(at cap)" rather than wrapping. The section index needs only
+# enough for MSEC_N = 11.
 assert "((reinit_sat & 0x0FUL) << 4)" in INO, \
     "the reinit count is not in the high nibble of the low byte"
 assert "((uint32_t)worst_sec & 0x0FUL)" in INO, \
