@@ -81,6 +81,12 @@ def _cmd_name(cmd_val: int) -> str:
         return f"0x{cmd_val:02X}"
 
 
+def _kb(n: int) -> str:
+    """Bytes as k, with a decimal below 10k — where a WiFi buffer (~1.6k) is
+    the difference between a free block that fits one and one that does not."""
+    return f"{n / 1024:.1f}k" if n < 10 * 1024 else f"{n // 1024}k"
+
+
 # ---------------------------------------------------------------------------
 # Transport abstractions
 # ---------------------------------------------------------------------------
@@ -1166,9 +1172,9 @@ class Bridge:
             # could not fix, and cam3 reached 247. The next such event on those
             # mounts is invisible to this number until they reboot.
             # Low byte is reinit(4) | worst loop section(4). It was reinit alone
-            # in eight bits until 2026-09-20; nothing else in node_u32 had room
-            # and the reinit count has never exceeded 3, so four bits with
-            # saturation lose nothing.
+            # in eight bits until 2026-09-20; nothing else in node_u32 had room.
+            # Four bits saturate at 15 — reachable, since cam4 reached 7 in 27 h
+            # on 2026-09-22 — and "(at cap)" below says so rather than wrapping.
             reinit = (n32 >> 4) & 0x0F
             sect   = n32 & 0x0F
             n32txt = "n32 %d%s" % (reinit, "+ (at cap)" if reinit == 15 else "")
@@ -1201,6 +1207,21 @@ class Bridge:
             # reports is the wedge arriving in slow motion.
             if leak:
                 n32txt += " | TX BUFFERS LEAKED %d" % leak
+            # The bridge tail, when the firmware sends one. Internal RAM is the
+            # memory the WiFi driver allocates from; "heap" above counts the
+            # 8 MB of PSRAM as well and could not have moved for it. Appended
+            # here, after everything that was already on the line, so no reader
+            # of the old field order has to change.
+            if h.iram_free is not None:
+                n32txt += " | iram %s (min %s, largest %s)" % (
+                    _kb(h.iram_free), _kb(h.iram_min), _kb(h.iram_largest))
+                # A NO_MEM run that ended with a send accepted, short of the
+                # 3 s reboot. None had ever been seen, because nothing could
+                # see one. Any at all means a cure without a reboot exists.
+                if h.nomem_healed:
+                    n32txt += " | NO_MEM CLEARED ITSELF %d%s (longest %d ms)" % (
+                        h.nomem_healed, "+" if h.nomem_healed == 0xFFFF else "",
+                        h.nomem_healed_max_ms)
         elif h.node_type == HEALTH_NODE_SATELLITE:
             # Same packing, different pair: refusals high, self-restart streak
             # low.  The streak is spelled out rather than left as a number

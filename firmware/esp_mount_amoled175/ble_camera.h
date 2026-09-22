@@ -926,6 +926,18 @@ static uint8_t ble_cam_health_flags() {
     return f;
 }
 
+// What BLE is doing right now, for the NO_MEM snapshot (MOUNT_NOMEM_BLE_*).
+// Not ble_cam_health_flags(): that one latches — it clears _bc_write_err — and
+// a snapshot must never consume a camera fault the PC app has not been sent.
+// Called from whichever task hit the refusal, which on a camera mount can be
+// the NimBLE host itself; every read here is a single flag.
+static uint8_t ble_cam_activity_bits() {
+    return (ble_gap_disc_active() ? MOUNT_NOMEM_BLE_SCANNING   : 0)
+         | (ble_gap_conn_active() ? MOUNT_NOMEM_BLE_CONNECTING : 0)
+         | (_bc_connected         ? MOUNT_NOMEM_BLE_LINKED     : 0)
+         | (_bc_have_bond         ? MOUNT_NOMEM_BLE_BONDED     : 0);
+}
+
 static void ble_cam_poll() {
     uint32_t now = millis();
 

@@ -1138,6 +1138,165 @@ static void espnow_peer_long_range(const uint8_t *mac) {
     esp_now_set_peer_rate_config(mac, &rate);
 }
 
+// ── Refused sends: the wedge itself ──────────────────────────────────────────
+//
+// Every mount wedge on record is this.  To 2026-09-22 all 28 — cam1 x4 and cam2
+// x3 labelled "isolated", cam4 x7 and cam5 x14 labelled "one-way" — were
+// esp_now_send() refusing, 165-597 refusals each.  The label was never the
+// fault, it was the route: a satellite relays ~50 PINGs per 10 s to its mounts,
+// answered or not, so their receive side always looked alive, while a direct
+// mount hears only the PC app, which stops polling a mount that stops answering.
+//
+// Every one of them ended in a reboot.  The isolated path needed 20 s of
+// silence to get there; the one-way path spent 30 s detecting, ~415 ms on a
+// WiFi-level restart, then 12-13 s proving it had not held — 21 times of 21.
+// The ladder was spending 35-65 s arriving at the one remedy that works.
+//
+// So the first NO_MEM starts a clock, an accepted send stops it, and refusals
+// spanning NOMEM_RESTART_MS reboot the chip — the rule the hub has run since
+// 2026-09-12.  NO_MEM only: NOT_INIT is this mount's own ladder with the stack
+// torn down, NOT_FOUND is a peer refresh, and a reboot cures neither.  The span
+// runs from the first refusal to the LATEST, never from the clock's age alone,
+// so the mount must have tried and been refused at both ends — one refusal and
+// then a quiet spell is not three seconds of anything.  The bench drains a
+// genuinely full queue in 30-90 ms, so a real transient never gets near it.
+//
+// 0 turns it off, and the old ladder then runs exactly as before.
+#ifndef NOMEM_RESTART_MS
+#define NOMEM_RESTART_MS 3000UL
+#endif
+
+// The send path runs on BOTH cores: loop() sends from core 1, and the camera's
+// status forward sends from the NimBLE host task on core 0 (ble_cam_on_status,
+// in setup).  So arming and ending a run is one critical section, and the rung
+// in loop() reads the pair under the same lock.
+static portMUX_TYPE      _nomem_mux      = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t _nomem_since_ms = 0;   // first NO_MEM of this run; 0 = none
+static volatile uint32_t _nomem_last_ms  = 0;   // latest NO_MEM of this run
+// Runs that ENDED with a send accepted: the stack recovering by itself, short
+// of the reboot.  Not one has ever been seen, because nothing could see one.
+// If this moves, a cure without a reboot exists, and the longest says how
+// long it needs to work.
+static volatile uint16_t _nomem_healed        = 0;
+static volatile uint16_t _nomem_healed_max_ms = 0;
+
+// Inputs to the snapshot that nothing recorded before.
+static volatile uint32_t _espnow_cb_last_ms = 0;  // last send callback, either status
+static volatile uint32_t _espnow_ok_last_ms = 0;  // last send the stack accepted
+static volatile uint32_t _espnow_rx_total   = 0;  // frames received since boot
+
+// The moment of the first refusal of the current run, taken before anything
+// reacts to it.  Its last three fields are filled in at the reboot, from the
+// counters as they stood here.
+static MountNomemSnapshot _nomem_snap;
+static uint32_t _nomem_snap_cb = 0, _nomem_snap_rx = 0, _nomem_snap_ref = 0;
+// Carried across the reboot beside the other _evt_* fields, under _evt_magic.
+RTC_NOINIT_ATTR static uint8_t _evt_snap[MOUNT_EVENT_NOMEM_SNAP_LEN];
+
+static inline uint16_t nomem_sat16(uint32_t v) {
+    return v > 0xFFFF ? 0xFFFF : (uint16_t)v;
+}
+
+// Everything that could say WHY, read at the first refusal.  The candidates it
+// is built to separate, next time a mount wedges:
+//   send-completions stopped well before the first refusal -> the driver stopped
+//     finishing sends, and the queue filled behind it
+//   completions current, internal RAM near empty           -> an allocation
+//     failing, and the cure is finding what ate the memory
+//   BLE scanning or connecting, or the channel moved       -> the shared radio
+static void nomem_snapshot_take(uint32_t now, uint8_t cmd) {
+    MountNomemSnapshot s = {};
+    s.uptime_s     = now / 1000UL;
+    s.accepted     = _espnow_issued;
+    // Before the first callback of the boot these read as time since boot and
+    // saturate, which is the truth: there has been none for that long.
+    s.since_cb_ms  = nomem_sat16(now - _espnow_cb_last_ms);
+    s.since_ok_ms  = nomem_sat16(now - _espnow_ok_last_ms);
+    s.since_rx_ms  = nomem_sat16(now - _last_hub_rx_ms);
+    s.in_flight    = nomem_sat16(espnow_in_flight());
+    s.leak_floor   = nomem_sat16(_espnow_leak_floor);
+    s.iram_free    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    s.iram_min     = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    s.iram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    uint8_t prim = 0;
+    wifi_second_chan_t sec;
+    if (esp_wifi_get_channel(&prim, &sec) != ESP_OK) prim = 0;
+    s.chan_now     = prim;
+    s.chan_hub     = _hub_channel;
+    s.loop_max_ms  = _health_loop_max_ms;
+    int w = 0;
+    for (int i = 1; i < MSEC_N; i++)
+        if (_msec_max[i] > _msec_max[w]) w = i;
+    s.loop_section = (uint8_t)w;
+    s.ble          = ble_cam_activity_bits();
+    s.first_cmd    = cmd;
+    _nomem_snap_cb  = _espnow_cb_total;
+    _nomem_snap_rx  = _espnow_rx_total;
+    _nomem_snap_ref = _espnow_tx_refused;
+    _nomem_snap     = s;
+    Serial.printf("[ESP-NOW] first NO_MEM: cmd 0x%02X | callback %ums ago, accepted "
+                  "%ums ago, heard %ums ago | in flight %u | iram %lu free, %lu "
+                  "largest | chan %u (hub %u) | BLE 0x%02X\n",
+                  cmd, s.since_cb_ms, s.since_ok_ms, s.since_rx_ms, s.in_flight,
+                  (unsigned long)s.iram_free, (unsigned long)s.iram_largest,
+                  s.chan_now, s.chan_hub, s.ble);
+}
+
+// Every NO_MEM, from whichever task sent.
+static void nomem_note(uint8_t cmd) {
+    bool first = false;
+    uint32_t now;
+    portENTER_CRITICAL(&_nomem_mux);
+    now = millis();
+    if (!now) now = 1;
+    _nomem_last_ms = now;
+    if (!_nomem_since_ms) { _nomem_since_ms = now; first = true; }
+    portEXIT_CRITICAL(&_nomem_mux);
+    // Outside the lock: the heap walks take the heap's own lock, and nothing
+    // that can wait may run inside a critical section.
+    if (first) nomem_snapshot_take(now, cmd);
+}
+
+// An accepted send while a run is open.  The stack took a frame, so whatever
+// was refusing has stopped — the one way a run ends short of the reboot.
+static void nomem_heal() {
+    uint32_t since, d = 0;
+    portENTER_CRITICAL(&_nomem_mux);
+    since = _nomem_since_ms;
+    if (since) {
+        uint32_t now = millis();
+        d = (int32_t)(now - since) > 0 ? now - since : 0;
+        _nomem_since_ms = 0;
+        if (_nomem_healed < 0xFFFF) _nomem_healed = _nomem_healed + 1;
+        if (d > _nomem_healed_max_ms) _nomem_healed_max_ms = nomem_sat16(d);
+    }
+    portEXIT_CRITICAL(&_nomem_mux);
+    if (since)
+        Serial.printf("[ESP-NOW] NO_MEM cleared by itself after %lu ms\n",
+                      (unsigned long)d);
+}
+
+// Called with the chip about to restart: the only chance to write any of it.
+static void nomem_stash_event(uint32_t span_ms) {
+    uint32_t now = millis();
+    MountNomemSnapshot s = _nomem_snap;
+    s.cb_during      = nomem_sat16(_espnow_cb_total  - _nomem_snap_cb);
+    s.rx_during      = nomem_sat16(_espnow_rx_total  - _nomem_snap_rx);
+    s.refused_during = nomem_sat16(_espnow_tx_refused - _nomem_snap_ref);
+    encode_mount_nomem_snapshot(_evt_snap, &s);
+    _evt_magic   = MOUNT_EVT_MAGIC;
+    _evt_kind    = MOUNT_EVENT_NOMEM_REBOOT;
+    _evt_txfail  = (uint16_t)_espnow_fail_total;   // ON AIR, since boot
+    _evt_reinits = (uint16_t)_reinit_count;
+    _evt_rx_s    = (uint16_t)((now - _last_hub_rx_ms) / 1000UL);
+    _evt_tx_s    = (uint16_t)((now - _last_espnow_tx_ok_ms) / 1000UL);
+    _evt_refused = (uint16_t)_espnow_tx_refused;
+    _evt_txerr   = _espnow_last_tx_err;
+    Serial.printf("[ESP-NOW] NO_MEM for %lu ms: %u refused, %u callbacks, %u frames "
+                  "heard since the first — rebooting\n",
+                  (unsigned long)span_ms, s.refused_during, s.cb_during, s.rx_during);
+}
+
 // Every ESP-NOW send to the hub goes through here, so a refusal is counted
 // exactly once and in one place.  Returning void keeps the call sites unchanged:
 // none of them can do anything useful about a refusal in the moment — the point
@@ -1148,6 +1307,9 @@ static void espnow_tx(const uint8_t *buf, uint16_t n) {
     if (e == ESP_OK) {
         // Taken by the stack — a buffer is now out, and the callback owes it back.
         _espnow_issued = _espnow_issued + 1;
+        _espnow_ok_last_ms = millis();
+        // The ONLY place a NO_MEM run ends: the stack took a frame.
+        if (_nomem_since_ms) nomem_heal();
     }
     if (e != ESP_OK) {
         // Refused outright: it did not go out, and it never reaches the send
@@ -1156,6 +1318,9 @@ static void espnow_tx(const uint8_t *buf, uint16_t n) {
         // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
         _espnow_tx_refused  = _espnow_tx_refused + 1;
         _espnow_last_tx_err = (uint16_t)e;
+        // Stamped here, in the send path, and not sampled from the ladder: a
+        // run that ends between two ladder passes must still count as ended.
+        if (e == ESP_ERR_ESPNOW_NO_MEM) nomem_note(n > 6 ? buf[6] : 0);
     }
 }
 
@@ -1322,9 +1487,19 @@ static void send_health(bool anomaly) {
                       ((reinit_sat & 0x0FUL) << 4) |
                       ((uint32_t)worst_sec & 0x0FUL);
 #endif
-    uint8_t p[24];
+    uint8_t p[24 + HEALTH_BRIDGE_TAIL_LEN];
     encode_health_payload(p, &h);
-    send_to_hub(CMD_HEALTH, p, 24);   // no-op while unpaired (send_to_hub guards)
+    // The bridge tail: internal RAM, which free_heap above cannot show because
+    // it counts the PSRAM, and NO_MEM runs that ended on their own.  Readers
+    // that predate it take the first 24 bytes and never see it.
+    HealthBridgeTail t = {};
+    t.iram_free           = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    t.iram_min            = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    t.iram_largest        = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    t.nomem_healed        = _nomem_healed;
+    t.nomem_healed_max_ms = _nomem_healed_max_ms;
+    encode_health_bridge_tail(p + 24, &t);
+    send_to_hub(CMD_HEALTH, p, sizeof(p));   // no-op while unpaired (send_to_hub guards)
     _health_last_ms     = millis();
     _health_loop_max_ms = 0;
     // Cleared with loop_max_ms and in the same place, or the worst section
@@ -1412,6 +1587,7 @@ static void health_check_bridge(uint32_t now) {
 static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
                            const uint8_t *data, int len) {
     _last_hub_rx_ms = millis();
+    _espnow_rx_total = _espnow_rx_total + 1;   // only this task writes it
     _watchdog_fired = false;
     if (recv_info && recv_info->rx_ctrl) {
         _last_rssi = (int8_t)recv_info->rx_ctrl->rssi;
@@ -1436,6 +1612,7 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
     // Before anything else: it fired, and that is the fact the leak is measured
     // from. Success or failure both return the buffer; not firing is the fault.
     _espnow_cb_total = _espnow_cb_total + 1;
+    _espnow_cb_last_ms = millis();   // either status: a completion is a completion
     if (s == ESP_NOW_SEND_SUCCESS) {
         _espnow_consec_fails  = 0;
         _espnow_refresh_count = 0;
@@ -3240,6 +3417,12 @@ void setup() {
                       "RX stale %us, TX stale %us, refused %u (last err 0x%04X)\n",
                       _evt_kind, _evt_txfail, _evt_reinits, _evt_rx_s, _evt_tx_s,
                       _evt_refused, _evt_txerr);
+        if (_evt_kind == MOUNT_EVENT_NOMEM_REBOOT) {
+            Serial.print("[ESPNOW] NO_MEM snapshot:");
+            for (int i = 0; i < MOUNT_EVENT_NOMEM_SNAP_LEN; i++)
+                Serial.printf(" %02X", _evt_snap[i]);
+            Serial.println();
+        }
     }
     if (_iso_magic != ISOLATION_RTC_MAGIC) {
         _iso_magic     = ISOLATION_RTC_MAGIC;
@@ -3582,6 +3765,39 @@ void loop() {
     }
 
     MARK(MSEC_ESPNOW);
+    // ── Refused sends → reboot (see NOMEM_RESTART_MS) ────────────────────
+    // First in this section on purpose: it answers in three seconds a fault the
+    // one-way detector below takes thirty to recognise, and then treats with a
+    // WiFi-level restart that has never once held on a mount.  It shares that
+    // detector's reboot quota — from the operator's chair these are the same
+    // event — so a fault that a boot does not fix cannot boot-loop the mount;
+    // past the quota the old ladder takes over, exactly as it was.
+    if (NOMEM_RESTART_MS && _cfg_valid && !_setup_active && !_pair_active) {
+        uint32_t since, last;
+        portENTER_CRITICAL(&_nomem_mux);
+        since = _nomem_since_ms;
+        last  = _nomem_last_ms;
+        portEXIT_CRITICAL(&_nomem_mux);
+        int32_t span = since ? (int32_t)(last - since) : -1;
+        if (span >= (int32_t)NOMEM_RESTART_MS) {
+            if (_wedge_reboots < TXWEDGE_MAX_REBOOTS) {
+                _wedge_reboots++;
+                nomem_stash_event((uint32_t)span);
+                wedge_count_bump();     // persists across the restart AND a power cycle
+                esp_restart();
+            } else {
+                static uint32_t moaned = 0;
+                uint32_t nw = millis();
+                if (!moaned || (nw - moaned) > 60000UL) {
+                    moaned = nw ? nw : 1;
+                    Serial.printf("[ESP-NOW] NO_MEM for %ldms but %d reboots already "
+                                  "— leaving it to the old ladder\n",
+                                  (long)span, TXWEDGE_MAX_REBOOTS);
+                }
+            }
+        }
+    }
+
     // ── One-way transmit wedge ───────────────────────────────────────────
     // Watched on the RATE of send failures, not on silence, so a mount that is
     // still receiving is not excused.  See TXWEDGE_FAILS_PER_S.
@@ -3708,7 +3924,7 @@ void loop() {
     // event in the first place.
     if (_evt_pending && hub_ok) {
         _evt_pending = false;
-        uint8_t p[MOUNT_EVENT_PAYLOAD_LEN] = {
+        uint8_t p[MOUNT_EVENT_NOMEM_PAYLOAD_LEN] = {
             _evt_kind,
             (uint8_t)(_evt_txfail  >> 8), (uint8_t)_evt_txfail,
             (uint8_t)(_evt_reinits >> 8), (uint8_t)_evt_reinits,
@@ -3717,7 +3933,13 @@ void loop() {
             (uint8_t)(_evt_refused >> 8), (uint8_t)_evt_refused,
             (uint8_t)(_evt_txerr   >> 8), (uint8_t)_evt_txerr,
             (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
-        send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
+        uint8_t n = MOUNT_EVENT_PAYLOAD_LEN;
+        // A NO_MEM reboot also carries the moment of its first refusal.
+        if (_evt_kind == MOUNT_EVENT_NOMEM_REBOOT) {
+            memcpy(p + MOUNT_EVENT_PAYLOAD_LEN, _evt_snap, MOUNT_EVENT_NOMEM_SNAP_LEN);
+            n = MOUNT_EVENT_NOMEM_PAYLOAD_LEN;
+        }
+        send_to_hub(CMD_MOUNT_EVENT, p, n);
     }
 
     // A one-way TX wedge that the WiFi-level restart cleared.  Gated on TX

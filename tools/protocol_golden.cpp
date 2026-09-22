@@ -110,6 +110,66 @@ static int do_emit() {
     n = build_position(buf, 4, 99, -12.5f, 3.25f, 456.75f, -2048, 0x05);
     emit_pkt("position_17b", buf, n);
 
+    // j: a bridge's health with the tail — the 24 uniform bytes, then internal
+    //    RAM and the NO_MEM runs that healed, exactly as send_health() writes it.
+    {
+        uint8_t hp[24 + HEALTH_BRIDGE_TAIL_LEN];
+        PayloadHealth hb;
+        hb.node_type     = HEALTH_NODE_BRIDGE;
+        hb.reset_reason  = 1;
+        hb.uptime_s      = 36000;
+        hb.free_heap     = 8400000;
+        hb.min_free_heap = 8390000;
+        hb.loop_max_ms   = 10;
+        hb.tx_fail       = 3;
+        hb.rssi          = -33;
+        hb.flags         = 0x02;
+        hb.node_u32      = 0x07010010;
+        encode_health_payload(hp, &hb);
+        HealthBridgeTail t;
+        t.iram_free           = 142000;
+        t.iram_min            = 118000;
+        t.iram_largest        = 0x0000F00D;
+        t.nomem_healed        = 2;
+        t.nomem_healed_max_ms = 0x04D2;
+        encode_health_bridge_tail(hp + 24, &t);
+        n = build_packet(buf, 2, 0x0203, CMD_HEALTH, hp, sizeof(hp));
+        emit_pkt("health_bridge_tail", buf, n);
+    }
+
+    // k: the NO_MEM reboot event — the common 14 bytes as the mount builds them,
+    //    then the snapshot through the real encoder.  Every width and both
+    //    byte orders of each field are exercised, and 0xFFFF for a saturated
+    //    interval.
+    {
+        uint8_t ep[MOUNT_EVENT_NOMEM_PAYLOAD_LEN] = {
+            MOUNT_EVENT_NOMEM_REBOOT, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02,
+            0x00, 0x03, 0x00, 0xC2, 0x30, 0x67, 0x00 };
+        MountNomemSnapshot s;
+        s.uptime_s       = 0x01020304;
+        s.accepted       = 0x0A0B0C0D;
+        s.since_cb_ms    = 0xFFFF;
+        s.since_ok_ms    = 110;
+        s.since_rx_ms    = 2100;
+        s.in_flight      = 1;
+        s.leak_floor     = 0;
+        s.iram_free      = 41234;
+        s.iram_min       = 38000;
+        s.iram_largest   = 30100;
+        s.chan_now       = 1;
+        s.chan_hub       = 6;
+        s.loop_max_ms    = 10;
+        s.loop_section   = 1;
+        s.ble            = MOUNT_NOMEM_BLE_LINKED | MOUNT_NOMEM_BLE_BONDED;
+        s.first_cmd      = CMD_STATUS;
+        s.cb_during      = 0;
+        s.rx_during      = 4;
+        s.refused_during = 18;
+        encode_mount_nomem_snapshot(ep + MOUNT_EVENT_PAYLOAD_LEN, &s);
+        n = build_packet(buf, 1, 0x0A0B, CMD_MOUNT_EVENT, ep, sizeof(ep));
+        emit_pkt("mount_event_nomem", buf, n);
+    }
+
     return 0;
 }
 

@@ -155,6 +155,52 @@
 // something survives esp_wifi_stop()/start() that does not survive a boot, and
 // only the boot is a remedy.
 #define MOUNT_EVENT_TX_WEDGE_REBOOT 3
+// The stack refused sends with ESP_ERR_ESPNOW_NO_MEM for NOMEM_RESTART_MS with
+// not one accepted in between, and the mount rebooted at once instead of
+// climbing the reinit / WiFi-restart rungs.  Neither rung has ever cleared this
+// on a mount: to 2026-09-22 all 28 mount wedges were the stack refusing sends
+// (165-597 refusals each), and all 21 WiFi-level restarts among them were
+// followed by a reboot 12-13 s later.  The ladder was spending 35-65 s arriving
+// at the one remedy that works.
+//
+// The payload is the common 14 bytes above, then MOUNT_EVENT_NOMEM_SNAP_LEN
+// bytes describing the moment of the FIRST refusal, taken before anything
+// reacted to it — the only picture of the fault itself that any node has
+// captured.  A reader that knows only the 14-byte form still reads those right.
+//
+//   [14..17] uptime_s at the first refusal                            u32
+//   [18..21] sends the stack had accepted this boot                   u32
+//   [22..23] ms since the last send-complete callback, either status  u16 sat
+//   [24..25] ms since the last send the stack accepted                u16 sat
+//   [26..27] ms since the last frame received                         u16 sat
+//   [28..29] in flight: accepted minus callbacks                      u16 sat
+//   [30..31] leak floor                                               u16 sat
+//   [32..35] internal RAM free                                        u32 bytes
+//   [36..39] internal RAM lowest this boot                            u32 bytes
+//   [40..43] internal RAM largest free block                          u32 bytes
+//   [44]     WiFi primary channel at that moment                      u8
+//   [45]     the channel the hub peer is configured on                u8
+//   [46..47] worst loop pass in the current health window, ms         u16
+//   [48]     the loop section that owned it (MSEC_* in the mount)     u8
+//   [49]     BLE activity, MOUNT_NOMEM_BLE_* bits                     u8
+//   [50]     command byte of the send that was refused                u8
+// ...then counted from that first refusal to the reboot:
+//   [51..52] send-complete callbacks                                  u16 sat
+//   [53..54] frames received                                          u16 sat
+//   [55..56] sends refused                                            u16 sat
+#define MOUNT_EVENT_NOMEM_REBOOT        4
+#define MOUNT_EVENT_NOMEM_SNAP_LEN      43
+#define MOUNT_EVENT_NOMEM_PAYLOAD_LEN   57
+static_assert(MOUNT_EVENT_NOMEM_PAYLOAD_LEN ==
+              MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN,
+              "the NO_MEM event is the common 14 bytes plus the snapshot");
+// WiFi and BLE share one radio on the S3, arbitrated in software.  Whether BLE
+// was busy at the moment the stack started refusing is a question the log has
+// never been able to answer, so it is asked here, not assumed either way.
+#define MOUNT_NOMEM_BLE_SCANNING        0x01
+#define MOUNT_NOMEM_BLE_CONNECTING      0x02
+#define MOUNT_NOMEM_BLE_LINKED          0x04
+#define MOUNT_NOMEM_BLE_BONDED          0x08
 // rssi min/mean/max (3 × int8) + noise floor min/mean/max (3 × int8)
 // + frames the window was measured over (2) + frames the receive queue refused
 // (2).  Signed dBm throughout; a report with frames == 0 means nothing was heard
@@ -840,6 +886,55 @@ typedef struct __attribute__((packed)) {
 } PayloadHealth;              // wire: 24 bytes, all multi-byte fields big-endian
                               // (build_health() is with the other builders below)
 
+// A bridge's CMD_HEALTH carries this tail after the uniform 24 bytes.  Every
+// reader takes the first 24 after a length >= 24 check — decode_health() in the
+// app, the hub's camera-link read at offset 19 — and the hub and satellites
+// forward mount frames whole, so the tail is invisible to anything that does
+// not know it is there and no other node needs a reflash.
+//
+// Internal RAM, because free_heap cannot show it.  On a mount that field is
+// esp_get_free_heap_size(), which counts the 8 MB of PSRAM, while the WiFi
+// driver allocates from internal RAM only.  "heap 8204k" was the one memory
+// number the rig had, and it could not move for the memory that matters.
+//
+//   [24..27] internal RAM free now                         u32 bytes
+//   [28..31] internal RAM lowest this boot                 u32 bytes
+//   [32..35] internal RAM largest free block now           u32 bytes
+//   [36..37] NO_MEM runs that ended with a send accepted   u16 sat, since boot
+//   [38..39] the longest of those, ms                      u16 sat
+#define HEALTH_BRIDGE_TAIL_LEN  16
+typedef struct {
+    uint32_t iram_free;
+    uint32_t iram_min;
+    uint32_t iram_largest;
+    uint16_t nomem_healed;
+    uint16_t nomem_healed_max_ms;
+} HealthBridgeTail;
+
+// The moment of a mount's first NO_MEM refusal — see MOUNT_EVENT_NOMEM_REBOOT
+// for what each field is for.  The last three are filled in at the reboot.
+typedef struct {
+    uint32_t uptime_s;
+    uint32_t accepted;
+    uint16_t since_cb_ms;
+    uint16_t since_ok_ms;
+    uint16_t since_rx_ms;
+    uint16_t in_flight;
+    uint16_t leak_floor;
+    uint32_t iram_free;
+    uint32_t iram_min;
+    uint32_t iram_largest;
+    uint8_t  chan_now;
+    uint8_t  chan_hub;
+    uint16_t loop_max_ms;
+    uint8_t  loop_section;
+    uint8_t  ble;
+    uint8_t  first_cmd;
+    uint16_t cb_during;
+    uint16_t rx_during;
+    uint16_t refused_during;
+} MountNomemSnapshot;
+
 // CMD_POSITION payload (17 bytes) — live axis positions in physical units.
 typedef struct __attribute__((packed)) {
     uint8_t pan_deg[4];       // BE float — degrees
@@ -1092,6 +1187,40 @@ static inline uint16_t build_health(uint8_t *buf, uint8_t mount_id, uint16_t seq
     uint8_t p[24];
     encode_health_payload(p, h);
     return build_packet(buf, mount_id, seq, CMD_HEALTH, p, 24);
+}
+
+// The bridge tail, written straight after the 24 bytes above.
+static inline void encode_health_bridge_tail(uint8_t p[HEALTH_BRIDGE_TAIL_LEN],
+                                             const HealthBridgeTail *t) {
+    write_be32(p + 0,  t->iram_free);
+    write_be32(p + 4,  t->iram_min);
+    write_be32(p + 8,  t->iram_largest);
+    write_be16(p + 12, t->nomem_healed);
+    write_be16(p + 14, t->nomem_healed_max_ms);
+}
+
+// The NO_MEM snapshot, written straight after the common 14 event bytes.
+static inline void encode_mount_nomem_snapshot(uint8_t p[MOUNT_EVENT_NOMEM_SNAP_LEN],
+                                               const MountNomemSnapshot *s) {
+    write_be32(p + 0,  s->uptime_s);
+    write_be32(p + 4,  s->accepted);
+    write_be16(p + 8,  s->since_cb_ms);
+    write_be16(p + 10, s->since_ok_ms);
+    write_be16(p + 12, s->since_rx_ms);
+    write_be16(p + 14, s->in_flight);
+    write_be16(p + 16, s->leak_floor);
+    write_be32(p + 18, s->iram_free);
+    write_be32(p + 22, s->iram_min);
+    write_be32(p + 26, s->iram_largest);
+    p[30] = s->chan_now;
+    p[31] = s->chan_hub;
+    write_be16(p + 32, s->loop_max_ms);
+    p[34] = s->loop_section;
+    p[35] = s->ble;
+    p[36] = s->first_cmd;
+    write_be16(p + 37, s->cb_during);
+    write_be16(p + 39, s->rx_during);
+    write_be16(p + 41, s->refused_during);
 }
 
 // Build a CMD_POSITION packet (17-byte payload, physical units).

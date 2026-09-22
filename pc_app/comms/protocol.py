@@ -832,6 +832,14 @@ class HealthPayload:
     rssi:          int
     flags:         int    # HEALTH_FLAG_* bits
     node_u32:      int    # node-specific counter (hub=ghost drops, bridge=reinits)
+    # The bridge tail (HEALTH_BRIDGE_TAIL_LEN bytes after the 24); None when the
+    # sender predates it or is not a bridge.  Internal RAM because free_heap on
+    # a mount counts the PSRAM and cannot move for what the radio allocates.
+    iram_free:           Optional[int] = None
+    iram_min:            Optional[int] = None
+    iram_largest:        Optional[int] = None
+    nomem_healed:        Optional[int] = None   # NO_MEM runs that ended on their own
+    nomem_healed_max_ms: Optional[int] = None
 
     @property
     def anomaly(self) -> bool:
@@ -849,10 +857,15 @@ def decode_health(payload: bytes) -> HealthPayload:
     (node_type, reset_reason, uptime_s, free_heap, min_free,
      loop_max_ms, tx_fail, rssi, flags, node_u32) = struct.unpack(
         ">BBIIIHHbBI", payload[:24])
+    tail = {}
+    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+        (tail["iram_free"], tail["iram_min"], tail["iram_largest"],
+         tail["nomem_healed"], tail["nomem_healed_max_ms"]) = struct.unpack(
+            ">IIIHH", payload[24:24 + HEALTH_BRIDGE_TAIL_LEN])
     return HealthPayload(
         node_type=node_type, reset_reason=reset_reason, uptime_s=uptime_s,
         free_heap=free_heap, min_free_heap=min_free, loop_max_ms=loop_max_ms,
-        tx_fail=tx_fail, rssi=rssi, flags=flags, node_u32=node_u32)
+        tx_fail=tx_fail, rssi=rssi, flags=flags, node_u32=node_u32, **tail)
 
 
 @dataclass
@@ -1804,7 +1817,62 @@ SAT_DOWNLINK_TOP_CMDS     = 3
 MOUNT_EVENT_ISOLATED      = 1
 MOUNT_EVENT_TX_WEDGE      = 2
 MOUNT_EVENT_TX_WEDGE_REBOOT = 3
+# The stack refused every send with NO_MEM for 3 s and the mount rebooted at
+# once, skipping the reinit and WiFi-restart rungs that have never cleared it.
+# The payload is the common 14 bytes plus a snapshot of the FIRST refusal —
+# layout and reasoning in shared/protocol.h.
+MOUNT_EVENT_NOMEM_REBOOT      = 4
+MOUNT_EVENT_NOMEM_SNAP_LEN    = 43
+MOUNT_EVENT_NOMEM_PAYLOAD_LEN = MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN
+MOUNT_NOMEM_BLE_SCANNING      = 0x01
+MOUNT_NOMEM_BLE_CONNECTING    = 0x02
+MOUNT_NOMEM_BLE_LINKED        = 0x04
+MOUNT_NOMEM_BLE_BONDED        = 0x08
+# A bridge's CMD_HEALTH carries this many bytes after the uniform 24: internal
+# RAM free / lowest / largest block, and NO_MEM runs that ended on their own.
+HEALTH_BRIDGE_TAIL_LEN        = 16
 CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
+
+
+@dataclass
+class MountNomemSnapshot:
+    """The moment a mount's stack first refused a send with NO_MEM.
+
+    Taken before anything reacted to it, carried across the reboot in RTC
+    memory, and the only picture of the fault itself that any node captures.
+    The last three fields count from that refusal to the reboot.
+    """
+    uptime_s:       int
+    accepted:       int    # sends the stack had accepted this boot
+    since_cb_ms:    int    # since the last send-complete callback (saturates 65535)
+    since_ok_ms:    int    # since the last accepted send
+    since_rx_ms:    int    # since the last frame received
+    in_flight:      int    # accepted minus callbacks
+    leak_floor:     int
+    iram_free:      int
+    iram_min:       int
+    iram_largest:   int
+    chan_now:       int    # WiFi primary channel at that moment
+    chan_hub:       int    # the channel the hub peer is configured on
+    loop_max_ms:    int
+    loop_section:   int    # MSEC_* in the mount firmware
+    ble:            int    # MOUNT_NOMEM_BLE_* bits
+    first_cmd:      int    # command byte of the refused send
+    cb_during:      int
+    rx_during:      int
+    refused_during: int
+
+
+_NOMEM_SNAP_FMT = ">IIHHHHHIIIBBHBBBHHH"
+assert struct.calcsize(_NOMEM_SNAP_FMT) == MOUNT_EVENT_NOMEM_SNAP_LEN
+
+
+def decode_mount_nomem_snapshot(snap: bytes) -> MountNomemSnapshot:
+    """Decode the MOUNT_EVENT_NOMEM_SNAP_LEN bytes after the common 14."""
+    if len(snap) < MOUNT_EVENT_NOMEM_SNAP_LEN:
+        raise ParseError(f"NO_MEM snapshot too short: {len(snap)}")
+    return MountNomemSnapshot(
+        *struct.unpack(_NOMEM_SNAP_FMT, snap[:MOUNT_EVENT_NOMEM_SNAP_LEN]))
 
 
 def pkt_get_mount_table() -> bytes:

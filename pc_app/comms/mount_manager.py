@@ -52,12 +52,16 @@ from .protocol import (
     decode_mount_table, decode_mount_route, decode_sat_names, decode_sat_ips,
     MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, MOUNT_EVENT_TX_WEDGE,
     MOUNT_EVENT_TX_WEDGE_REBOOT,
+    MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_PAYLOAD_LEN,
+    MOUNT_NOMEM_BLE_SCANNING, MOUNT_NOMEM_BLE_CONNECTING,
+    MOUNT_NOMEM_BLE_LINKED, MOUNT_NOMEM_BLE_BONDED,
+    decode_mount_nomem_snapshot,
     RF_REPORT_PAYLOAD_LEN,
     decode_pair_conflict, PairConflictPayload,
 )
 
 
-from .bridge import Bridge
+from .bridge import Bridge, _kb
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +118,78 @@ def _espnow_err_text(refused: int, err: int) -> str:
         return "the stack accepted every send (0 refused) — TX stopped below that"
     name = _ESPNOW_ERRS.get(err, f"unknown error 0x{err:04X}")
     return f"{refused} sends REFUSED by the stack, last: {name}"
+
+
+def _ms(v: int) -> str:
+    """A snapshot interval.  65535 is the u16 ceiling, so it means 'at least'."""
+    if v >= 0xFFFF:
+        return ">=65 s"
+    return f"{v} ms" if v < 10000 else f"{v / 1000:.1f} s"
+
+
+def _ble_activity(bits: int) -> str:
+    parts = []
+    if bits & MOUNT_NOMEM_BLE_SCANNING:
+        parts.append("SCANNING")
+    if bits & MOUNT_NOMEM_BLE_CONNECTING:
+        parts.append("CONNECTING")
+    if bits & MOUNT_NOMEM_BLE_LINKED:
+        parts.append("camera linked")
+    elif bits & MOUNT_NOMEM_BLE_BONDED:
+        parts.append("camera bonded, not linked")
+    else:
+        parts.append("no camera")
+    return ", ".join(parts)
+
+
+def _nomem_event_text(b: bytes, txf: int, rei: int, ref: int,
+                      err: int) -> tuple[str, str]:
+    """A NO_MEM reboot as two lines: what happened, then the snapshot.
+
+    The first line carries the ONE reading the numbers support on their own —
+    whether sends were completing after the first refusal — because that is
+    the split between a radio that stopped finishing sends and a refusal that
+    is not our sends backing up at all.  Everything else is printed as
+    measured, with no thresholds: nobody knows yet what a normal value is, and
+    a verdict written before the first capture would be a guess.
+    """
+    head = ("REBOOTED ON REFUSED SENDS — every send refused for lack of memory "
+            "(NO_MEM), none accepted for 3 s, so it rebooted without the reinit "
+            "or the WiFi restart, neither of which has ever cleared this on a mount")
+    since_boot = "since boot: txfail %d, %d stack reinits, %s" % (
+        txf, rei, _espnow_err_text(ref, err))
+    if len(b) < MOUNT_EVENT_NOMEM_PAYLOAD_LEN:
+        return f"{head} | {since_boot} | (no snapshot in this event)", ""
+    s = decode_mount_nomem_snapshot(b[MOUNT_EVENT_PAYLOAD_LEN:])
+    if s.cb_during:
+        verdict = (f"sends were still COMPLETING after the first refusal "
+                   f"({s.cb_during}) — the queue was not stalled")
+    elif s.in_flight:
+        verdict = (f"{s.in_flight} send(s) outstanding and NOT ONE completed in "
+                   f"the 3 s — the radio had stopped finishing sends")
+    else:
+        verdict = ("by this mount's count nothing was outstanding, yet the stack "
+                   "refused for lack of memory — not our sends backing up")
+    head += " | " + verdict
+    if s.chan_now and s.chan_now != s.chan_hub:
+        head += f" | CHANNEL MOVED: radio on {s.chan_now}, hub on {s.chan_hub}"
+    try:
+        first = Cmd(s.first_cmd).name
+    except ValueError:
+        first = f"0x{s.first_cmd:02X}"
+    sect = Bridge._MOUNT_SECTION_NAMES.get(s.loop_section, str(s.loop_section))
+    detail = (
+        f"at the first refusal: up {s.uptime_s / 3600:.2f}h, {s.accepted} sends "
+        f"accepted | last completion {_ms(s.since_cb_ms)} before, last accepted "
+        f"send {_ms(s.since_ok_ms)} before, last frame heard {_ms(s.since_rx_ms)} "
+        f"before | in flight {s.in_flight}, leak floor {s.leak_floor} | iram "
+        f"{_kb(s.iram_free)} free (lowest {_kb(s.iram_min)}), largest block "
+        f"{_kb(s.iram_largest)} | WiFi channel {s.chan_now} (hub {s.chan_hub}) | "
+        f"worst loop {s.loop_max_ms} ms in '{sect}' | BLE: {_ble_activity(s.ble)} "
+        f"| refused first: {first} || until the reboot: {s.refused_during} "
+        f"refused, {s.cb_during} completions, {s.rx_during} frames heard || "
+        f"{since_boot}")
+    return head, detail
 
 
 @dataclass
@@ -952,6 +1028,12 @@ class MountManager(QObject):
             ref  = (b[9] << 8) | b[10]
             err  = (b[11] << 8) | b[12]
             wifi = b[13]
+            if kind == MOUNT_EVENT_NOMEM_REBOOT:
+                head, detail = _nomem_event_text(b, txf, rei, ref, err)
+                log.warning("MOUNT EVENT cam%d %s", mid, head)
+                if detail:
+                    log.warning("MOUNT EVENT cam%d   %s", mid, detail)
+                return
             if kind == MOUNT_EVENT_TX_WEDGE_REBOOT:
                 # The escalation, and the only remedy with evidence behind it:
                 # 99 WiFi-level restarts on one mount changed nothing, and one

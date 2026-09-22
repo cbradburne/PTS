@@ -61,21 +61,33 @@ print("\n2. when it counts:")
 restarts = re.findall(r"^[^\n]*esp_restart\(\);", INO, re.M)
 assert len(restarts) >= 3, f"esp_restart call sites changed: {len(restarts)}"
 bumped = re.findall(r"wedge_count_bump\(\);[^\n]*\n\s*esp_restart\(\);", INO)
-assert len(bumped) == 2, \
-    f"{len(bumped)} of {len(restarts)} restarts bump the count. It must be the two\n" \
-    "    the radio takes itself down for — MOUNT_EVENT_ISOLATED and\n" \
-    "    MOUNT_EVENT_TX_WEDGE_REBOOT — and no others, or a reflash or an\n" \
-    "    identity change would read as a wedge."
+assert len(bumped) == 3, \
+    f"{len(bumped)} of {len(restarts)} restarts bump the count. It must be the three\n" \
+    "    the radio takes itself down for — MOUNT_EVENT_ISOLATED,\n" \
+    "    MOUNT_EVENT_TX_WEDGE_REBOOT and MOUNT_EVENT_NOMEM_REBOOT — and no others,\n" \
+    "    or a reflash or an identity change would read as a wedge."
 
-# Both kinds, named. From the operator's chair they are the same event: the
+# All three kinds, named. From the operator's chair they are the same event: the
 # radio stopped and the bridge rebooted itself to get it back.
 for kind in ("MOUNT_EVENT_ISOLATED", "MOUNT_EVENT_TX_WEDGE_REBOOT"):
     blk = INO[INO.index(f"_evt_kind    = {kind};"):]
     blk = blk[:blk.index("esp_restart();")]
     assert "wedge_count_bump();" in blk, \
-        f"the {kind} restart does not bump the count, so one of the two ways a\n" \
+        f"the {kind} restart does not bump the count, so one of the ways a\n" \
         "    bridge wedges goes unrecorded"
-print("   both radio self-rescues, and no other restart      OK")
+# The NO_MEM reboot sets its kind inside nomem_stash_event() and bumps the count
+# in the rung that calls it, so it is checked there rather than by proximity.
+stash = INO[INO.index("static void nomem_stash_event("):]
+stash = stash[:stash.index("\n}\n")]
+assert "_evt_kind    = MOUNT_EVENT_NOMEM_REBOOT;" in stash, \
+    "the NO_MEM stash does not name its kind"
+start = INO.index("Refused sends → reboot")
+rung = INO[start:INO.index("One-way transmit wedge", start)]
+assert re.search(r"nomem_stash_event\([^\n]*\n\s*wedge_count_bump\(\);[^\n]*\n\s*esp_restart\(\);",
+                 rung), \
+    "the NO_MEM reboot does not bump the count, so the commonest way a bridge\n" \
+    "    wedges — every one on record — goes unrecorded"
+print("   all three radio self-rescues, and no other restart  OK")
 
 # ---- 3. it reaches the operator --------------------------------------------
 print("\n3. how it is reported:")

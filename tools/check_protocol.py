@@ -129,6 +129,18 @@ SCALAR_MAP = {
     "SUBJECT_RECORD_LEN":       ("SUBJECT_RECORD_LEN", True),
     "SUBJECT_LIST_PAYLOAD_LEN": ("SUBJECT_LIST_PAYLOAD_LEN", True),
     "CONFIG_REPORT_PAYLOAD_LEN": ("CONFIG_REPORT_PAYLOAD_LEN", False),
+    # The NO_MEM snapshot and the bridge health tail are layouts two ends share
+    # byte for byte, so their lengths and bits are held here and the golden
+    # vectors below build them in C and decode them in Python.
+    "MOUNT_EVENT_PAYLOAD_LEN":       ("MOUNT_EVENT_PAYLOAD_LEN", True),
+    "MOUNT_EVENT_NOMEM_REBOOT":      ("MOUNT_EVENT_NOMEM_REBOOT", True),
+    "MOUNT_EVENT_NOMEM_SNAP_LEN":    ("MOUNT_EVENT_NOMEM_SNAP_LEN", True),
+    "MOUNT_EVENT_NOMEM_PAYLOAD_LEN": ("MOUNT_EVENT_NOMEM_PAYLOAD_LEN", True),
+    "MOUNT_NOMEM_BLE_SCANNING":      ("MOUNT_NOMEM_BLE_SCANNING", True),
+    "MOUNT_NOMEM_BLE_CONNECTING":    ("MOUNT_NOMEM_BLE_CONNECTING", True),
+    "MOUNT_NOMEM_BLE_LINKED":        ("MOUNT_NOMEM_BLE_LINKED", True),
+    "MOUNT_NOMEM_BLE_BONDED":        ("MOUNT_NOMEM_BLE_BONDED", True),
+    "HEALTH_BRIDGE_TAIL_LEN":        ("HEALTH_BRIDGE_TAIL_LEN", True),
 }
 
 # C enum members that are C-side only (none currently).  Add here if a value
@@ -251,6 +263,22 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
                                    12, 3, -58, 0x01, 2)),
         "position_17b": (4, 99, Cmd.POSITION,
                          struct.pack(">fffiB", -12.5, 3.25, 456.75, -2048, 0x05)),
+        "health_bridge_tail": (2, 0x0203, Cmd.HEALTH,
+                               struct.pack(">BBIIIHHbBI", 1, 1, 36000, 8400000,
+                                           8390000, 10, 3, -33, 0x02, 0x07010010)
+                               + struct.pack(">IIIHH", 142000, 118000, 0xF00D,
+                                             2, 0x04D2)),
+        "mount_event_nomem": (1, 0x0A0B, Cmd.MOUNT_EVENT,
+                              bytes([pyproto.MOUNT_EVENT_NOMEM_REBOOT, 0x00, 0x03,
+                                     0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
+                                     0xC2, 0x30, 0x67, 0x00])
+                              + struct.pack(">IIHHHHHIIIBBHBBBHHH",
+                                            0x01020304, 0x0A0B0C0D, 0xFFFF, 110,
+                                            2100, 1, 0, 41234, 38000, 30100, 1, 6,
+                                            10, 1,
+                                            pyproto.MOUNT_NOMEM_BLE_LINKED
+                                            | pyproto.MOUNT_NOMEM_BLE_BONDED,
+                                            int(Cmd.STATUS), 0, 4, 18)),
     }
 
 
@@ -354,6 +382,29 @@ def check_golden(pyproto):
                 or not pp.axis_moving(pyproto.Axis.PAN) or not pp.any_moving):
             fail("decode_position() fields differ from the C-built POSITION payload")
         ok("semantic decoders (STATUS, LOOK_AT_STATUS, HEALTH, POSITION) verified on C bytes")
+
+        # The bridge tail and the NO_MEM snapshot, decoded from C-built bytes.
+        # A 24-byte health must still decode with no tail at all.
+        if hh.iram_free is not None:
+            fail("decode_health() invented a bridge tail on a 24-byte payload")
+        ht = pyproto.decode_health(c_pkts["health_bridge_tail"][7:-2])
+        if (ht.uptime_s != 36000 or ht.node_u32 != 0x07010010
+                or (ht.iram_free, ht.iram_min, ht.iram_largest,
+                    ht.nomem_healed, ht.nomem_healed_max_ms)
+                != (142000, 118000, 0xF00D, 2, 0x04D2)):
+            fail("decode_health() misread the C-built bridge tail")
+        ev = c_pkts["mount_event_nomem"][7:-2]
+        if len(ev) != pyproto.MOUNT_EVENT_NOMEM_PAYLOAD_LEN or ev[0] != 4:
+            fail("the C-built NO_MEM event is not the length or kind Python expects")
+        sn = pyproto.decode_mount_nomem_snapshot(ev[pyproto.MOUNT_EVENT_PAYLOAD_LEN:])
+        if ((sn.uptime_s, sn.accepted, sn.since_cb_ms, sn.since_ok_ms, sn.since_rx_ms,
+             sn.in_flight, sn.leak_floor, sn.iram_free, sn.iram_min, sn.iram_largest,
+             sn.chan_now, sn.chan_hub, sn.loop_max_ms, sn.loop_section, sn.ble,
+             sn.first_cmd, sn.cb_during, sn.rx_during, sn.refused_during)
+                != (0x01020304, 0x0A0B0C0D, 0xFFFF, 110, 2100, 1, 0, 41234, 38000,
+                    30100, 1, 6, 10, 1, 0x0C, int(pyproto.Cmd.STATUS), 0, 4, 18)):
+            fail("decode_mount_nomem_snapshot() misread the C-built snapshot")
+        ok("bridge health tail and NO_MEM snapshot verified on C bytes")
 
         # ── parse: Python builds / mangles packets, C must agree ────────────
         AxisGroup = pyproto.AxisGroup
