@@ -410,4 +410,47 @@ assert "void onResult(BLEAdvertisedDevice dev)" in cb and "BLEAdvertisedDevice *
     "    would leave it dangling. It must copy what it needs, as it did."
 print("   freed once read, counted, and nothing points into them  OK")
 
+# ---- 10. a camera switched off must not send the mount scanning ------------------
+# The foyer test on 2026-09-23: camera off for ten minutes, and the mount
+# scanned 5 s in every 20 because its 10 s retry landed inside a 15 s connect
+# attempt, NimBLE refused it (EALREADY), and that read as "could not start —
+# rescan". Every scan held 127-165 devices; all eight NO_MEM runs came out of
+# them. And two of the eight began after a scan had FINISHED, while its results
+# sat waiting up to five seconds for the next retry to free them.
+print("\n10. an absent camera, and a finished scan:")
+FLATB = re.sub(r"\s+", " ", BLE)
+assert re.search(r"bool busy = _bc_connected \|\| _bc_conn != BLE_HS_CONN_HANDLE_NONE "
+                 r"\|\| _bc_scanning \|\| ble_gap_conn_active\(\);", FLATB), \
+    "a connection attempt in progress is not busy, so the 10 s retry lands inside\n" \
+    "    the 15 s attempt, fails, and drops the camera into a scan"
+gap = body(BLE, "static int bc_gap_event(")
+fail_blk = gap[gap.index("if (ev->connect.status != 0) {"):]
+fail_blk = fail_blk[:fail_blk.index("return 0;")]
+assert "_bc_retry_ms = t ? t : 1;" in fail_blk, \
+    "a failed attempt does not restart the retry clock, so with the busy fix the\n" \
+    "    next attempt is already due and BLE holds the radio back to back"
+done = body(BLE, "static void bc_scan_done(")
+assert "_bc_scan_end_ms" in done and done.index("_bc_scan_end_ms") < done.index("_bc_scan_ready  = true"), \
+    "the scan's end is not stamped before it is announced, so the gap below is\n" \
+    "    measured from an older scan"
+assert "ble_cam_free_scan" not in done and "clearResults" not in done, \
+    "results are freed on the BLE task, inside the library's own callback"
+early = poll[poll.index("if (_bc_scan_ready && !ble_gap_disc_active() &&"):]
+early = early[:early.index(";") + 1]
+assert "(uint32_t)(now - _bc_scan_end_ms) >= BC_SCAN_FREE_GAP_MS" in early and \
+       "ble_cam_free_scan()" in early, \
+    "a finished scan is freed without the gap after it ended — after a CANCEL a\n" \
+    "    report may still be walking the results"
+assert poll.index("if (_bc_scan_ready && !ble_gap_disc_active() &&") < \
+       poll.index("if (!busy && !held &&"), \
+    "the early free sits behind the retry gate, so it still waits for `due`"
+assert re.search(r"#define NOMEM_SCAN_FREE_GAP_MS\s+BC_SCAN_FREE_GAP_MS", INO), \
+    "the ladder and the camera code keep separate numbers for the same safety gap"
+assert "_bc_scan_freed_at_ms = t ? t : 1;" in body(BLE, "static uint32_t ble_cam_free_scan("), \
+    "the free is not stamped, so the ladder cannot see one made during its run"
+assert "(int32_t)(fa - since) >= 0" in step and "_bc_scan_freed_at_ms" in step, \
+    "the ladder does not record a scan freed during the run by ble_cam_poll(), so\n" \
+    "    that cure would be credited to whatever step came next"
+print("   an attempt in progress is busy; a finished scan is freed at once  OK")
+
 print("\nALL CHECKS PASSED")

@@ -1188,7 +1188,7 @@ static void espnow_peer_long_range(const uint8_t *mac) {
 #ifndef NOMEM_BLE_HOLD_MS
 #define NOMEM_BLE_HOLD_MS       10000UL
 #endif
-#define NOMEM_SCAN_FREE_GAP_MS    200UL
+#define NOMEM_SCAN_FREE_GAP_MS    BC_SCAN_FREE_GAP_MS   // one number, in ble_camera.h
 #ifndef NOMEM_RESERVE_AFTER_MS
 #define NOMEM_RESERVE_AFTER_MS   1000UL
 #endif
@@ -1434,6 +1434,16 @@ static void nomem_ladder_step(uint32_t since, uint32_t now) {
         ble_cam_free_scan();
         l.steps          |= MOUNT_NOMEM_STEP_SCAN_FREED;
         l.t_free_ms       = nomem_sat16(age);
+        l.iram_after_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        acted = true;
+    }
+    //    ...or a FINISHED scan's results, freed by ble_cam_poll() during this
+    //    run.  Not the ladder's doing, but the same remedy, and a cure the
+    //    record did not mention would be credited to whatever came next.
+    uint32_t fa = _bc_scan_freed_at_ms;
+    if (!(l.steps & MOUNT_NOMEM_STEP_SCAN_FREED) && fa && (int32_t)(fa - since) >= 0) {
+        l.steps          |= MOUNT_NOMEM_STEP_SCAN_FREED;
+        l.t_free_ms       = nomem_sat16(fa - since);
         l.iram_after_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         acted = true;
     }

@@ -477,6 +477,13 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         if (ev->connect.status != 0) {
             Serial.printf("[CAM] connect failed, status=%d\n", ev->connect.status);
             _bc_conn = BLE_HS_CONN_HANDLE_NONE;
+            // Restart the retry clock at the FAILURE, not the start: an attempt
+            // lasts 15 s, longer than CAM_RETRY_MS, so counted from its start
+            // the next one was already due and the mount would hold the shared
+            // radio for attempts back to back while its camera is switched off.
+            // This keeps CAM_RETRY_MS between attempts, as it always meant.
+            uint32_t t = millis();
+            _bc_retry_ms = t ? t : 1;
             return 0;
         }
         _bc_conn = ev->connect.conn_handle;
@@ -804,13 +811,19 @@ static void ble_cam_setup() {
 
 static volatile bool _bc_scanning   = false;
 static volatile bool _bc_scan_ready = false;
+// When the last scan ended, completed or cancelled — so its results can be
+// freed as soon as it is safe to (see BC_SCAN_FREE_GAP_MS), not at the next
+// retry, which could be five seconds later.
+static volatile uint32_t _bc_scan_end_ms = 0;
 
 // Runs on the BLE task, so it does no work beyond saying the scan is over.
 // Choosing can wait fifteen seconds for a keystroke, which has no business
 // happening on that task.
 static void bc_scan_done(BLEScanResults) {
-    _bc_scanning   = false;
-    _bc_scan_ready = true;
+    uint32_t t = millis();
+    _bc_scan_end_ms = t ? t : 1;   // before _bc_scan_ready, which is what is read
+    _bc_scanning    = false;
+    _bc_scan_ready  = true;
 }
 
 static bool bc_choose() {
@@ -958,6 +971,14 @@ static uint8_t ble_cam_activity_bits() {
 // NimBLE delivers no more reports for it.
 static uint16_t _bc_scan_devices  = 0;   // what the last scan freed had held
 static uint16_t _bc_scan_freed_kb = 0;   // internal RAM freeing it gave back
+// When the last free happened.  Read by the mount's NO_MEM ladder, so a free
+// that lands during a run is on that run's record whoever made it.
+static volatile uint32_t _bc_scan_freed_at_ms = 0;
+// How long after a scan ENDS before its results may be freed.  After a
+// completed scan NimBLE reports nothing more; after a CANCEL a report the BLE
+// task was already handling may still be walking the results, and deleting
+// them under it would corrupt the heap.  One number for every path that frees.
+#define BC_SCAN_FREE_GAP_MS 200UL
 
 static uint32_t ble_cam_free_scan() {
     BLEScan *sc = BLEDevice::getScan();
@@ -967,6 +988,8 @@ static uint32_t ble_cam_free_scan() {
     sc->clearResults();
     uint32_t after  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     uint32_t freed  = after > before ? after - before : 0;
+    uint32_t t      = millis();
+    _bc_scan_freed_at_ms = t ? t : 1;
     _bc_scan_devices  = n > 0xFFFF ? 0xFFFF : (uint16_t)n;
     _bc_scan_freed_kb = (uint16_t)((freed + 512) / 1024);
     Serial.printf("[CAM] scan results freed: %lu devices, %lu bytes internal\n",
@@ -1014,7 +1037,17 @@ static void ble_cam_poll() {
     // there is no long blocking call in loop() any more, and nothing for the
     // task watchdog to trip over — the reason it had to be disabled was the
     // wrapper's blocking connect(), which is gone.
-    bool busy = _bc_connected || _bc_conn != BLE_HS_CONN_HANDLE_NONE || _bc_scanning;
+    //
+    // A connection attempt in progress is busy too.  ble_gap_connect() runs for
+    // up to 15 s and this retries every CAM_RETRY_MS (10 s), so without it the
+    // retry landed INSIDE the attempt, NimBLE refused it as EALREADY, and the
+    // code below read that as "could not start the attempt — rescanning": the
+    // mount dropped its own camera and scanned, 5 s in every 20, for as long
+    // as the camera stayed off.  In the foyer on 2026-09-23 each of those
+    // scans held 127-165 devices and took internal RAM to 0.3 KB, and all
+    // eight NO_MEM runs that afternoon came out of them.
+    bool busy = _bc_connected || _bc_conn != BLE_HS_CONN_HANDLE_NONE || _bc_scanning
+             || ble_gap_conn_active();
     // _bc_retry_ms == 0 means "try now".  Without that case the arithmetic
     // below reads (now - 0) > CAM_RETRY_MS, so a freshly booted mount sits for
     // a full ten seconds before it even begins looking for its camera — dead
@@ -1028,6 +1061,15 @@ static void ble_cam_poll() {
     // connection attempt until the hold runs out.  The rest of this carries on.
     bool held = _bc_hold_until_ms && (int32_t)(now - _bc_hold_until_ms) < 0;
     if (_bc_hold_until_ms && !held) _bc_hold_until_ms = 0;
+    // A finished scan's results are freed as soon as it is safe, not at the
+    // next retry.  They used to wait for the consume below, up to five seconds
+    // after the scan ended, with BLE idle and nothing for the NO_MEM ladder to
+    // stop — two of the eight foyer runs on 2026-09-23 began in that window
+    // and waited a second for the reserve.  _bc_cand already holds everything
+    // the choice needs, copied out as each device was reported.
+    if (_bc_scan_ready && !ble_gap_disc_active() &&
+            (uint32_t)(now - _bc_scan_end_ms) >= BC_SCAN_FREE_GAP_MS)
+        ble_cam_free_scan();
     // No bond and not pairing: do not go looking.  See _bc_have_bond — an
     // unbonded mount that hunts for cameras takes the link away from whichever
     // mount owns the one it finds.
