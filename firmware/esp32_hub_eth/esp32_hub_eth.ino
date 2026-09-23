@@ -842,11 +842,28 @@ static inline bool mount_is_active(int i, uint32_t now) {
 //
 // 96 h answers "how long can it stay up" to twelve times the old interval and
 // still lands its restart on Wednesday night, leaving a fresh hub for Friday's
-// production without anyone remembering to do it. RESTORE TO 8 (or decide on a
-// new value) once that week's evidence is in.
-#define MAINT_RESTART_HOURS      96UL
+// production without anyone remembering to do it.
+//
+// WEEKLY since 2026-09-23, and that is the week's answer. The premise above did
+// not hold: one boot ran 85.8 h (from 23:04 on the 19th, logged to 12:48 on
+// the 23rd) with no refused send, no ladder rung and no stall, heap flat at
+// 165-169k throughout; its last refused send was 2026-09-12 21:16, eleven days
+// earlier. The two faults this hub has ever had — the NO_MEM wedge and the
+// callback stall — each have their own detector and rung now, so this restart
+// is not what protects it. Kept as a backstop rather than switched off (0), by
+// the operator's choice: once a week at an idle moment costs almost nothing,
+// and it bounds a slow pathology nobody has seen yet.
+//
+// It lands 168 h after the hub BOOTS, at the first 20-minute idle spell after
+// that, so the moment the hub was last flashed or powered on sets the time of
+// the week it falls in.
+#define MAINT_RESTART_HOURS      168UL
 #define MAINT_RESTART_UPTIME_MS  (MAINT_RESTART_HOURS * 3600UL * 1000UL)
 #define MAINT_RESTART_IDLE_MS    (20UL * 60UL * 1000UL)
+// millis() and the product above are 32-bit: past 1193 h the multiplication
+// wraps and the restart fires at some unrelated, much shorter uptime.
+static_assert(MAINT_RESTART_HOURS <= 1193UL,
+              "MAINT_RESTART_HOURS overflows the 32-bit millisecond clock");
 
 // Survives esp_restart() (not power-on/brownout): consecutive self-restart
 // count, so a wedge that reappears instantly after every reboot can't create

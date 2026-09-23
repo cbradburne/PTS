@@ -182,7 +182,14 @@ assert mr.index("if (!MAINT_RESTART_UPTIME_MS) return;") \
     "the disable guard is AFTER the uptime test, so it never runs on the pass\n" \
     "    that matters"
 hours = int(re.search(r"#define MAINT_RESTART_HOURS\s+(\d+)", HUB).group(1))
-print(f"   interval {hours} h, and 0 genuinely disables it      OK")
+# The interval becomes milliseconds in 32 bits, and millis() is 32 bits too:
+# past 1193 h the product wraps and the hub restarts at a much shorter,
+# unrelated uptime. The firmware static_asserts it; this says so on every run.
+assert hours <= 1193, \
+    f"MAINT_RESTART_HOURS {hours} overflows the 32-bit millisecond clock"
+assert "static_assert(MAINT_RESTART_HOURS <= 1193UL" in HUB, \
+    "the firmware no longer refuses an interval that overflows"
+print(f"   interval {hours} h, and 0 genuinely disables it     OK")
 
 fwd = block("static void forward_to_mounts(const ParsedPacket &pkt)")
 assert "if (cmd_is_client_activity(pkt.cmd)) _last_client_cmd_ms = millis();" in fwd, \
