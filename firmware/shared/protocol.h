@@ -184,16 +184,40 @@
 //   [48]     the loop section that owned it (MSEC_* in the mount)     u8
 //   [49]     BLE activity, MOUNT_NOMEM_BLE_* bits                     u8
 //   [50]     command byte of the send that was refused                u8
-// ...then counted from that first refusal to the reboot:
+// ...then counted from that first refusal to the reboot (kind 4) or to the end
+// of the run (kind 5):
 //   [51..52] send-complete callbacks                                  u16 sat
 //   [53..54] frames received                                          u16 sat
 //   [55..56] sends refused                                            u16 sat
+//
+// Since 2026-09-23 the mount tries to end a run before it reboots, and the
+// event carries what it tried after the snapshot — MOUNT_EVENT_NOMEM_LADDER_LEN
+// bytes, all times in ms from the first refusal, 0xFFFF for a step not taken:
+//   [57]     steps taken, MOUNT_NOMEM_STEP_* bits                     u8
+//   [58]     what the BLE pause stopped, MOUNT_NOMEM_BLE_* bits       u8
+//   [59..60] when BLE was taken off the radio                         u16
+//   [61..62] when what the stopped scan had collected was freed       u16
+//   [63..64] when the internal-RAM reserve was released               u16
+//   [65..66] when the run ended (kind 5) or the reboot fired (kind 4) u16
+//   [67..68] bytes of reserve released                                u16
+//   [69..72] internal RAM free right after the scan was freed         u32
+//   [73..76] internal RAM free right after the reserve was released   u32
 #define MOUNT_EVENT_NOMEM_REBOOT        4
+// A run the ladder ENDED — a send was accepted after at least one step acted —
+// so the mount never rebooted.  Same payload as kind 4, sent as soon as the
+// radio works again, because this time there is no reboot to report it after.
+#define MOUNT_EVENT_NOMEM_CURED         5
 #define MOUNT_EVENT_NOMEM_SNAP_LEN      43
-#define MOUNT_EVENT_NOMEM_PAYLOAD_LEN   57
+#define MOUNT_EVENT_NOMEM_LADDER_LEN    20
+#define MOUNT_EVENT_NOMEM_PAYLOAD_LEN   77
 static_assert(MOUNT_EVENT_NOMEM_PAYLOAD_LEN ==
-              MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN,
-              "the NO_MEM event is the common 14 bytes plus the snapshot");
+              MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN +
+              MOUNT_EVENT_NOMEM_LADDER_LEN,
+              "the NO_MEM event is the common 14 bytes, the snapshot, the ladder");
+#define MOUNT_NOMEM_STEP_BLE_PAUSED     0x01   // a scan or connect attempt was stopped
+#define MOUNT_NOMEM_STEP_SCAN_FREED     0x02   // ...and what the scan held was freed
+#define MOUNT_NOMEM_STEP_RESERVE        0x04   // the internal-RAM reserve was released
+#define MOUNT_NOMEM_STEP_NO_RESERVE     0x08   // its turn came and none was held
 // WiFi and BLE share one radio on the S3, arbitrated in software.  Whether BLE
 // was busy at the moment the stack started refusing is a question the log has
 // never been able to answer, so it is asked here, not assumed either way.
@@ -900,15 +924,26 @@ typedef struct __attribute__((packed)) {
 //   [24..27] internal RAM free now                         u32 bytes
 //   [28..31] internal RAM lowest this boot                 u32 bytes
 //   [32..35] internal RAM largest free block now           u32 bytes
-//   [36..37] NO_MEM runs that ended with a send accepted   u16 sat, since boot
+//   [36..37] NO_MEM runs that ended by THEMSELVES — before  u16 sat, since boot
+//            any ladder step acted
 //   [38..39] the longest of those, ms                      u16 sat
-#define HEALTH_BRIDGE_TAIL_LEN  16
+// ...added 2026-09-23 with the NO_MEM ladder; a reader takes these when the
+// payload is long enough, so a 16-byte tail still reads as it always did:
+//   [40..41] internal-RAM reserve held now, bytes (0 = none) u16
+//   [42..43] NO_MEM runs the ladder ENDED, since boot        u16 sat
+//   [44..45] devices the last finished camera scan held      u16
+//   [46..47] internal RAM freeing them gave back, KB         u16
+#define HEALTH_BRIDGE_TAIL_LEN  24
 typedef struct {
     uint32_t iram_free;
     uint32_t iram_min;
     uint32_t iram_largest;
     uint16_t nomem_healed;
     uint16_t nomem_healed_max_ms;
+    uint16_t reserve_held;
+    uint16_t nomem_cured;
+    uint16_t scan_devices;
+    uint16_t scan_freed_kb;
 } HealthBridgeTail;
 
 // The moment of a mount's first NO_MEM refusal — see MOUNT_EVENT_NOMEM_REBOOT
@@ -934,6 +969,19 @@ typedef struct {
     uint16_t rx_during;
     uint16_t refused_during;
 } MountNomemSnapshot;
+
+// What the ladder tried during a run — see MOUNT_EVENT_NOMEM_REBOOT.
+typedef struct {
+    uint8_t  steps;
+    uint8_t  ble_stopped;
+    uint16_t t_pause_ms;
+    uint16_t t_free_ms;
+    uint16_t t_reserve_ms;
+    uint16_t t_end_ms;
+    uint16_t reserve_bytes;
+    uint32_t iram_after_free;
+    uint32_t iram_after_reserve;
+} MountNomemLadder;
 
 // CMD_POSITION payload (17 bytes) — live axis positions in physical units.
 typedef struct __attribute__((packed)) {
@@ -1197,6 +1245,24 @@ static inline void encode_health_bridge_tail(uint8_t p[HEALTH_BRIDGE_TAIL_LEN],
     write_be32(p + 8,  t->iram_largest);
     write_be16(p + 12, t->nomem_healed);
     write_be16(p + 14, t->nomem_healed_max_ms);
+    write_be16(p + 16, t->reserve_held);
+    write_be16(p + 18, t->nomem_cured);
+    write_be16(p + 20, t->scan_devices);
+    write_be16(p + 22, t->scan_freed_kb);
+}
+
+// The ladder, written straight after the snapshot.
+static inline void encode_mount_nomem_ladder(uint8_t p[MOUNT_EVENT_NOMEM_LADDER_LEN],
+                                             const MountNomemLadder *l) {
+    p[0] = l->steps;
+    p[1] = l->ble_stopped;
+    write_be16(p + 2,  l->t_pause_ms);
+    write_be16(p + 4,  l->t_free_ms);
+    write_be16(p + 6,  l->t_reserve_ms);
+    write_be16(p + 8,  l->t_end_ms);
+    write_be16(p + 10, l->reserve_bytes);
+    write_be32(p + 12, l->iram_after_free);
+    write_be32(p + 16, l->iram_after_reserve);
 }
 
 // The NO_MEM snapshot, written straight after the common 14 event bytes.

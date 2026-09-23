@@ -132,6 +132,10 @@ static int do_emit() {
         t.iram_largest        = 0x0000F00D;
         t.nomem_healed        = 2;
         t.nomem_healed_max_ms = 0x04D2;
+        t.reserve_held        = 12288;
+        t.nomem_cured         = 3;
+        t.scan_devices        = 87;
+        t.scan_freed_kb       = 0x0102;
         encode_health_bridge_tail(hp + 24, &t);
         n = build_packet(buf, 2, 0x0203, CMD_HEALTH, hp, sizeof(hp));
         emit_pkt("health_bridge_tail", buf, n);
@@ -166,6 +170,18 @@ static int do_emit() {
         s.rx_during      = 4;
         s.refused_during = 18;
         encode_mount_nomem_snapshot(ep + MOUNT_EVENT_PAYLOAD_LEN, &s);
+        MountNomemLadder l;
+        l.steps              = MOUNT_NOMEM_STEP_BLE_PAUSED | MOUNT_NOMEM_STEP_SCAN_FREED
+                             | MOUNT_NOMEM_STEP_RESERVE;
+        l.ble_stopped        = MOUNT_NOMEM_BLE_SCANNING;
+        l.t_pause_ms         = 0;
+        l.t_free_ms          = 204;
+        l.t_reserve_ms       = 1000;
+        l.t_end_ms           = 0x0BBC;
+        l.reserve_bytes      = 12288;
+        l.iram_after_free    = 0x0001B8A0;
+        l.iram_after_reserve = 0x0001E8C0;
+        encode_mount_nomem_ladder(ep + MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN, &l);
         n = build_packet(buf, 1, 0x0A0B, CMD_MOUNT_EVENT, ep, sizeof(ep));
         emit_pkt("mount_event_nomem", buf, n);
     }

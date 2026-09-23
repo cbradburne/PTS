@@ -1222,6 +1222,20 @@ class Bridge:
                     n32txt += " | NO_MEM CLEARED ITSELF %d%s (longest %d ms)" % (
                         h.nomem_healed, "+" if h.nomem_healed == 0xFFFF else "",
                         h.nomem_healed_max_ms)
+            # The ladder's part of the tail, on firmware that has it.
+            if h.reserve_held is not None:
+                # Held only while there is RAM to spare and no scan running, so
+                # "no reserve" on a mount that is not mid-run says RAM is short.
+                n32txt += (" | reserve %s" % _kb(h.reserve_held) if h.reserve_held
+                           else " | no reserve")
+                if h.nomem_cured:
+                    n32txt += " | NO_MEM ENDED BY THE LADDER %d%s" % (
+                        h.nomem_cured, "+" if h.nomem_cured == 0xFFFF else "")
+                # What the camera scan collects and the mount used to keep for
+                # the whole boot: forty students' phones cost cam5 ~60 KB.
+                if h.scan_devices:
+                    n32txt += " | last scan held %d devices (%dk)" % (
+                        h.scan_devices, h.scan_freed_kb)
         elif h.node_type == HEALTH_NODE_SATELLITE:
             # Same packing, different pair: refusals high, self-restart streak
             # low.  The streak is spelled out rather than left as a number

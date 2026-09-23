@@ -1166,6 +1166,43 @@ static void espnow_peer_long_range(const uint8_t *mac) {
 #define NOMEM_RESTART_MS 3000UL
 #endif
 
+// ── ...and first, the ladder: three things to try before the reboot ────────
+//
+// The first capture (cam5, 2026-09-23 10:27) put the fault in a different
+// place from the one this was built around.  The radio had not stopped: a send
+// had completed 23 ms before the refusal and one more after it.  What was gone
+// was internal RAM — 9.2 KB free, a low of 0.6 KB — while BLE scanned for the
+// camera in a room with forty students' phones.  And two runs that week were
+// the first ever seen to end by themselves.  So a run can be ended short of a
+// reboot, and each of these is one way it might be; each is recorded, with its
+// time, so the step that ends a run names the cure.
+//
+//   at once   take BLE off the radio: stop a scan or a connect attempt, and
+//             hold off new ones for NOMEM_BLE_HOLD_MS (ble_cam_nomem_pause)
+//   +200 ms   free what the stopped scan had collected, once a report the BLE
+//             task was already handling has had time to finish
+//   +1 s      release the internal-RAM reserve this mount has held since boot
+//   +3 s      reboot, as before (NOMEM_RESTART_MS)
+//
+// Each is a switch: 0 skips it, and the ladder goes on to the next.
+#ifndef NOMEM_BLE_HOLD_MS
+#define NOMEM_BLE_HOLD_MS       10000UL
+#endif
+#define NOMEM_SCAN_FREE_GAP_MS    200UL
+#ifndef NOMEM_RESERVE_AFTER_MS
+#define NOMEM_RESERVE_AFTER_MS   1000UL
+#endif
+// The reserve: internal RAM taken once there is plenty and given back mid-run.
+// Held back ONLY while that leaves NOMEM_RESERVE_MARGIN free beside it, and
+// never while a scan is running, because a reserve that starves the scan's
+// peak would manufacture the very run it exists to end.  After a release it
+// waits NOMEM_RESERVE_RETAKE_MS, and for the RAM, before holding again.
+#ifndef NOMEM_RESERVE_BYTES
+#define NOMEM_RESERVE_BYTES     12288UL
+#endif
+#define NOMEM_RESERVE_MARGIN    40960UL
+#define NOMEM_RESERVE_RETAKE_MS 30000UL
+
 // The send path runs on BOTH cores: loop() sends from core 1, and the camera's
 // status forward sends from the NimBLE host task on core 0 (ble_cam_on_status,
 // in setup).  So arming and ending a run is one critical section, and the rung
@@ -1173,12 +1210,29 @@ static void espnow_peer_long_range(const uint8_t *mac) {
 static portMUX_TYPE      _nomem_mux      = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t _nomem_since_ms = 0;   // first NO_MEM of this run; 0 = none
 static volatile uint32_t _nomem_last_ms  = 0;   // latest NO_MEM of this run
-// Runs that ENDED with a send accepted: the stack recovering by itself, short
-// of the reboot.  Not one has ever been seen, because nothing could see one.
-// If this moves, a cure without a reboot exists, and the longest says how
-// long it needs to work.
+// Runs that ENDED BY THEMSELVES — a send accepted before any ladder step
+// acted.  None had been seen until 2026-09-23, because nothing could see one;
+// cam5 then showed two, of 1020 and 1505 ms.
 static volatile uint16_t _nomem_healed        = 0;
 static volatile uint16_t _nomem_healed_max_ms = 0;
+// Runs the ladder ENDED — a send accepted after a step acted, no reboot.
+static volatile uint16_t _nomem_cured         = 0;
+
+// The ladder's state for the current run.  Written from loop() and copied out
+// by nomem_heal() on whichever core ends the run, so both sides hold the lock.
+static uint32_t         _nomem_ladder_run = 0;   // the run (its since) this is for
+static uint8_t          _nomem_tried      = 0;   // steps attempted, internal only
+static MountNomemLadder _nomem_lad;
+#define NOMEM_TRIED_PAUSE    0x01
+#define NOMEM_TRIED_FREE     0x02
+#define NOMEM_TRIED_RESERVE  0x04
+// A cured run, copied out when it ended, waiting for loop() to report it.
+static volatile bool    _nomem_cured_due = false;
+static MountNomemSnapshot _nomem_cured_snap;
+static MountNomemLadder   _nomem_cured_lad;
+
+static void            *_nomem_reserve          = nullptr;
+static uint32_t         _nomem_reserve_freed_ms = 0;
 
 // Inputs to the snapshot that nothing recorded before.
 static volatile uint32_t _espnow_cb_last_ms = 0;  // last send callback, either status
@@ -1190,8 +1244,10 @@ static volatile uint32_t _espnow_rx_total   = 0;  // frames received since boot
 // counters as they stood here.
 static MountNomemSnapshot _nomem_snap;
 static uint32_t _nomem_snap_cb = 0, _nomem_snap_rx = 0, _nomem_snap_ref = 0;
-// Carried across the reboot beside the other _evt_* fields, under _evt_magic.
-RTC_NOINIT_ATTR static uint8_t _evt_snap[MOUNT_EVENT_NOMEM_SNAP_LEN];
+// The snapshot and the ladder, carried across the reboot beside the other
+// _evt_* fields, under _evt_magic.
+RTC_NOINIT_ATTR static uint8_t _evt_snap[MOUNT_EVENT_NOMEM_SNAP_LEN +
+                                         MOUNT_EVENT_NOMEM_LADDER_LEN];
 
 static inline uint16_t nomem_sat16(uint32_t v) {
     return v > 0xFFFF ? 0xFFFF : (uint16_t)v;
@@ -1230,10 +1286,14 @@ static void nomem_snapshot_take(uint32_t now, uint8_t cmd) {
     s.loop_section = (uint8_t)w;
     s.ble          = ble_cam_activity_bits();
     s.first_cmd    = cmd;
+    // Published under the lock: nomem_heal() copies it out on whichever core
+    // ends the run, and must not catch it half-written.
+    portENTER_CRITICAL(&_nomem_mux);
     _nomem_snap_cb  = _espnow_cb_total;
     _nomem_snap_rx  = _espnow_rx_total;
     _nomem_snap_ref = _espnow_tx_refused;
     _nomem_snap     = s;
+    portEXIT_CRITICAL(&_nomem_mux);
     Serial.printf("[ESP-NOW] first NO_MEM: cmd 0x%02X | callback %ums ago, accepted "
                   "%ums ago, heard %ums ago | in flight %u | iram %lu free, %lu "
                   "largest | chan %u (hub %u) | BLE 0x%02X\n",
@@ -1258,32 +1318,58 @@ static void nomem_note(uint8_t cmd) {
 }
 
 // An accepted send while a run is open.  The stack took a frame, so whatever
-// was refusing has stopped — the one way a run ends short of the reboot.
+// was refusing has stopped — the one way a run ends short of the reboot.  If a
+// ladder step acted first, the run is copied out HERE, before the next run can
+// overwrite it, and loop() reports it (nomem_send_cured); otherwise it ended by
+// itself and is counted in the health tail.
 static void nomem_heal() {
     uint32_t since, d = 0;
+    bool cured = false;
     portENTER_CRITICAL(&_nomem_mux);
     since = _nomem_since_ms;
     if (since) {
         uint32_t now = millis();
         d = (int32_t)(now - since) > 0 ? now - since : 0;
         _nomem_since_ms = 0;
-        if (_nomem_healed < 0xFFFF) _nomem_healed = _nomem_healed + 1;
-        if (d > _nomem_healed_max_ms) _nomem_healed_max_ms = nomem_sat16(d);
+        cured = since == _nomem_ladder_run &&
+                (_nomem_lad.steps & (MOUNT_NOMEM_STEP_BLE_PAUSED |
+                                     MOUNT_NOMEM_STEP_SCAN_FREED |
+                                     MOUNT_NOMEM_STEP_RESERVE));
+        if (cured) {
+            _nomem_cured_snap = _nomem_snap;
+            _nomem_cured_snap.cb_during      = nomem_sat16(_espnow_cb_total  - _nomem_snap_cb);
+            _nomem_cured_snap.rx_during      = nomem_sat16(_espnow_rx_total  - _nomem_snap_rx);
+            _nomem_cured_snap.refused_during = nomem_sat16(_espnow_tx_refused - _nomem_snap_ref);
+            _nomem_cured_lad          = _nomem_lad;
+            _nomem_cured_lad.t_end_ms = nomem_sat16(d);
+            _nomem_cured_due          = true;
+            if (_nomem_cured < 0xFFFF) _nomem_cured = _nomem_cured + 1;
+        } else {
+            if (_nomem_healed < 0xFFFF) _nomem_healed = _nomem_healed + 1;
+            if (d > _nomem_healed_max_ms) _nomem_healed_max_ms = nomem_sat16(d);
+        }
     }
     portEXIT_CRITICAL(&_nomem_mux);
     if (since)
-        Serial.printf("[ESP-NOW] NO_MEM cleared by itself after %lu ms\n",
-                      (unsigned long)d);
+        Serial.printf("[ESP-NOW] NO_MEM ended after %lu ms — %s\n", (unsigned long)d,
+                      cured ? "after the ladder acted" : "by itself");
 }
 
 // Called with the chip about to restart: the only chance to write any of it.
 static void nomem_stash_event(uint32_t span_ms) {
     uint32_t now = millis();
-    MountNomemSnapshot s = _nomem_snap;
+    MountNomemSnapshot s;
+    MountNomemLadder   l;
+    portENTER_CRITICAL(&_nomem_mux);
+    s = _nomem_snap;
+    l = _nomem_lad;
+    portEXIT_CRITICAL(&_nomem_mux);
     s.cb_during      = nomem_sat16(_espnow_cb_total  - _nomem_snap_cb);
     s.rx_during      = nomem_sat16(_espnow_rx_total  - _nomem_snap_rx);
     s.refused_during = nomem_sat16(_espnow_tx_refused - _nomem_snap_ref);
+    l.t_end_ms       = nomem_sat16(span_ms);
     encode_mount_nomem_snapshot(_evt_snap, &s);
+    encode_mount_nomem_ladder(_evt_snap + MOUNT_EVENT_NOMEM_SNAP_LEN, &l);
     _evt_magic   = MOUNT_EVT_MAGIC;
     _evt_kind    = MOUNT_EVENT_NOMEM_REBOOT;
     _evt_txfail  = (uint16_t)_espnow_fail_total;   // ON AIR, since boot
@@ -1295,6 +1381,122 @@ static void nomem_stash_event(uint32_t span_ms) {
     Serial.printf("[ESP-NOW] NO_MEM for %lu ms: %u refused, %u callbacks, %u frames "
                   "heard since the first — rebooting\n",
                   (unsigned long)span_ms, s.refused_during, s.cb_during, s.rx_during);
+}
+
+// ── The ladder's steps (see NOMEM_BLE_HOLD_MS) ───────────────────────────────
+
+static void nomem_reserve_release_into(MountNomemLadder &l, uint32_t age) {
+    if (!_nomem_reserve) { l.steps |= MOUNT_NOMEM_STEP_NO_RESERVE; return; }
+    heap_caps_free(_nomem_reserve);
+    _nomem_reserve          = nullptr;
+    _nomem_reserve_freed_ms = millis() ? millis() : 1;
+    l.steps             |= MOUNT_NOMEM_STEP_RESERVE;
+    l.reserve_bytes      = (uint16_t)NOMEM_RESERVE_BYTES;
+    l.t_reserve_ms       = nomem_sat16(age);
+    l.iram_after_reserve = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+}
+
+// One pass of the ladder, from loop(), while a run is open.  The actions run
+// OUTSIDE the lock — stopping a scan, freeing its results and freeing the
+// reserve all take the heap's own lock or NimBLE's — and only the record of
+// what they did is written under it.
+static void nomem_ladder_step(uint32_t since, uint32_t now) {
+    uint32_t age = now - since;
+    MountNomemLadder l;
+    portENTER_CRITICAL(&_nomem_mux);
+    if (since != _nomem_ladder_run) {           // a new run: start at the bottom
+        _nomem_ladder_run = since;
+        _nomem_tried      = 0;
+        _nomem_lad        = {};
+        _nomem_lad.t_pause_ms = _nomem_lad.t_free_ms = 0xFFFF;
+        _nomem_lad.t_reserve_ms = _nomem_lad.t_end_ms = 0xFFFF;
+    }
+    l = _nomem_lad;
+    portEXIT_CRITICAL(&_nomem_mux);
+
+    bool acted = false;
+    // 1. At once: take BLE off the radio.
+    if (!(_nomem_tried & NOMEM_TRIED_PAUSE)) {
+        _nomem_tried |= NOMEM_TRIED_PAUSE;
+        uint8_t stopped = NOMEM_BLE_HOLD_MS ? ble_cam_nomem_pause(NOMEM_BLE_HOLD_MS) : 0;
+        if (stopped) {
+            l.steps      |= MOUNT_NOMEM_STEP_BLE_PAUSED;
+            l.ble_stopped = stopped;
+            l.t_pause_ms  = nomem_sat16(age);
+            acted = true;
+        }
+    }
+    // 2. Once a report the BLE task was already handling has finished: free
+    //    what the stopped scan collected.  Never in the same pass as the stop.
+    if ((l.ble_stopped & MOUNT_NOMEM_BLE_SCANNING) && !(_nomem_tried & NOMEM_TRIED_FREE)
+            && l.t_pause_ms != 0xFFFF && age >= (uint32_t)l.t_pause_ms + NOMEM_SCAN_FREE_GAP_MS) {
+        _nomem_tried |= NOMEM_TRIED_FREE;
+        ble_cam_free_scan();
+        l.steps          |= MOUNT_NOMEM_STEP_SCAN_FREED;
+        l.t_free_ms       = nomem_sat16(age);
+        l.iram_after_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        acted = true;
+    }
+    // 3. At NOMEM_RESERVE_AFTER_MS: give the reserve back.
+    if (NOMEM_RESERVE_AFTER_MS && age >= NOMEM_RESERVE_AFTER_MS
+            && !(_nomem_tried & NOMEM_TRIED_RESERVE)) {
+        _nomem_tried |= NOMEM_TRIED_RESERVE;
+        nomem_reserve_release_into(l, age);
+        acted = true;
+    }
+    if (!acted) return;
+    portENTER_CRITICAL(&_nomem_mux);
+    if (since == _nomem_ladder_run) _nomem_lad = l;
+    portEXIT_CRITICAL(&_nomem_mux);
+    Serial.printf("[ESP-NOW] NO_MEM ladder at %lu ms: steps 0x%02X, iram %lu free\n",
+                  (unsigned long)age, l.steps,
+                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+// Hold the reserve whenever it is safe to: no run open, no scan running, the
+// retake wait over, and NOMEM_RESERVE_MARGIN left free beside it.  Checked
+// every couple of seconds from loop(); cheap when there is nothing to do.
+static void nomem_reserve_tend(uint32_t now) {
+    static uint32_t last = 0;
+    if (!NOMEM_RESERVE_BYTES || _nomem_reserve || _nomem_since_ms) return;
+    if (last && (now - last) < 2000UL) return;
+    last = now ? now : 1;
+    if (_nomem_reserve_freed_ms && (now - _nomem_reserve_freed_ms) < NOMEM_RESERVE_RETAKE_MS)
+        return;
+    if (ble_gap_disc_active()) return;
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < NOMEM_RESERVE_BYTES + NOMEM_RESERVE_MARGIN)
+        return;
+    // DMA-capable internal RAM: the pool the WiFi driver's buffers come from.
+    _nomem_reserve = heap_caps_malloc(NOMEM_RESERVE_BYTES,
+                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+}
+
+// A run the ladder ended, reported now: the radio works again, and this time
+// there is no reboot to report it after.
+static void send_to_hub(CmdType cmd, const uint8_t *payload, uint8_t plen);
+static void nomem_send_cured() {
+    if (!_nomem_cured_due) return;
+    MountNomemSnapshot s;
+    MountNomemLadder   l;
+    portENTER_CRITICAL(&_nomem_mux);
+    s = _nomem_cured_snap;
+    l = _nomem_cured_lad;
+    _nomem_cured_due = false;
+    portEXIT_CRITICAL(&_nomem_mux);
+    uint32_t now = millis();
+    uint16_t txs = (uint16_t)((now - _last_espnow_tx_ok_ms) / 1000UL);
+    uint16_t rxs = (uint16_t)((now - _last_hub_rx_ms) / 1000UL);
+    uint16_t txf = (uint16_t)_espnow_fail_total, rei = (uint16_t)_reinit_count;
+    uint16_t ref = (uint16_t)_espnow_tx_refused, err = _espnow_last_tx_err;
+    uint8_t p[MOUNT_EVENT_NOMEM_PAYLOAD_LEN] = {
+        MOUNT_EVENT_NOMEM_CURED,
+        (uint8_t)(txf >> 8), (uint8_t)txf, (uint8_t)(rei >> 8), (uint8_t)rei,
+        (uint8_t)(rxs >> 8), (uint8_t)rxs, (uint8_t)(txs >> 8), (uint8_t)txs,
+        (uint8_t)(ref >> 8), (uint8_t)ref, (uint8_t)(err >> 8), (uint8_t)err,
+        (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
+    encode_mount_nomem_snapshot(p + MOUNT_EVENT_PAYLOAD_LEN, &s);
+    encode_mount_nomem_ladder(p + MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN, &l);
+    send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
 }
 
 // Every ESP-NOW send to the hub goes through here, so a refusal is counted
@@ -1498,6 +1700,10 @@ static void send_health(bool anomaly) {
     t.iram_largest        = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     t.nomem_healed        = _nomem_healed;
     t.nomem_healed_max_ms = _nomem_healed_max_ms;
+    t.reserve_held        = _nomem_reserve ? (uint16_t)NOMEM_RESERVE_BYTES : 0;
+    t.nomem_cured         = _nomem_cured;
+    t.scan_devices        = _bc_scan_devices;
+    t.scan_freed_kb       = _bc_scan_freed_kb;
     encode_health_bridge_tail(p + 24, &t);
     send_to_hub(CMD_HEALTH, p, sizeof(p));   // no-op while unpaired (send_to_hub guards)
     _health_last_ms     = millis();
@@ -3418,8 +3624,8 @@ void setup() {
                       _evt_kind, _evt_txfail, _evt_reinits, _evt_rx_s, _evt_tx_s,
                       _evt_refused, _evt_txerr);
         if (_evt_kind == MOUNT_EVENT_NOMEM_REBOOT) {
-            Serial.print("[ESPNOW] NO_MEM snapshot:");
-            for (int i = 0; i < MOUNT_EVENT_NOMEM_SNAP_LEN; i++)
+            Serial.print("[ESPNOW] NO_MEM snapshot + ladder:");
+            for (size_t i = 0; i < sizeof(_evt_snap); i++)
                 Serial.printf(" %02X", _evt_snap[i]);
             Serial.println();
         }
@@ -3772,12 +3978,17 @@ void loop() {
     // detector's reboot quota — from the operator's chair these are the same
     // event — so a fault that a boot does not fix cannot boot-loop the mount;
     // past the quota the old ladder takes over, exactly as it was.
+    //
+    // Below the reboot, the ladder (see NOMEM_BLE_HOLD_MS) gets its three
+    // chances first, on every pass while the run is open.
     if (NOMEM_RESTART_MS && _cfg_valid && !_setup_active && !_pair_active) {
         uint32_t since, last;
         portENTER_CRITICAL(&_nomem_mux);
         since = _nomem_since_ms;
         last  = _nomem_last_ms;
         portEXIT_CRITICAL(&_nomem_mux);
+        if (since) nomem_ladder_step(since, millis());
+        else       nomem_reserve_tend(millis());
         int32_t span = since ? (int32_t)(last - since) : -1;
         if (span >= (int32_t)NOMEM_RESTART_MS) {
             if (_wedge_reboots < TXWEDGE_MAX_REBOOTS) {
@@ -3934,13 +4145,16 @@ void loop() {
             (uint8_t)(_evt_txerr   >> 8), (uint8_t)_evt_txerr,
             (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
         uint8_t n = MOUNT_EVENT_PAYLOAD_LEN;
-        // A NO_MEM reboot also carries the moment of its first refusal.
+        // A NO_MEM reboot also carries the moment of its first refusal, and
+        // what the ladder tried before the reboot.
         if (_evt_kind == MOUNT_EVENT_NOMEM_REBOOT) {
-            memcpy(p + MOUNT_EVENT_PAYLOAD_LEN, _evt_snap, MOUNT_EVENT_NOMEM_SNAP_LEN);
+            memcpy(p + MOUNT_EVENT_PAYLOAD_LEN, _evt_snap, sizeof(_evt_snap));
             n = MOUNT_EVENT_NOMEM_PAYLOAD_LEN;
         }
         send_to_hub(CMD_MOUNT_EVENT, p, n);
     }
+    // A run the ladder ended without a reboot.
+    nomem_send_cured();
 
     // A one-way TX wedge that the WiFi-level restart cleared.  Gated on TX
     // actually working again, not on hub_ok: hub_ok is an RX test, and RX was

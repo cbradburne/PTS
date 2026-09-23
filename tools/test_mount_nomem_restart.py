@@ -154,8 +154,9 @@ assert sent.index("_espnow_cb_last_ms") < sent.index("if (s == ESP_NOW_SEND_SUCC
     "    too, and 'completing' is what the snapshot is asking about"
 assert "_espnow_rx_total = _espnow_rx_total + 1" in body(INO, "static void on_espnow_recv("), \
     "frames received are not counted, so 'was it still hearing' has no answer"
-assert re.search(r"RTC_NOINIT_ATTR static uint8_t _evt_snap\[MOUNT_EVENT_NOMEM_SNAP_LEN\]", INO), \
-    "the snapshot is not in RTC memory, so the reboot erases it"
+assert re.search(r"RTC_NOINIT_ATTR static uint8_t _evt_snap\[MOUNT_EVENT_NOMEM_SNAP_LEN \+\s*"
+                 r"MOUNT_EVENT_NOMEM_LADDER_LEN\]", INO), \
+    "the snapshot and ladder are not in RTC memory, so the reboot erases them"
 stash = body(INO, "static void nomem_stash_event(")
 for need in ("encode_mount_nomem_snapshot(_evt_snap", "_evt_magic   = MOUNT_EVT_MAGIC",
              "_evt_kind    = MOUNT_EVENT_NOMEM_REBOOT"):
@@ -163,9 +164,9 @@ for need in ("encode_mount_nomem_snapshot(_evt_snap", "_evt_magic   = MOUNT_EVT_
 send = FLAT[FLAT.index("if (_evt_pending && hub_ok)"):]
 send = send[:send.index("send_to_hub(CMD_MOUNT_EVENT")]
 assert ("if (_evt_kind == MOUNT_EVENT_NOMEM_REBOOT)" in send and
-        "memcpy(p + MOUNT_EVENT_PAYLOAD_LEN, _evt_snap, MOUNT_EVENT_NOMEM_SNAP_LEN)" in send and
+        "memcpy(p + MOUNT_EVENT_PAYLOAD_LEN, _evt_snap, sizeof(_evt_snap))" in send and
         "n = MOUNT_EVENT_NOMEM_PAYLOAD_LEN" in send), \
-    "the post-reboot event does not carry the snapshot"
+    "the post-reboot event does not carry the snapshot and the ladder"
 print("   records RAM, completions, channel, BLE; survives reboot  OK")
 
 # ---- 5. the health tail ----------------------------------------------------------
@@ -180,29 +181,38 @@ print("   internal RAM and healed runs follow the 24 bytes          OK")
 # ---- 6. what the app makes of it ------------------------------------------------
 print("\n6. the app:")
 from comms import mount_manager as mm
-from comms.protocol import (Cmd, MOUNT_EVENT_NOMEM_REBOOT, MOUNT_NOMEM_BLE_LINKED,
-                            MOUNT_NOMEM_BLE_BONDED, MOUNT_NOMEM_BLE_SCANNING)
+from comms.protocol import (Cmd, MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_CURED,
+                            MOUNT_NOMEM_BLE_LINKED, MOUNT_NOMEM_BLE_BONDED,
+                            MOUNT_NOMEM_BLE_SCANNING, MOUNT_NOMEM_STEP_BLE_PAUSED,
+                            MOUNT_NOMEM_STEP_SCAN_FREED, MOUNT_NOMEM_STEP_RESERVE,
+                            MOUNT_NOMEM_STEP_NO_RESERVE)
 
 MMSRC = (REPO / "pc_app/comms/mount_manager.py").read_text()
-branch = MMSRC[MMSRC.index("if kind == MOUNT_EVENT_NOMEM_REBOOT:"):]
+branch = MMSRC[MMSRC.index("if kind in (MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_CURED):"):]
 branch = branch[:branch.index("return")]
-assert "_nomem_event_text(b, txf, rei, ref, err)" in branch, \
-    "the MOUNT_EVENT handler does not route kind 4 to the decoder"
-
-HEAD14 = bytes([MOUNT_EVENT_NOMEM_REBOOT, 0, 3, 0, 0, 0, 2, 0, 3, 0, 194, 0x30, 0x67, 0])
+assert "_nomem_event_text(kind, b, txf, rei, ref, err)" in branch, \
+    "the MOUNT_EVENT handler does not route kinds 4 and 5 to the decoder"
 
 
-def event(cb_during=0, in_flight=1, chan_now=1, chan_hub=1, ble=0, since_cb=0xFFFF):
+def head14(kind=MOUNT_EVENT_NOMEM_REBOOT):
+    return bytes([kind, 0, 3, 0, 0, 0, 2, 0, 3, 0, 194, 0x30, 0x67, 0])
+
+
+def event(cb_during=0, in_flight=1, chan_now=1, chan_hub=1, ble=0, since_cb=0xFFFF,
+          kind=MOUNT_EVENT_NOMEM_REBOOT, ladder=None):
     snap = struct.pack(">IIHHHHHIIIBBHBBBHHH", 2196, 21402, since_cb, 110, 2100,
                        in_flight, 0, 41234, 38000, 30100, chan_now, chan_hub, 10, 1,
                        ble, int(Cmd.STATUS), cb_during, 4, 18)
-    return HEAD14 + snap
+    return head14(kind) + snap + (struct.pack(">BBHHHHHII", *ladder) if ladder else b"")
 
 
 txf, rei, ref, err = 3, 0, 194, 0x3067
-head, detail = mm._nomem_event_text(event(), txf, rei, ref, err)
+# A 57-byte event is firmware from before the ladder: snapshot, no ladder.
+lines = mm._nomem_event_text(MOUNT_EVENT_NOMEM_REBOOT, event(), txf, rei, ref, err)
+head, detail = lines[0], lines[-1]
 print("   " + head[:110] + "...")
 print("   " + detail[:110] + "...")
+assert len(lines) == 2, f"a pre-ladder event grew a ladder line: {lines}"
 assert "REBOOTED ON REFUSED SENDS" in head, head
 assert "NOT ONE completed" in head, \
     f"outstanding sends with no completion in 3 s is not read as the radio\n    stopping: {head}"
@@ -213,29 +223,65 @@ for want in ("in flight 1", "iram 40k free", "largest block 29k",
     assert want in detail, f"missing {want!r} in: {detail}"
 assert "CHANNEL MOVED" not in head, "a channel that did not move is reported as moved"
 
+
+def h(**kw):
+    return mm._nomem_event_text(kw.pop("kind", MOUNT_EVENT_NOMEM_REBOOT),
+                                event(**kw), txf, rei, ref, err)[0]
+
+
 # 21402 accepted in 2196 s is ~29 due in the 3 s. A quarter of that or more is
 # a queue that is moving; fewer is a radio that has nearly stopped — the first
 # real capture had ONE against ~20 due and was misreported as "not stalled".
-h2, _ = mm._nomem_event_text(event(cb_during=25), txf, rei, ref, err)
+h2 = h(cb_during=25)
 assert "still COMPLETING" in h2 and "~29" in h2 and "NOT ONE" not in h2, h2
-h2b, _ = mm._nomem_event_text(event(cb_during=1), txf, rei, ref, err)
+h2b = h(cb_during=1)
 assert "only 1 send(s) completed" in h2b and "nearly stopped" in h2b, \
     f"one completion in 3 s against ~29 due reads as a working queue: {h2b}"
 assert "still COMPLETING" not in h2b, h2b
-h3, _ = mm._nomem_event_text(event(in_flight=0), txf, rei, ref, err)
-assert "nothing was outstanding" in h3, h3
-h4, _ = mm._nomem_event_text(event(chan_now=1, chan_hub=6), txf, rei, ref, err)
-assert "CHANNEL MOVED: radio on 1, hub on 6" in h4, h4
-_, d5 = mm._nomem_event_text(event(ble=MOUNT_NOMEM_BLE_SCANNING | MOUNT_NOMEM_BLE_LINKED
-                                   | MOUNT_NOMEM_BLE_BONDED), txf, rei, ref, err)
+assert "nothing was outstanding" in h(in_flight=0)
+assert "CHANNEL MOVED: radio on 1, hub on 6" in h(chan_now=1, chan_hub=6)
+d5 = mm._nomem_event_text(MOUNT_EVENT_NOMEM_REBOOT,
+                          event(ble=MOUNT_NOMEM_BLE_SCANNING | MOUNT_NOMEM_BLE_LINKED
+                                | MOUNT_NOMEM_BLE_BONDED), txf, rei, ref, err)[-1]
 assert "BLE: SCANNING, camera linked" in d5, d5
 print("   four verdicts, channel and BLE read correctly           OK")
 
-h6, d6 = mm._nomem_event_text(HEAD14, txf, rei, ref, err)
-assert "(no snapshot in this event)" in h6 and d6 == "", \
+only = mm._nomem_event_text(MOUNT_EVENT_NOMEM_REBOOT, head14(), txf, rei, ref, err)
+assert len(only) == 1 and "(no snapshot in this event)" in only[0], \
     "a 14-byte event of the new kind is not handled — a firmware that sends the\n" \
     "    kind without the snapshot must still log, not throw"
 print("   an event without the snapshot still logs               OK")
+
+# The ladder. A cure is named by the step the run ended SOONEST after, with the
+# gap printed, because 12 ms after a step and 900 ms after it are not the same
+# evidence. A reboot names what was tried and did not work.
+ALL3 = MOUNT_NOMEM_STEP_BLE_PAUSED | MOUNT_NOMEM_STEP_SCAN_FREED | MOUNT_NOMEM_STEP_RESERVE
+cured = mm._nomem_event_text(
+    MOUNT_EVENT_NOMEM_CURED,
+    event(kind=MOUNT_EVENT_NOMEM_CURED, cb_during=6,
+          ladder=(ALL3, MOUNT_NOMEM_BLE_SCANNING, 0, 204, 1000, 1012, 12288, 48000, 60300)),
+    txf, rei, ref, err)
+print("   " + cured[0][:110] + "...")
+print("   " + cured[1][:110] + "...")
+assert len(cured) == 3, f"a cured run is not head, ladder, snapshot: {cured}"
+assert cured[0].startswith("NO_MEM ENDED WITHOUT A REBOOT"), cured[0]
+assert "1012 ms long, ending 12 ms after the reserve was released" in cured[0], \
+    f"the cure is not attributed to the last step before the end: {cured[0]}"
+assert "its 1012 ms" in cured[0], \
+    f"completions are not judged over the cured run's own length: {cured[0]}"
+for want in ("BLE scan stopped at 0 ms", "scan freed at 204 ms (iram 46k)",
+             "reserve 12k released at 1000 ms (iram 58k)", "ended at 1012 ms"):
+    assert want in cured[1], f"missing {want!r} in: {cured[1]}"
+assert "until the end:" in cured[2], cured[2]
+
+reboot = mm._nomem_event_text(
+    MOUNT_EVENT_NOMEM_REBOOT,
+    event(ladder=(MOUNT_NOMEM_STEP_NO_RESERVE, 0, 0xFFFF, 0xFFFF, 0xFFFF, 3004, 0, 0, 0)),
+    txf, rei, ref, err)
+assert "the ladder did not end it" in reboot[0], reboot[0]
+for want in ("BLE was not scanning or connecting", "no reserve was held", "rebooted at 3004 ms"):
+    assert want in reboot[1], f"missing {want!r} in: {reboot[1]}"
+print("   a cure names its step and gap; a reboot what failed      OK")
 
 # ---- 7. the health line ----------------------------------------------------------
 BUF = io.StringIO()
@@ -272,14 +318,96 @@ new = health(struct.pack(">IIIHH", 142000, 118000, 60000, 0, 0))
 assert "iram 138k (min 115k, largest 58k)" in new, new
 assert "NO_MEM CLEARED ITSELF" not in new, \
     f"a mount on which no run ever healed claims one did: {new}"
+assert "reserve" not in new, f"a 16-byte tail is shown with the ladder's fields: {new}"
 healed = health(struct.pack(">IIIHH", 142000, 118000, 1500, 2, 1234))
 assert "largest 1.5k" in healed, \
     f"a small block is rounded to a whole k, hiding the buffer-sized difference: {healed}"
 assert "NO_MEM CLEARED ITSELF 2 (longest 1234 ms)" in healed, healed
 assert new.index("n32 1") < new.index("iram"), \
     "the tail is not appended after the existing fields"
-print("   " + healed[healed.index("n32"):])
-print("   absent -> silent, present -> iram, healed runs shown    OK")
+lad = health(struct.pack(">IIIHHHHHH", 142000, 118000, 60000, 0, 0, 12288, 3, 87, 58))
+for want in ("reserve 12k", "NO_MEM ENDED BY THE LADDER 3", "last scan held 87 devices (58k)"):
+    assert want in lad, f"missing {want!r} in: {lad}"
+none = health(struct.pack(">IIIHHHHHH", 9800, 400, 5000, 1, 1505, 0, 0, 0, 0))
+assert "no reserve" in none and "LADDER" not in none and "last scan" not in none, none
+print("   " + lad[lad.index("n32"):])
+print("   absent -> silent, present -> iram, the ladder's fields   OK")
 
 _lg.handlers, _lg.level, _lg.propagate = _saved
+
+# ---- 8. the ladder, in the firmware ---------------------------------------------
+print("\n8. the ladder:")
+step = body(INO, "static void nomem_ladder_step(")
+i_pause, i_free, i_res = (step.index("ble_cam_nomem_pause("), step.index("ble_cam_free_scan()"),
+                          step.index("nomem_reserve_release_into("))
+assert i_pause < i_free < i_res, "the steps are not in order: BLE, scan, reserve"
+assert "age >= (uint32_t)l.t_pause_ms + NOMEM_SCAN_FREE_GAP_MS" in step, \
+    "the scan is freed without waiting after the stop — a report the BLE task was\n" \
+    "    already handling would be walking the map as it is deleted"
+assert "(l.ble_stopped & MOUNT_NOMEM_BLE_SCANNING)" in step, \
+    "the scan is freed when no scan was stopped"
+assert "age >= NOMEM_RESERVE_AFTER_MS" in step, "the reserve is released at once"
+crits = [step[a:step.index("portEXIT_CRITICAL", a)]
+         for a in [i for i in range(len(step)) if step.startswith("portENTER_CRITICAL", i)]]
+for c in crits:
+    for bad in ("ble_cam_", "heap_caps_", "Serial."):
+        assert bad not in c, f"the ladder calls {bad} inside the critical section"
+rung3 = INO[INO.index("Refused sends → reboot"):]
+rung3 = rung3[:rung3.index("One-way transmit wedge")]
+assert rung3.index("nomem_ladder_step(") < rung3.index("span >= (int32_t)NOMEM_RESTART_MS"), \
+    "the reboot is checked before the ladder has had its turn"
+
+pause = body(BLE, "static uint8_t ble_cam_nomem_pause(")
+assert "ble_gap_terminate" not in pause, \
+    "the pause drops an established camera link — it is meant to stop a scan or\n" \
+    "    an attempt, not disconnect a working camera"
+assert "BLEDevice::getScan()->stop()" in pause and "ble_gap_disc_cancel" not in pause, \
+    "the scan is cancelled behind BLEScan's back, so the library's own state (and\n" \
+    "    bc_scan_done) never hear that it ended"
+assert "clearResults" not in pause and "ble_cam_free_scan" not in pause, \
+    "the pause frees the scan in the same breath as it stops it"
+poll = body(BLE, "static void ble_cam_poll(")
+assert "!busy && !held &&" in poll, "the hold is not honoured when starting a scan"
+
+heal = body(INO, "static void nomem_heal(")
+# The expression, not the declaration above it ("bool cured = false;").
+cexpr = heal[heal.index("cured = since =="):]
+cexpr = cexpr[:cexpr.index(";")]
+assert "MOUNT_NOMEM_STEP_RESERVE" in cexpr and "MOUNT_NOMEM_STEP_NO_RESERVE" not in cexpr, \
+    "a run in which no reserve was HELD counts as cured by it"
+assert "_nomem_cured_due          = true" in heal and "_nomem_cured_snap = _nomem_snap" in heal, \
+    "a cured run is not copied out before the next run can overwrite it"
+cured_send = body(INO, "static void nomem_send_cured(")
+assert "MOUNT_EVENT_NOMEM_CURED" in cured_send and "sizeof(p)" in cured_send, \
+    "a cured run is not reported as kind 5 with the full payload"
+assert "nomem_send_cured();" in INO[INO.index("if (_evt_pending && hub_ok)"):], \
+    "nothing in loop() sends the cured-run report"
+
+tend = body(INO, "static void nomem_reserve_tend(")
+for need, why in (("_nomem_since_ms) return", "while a run is open"),
+                  ("ble_gap_disc_active()", "while a scan is at its peak"),
+                  ("NOMEM_RESERVE_BYTES + NOMEM_RESERVE_MARGIN", "without the margin"),
+                  ("NOMEM_RESERVE_RETAKE_MS", "straight after a release"),
+                  ("MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA", "from outside the WiFi driver's pool")):
+    assert need in tend, f"the reserve can be taken {why}"
+print("   BLE, then scan, then reserve; outside the lock; no link dropped  OK")
+
+# ---- 9. the scan's haul -------------------------------------------------------------
+print("\n9. what the camera scan collects:")
+consume = poll[poll.index("_bc_scan_ready = false;"):poll.index("if (!bc_choose())")]
+assert "ble_cam_free_scan();" in consume, \
+    "a finished scan's results are kept after they have been read — the last scan\n" \
+    "    before the camera connects sits in internal RAM for the whole boot"
+free = body(BLE, "static uint32_t ble_cam_free_scan(")
+assert "clearResults()" in free and "getCount()" in free, \
+    "the free does not count what it freed, so the log cannot say what a room cost"
+assert "if (!n) return 0;" in free, \
+    "an empty free overwrites the figures of the one before it"
+cb = BLE[BLE.index("class BcScanCb"):]
+cb = cb[:cb.index("\n};")]
+assert "void onResult(BLEAdvertisedDevice dev)" in cb and "BLEAdvertisedDevice *" not in cb, \
+    "the scan callback keeps a pointer into the library's results — freeing them\n" \
+    "    would leave it dangling. It must copy what it needs, as it did."
+print("   freed once read, counted, and nothing points into them  OK")
+
 print("\nALL CHECKS PASSED")

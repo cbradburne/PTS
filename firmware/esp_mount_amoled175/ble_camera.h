@@ -938,6 +938,74 @@ static uint8_t ble_cam_activity_bits() {
          | (_bc_have_bond         ? MOUNT_NOMEM_BLE_BONDED     : 0);
 }
 
+// ── Scan results: freed once read ──────────────────────────────────────────
+//
+// BLEScan keeps a heap object for EVERY advertiser a scan hears — address
+// string, parsed payload, map node — until the next scan starts.  Nothing here
+// reads them: BcScanCb copies what it needs into _bc_cand, by value, as each
+// device is reported.  So once the camera connects there is no next scan, and
+// the last one's haul stays for the whole boot, in INTERNAL RAM: every piece is
+// under the 4 KB line (SPIRAM_MALLOC_ALWAYSINTERNAL) that sends small
+// allocations there first, and the WiFi driver draws on the same RAM with none
+// reserved for it.
+//
+// cam5 on 2026-09-23 sat at 9.8 KB of internal RAM free — ~64 KB below its own
+// figure on the 20th-22nd — in a room with forty students and their phones,
+// and its first NO_MEM snapshot was taken mid-scan.
+//
+// Safe only once the scan has ENDED: completed, or cancelled long enough ago
+// that a report the BLE task was already handling has finished.  After either,
+// NimBLE delivers no more reports for it.
+static uint16_t _bc_scan_devices  = 0;   // what the last scan freed had held
+static uint16_t _bc_scan_freed_kb = 0;   // internal RAM freeing it gave back
+
+static uint32_t ble_cam_free_scan() {
+    BLEScan *sc = BLEDevice::getScan();
+    uint32_t n  = sc->getResults()->getCount();
+    if (!n) return 0;                    // nothing held; keep the last figures
+    uint32_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    sc->clearResults();
+    uint32_t after  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    uint32_t freed  = after > before ? after - before : 0;
+    _bc_scan_devices  = n > 0xFFFF ? 0xFFFF : (uint16_t)n;
+    _bc_scan_freed_kb = (uint16_t)((freed + 512) / 1024);
+    Serial.printf("[CAM] scan results freed: %lu devices, %lu bytes internal\n",
+                  (unsigned long)n, (unsigned long)freed);
+    return freed;
+}
+
+// ── NO_MEM: take BLE off the radio ─────────────────────────────────────────
+//
+// The mount's refused-send ladder calls this at the first NO_MEM.  The first
+// such run ever captured (cam5, 2026-09-23) began WHILE THIS FILE WAS
+// SCANNING, and in the three seconds after it the radio finished one send
+// where twenty were due.  The scan is active with a window of 80 ms in every
+// 100 (see ble_cam_setup), so BLE has the shared radio four fifths of the time.
+//
+// Stops a scan or a connection attempt in progress — never an established
+// camera link — and holds off starting another for hold_ms.  Returns what it
+// stopped as MOUNT_NOMEM_BLE_* bits; 0 means BLE was not competing.
+static uint32_t _bc_hold_until_ms = 0;
+
+static uint8_t ble_cam_nomem_pause(uint32_t hold_ms) {
+    uint8_t stopped = 0;
+    if (ble_gap_disc_active()) {
+        BLEDevice::getScan()->stop();    // cancels, and runs bc_scan_done
+        stopped |= MOUNT_NOMEM_BLE_SCANNING;
+    }
+    if (ble_gap_conn_active()) {
+        // Reaches bc_gap_event as a failed CONNECT, which clears _bc_conn and
+        // keeps the pick, so the attempt simply comes round again later.
+        ble_gap_conn_cancel();
+        stopped |= MOUNT_NOMEM_BLE_CONNECTING;
+    }
+    if (stopped) {
+        uint32_t until = millis() + hold_ms;
+        _bc_hold_until_ms = until ? until : 1;
+    }
+    return stopped;
+}
+
 static void ble_cam_poll() {
     uint32_t now = millis();
 
@@ -956,10 +1024,14 @@ static void ble_cam_poll() {
     // The same zero is written by ble_cam_forget() and ble_cam_pair_begin(),
     // where "try now" is exactly what is wanted too.
     bool due = (_bc_retry_ms == 0) || ((now - _bc_retry_ms) > CAM_RETRY_MS);
+    // Held off by the NO_MEM ladder (ble_cam_nomem_pause): no new scan or
+    // connection attempt until the hold runs out.  The rest of this carries on.
+    bool held = _bc_hold_until_ms && (int32_t)(now - _bc_hold_until_ms) < 0;
+    if (_bc_hold_until_ms && !held) _bc_hold_until_ms = 0;
     // No bond and not pairing: do not go looking.  See _bc_have_bond — an
     // unbonded mount that hunts for cameras takes the link away from whichever
     // mount owns the one it finds.
-    if (!busy && (_bc_pair_mode || _bc_have_bond) && due) {
+    if (!busy && !held && (_bc_pair_mode || _bc_have_bond) && due) {
         _bc_retry_ms = now ? now : 1;
         if (!_bc_chosen) {
             if (!_bc_scan_ready) {
@@ -975,6 +1047,11 @@ static void ble_cam_poll() {
                 return;
             }
             _bc_scan_ready = false;
+            // The scan is over, and everything that matters from it is in
+            // _bc_cand.  Free the library's copy of every advertiser it heard
+            // (see ble_cam_free_scan) — left alone, the last scan before the
+            // camera connected sat in internal RAM for the rest of the boot.
+            ble_cam_free_scan();
             if (!bc_choose()) {
                 // Tell the pairing screen, rather than leaving it saying
                 // "searching" at somebody who is standing there with a camera

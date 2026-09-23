@@ -838,8 +838,12 @@ class HealthPayload:
     iram_free:           Optional[int] = None
     iram_min:            Optional[int] = None
     iram_largest:        Optional[int] = None
-    nomem_healed:        Optional[int] = None   # NO_MEM runs that ended on their own
+    nomem_healed:        Optional[int] = None   # NO_MEM runs that ended by themselves
     nomem_healed_max_ms: Optional[int] = None
+    reserve_held:        Optional[int] = None   # internal-RAM reserve held, bytes
+    nomem_cured:         Optional[int] = None   # NO_MEM runs the ladder ended
+    scan_devices:        Optional[int] = None   # what the last camera scan held
+    scan_freed_kb:       Optional[int] = None   # ...and freeing it gave back
 
     @property
     def anomaly(self) -> bool:
@@ -857,11 +861,17 @@ def decode_health(payload: bytes) -> HealthPayload:
     (node_type, reset_reason, uptime_s, free_heap, min_free,
      loop_max_ms, tx_fail, rssi, flags, node_u32) = struct.unpack(
         ">BBIIIHHbBI", payload[:24])
+    # The bridge tail grew with the NO_MEM ladder; each part is read when the
+    # payload is long enough for it, so a mount on 466477d still reads right.
     tail = {}
-    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+    if len(payload) >= 24 + _HEALTH_BRIDGE_TAIL_V1:
         (tail["iram_free"], tail["iram_min"], tail["iram_largest"],
          tail["nomem_healed"], tail["nomem_healed_max_ms"]) = struct.unpack(
-            ">IIIHH", payload[24:24 + HEALTH_BRIDGE_TAIL_LEN])
+            ">IIIHH", payload[24:24 + _HEALTH_BRIDGE_TAIL_V1])
+    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+        (tail["reserve_held"], tail["nomem_cured"], tail["scan_devices"],
+         tail["scan_freed_kb"]) = struct.unpack(
+            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V1:24 + HEALTH_BRIDGE_TAIL_LEN])
     return HealthPayload(
         node_type=node_type, reset_reason=reset_reason, uptime_s=uptime_s,
         free_heap=free_heap, min_free_heap=min_free, loop_max_ms=loop_max_ms,
@@ -1822,15 +1832,26 @@ MOUNT_EVENT_TX_WEDGE_REBOOT = 3
 # The payload is the common 14 bytes plus a snapshot of the FIRST refusal —
 # layout and reasoning in shared/protocol.h.
 MOUNT_EVENT_NOMEM_REBOOT      = 4
+# A run the mount's ladder ENDED without a reboot; same payload as kind 4.
+MOUNT_EVENT_NOMEM_CURED       = 5
 MOUNT_EVENT_NOMEM_SNAP_LEN    = 43
-MOUNT_EVENT_NOMEM_PAYLOAD_LEN = MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN
+MOUNT_EVENT_NOMEM_LADDER_LEN  = 20
+MOUNT_EVENT_NOMEM_PAYLOAD_LEN = (MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN
+                                 + MOUNT_EVENT_NOMEM_LADDER_LEN)
 MOUNT_NOMEM_BLE_SCANNING      = 0x01
 MOUNT_NOMEM_BLE_CONNECTING    = 0x02
 MOUNT_NOMEM_BLE_LINKED        = 0x04
 MOUNT_NOMEM_BLE_BONDED        = 0x08
+MOUNT_NOMEM_STEP_BLE_PAUSED   = 0x01   # a scan or connect attempt was stopped
+MOUNT_NOMEM_STEP_SCAN_FREED   = 0x02   # ...and what the scan held was freed
+MOUNT_NOMEM_STEP_RESERVE      = 0x04   # the internal-RAM reserve was released
+MOUNT_NOMEM_STEP_NO_RESERVE   = 0x08   # its turn came and none was held
 # A bridge's CMD_HEALTH carries this many bytes after the uniform 24: internal
-# RAM free / lowest / largest block, and NO_MEM runs that ended on their own.
-HEALTH_BRIDGE_TAIL_LEN        = 16
+# RAM free / lowest / largest block and NO_MEM runs that ended by themselves
+# (the first 16, since 466477d), then the reserve held, runs the ladder ended,
+# and what the last camera scan held and gave back (to 24, since the ladder).
+HEALTH_BRIDGE_TAIL_LEN        = 24
+_HEALTH_BRIDGE_TAIL_V1        = 16
 CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
 
 
@@ -1873,6 +1894,35 @@ def decode_mount_nomem_snapshot(snap: bytes) -> MountNomemSnapshot:
         raise ParseError(f"NO_MEM snapshot too short: {len(snap)}")
     return MountNomemSnapshot(
         *struct.unpack(_NOMEM_SNAP_FMT, snap[:MOUNT_EVENT_NOMEM_SNAP_LEN]))
+
+
+@dataclass
+class MountNomemLadder:
+    """What a mount tried during a NO_MEM run before rebooting — or instead.
+
+    Times are ms from the first refusal; 0xFFFF is a step that was not taken.
+    """
+    steps:              int    # MOUNT_NOMEM_STEP_* bits
+    ble_stopped:        int    # MOUNT_NOMEM_BLE_* bits of what the pause stopped
+    t_pause_ms:         int
+    t_free_ms:          int
+    t_reserve_ms:       int
+    t_end_ms:           int    # the run's end (kind 5) or the reboot (kind 4)
+    reserve_bytes:      int
+    iram_after_free:    int
+    iram_after_reserve: int
+
+
+_NOMEM_LADDER_FMT = ">BBHHHHHII"
+assert struct.calcsize(_NOMEM_LADDER_FMT) == MOUNT_EVENT_NOMEM_LADDER_LEN
+
+
+def decode_mount_nomem_ladder(lad: bytes) -> MountNomemLadder:
+    """Decode the MOUNT_EVENT_NOMEM_LADDER_LEN bytes after the snapshot."""
+    if len(lad) < MOUNT_EVENT_NOMEM_LADDER_LEN:
+        raise ParseError(f"NO_MEM ladder too short: {len(lad)}")
+    return MountNomemLadder(
+        *struct.unpack(_NOMEM_LADDER_FMT, lad[:MOUNT_EVENT_NOMEM_LADDER_LEN]))
 
 
 def pkt_get_mount_table() -> bytes:

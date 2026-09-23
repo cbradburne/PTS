@@ -52,10 +52,13 @@ from .protocol import (
     decode_mount_table, decode_mount_route, decode_sat_names, decode_sat_ips,
     MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, MOUNT_EVENT_TX_WEDGE,
     MOUNT_EVENT_TX_WEDGE_REBOOT,
-    MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_PAYLOAD_LEN,
+    MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_CURED,
+    MOUNT_EVENT_NOMEM_PAYLOAD_LEN, MOUNT_EVENT_NOMEM_SNAP_LEN,
     MOUNT_NOMEM_BLE_SCANNING, MOUNT_NOMEM_BLE_CONNECTING,
     MOUNT_NOMEM_BLE_LINKED, MOUNT_NOMEM_BLE_BONDED,
-    decode_mount_nomem_snapshot,
+    MOUNT_NOMEM_STEP_BLE_PAUSED, MOUNT_NOMEM_STEP_SCAN_FREED,
+    MOUNT_NOMEM_STEP_RESERVE, MOUNT_NOMEM_STEP_NO_RESERVE,
+    decode_mount_nomem_snapshot, decode_mount_nomem_ladder,
     RF_REPORT_PAYLOAD_LEN,
     decode_pair_conflict, PairConflictPayload,
 )
@@ -142,9 +145,42 @@ def _ble_activity(bits: int) -> str:
     return ", ".join(parts)
 
 
-def _nomem_event_text(b: bytes, txf: int, rei: int, ref: int,
-                      err: int) -> tuple[str, str]:
-    """A NO_MEM reboot as two lines: what happened, then the snapshot.
+def _nomem_ladder_text(l, kind: int) -> tuple[str, Optional[tuple[int, str]]]:
+    """The ladder as one line, and the last step taken before the run ended.
+
+    The step a run ended soonest after is the candidate cure — printed with
+    the gap, because a run that ends 12 ms after a step and one that ends
+    900 ms after it are not the same evidence, and nothing here should
+    pretend they are.
+    """
+    parts = []
+    if l.steps & MOUNT_NOMEM_STEP_BLE_PAUSED:
+        what = " and ".join(w for bit, w in ((MOUNT_NOMEM_BLE_SCANNING, "scan"),
+                                             (MOUNT_NOMEM_BLE_CONNECTING, "connect attempt"))
+                            if l.ble_stopped & bit) or "activity"
+        parts.append(f"BLE {what} stopped at {_ms(l.t_pause_ms)}")
+    else:
+        parts.append("BLE was not scanning or connecting")
+    if l.steps & MOUNT_NOMEM_STEP_SCAN_FREED:
+        parts.append(f"scan freed at {_ms(l.t_free_ms)} (iram {_kb(l.iram_after_free)})")
+    if l.steps & MOUNT_NOMEM_STEP_RESERVE:
+        parts.append(f"reserve {_kb(l.reserve_bytes)} released at {_ms(l.t_reserve_ms)} "
+                     f"(iram {_kb(l.iram_after_reserve)})")
+    elif l.steps & MOUNT_NOMEM_STEP_NO_RESERVE:
+        parts.append("no reserve was held")
+    ended = "ended" if kind == MOUNT_EVENT_NOMEM_CURED else "rebooted"
+    parts.append(f"{ended} at {_ms(l.t_end_ms)}")
+    taken = [(t, name) for t, name, bit in (
+                 (l.t_pause_ms,   "BLE was stopped",           MOUNT_NOMEM_STEP_BLE_PAUSED),
+                 (l.t_free_ms,    "the scan was freed",        MOUNT_NOMEM_STEP_SCAN_FREED),
+                 (l.t_reserve_ms, "the reserve was released",  MOUNT_NOMEM_STEP_RESERVE))
+             if l.steps & bit and t != 0xFFFF and t <= l.t_end_ms]
+    return "ladder: " + " -> ".join(parts), (max(taken) if taken else None)
+
+
+def _nomem_event_text(kind: int, b: bytes, txf: int, rei: int, ref: int,
+                      err: int) -> list[str]:
+    """A NO_MEM run as up to three lines: what happened, the ladder, the snapshot.
 
     The first line carries the ONE reading the numbers support on their own —
     whether sends were completing after the first refusal — because that is
@@ -152,31 +188,57 @@ def _nomem_event_text(b: bytes, txf: int, rei: int, ref: int,
     is not our sends backing up at all.  Everything else is printed as
     measured, with no thresholds: nobody knows yet what a normal value is, and
     a verdict written before the first capture would be a guess.
+
+    kind 4 rebooted; kind 5 is a run the ladder ended, so there was no reboot.
+    A 57-byte event is from firmware before the ladder, and a 14-byte one from
+    firmware that sent the kind without a snapshot; both still read.
     """
-    head = ("REBOOTED ON REFUSED SENDS — every send refused for lack of memory "
-            "(NO_MEM), none accepted for 3 s, so it rebooted without the reinit "
-            "or the WiFi restart, neither of which has ever cleared this on a mount")
     since_boot = "since boot: txfail %d, %d stack reinits, %s" % (
         txf, rei, _espnow_err_text(ref, err))
-    if len(b) < MOUNT_EVENT_NOMEM_PAYLOAD_LEN:
-        return f"{head} | {since_boot} | (no snapshot in this event)", ""
+    snap_end = MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN
+    lad = (decode_mount_nomem_ladder(b[snap_end:])
+           if len(b) >= MOUNT_EVENT_NOMEM_PAYLOAD_LEN else None)
+    if kind == MOUNT_EVENT_NOMEM_CURED:
+        head = "NO_MEM ENDED WITHOUT A REBOOT"
+    elif lad is not None:
+        head = ("REBOOTED ON REFUSED SENDS — every send refused for lack of memory "
+                "(NO_MEM) for 3 s, and the ladder did not end it")
+    else:
+        head = ("REBOOTED ON REFUSED SENDS — every send refused for lack of memory "
+                "(NO_MEM), none accepted for 3 s, so it rebooted without the reinit "
+                "or the WiFi restart, neither of which has ever cleared this on a mount")
+    lines_ladder = ""
+    if lad is not None:
+        lines_ladder, last = _nomem_ladder_text(lad, kind)
+        if kind == MOUNT_EVENT_NOMEM_CURED:
+            if last is not None:
+                head += (f" — {_ms(lad.t_end_ms)} long, ending {lad.t_end_ms - last[0]} ms "
+                         f"after {last[1]}")
+            else:
+                head += f" — {_ms(lad.t_end_ms)} long"
+    if len(b) < snap_end:
+        return [f"{head} | {since_boot} | (no snapshot in this event)"]
     s = decode_mount_nomem_snapshot(b[MOUNT_EVENT_PAYLOAD_LEN:])
     # "Completing" is judged against this boot's own average send rate, not a
     # fixed number, because cam5 sends nearly twice what cam1 does. The first
     # capture (cam5, 2026-09-23 10:27) had ONE completion in the 3 s against
     # ~20 due, and the first version of this line called that "not stalled".
-    due = s.accepted * 3.0 / s.uptime_s if s.uptime_s else 0.0
+    # Over the run's own length: 3 s for a reboot, whatever it was for a cure.
+    secs = (lad.t_end_ms / 1000.0 if lad is not None and lad.t_end_ms != 0xFFFF
+            else 3.0)
+    span = "the 3 s" if kind != MOUNT_EVENT_NOMEM_CURED else f"its {_ms(round(secs * 1000))}"
+    due = s.accepted * secs / s.uptime_s if s.uptime_s else 0.0
     if s.cb_during and due and s.cb_during < due / 4:
-        verdict = (f"only {s.cb_during} send(s) completed in the 3 s, against "
+        verdict = (f"only {s.cb_during} send(s) completed in {span}, against "
                    f"~{due:.0f} at this boot's average rate — the radio had "
                    f"nearly stopped finishing sends")
     elif s.cb_during:
         verdict = (f"sends were still COMPLETING after the first refusal "
-                   f"({s.cb_during} in the 3 s, ~{due:.0f} at this boot's "
+                   f"({s.cb_during} in {span}, ~{due:.0f} at this boot's "
                    f"average rate) — the queue was moving")
     elif s.in_flight:
         verdict = (f"{s.in_flight} send(s) outstanding and NOT ONE completed in "
-                   f"the 3 s — the radio had stopped finishing sends")
+                   f"{span} — the radio had stopped finishing sends")
     else:
         verdict = ("by this mount's count nothing was outstanding, yet the stack "
                    "refused for lack of memory — not our sends backing up")
@@ -188,6 +250,7 @@ def _nomem_event_text(b: bytes, txf: int, rei: int, ref: int,
     except ValueError:
         first = f"0x{s.first_cmd:02X}"
     sect = Bridge._MOUNT_SECTION_NAMES.get(s.loop_section, str(s.loop_section))
+    until = "the reboot" if kind != MOUNT_EVENT_NOMEM_CURED else "the end"
     detail = (
         f"at the first refusal: up {s.uptime_s / 3600:.2f}h, {s.accepted} sends "
         f"accepted | last completion {_ms(s.since_cb_ms)} before, last accepted "
@@ -196,10 +259,10 @@ def _nomem_event_text(b: bytes, txf: int, rei: int, ref: int,
         f"{_kb(s.iram_free)} free (lowest {_kb(s.iram_min)}), largest block "
         f"{_kb(s.iram_largest)} | WiFi channel {s.chan_now} (hub {s.chan_hub}) | "
         f"worst loop {s.loop_max_ms} ms in '{sect}' | BLE: {_ble_activity(s.ble)} "
-        f"| refused first: {first} || until the reboot: {s.refused_during} "
+        f"| refused first: {first} || until {until}: {s.refused_during} "
         f"refused, {s.cb_during} completions, {s.rx_during} frames heard || "
         f"{since_boot}")
-    return head, detail
+    return [line for line in (head, lines_ladder, detail) if line]
 
 
 @dataclass
@@ -1038,11 +1101,11 @@ class MountManager(QObject):
             ref  = (b[9] << 8) | b[10]
             err  = (b[11] << 8) | b[12]
             wifi = b[13]
-            if kind == MOUNT_EVENT_NOMEM_REBOOT:
-                head, detail = _nomem_event_text(b, txf, rei, ref, err)
-                log.warning("MOUNT EVENT cam%d %s", mid, head)
-                if detail:
-                    log.warning("MOUNT EVENT cam%d   %s", mid, detail)
+            if kind in (MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_CURED):
+                lines = _nomem_event_text(kind, b, txf, rei, ref, err)
+                log.warning("MOUNT EVENT cam%d %s", mid, lines[0])
+                for more in lines[1:]:
+                    log.warning("MOUNT EVENT cam%d   %s", mid, more)
                 return
             if kind == MOUNT_EVENT_TX_WEDGE_REBOOT:
                 # The escalation, and the only remedy with evidence behind it:
