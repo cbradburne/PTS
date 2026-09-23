@@ -161,9 +161,19 @@ def _nomem_event_text(b: bytes, txf: int, rei: int, ref: int,
     if len(b) < MOUNT_EVENT_NOMEM_PAYLOAD_LEN:
         return f"{head} | {since_boot} | (no snapshot in this event)", ""
     s = decode_mount_nomem_snapshot(b[MOUNT_EVENT_PAYLOAD_LEN:])
-    if s.cb_during:
+    # "Completing" is judged against this boot's own average send rate, not a
+    # fixed number, because cam5 sends nearly twice what cam1 does. The first
+    # capture (cam5, 2026-09-23 10:27) had ONE completion in the 3 s against
+    # ~20 due, and the first version of this line called that "not stalled".
+    due = s.accepted * 3.0 / s.uptime_s if s.uptime_s else 0.0
+    if s.cb_during and due and s.cb_during < due / 4:
+        verdict = (f"only {s.cb_during} send(s) completed in the 3 s, against "
+                   f"~{due:.0f} at this boot's average rate — the radio had "
+                   f"nearly stopped finishing sends")
+    elif s.cb_during:
         verdict = (f"sends were still COMPLETING after the first refusal "
-                   f"({s.cb_during}) — the queue was not stalled")
+                   f"({s.cb_during} in the 3 s, ~{due:.0f} at this boot's "
+                   f"average rate) — the queue was moving")
     elif s.in_flight:
         verdict = (f"{s.in_flight} send(s) outstanding and NOT ONE completed in "
                    f"the 3 s — the radio had stopped finishing sends")

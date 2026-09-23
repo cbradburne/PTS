@@ -213,8 +213,15 @@ for want in ("in flight 1", "iram 40k free", "largest block 29k",
     assert want in detail, f"missing {want!r} in: {detail}"
 assert "CHANNEL MOVED" not in head, "a channel that did not move is reported as moved"
 
-h2, _ = mm._nomem_event_text(event(cb_during=5), txf, rei, ref, err)
-assert "still COMPLETING" in h2 and "NOT ONE" not in h2, h2
+# 21402 accepted in 2196 s is ~29 due in the 3 s. A quarter of that or more is
+# a queue that is moving; fewer is a radio that has nearly stopped — the first
+# real capture had ONE against ~20 due and was misreported as "not stalled".
+h2, _ = mm._nomem_event_text(event(cb_during=25), txf, rei, ref, err)
+assert "still COMPLETING" in h2 and "~29" in h2 and "NOT ONE" not in h2, h2
+h2b, _ = mm._nomem_event_text(event(cb_during=1), txf, rei, ref, err)
+assert "only 1 send(s) completed" in h2b and "nearly stopped" in h2b, \
+    f"one completion in 3 s against ~29 due reads as a working queue: {h2b}"
+assert "still COMPLETING" not in h2b, h2b
 h3, _ = mm._nomem_event_text(event(in_flight=0), txf, rei, ref, err)
 assert "nothing was outstanding" in h3, h3
 h4, _ = mm._nomem_event_text(event(chan_now=1, chan_hub=6), txf, rei, ref, err)
@@ -222,7 +229,7 @@ assert "CHANNEL MOVED: radio on 1, hub on 6" in h4, h4
 _, d5 = mm._nomem_event_text(event(ble=MOUNT_NOMEM_BLE_SCANNING | MOUNT_NOMEM_BLE_LINKED
                                    | MOUNT_NOMEM_BLE_BONDED), txf, rei, ref, err)
 assert "BLE: SCANNING, camera linked" in d5, d5
-print("   three verdicts, channel and BLE read correctly          OK")
+print("   four verdicts, channel and BLE read correctly           OK")
 
 h6, d6 = mm._nomem_event_text(HEAD14, txf, rei, ref, err)
 assert "(no snapshot in this event)" in h6 and d6 == "", \
