@@ -592,6 +592,24 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
     }
 }
 
+// How long the mount listens for its camera in each interval while trying to
+// connect: 30 ms in every 100.
+//
+// It passed no parameters before, so NimBLE listened by its own default, and
+// the radio is shared — every moment BLE listens is one WiFi cannot.  With
+// cam5's camera off for ten minutes on 2026-09-24 (and the mount retrying it,
+// no longer scanning), the Foyer satellite's sends to cam5 began failing 20 s
+// after the camera went off, failed 53 times, and stopped the moment it
+// re-paired; 7 of 295 commands were lost where none had been before.  A camera
+// advertising again is still caught within seconds at 30 in 100.
+//
+// Only the listening pattern is ours.  The connection's own interval, latency
+// and timeout are NimBLE's BLE_GAP_INITIAL_* values, so a camera, once found,
+// is connected exactly as before.  Pairing keeps NimBLE's default: WiFi is
+// stopped for it, so there is nothing to share the radio with.
+#define BC_CONN_SCAN_ITVL_MS  100
+#define BC_CONN_SCAN_WIN_MS    30
+
 // Returns false if the attempt could not even be started.
 static bool bc_connect(const char *addr_text) {
     ble_addr_t a = {};
@@ -601,7 +619,17 @@ static bool bc_connect(const char *addr_text) {
                &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
     // ble_addr_t.val is little-endian — the reverse of the printed form.
     for (int i = 0; i < 6; i++) a.val[i] = (uint8_t)v[5 - i];
-    int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &a, 15000, nullptr,
+    struct ble_gap_conn_params cp = {};
+    cp.scan_itvl           = BLE_GAP_SCAN_ITVL_MS(BC_CONN_SCAN_ITVL_MS);
+    cp.scan_window         = BLE_GAP_SCAN_WIN_MS(BC_CONN_SCAN_WIN_MS);
+    cp.itvl_min            = BLE_GAP_INITIAL_CONN_ITVL_MIN;
+    cp.itvl_max            = BLE_GAP_INITIAL_CONN_ITVL_MAX;
+    cp.latency             = BLE_GAP_INITIAL_CONN_LATENCY;
+    cp.supervision_timeout = BLE_GAP_INITIAL_SUPERVISION_TIMEOUT;
+    cp.min_ce_len          = BLE_GAP_INITIAL_CONN_MIN_CE_LEN;
+    cp.max_ce_len          = BLE_GAP_INITIAL_CONN_MAX_CE_LEN;
+    int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &a, 15000,
+                             _bc_pair_mode ? nullptr : &cp,
                              bc_gap_event, nullptr);
     if (rc) Serial.printf("[CAM] ble_gap_connect rc=%d\n", rc);
     return rc == 0;

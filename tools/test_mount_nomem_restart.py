@@ -453,4 +453,33 @@ assert "(int32_t)(fa - since) >= 0" in step and "_bc_scan_freed_at_ms" in step, 
     "    that cure would be credited to whatever step came next"
 print("   an attempt in progress is busy; a finished scan is freed at once  OK")
 
+# ---- 11. a reconnect attempt must leave WiFi the radio ----------------------------
+# With cam5's camera off for ten minutes on 2026-09-24, and the mount retrying it
+# rather than scanning, the Foyer satellite's sends to cam5 failed 53 times — from
+# 20 s after the camera went off to the moment it re-paired — and 7 of 295
+# commands were lost. The attempts passed no parameters, so NimBLE listened by
+# its own default on a radio WiFi shares.
+print("\n11. how a reconnect attempt listens:")
+conn = body(BLE, "static bool bc_connect(")
+assert "_bc_pair_mode ? nullptr : &cp" in conn, \
+    "the connect attempt passes no listening pattern outside pairing, so NimBLE's\n" \
+    "    default decides how much of the shared radio BLE takes"
+itv = int(re.search(r"#define BC_CONN_SCAN_ITVL_MS\s+(\d+)", BLE).group(1))
+win = int(re.search(r"#define BC_CONN_SCAN_WIN_MS\s+(\d+)", BLE).group(1))
+assert 0 < win <= itv // 2, \
+    f"the attempt listens {win} ms in every {itv} — more than half the radio, the\n" \
+    "    condition that cost cam5 7 commands in ten minutes"
+assert "cp.scan_itvl           = BLE_GAP_SCAN_ITVL_MS(BC_CONN_SCAN_ITVL_MS);" in conn and \
+       "cp.scan_window         = BLE_GAP_SCAN_WIN_MS(BC_CONN_SCAN_WIN_MS);" in conn, \
+    "the listening pattern is not built from the two named numbers"
+for f, v in (("itvl_min", "BLE_GAP_INITIAL_CONN_ITVL_MIN"), ("itvl_max", "BLE_GAP_INITIAL_CONN_ITVL_MAX"),
+             ("latency", "BLE_GAP_INITIAL_CONN_LATENCY"),
+             ("supervision_timeout", "BLE_GAP_INITIAL_SUPERVISION_TIMEOUT"),
+             ("min_ce_len", "BLE_GAP_INITIAL_CONN_MIN_CE_LEN"),
+             ("max_ce_len", "BLE_GAP_INITIAL_CONN_MAX_CE_LEN")):
+    assert re.search(rf"cp\.{f}\s*=\s*{v};", conn), \
+        f"the connection's own {f} is no longer NimBLE's {v} — the change was meant\n" \
+        "    to alter how the camera is FOUND, not how the link behaves once it is"
+print(f"   {win} ms in every {itv} outside pairing; the link itself unchanged  OK")
+
 print("\nALL CHECKS PASSED")
