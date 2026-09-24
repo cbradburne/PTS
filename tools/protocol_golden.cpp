@@ -111,7 +111,8 @@ static int do_emit() {
     emit_pkt("position_17b", buf, n);
 
     // j: a bridge's health with the tail — the 24 uniform bytes, then internal
-    //    RAM and the NO_MEM runs that healed, exactly as send_health() writes it.
+    //    RAM, the NO_MEM runs that healed, the ladder's part and the camera's
+    //    replies, exactly as send_health() writes it.
     {
         uint8_t hp[24 + HEALTH_BRIDGE_TAIL_LEN];
         PayloadHealth hb;
@@ -136,6 +137,13 @@ static int do_emit() {
         t.nomem_cured         = 3;
         t.scan_devices        = 87;
         t.scan_freed_kb       = 0x0102;
+        t.cam_wr_ok           = 0x03E8;
+        t.cam_wr_refused      = 0x0A0B;
+        t.cam_wr_unanswered   = 2;
+        t.cam_wr_unsent       = 0xFFFF;
+        t.cam_fail_cat        = 8;
+        t.cam_fail_param      = 6;
+        t.cam_fail_status     = 0x0180;
         encode_health_bridge_tail(hp + 24, &t);
         n = build_packet(buf, 2, 0x0203, CMD_HEALTH, hp, sizeof(hp));
         emit_pkt("health_bridge_tail", buf, n);

@@ -844,6 +844,16 @@ class HealthPayload:
     nomem_cured:         Optional[int] = None   # NO_MEM runs the ladder ended
     scan_devices:        Optional[int] = None   # what the last camera scan held
     scan_freed_kb:       Optional[int] = None   # ...and freeing it gave back
+    # The camera's replies to the commands relayed to it, counted since boot.
+    # The Blackmagic protocol never acknowledges a command; the GATT write it
+    # rides in is answered, and these are those answers.
+    cam_wr_ok:           Optional[int] = None   # accepted
+    cam_wr_refused:      Optional[int] = None   # refused with an ATT error
+    cam_wr_unanswered:   Optional[int] = None   # timed out, or the link dropped
+    cam_wr_unsent:       Optional[int] = None   # could not even be started
+    cam_fail_cat:        Optional[int] = None   # last refused or timed-out
+    cam_fail_param:      Optional[int] = None   #   command, and NimBLE's
+    cam_fail_status:     Optional[int] = None   #   status for it (0 = none)
 
     @property
     def anomaly(self) -> bool:
@@ -861,17 +871,22 @@ def decode_health(payload: bytes) -> HealthPayload:
     (node_type, reset_reason, uptime_s, free_heap, min_free,
      loop_max_ms, tx_fail, rssi, flags, node_u32) = struct.unpack(
         ">BBIIIHHbBI", payload[:24])
-    # The bridge tail grew with the NO_MEM ladder; each part is read when the
-    # payload is long enough for it, so a mount on 466477d still reads right.
+    # The bridge tail has grown twice; each part is read when the payload is
+    # long enough for it, so a mount on 466477d or 42af949 still reads right.
     tail = {}
     if len(payload) >= 24 + _HEALTH_BRIDGE_TAIL_V1:
         (tail["iram_free"], tail["iram_min"], tail["iram_largest"],
          tail["nomem_healed"], tail["nomem_healed_max_ms"]) = struct.unpack(
             ">IIIHH", payload[24:24 + _HEALTH_BRIDGE_TAIL_V1])
-    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+    if len(payload) >= 24 + _HEALTH_BRIDGE_TAIL_V2:
         (tail["reserve_held"], tail["nomem_cured"], tail["scan_devices"],
          tail["scan_freed_kb"]) = struct.unpack(
-            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V1:24 + HEALTH_BRIDGE_TAIL_LEN])
+            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V1:24 + _HEALTH_BRIDGE_TAIL_V2])
+    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+        (tail["cam_wr_ok"], tail["cam_wr_refused"], tail["cam_wr_unanswered"],
+         tail["cam_wr_unsent"], tail["cam_fail_cat"], tail["cam_fail_param"],
+         tail["cam_fail_status"]) = struct.unpack(
+            ">HHHHBBH", payload[24 + _HEALTH_BRIDGE_TAIL_V2:24 + HEALTH_BRIDGE_TAIL_LEN])
     return HealthPayload(
         node_type=node_type, reset_reason=reset_reason, uptime_s=uptime_s,
         free_heap=free_heap, min_free_heap=min_free, loop_max_ms=loop_max_ms,
@@ -1425,6 +1440,12 @@ _CAM_PARAM_NAMES = {
     (12, 15): "slate",
 }
 
+
+def cam_param_name(category: int, parameter: int) -> str:
+    """What a (category, parameter) is, or "?" when the table does not say."""
+    return _CAM_PARAM_NAMES.get((category, parameter), "?")
+
+
 # Parameters that are MEASUREMENTS rather than settings: worth recording once
 # so the value is on file, never worth a line each time they move.  The
 # battery dithers 11.82-11.86V report after report — noise, not charging, as
@@ -1849,9 +1870,11 @@ MOUNT_NOMEM_STEP_NO_RESERVE   = 0x08   # its turn came and none was held
 # A bridge's CMD_HEALTH carries this many bytes after the uniform 24: internal
 # RAM free / lowest / largest block and NO_MEM runs that ended by themselves
 # (the first 16, since 466477d), then the reserve held, runs the ladder ended,
-# and what the last camera scan held and gave back (to 24, since the ladder).
-HEALTH_BRIDGE_TAIL_LEN        = 24
+# and what the last camera scan held and gave back (to 24, since the ladder),
+# then the camera's replies to command writes (to 36, since 2026-09-24).
+HEALTH_BRIDGE_TAIL_LEN        = 36
 _HEALTH_BRIDGE_TAIL_V1        = 16
+_HEALTH_BRIDGE_TAIL_V2        = 24
 CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
 
 

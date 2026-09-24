@@ -1702,8 +1702,9 @@ static void send_health(bool anomaly) {
     uint8_t p[24 + HEALTH_BRIDGE_TAIL_LEN];
     encode_health_payload(p, &h);
     // The bridge tail: internal RAM, which free_heap above cannot show because
-    // it counts the PSRAM, and NO_MEM runs that ended on their own.  Readers
-    // that predate it take the first 24 bytes and never see it.
+    // it counts the PSRAM, NO_MEM runs that ended on their own or by the ladder,
+    // and the camera's replies to the commands relayed to it.  Readers that
+    // predate it take the first 24 bytes and never see it.
     HealthBridgeTail t = {};
     t.iram_free           = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     t.iram_min            = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
@@ -1714,6 +1715,14 @@ static void send_health(bool anomaly) {
     t.nomem_cured         = _nomem_cured;
     t.scan_devices        = _bc_scan_devices;
     t.scan_freed_kb       = _bc_scan_freed_kb;
+    t.cam_wr_ok           = _bc_wr_ok;
+    t.cam_wr_refused      = _bc_wr_refused;
+    t.cam_wr_unanswered   = _bc_wr_unanswered;
+    t.cam_wr_unsent       = _bc_wr_unsent;
+    uint32_t wf           = _bc_wr_fail;   // one read: one failure's fields
+    t.cam_fail_cat        = (uint8_t)(wf >> 24);
+    t.cam_fail_param      = (uint8_t)(wf >> 16);
+    t.cam_fail_status     = (uint16_t)wf;
     encode_health_bridge_tail(p + 24, &t);
     send_to_hub(CMD_HEALTH, p, sizeof(p));   // no-op while unpaired (send_to_hub guards)
     _health_last_ms     = millis();
