@@ -1,6 +1,6 @@
 """The focus button at the end of each camera row — and the switch that removes it.
 
-2026-09-25: a crosshair between button 10 and the slider dial fires one
+2026-09-24: a crosshair between button 10 and the slider dial fires one
 autofocus on that row's camera, the command Camera Control's Auto Focus sends.
 It only means something with Blackmagic cameras paired to the mounts, and the
 repo is public, so it is a Config option, off unless ticked.

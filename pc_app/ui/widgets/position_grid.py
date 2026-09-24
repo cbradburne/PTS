@@ -120,7 +120,7 @@ _ROW_MARGIN_FRAC = 0.25
 # the dials right — and the room they give up goes either side of the focus
 # button, so the crosshair gets space round it instead of the band's ends.
 # Hidden, the row is exactly the layout it was before they existed.
-# (The first cut, 2026-09-25, used 0.20 and even gaps; on a MacBook screen that
+# (The first cut, 2026-09-24, used 0.20 and even gaps; on a MacBook screen that
 # left more room at the ends of the row than around the crosshair.)
 _ROW_MARGIN_FRAC_FOCUS = 0.10
 _FOCUS_PAD_FRAC        = 0.10      # extra gap each side of the focus button
