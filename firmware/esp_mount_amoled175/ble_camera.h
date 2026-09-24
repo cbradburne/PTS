@@ -205,7 +205,7 @@ static uint16_t _bc_notify_handle = 0;
 static uint16_t _bc_cccd_handle   = 0;
 static uint16_t _bc_svc_start = 0, _bc_svc_end = 0;
 // volatile: written by the NimBLE host task, read by loop() to gate retries.
-// Does this mount have a camera bond at all?  Cached rather than asked every loop:
+// Does this mount have a camera bond at all?  Cached rather than asked每 loop:
 // bc_bonded_count() reads NVS-backed state and this gates a hot path.
 //
 // It replaces a latch that was set when a camera asked for a passkey we could
@@ -460,74 +460,13 @@ static int bc_on_svc(uint16_t conn, const struct ble_gatt_error *err,
     return 0;
 }
 
-// ── The camera's reply to every command write ────────────────────────────────
-//
-// Each command goes out as a GATT write WITH response, and the camera answers
-// every one: accepted, or refused with an ATT error.  That answer was given no
-// callback and thrown away, so a command the camera refused looked exactly like
-// one it applied — the Blackmagic protocol has no acknowledgement of its own.
-//
-// On 2026-09-24 saturation and contrast sent to cam2 and cam4 changed nothing
-// on the camera and were never echoed, while white balance and gain on the
-// same links worked.  Refused, or accepted and ignored?  Nothing could say.
-// These count every answer, keep the last failure's category, parameter and
-// status, and ride on the health tail.
-//
-// Three failures, kept apart because they point different ways:
-//   refused     the camera's own ATT error — the camera said no
-//   unanswered  no reply within NimBLE's 30 s ATT timeout, or the link went
-//               with the write still in flight — a link problem, not a verdict
-//   unsent      NimBLE would not even start it — most likely because its four
-//               GATT procedures were all in flight.  A colour wheel dragged at
-//               speed set this latch (_bc_write_err) on 2026-09-24; now counted.
-//
-// A write the link took with it (BLE_HS_ENOTCONN) is counted but does not
-// replace the last failure: a disconnect fails every write in flight at once,
-// and would bury the one reply that said why.
-static volatile uint16_t _bc_wr_ok         = 0;
-static volatile uint16_t _bc_wr_refused    = 0;
-static volatile uint16_t _bc_wr_unanswered = 0;
-static volatile uint16_t _bc_wr_unsent     = 0;
-// The last refused or timed-out write: category << 24 | parameter << 16 |
-// NimBLE status.  One word, so loop() on the other core can never read the
-// category of one failure beside the status of the next.
-static volatile uint32_t _bc_wr_fail       = 0;
-
-static inline void bc_count(volatile uint16_t &c) { if (c < 0xFFFF) c = c + 1; }
-
-// NimBLE calls this on its host task when the camera answers, when the ATT
-// timeout expires, or when the link drops with the write in flight.  arg is
-// the command it answers: category << 8 | parameter.
-static int bc_on_write(uint16_t, const struct ble_gatt_error *err,
-                       struct ble_gatt_attr *, void *arg) {
-    uint16_t cp = (uint16_t)(uintptr_t)arg;
-    uint16_t st = err ? err->status : 0;
-    if (st == 0) { bc_count(_bc_wr_ok); return 0; }
-    bool att = st >= BLE_HS_ERR_ATT_BASE && st < BLE_HS_ERR_ATT_BASE + 0x100;
-    bc_count(att ? _bc_wr_refused : _bc_wr_unanswered);
-    if (st != BLE_HS_ENOTCONN)
-        _bc_wr_fail = ((uint32_t)cp << 16) | st;
-    Serial.printf("[CAM] command %u.%u %s — status 0x%03X\n",
-                  (unsigned)(cp >> 8), (unsigned)(cp & 0xFF),
-                  att ? "REFUSED by the camera" : "never answered", (unsigned)st);
-    return 0;
-}
-
 // Relay a Blackmagic command to the camera, byte for byte.  The mount never
-// interprets it — see CMD_CAM_CONTROL in protocol.h for why — beyond reading
-// bytes 4 and 5, its category and parameter, to say which command a reply is
-// answering.
+// interprets it — see CMD_CAM_CONTROL in protocol.h for why.
 bool ble_cam_send(const uint8_t *cmd, uint16_t len) {
     if (!_bc_connected || !_bc_ctrl_handle) return false;
     if (!len || len > CAM_CONTROL_MAX_LEN) return false;
-    uint16_t cp = len >= 6 ? (uint16_t)((cmd[4] << 8) | cmd[5]) : 0xFFFF;
-    int rc = ble_gattc_write_flat(_bc_conn, _bc_ctrl_handle, cmd, len,
-                                  bc_on_write, (void *)(uintptr_t)cp);
-    if (rc) {
-        Serial.printf("[CAM] write rc=%d\n", rc);
-        _bc_write_err = true;
-        bc_count(_bc_wr_unsent);
-    }
+    int rc = ble_gattc_write_flat(_bc_conn, _bc_ctrl_handle, cmd, len, nullptr, nullptr);
+    if (rc) { Serial.printf("[CAM] write rc=%d\n", rc); _bc_write_err = true; }
     return rc == 0;
 }
 

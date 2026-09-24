@@ -933,20 +933,7 @@ typedef struct __attribute__((packed)) {
 //   [42..43] NO_MEM runs the ladder ENDED, since boot        u16 sat
 //   [44..45] devices the last finished camera scan held      u16
 //   [46..47] internal RAM freeing them gave back, KB         u16
-// ...added 2026-09-24: the camera's REPLIES to command writes.  The Blackmagic
-// protocol has no acknowledgement of its own, but each command is a GATT write
-// with response, and the camera's answer — accepted, or refused with an ATT
-// error — used to be thrown away.  All counts since boot, saturating:
-//   [48..49] writes the camera accepted                      u16
-//   [50..51] writes the camera REFUSED (an ATT error)        u16
-//   [52..53] writes never answered: timed out, or the link   u16
-//            dropped with them in flight
-//   [54..55] writes that could not even be started           u16
-//   [56]     last refused or timed-out command: category     u8
-//   [57]     ...its parameter                                u8
-//   [58..59] ...and NimBLE's status for it: 0x100 + the ATT  u16 (0 = none yet)
-//            error code, or 0x00D for no answer in 30 s
-#define HEALTH_BRIDGE_TAIL_LEN  36
+#define HEALTH_BRIDGE_TAIL_LEN  24
 typedef struct {
     uint32_t iram_free;
     uint32_t iram_min;
@@ -957,13 +944,6 @@ typedef struct {
     uint16_t nomem_cured;
     uint16_t scan_devices;
     uint16_t scan_freed_kb;
-    uint16_t cam_wr_ok;
-    uint16_t cam_wr_refused;
-    uint16_t cam_wr_unanswered;
-    uint16_t cam_wr_unsent;
-    uint8_t  cam_fail_cat;
-    uint8_t  cam_fail_param;
-    uint16_t cam_fail_status;
 } HealthBridgeTail;
 
 // The moment of a mount's first NO_MEM refusal — see MOUNT_EVENT_NOMEM_REBOOT
@@ -1269,13 +1249,6 @@ static inline void encode_health_bridge_tail(uint8_t p[HEALTH_BRIDGE_TAIL_LEN],
     write_be16(p + 18, t->nomem_cured);
     write_be16(p + 20, t->scan_devices);
     write_be16(p + 22, t->scan_freed_kb);
-    write_be16(p + 24, t->cam_wr_ok);
-    write_be16(p + 26, t->cam_wr_refused);
-    write_be16(p + 28, t->cam_wr_unanswered);
-    write_be16(p + 30, t->cam_wr_unsent);
-    p[32] = t->cam_fail_cat;
-    p[33] = t->cam_fail_param;
-    write_be16(p + 34, t->cam_fail_status);
 }
 
 // The ladder, written straight after the snapshot.

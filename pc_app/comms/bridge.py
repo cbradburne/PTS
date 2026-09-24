@@ -41,7 +41,7 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
                        ESPNOW_TX_QUEUE_CEILING,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
-                       decode_mount_outage, EspnowRejectCode, cam_param_name)
+                       decode_mount_outage, EspnowRejectCode)
 
 log = logging.getLogger(__name__)
 
@@ -85,54 +85,6 @@ def _kb(n: int) -> str:
     """Bytes as k, with a decimal below 10k — where a WiFi buffer (~1.6k) is
     the difference between a free block that fits one and one that does not."""
     return f"{n / 1024:.1f}k" if n < 10 * 1024 else f"{n // 1024}k"
-
-
-# The ATT errors a camera can answer a write with (Core spec Vol 3, Part F,
-# 3.4.1.1), named where the name tells someone at the rig something.
-_ATT_ERRORS = {
-    0x01: "invalid handle", 0x03: "write not permitted", 0x04: "invalid PDU",
-    0x05: "insufficient authentication", 0x06: "request not supported",
-    0x08: "insufficient authorization", 0x0D: "invalid value length",
-    0x0E: "unlikely error", 0x0F: "insufficient encryption",
-    0x11: "insufficient resources", 0x13: "value not allowed",
-}
-_BLE_HS_ETIMEOUT = 13   # NimBLE: no reply within the 30 s ATT timeout
-
-
-def _cam_write_status(st: int) -> str:
-    """NimBLE's status for a camera write that failed, in words."""
-    if 0x100 <= st < 0x200:
-        code = st - 0x100
-        name = ("application error" if 0x80 <= code <= 0x9F
-                else _ATT_ERRORS.get(code, ""))
-        return f"ATT 0x{code:02X}" + (f" {name}" if name else "")
-    if st == _BLE_HS_ETIMEOUT:
-        return "no answer in 30 s"
-    return f"NimBLE status {st}"
-
-
-def _cam_replies_text(h) -> str:
-    """The camera's answers to the commands relayed to it, since the mount
-    booted — or "" when none has been sent, or the firmware cannot tell."""
-    counts = (h.cam_wr_ok, h.cam_wr_refused, h.cam_wr_unanswered, h.cam_wr_unsent)
-    if h.cam_wr_ok is None or not any(counts):
-        return ""
-    def n(v):
-        return f"{v}+" if v == 0xFFFF else str(v)
-    parts = [f"{n(h.cam_wr_ok)} accepted"]
-    if h.cam_wr_refused:
-        parts.append(f"{n(h.cam_wr_refused)} REFUSED")
-    if h.cam_wr_unanswered:
-        parts.append(f"{n(h.cam_wr_unanswered)} UNANSWERED")
-    if h.cam_wr_unsent:
-        parts.append(f"{n(h.cam_wr_unsent)} NOT SENT")
-    txt = " | camera commands: " + ", ".join(parts)
-    if h.cam_fail_status:
-        txt += " (last failure %d.%d %s: %s)" % (
-            h.cam_fail_cat, h.cam_fail_param,
-            cam_param_name(h.cam_fail_cat, h.cam_fail_param),
-            _cam_write_status(h.cam_fail_status))
-    return txt
 
 
 # ---------------------------------------------------------------------------
@@ -1173,11 +1125,6 @@ class Bridge:
                     ble += " (subscribed but camera has never reported)"
             if h.flags & HEALTH_FLAG_CAM_WR_ERR:
                 ble += " | CAMERA WRITE FAILED"
-            # What the camera answered, on firmware that reads the answers.
-            # Added 2026-09-24, when saturation and contrast did nothing on two
-            # cameras and nothing could say whether each camera had refused
-            # them or taken them and ignored them.
-            ble += _cam_replies_text(h)
             if h.flags & HEALTH_FLAG_CAM_CACHE_FULL:
                 # Silent data loss otherwise: some camera value simply never
                 # arrives, and the only symptom is a dash where a number

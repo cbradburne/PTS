@@ -273,9 +273,7 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
                                struct.pack(">BBIIIHHbBI", 1, 1, 36000, 8400000,
                                            8390000, 10, 3, -33, 0x02, 0x07010010)
                                + struct.pack(">IIIHHHHHH", 142000, 118000, 0xF00D,
-                                             2, 0x04D2, 12288, 3, 87, 0x0102)
-                               + struct.pack(">HHHHBBH", 0x03E8, 0x0A0B, 2, 0xFFFF,
-                                             8, 6, 0x0180)),
+                                             2, 0x04D2, 12288, 3, 87, 0x0102)),
         "mount_event_nomem": (1, 0x0A0B, Cmd.MOUNT_EVENT,
                               bytes([pyproto.MOUNT_EVENT_NOMEM_REBOOT, 0x00, 0x03,
                                      0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
@@ -409,21 +407,11 @@ def check_golden(pyproto):
                     ht.nomem_cured, ht.scan_devices, ht.scan_freed_kb)
                 != (142000, 118000, 0xF00D, 2, 0x04D2, 12288, 3, 87, 0x0102)):
             fail("decode_health() misread the C-built bridge tail")
-        if ((ht.cam_wr_ok, ht.cam_wr_refused, ht.cam_wr_unanswered,
-             ht.cam_wr_unsent, ht.cam_fail_cat, ht.cam_fail_param,
-             ht.cam_fail_status) != (0x03E8, 0x0A0B, 2, 0xFFFF, 8, 6, 0x0180)):
-            fail("decode_health() misread the camera replies in the bridge tail")
         # A tail from 466477d (16 bytes) must still read its fields, and none
         # of the ladder's.
         h16 = pyproto.decode_health(c_pkts["health_bridge_tail"][7:-2][:24 + 16])
         if h16.iram_free != 142000 or h16.reserve_held is not None:
             fail("decode_health() mishandles the 16-byte tail of the older firmware")
-        # A tail from the ladder's firmware (24 bytes, up to 42af949) must read
-        # the ladder's fields and invent no camera replies.
-        h24 = pyproto.decode_health(c_pkts["health_bridge_tail"][7:-2][:24 + 24])
-        if (h24.reserve_held != 12288 or h24.scan_freed_kb != 0x0102
-                or h24.cam_wr_ok is not None):
-            fail("decode_health() mishandles the 24-byte tail of 42af949")
         ev = c_pkts["mount_event_nomem"][7:-2]
         if len(ev) != pyproto.MOUNT_EVENT_NOMEM_PAYLOAD_LEN or ev[0] != 4:
             fail("the C-built NO_MEM event is not the length or kind Python expects")
