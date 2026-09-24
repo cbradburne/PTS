@@ -11,7 +11,8 @@ Slot occupancy and AT_POSITION state come from the mount (slot_occupied_mask /
 slot_at_mask in STATUS packets / STATE_REPORT).  Coordinates are never held
 locally — they live in the mount's volatile RAM.
 
-Right side of each row: two RotaryDial widgets (Pan/Tilt speed, Slide speed).
+Right side of each row: a FocusButton — one autofocus on that mount's camera —
+then two RotaryDial widgets (Slide speed, Pan/Tilt speed).
 
 Two modes:
   MOVE — tap a button to recall that position on that camera
@@ -21,7 +22,7 @@ Two modes:
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
+    QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QSpacerItem,
     QLabel, QSizePolicy, QInputDialog, QMessageBox,
     QStyleOptionButton, QStylePainter, QStyle
 )
@@ -29,6 +30,7 @@ from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QColor, QPalette, QPaintEvent, QPainter
 
 from .rotary_dial import RotaryDial
+from .focus_button import FocusButton
 from config.position_store import PositionStore
 from ui import virtual_keyboard
 
@@ -106,11 +108,22 @@ _BTN_H_FRAC      = 120.0 / 178.0
 _BTN_ASPECT      = 130.0 / 120.0
 _DIAL_FRAC       = 0.78            # of button height
 _DIAL_GAP_FRAC   = 0.10
+# The focus crosshair between button 10 and the dials: small beside them, and
+# still a comfortable touch target (48px on the 1920x1080 screen).
+_FOCUS_FRAC      = 0.42            # of button height
 # The row's own inset, as a fraction of the button height.  The coloured band
 # is not meant to start where the first button does: the reference screen leaves
 # a clear margin before button 1 and after the last dial, and at a fixed 4px
 # that margin vanished as the buttons grew.
 _ROW_MARGIN_FRAC = 0.25
+# With the focus buttons shown the row's ends pull in — the buttons move left and
+# the dials right — and the room they give up goes either side of the focus
+# button, so the crosshair gets space round it instead of the band's ends.
+# Hidden, the row is exactly the layout it was before they existed.
+# (The first cut, 2026-09-25, used 0.20 and even gaps; on a MacBook screen that
+# left more room at the ends of the row than around the crosshair.)
+_ROW_MARGIN_FRAC_FOCUS = 0.10
+_FOCUS_PAD_FRAC        = 0.10      # extra gap each side of the focus button
 _ROW_MARGIN      = 4     # the value used before _relayout() has run once
 _BTN_RADIUS_FRAC = 22.0 / 120.0    # of the BUTTON height, as originally tuned
 _BTN_FONT_FRAC   = 24.0 / 120.0
@@ -211,6 +224,9 @@ class PositionGrid(QWidget):
     slider_jog_started          = pyqtSignal(int, int)  # mount_id, direction (+1 right / -1 left)
     slider_jog_stopped          = pyqtSignal(int)       # mount_id
 
+    # One autofocus on that mount's camera, from the crosshair at the row's end.
+    focus_requested             = pyqtSignal(int)       # mount_id
+
     def __init__(self, position_store: PositionStore, parent=None):
         super().__init__(parent)
         self._store  = position_store
@@ -269,6 +285,15 @@ class PositionGrid(QWidget):
         self._buttons: dict[tuple[int, int], QPushButton] = {}
         self._pt_dials: dict[int, RotaryDial] = {}
         self._sl_dials: dict[int, RotaryDial] = {}
+        self._focus_btns: dict[int, FocusButton] = {}
+        # The extra room either side of each focus button — see _relayout().
+        self._focus_pads: dict[int, tuple[QSpacerItem, QSpacerItem]] = {}
+        # Whether each mount's camera can take a command.  Starts False, so the
+        # crosshair is grey until the first health report says otherwise.
+        self._cam_ready: dict[int, bool] = {mid: False for mid in range(1, 6)}
+        # The focus buttons are a Config option (AppConfig.focus_buttons), off
+        # unless the rig has Blackmagic cameras.  See set_focus_buttons().
+        self._show_focus = False
         self._row_containers: dict[int, _RowContainer] = {}
 
         self._build()
@@ -371,6 +396,35 @@ class PositionGrid(QWidget):
         container = self._row_containers.get(mount_id)
         if container:
             container.overlay.setVisible(not connected)
+
+    def set_focus_buttons(self, show: bool) -> None:
+        """Show or hide the focus crosshair on every row, and re-lay the rows.
+
+        Hidden widgets take no room in a QHBoxLayout, so hiding them returns
+        the row to its old twelve items — and _relayout() returns the old
+        margins with it, which is what makes "off" the layout from before.
+        """
+        if show == self._show_focus:
+            return
+        self._show_focus = show
+        for btn in self._focus_btns.values():
+            btn.setVisible(show)
+        self._row_h = 0          # _relayout() skips a height it has already done
+        self._relayout()
+
+    def set_cam_ready(self, mount_id: int, ready: bool) -> None:
+        """Whether that mount's camera is linked and can take an autofocus.
+
+        Not ready is grey and untappable, like the slider dial on a mount with
+        no slider.  Offline mounts are covered by the row overlay regardless.
+        """
+        if self._cam_ready.get(mount_id) == ready:
+            return
+        self._cam_ready[mount_id] = ready
+        btn = self._focus_btns.get(mount_id)
+        if btn:
+            btn.setEnabled(ready)
+            btn.setToolTip("Auto focus" if ready else "Auto focus — no camera link")
 
     def set_pt_preset(self, mount_id: int, preset: int) -> None:
         self._pt_preset[mount_id] = preset
@@ -514,6 +568,7 @@ class PositionGrid(QWidget):
         btn_h = max(self._MIN_BTN_H, round(row_h * _BTN_H_FRAC))
         btn_w = round(btn_h * _BTN_ASPECT)
         dial  = max(48, round(btn_h * _DIAL_FRAC))
+        focus = max(28, round(btn_h * _FOCUS_FRAC))
 
         # Type, corners and border all scale with the button, or a 4K screen
         # gets 265px buttons with 24px digits rattling around inside them.
@@ -521,11 +576,26 @@ class PositionGrid(QWidget):
         self._font_px = max(9, round(btn_h * _BTN_FONT_FRAC))
         self._border  = max(2, round(btn_h * _BTN_BORDER_FRAC))
 
-        # 12 items in the row, so 11 gaps between them.
-        row_margin = max(4, round(btn_h * _ROW_MARGIN_FRAC))
+        # Ten buttons and two dials, so 11 gaps.  With the focus button between
+        # them, 13 items and 12 gaps, the ends tighter, and a pad either side
+        # of the focus button on top of its two gaps.
+        show_focus = self._show_focus
+        row_margin = max(4, round(btn_h * (_ROW_MARGIN_FRAC_FOCUS if show_focus
+                                           else _ROW_MARGIN_FRAC)))
+        pad      = round(btn_h * _FOCUS_PAD_FRAC) if show_focus else 0
         usable   = self.width() - m.left() - m.right() - row_margin * 2
-        leftover = usable - (10 * btn_w + 2 * dial)
-        spacing  = int(min(max(leftover / 11.0, 3), btn_w * 0.35))
+        leftover = usable - (10 * btn_w + 2 * dial
+                             + (focus + 2 * pad if show_focus else 0))
+        gaps     = 12 if show_focus else 11
+        spacing  = int(min(max(leftover / gaps, 3), btn_w * 0.35))
+        # Whole-pixel gaps leave up to a pixel per gap over, and it collects at
+        # the right-hand end.  With the focus button shown the ends are meant
+        # to match, so the spare goes into its pads instead.
+        pad_l = pad_r = pad
+        if show_focus:
+            spare  = max(0, min(leftover - gaps * spacing, gaps - 1))
+            pad_l += spare // 2
+            pad_r += spare - spare // 2
 
         for btn in self._buttons.values():
             btn.setMaximumHeight(btn_h)
@@ -541,10 +611,18 @@ class PositionGrid(QWidget):
         # bound, or the layout ratchets.
         for d in list(self._pt_dials.values()) + list(self._sl_dials.values()):
             d.setMaximumSize(dial, dial)
+        for f in self._focus_btns.values():
+            f.setMaximumSize(focus, focus)
+        for left, right in self._focus_pads.values():
+            left.changeSize(pad_l, 0, QSizePolicy.Policy.Fixed,
+                            QSizePolicy.Policy.Minimum)
+            right.changeSize(pad_r, 0, QSizePolicy.Policy.Fixed,
+                             QSizePolicy.Policy.Minimum)
         for hl in self._row_layouts.values():
             hl.setSpacing(spacing)
             cm = hl.contentsMargins()
             hl.setContentsMargins(row_margin, cm.top(), row_margin, cm.bottom())
+            hl.invalidate()              # the pads changed size under it
 
         for mid in list(self._row_containers):
             self._refresh_row_borders(mid)
@@ -600,6 +678,27 @@ class PositionGrid(QWidget):
         # _relayout(), which is how the original spacing came about. A collector
         # at this point instead put the whole surplus between button 10 and the
         # dials.
+
+        # The focus crosshair: grey until set_cam_ready() says the camera is
+        # linked.  Stretch 1 and an Expanding policy for the same reason as the
+        # buttons and dials; _relayout() caps its size.
+        focus = FocusButton()
+        focus.setEnabled(self._cam_ready[mount_id])
+        if not self._show_focus:
+            focus.hide()
+        focus.setSizePolicy(QSizePolicy.Policy.Expanding,
+                            QSizePolicy.Policy.Expanding)
+        focus.clicked.connect(lambda _=False, m=mount_id: self.focus_requested.emit(m))
+        self._focus_btns[mount_id] = focus
+        # The room either side of it.  Spacer items take no layout spacing of
+        # their own, so each side is the row's gap plus the pad — and while the
+        # button is hidden the pads are 0 and the row is the old one exactly.
+        pads = (QSpacerItem(0, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum),
+                QSpacerItem(0, 0, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum))
+        self._focus_pads[mount_id] = pads
+        hl.addItem(pads[0])
+        hl.addWidget(focus, 1)
+        hl.addItem(pads[1])
 
         accent  = col["accent"]
         pt_dial = RotaryDial(accent_colour=accent)

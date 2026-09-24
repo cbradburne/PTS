@@ -467,6 +467,12 @@ class ConfigDialog(QWidget):
         self._keypad_check.setChecked(self._config.numeric_keypad)
         form.addRow("Numeric keypad:", self._keypad_check)
 
+        # ---- Focus buttons (Blackmagic cameras only) ----
+        self._focus_check = QCheckBox(
+            "Show a focus button on each camera row (Blackmagic cameras only)")
+        self._focus_check.setChecked(self._config.focus_buttons)
+        form.addRow("Focus buttons:", self._focus_check)
+
         # ---- Camera & position names (save / load / defaults) ----
         names_box = QGroupBox("Camera && Position Names")
         names_vl  = QVBoxLayout(names_box)
@@ -972,6 +978,8 @@ class ConfigDialog(QWidget):
         # Numeric keypad — apply live too, so the effect is visible immediately
         # rather than only on the next time Settings is opened.
         self._config.numeric_keypad = self._keypad_check.isChecked()
+        # Applied to the grid by the main window once this dialog is accepted.
+        self._config.focus_buttons = self._focus_check.isChecked()
         kp = getattr(self, "_numeric_keypad", None)
         if self._config.numeric_keypad and kp is None:
             from ui.numeric_keypad import NumericKeypad

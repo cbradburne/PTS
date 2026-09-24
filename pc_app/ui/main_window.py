@@ -338,6 +338,7 @@ class MainWindow(QMainWindow):
 
         # ---- Position grid ----
         self._grid = PositionGrid(self._store)
+        self._grid.set_focus_buttons(self._config.focus_buttons)
         root.addWidget(self._grid, stretch=1)
 
         # ---- Nudge overlay (child of central widget, floats above grid) ----
@@ -564,6 +565,13 @@ class MainWindow(QMainWindow):
         self._grid.look_at_subject_selected.connect(self._on_look_at_subject_selected)
         self._grid.slider_jog_started.connect(self._on_slider_jog_start)
         self._grid.slider_jog_stopped.connect(self._on_slider_jog_stop)
+        self._grid.focus_requested.connect(self._mm.send_cam_autofocus)
+
+        # The focus crosshairs follow each camera's link.  It rides on the 10 s
+        # health, so a 2 s poll is plenty — Camera Control's own cadence.
+        self._cam_link_timer = QTimer(self)
+        self._cam_link_timer.timeout.connect(self._refresh_cam_links)
+        self._cam_link_timer.start(2000)
 
         # v2 — subject/calib signals from mount manager
         self._mm.subject_list_received.connect(self._on_subjects_updated)
@@ -1257,11 +1265,18 @@ class MainWindow(QMainWindow):
         # on each Config→OK even when nothing about the link changed.
         if conn_now != getattr(self, "_conn_snapshot", None) or not self._bridge.connected:
             self._connect_bridge()
+        self._grid.set_focus_buttons(self._config.focus_buttons)
         for mid in range(1, 6):
             self._grid.set_has_slider(mid, self._config.mount(mid).has_slider)
             self._grid.set_look_at_mode(mid, self._config.mount(mid).look_at_mode)
             # Reset cached look-at selection so stale subjects don't persist.
             self._active_la_subject[mid] = -1
+
+    def _refresh_cam_links(self) -> None:
+        for mid in range(1, 6):
+            ready = (self._mm.state(mid).connected
+                     and self._bridge.cam_ble_link(mid) is True)
+            self._grid.set_cam_ready(mid, ready)
 
     def _open_camera_control(self) -> None:
         """Blackmagic camera control over each mount's BLE link.

@@ -111,6 +111,10 @@ class AppConfig:
                                        # (touchscreen setups with no keyboard)
     numeric_keypad: bool = True        # keypad beside Settings for spin boxes
                                        # (same setups; spin arrows are tiny)
+    # A focus crosshair at the end of each camera row.  Off by default: it only
+    # does anything with Blackmagic cameras paired to the mounts, and on a rig
+    # without them it would be a dead control taking space from the rest.
+    focus_buttons: bool = False
 
     def mount(self, mount_id: int) -> MountConfig:
         if mount_id not in self.mounts:
@@ -199,6 +203,7 @@ def load_config() -> AppConfig:
         cfg.joystick_deadzone = data.get("joystick_deadzone", 0.08)
         cfg.virtual_keyboard  = data.get("virtual_keyboard", True)
         cfg.numeric_keypad    = data.get("numeric_keypad", True)
+        cfg.focus_buttons     = data.get("focus_buttons", False)
         # Load only the display label for each mount — everything else is in EEPROM
         for mid_str, md in data.get("mounts", {}).items():
             mid = int(mid_str)
@@ -230,6 +235,7 @@ def save_config(cfg: AppConfig) -> None:
             "joystick_deadzone": cfg.joystick_deadzone,
             "virtual_keyboard":  cfg.virtual_keyboard,
             "numeric_keypad":    cfg.numeric_keypad,
+            "focus_buttons":     cfg.focus_buttons,
             # Only the display label is app-specific; all other mount settings are in EEPROM
             "mounts": {
                 str(mid): {"mount_id": mc.mount_id, "label": mc.label}
