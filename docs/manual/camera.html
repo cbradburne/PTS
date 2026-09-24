@@ -38,6 +38,16 @@
     it, and that is the only real confirmation available. For a setting the
     camera never mentions, the honest feedback is the lens visibly hunting.</div>
 
+    <div class="warn" id="raw"><b>Record in RAW to use camera control fully</b>
+    The Blackmagic Pocket Cinema Camera applies colour correction only while it
+    is recording <strong>RAW</strong>, either <strong>Blackmagic RAW</strong> or
+    <strong>ProRes RAW</strong>. In <strong>ProRes HQ</strong> the colour
+    controls reach the camera and the picture does not change. That covers the
+    Lift, Gamma and Gain wheels, Contrast, Saturation, Hue, Pivot and
+    Lum&nbsp;Mix. White balance, ISO and shutter work in any codec. The camera
+    never reports its colour-correction values back, so nothing on the console
+    shows that they were ignored. Set the camera's codec before the show.</div>
+
     <h2>Pairing a camera to a mount</h2>
     <p>Done on the mount's own round touchscreen, not from the console.</p>
 
@@ -156,7 +166,8 @@
           <strong>Gain</strong> wheels, each over a master bar with its luma, red,
           green and blue values written out beneath. Then Contrast, Saturation,
           Hue, Pivot, Lum&nbsp;Mix and Tint, and <strong>Reset&nbsp;All</strong>
-          for the whole grade.</td></tr>
+          for the whole grade. The grade only takes effect while the camera
+          records RAW — see <a href="#raw">Record in RAW</a>.</td></tr>
     </table>
 
     <figure class="shot" data-file="cc-advanced.jpg">

@@ -114,6 +114,17 @@
       downloads the model (<a href="cv.html">CV tracking</a>).</li>
     </ul>
 
+    <h3>Saturation, contrast or the colour wheels do nothing</h3>
+    <ul>
+      <li>White balance and ISO still work, but the grade doesn't? The camera is
+      not recording RAW. The Blackmagic Pocket Cinema Camera applies colour
+      correction only in <strong>Blackmagic RAW</strong> or
+      <strong>ProRes RAW</strong>, not in ProRes HQ. Change the codec on the
+      camera (<a href="camera.html#raw">Blackmagic camera control</a>).</li>
+      <li>Nothing on the console will flag this: the camera never reports its
+      colour-correction values back, so the controls look as if they worked.</li>
+    </ul>
+
     <h3>OSC buttons don't fire</h3>
     <ul>
       <li>Point Companion/QLab at the hub (<code>192.168.4.1:9700</code>) or the PC
