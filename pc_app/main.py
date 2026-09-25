@@ -87,6 +87,11 @@ except OSError as e:
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT, handlers=_log_handlers)
 log = logging.getLogger(__name__)
 
+# Before anything else can fail: under PyQt6 an error that escapes a button
+# handler or timer otherwise aborts the whole app.  See error_hook.py.
+import error_hook
+error_hook.install()
+
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
