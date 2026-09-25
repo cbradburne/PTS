@@ -40,6 +40,9 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import math
+import os
+import sys
+import time
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -63,6 +66,68 @@ IOU_REANCHOR    = 0.30  # minimum IoU to accept a YOLO detection as the same per
 # 0.12 ≈ top of head, 0.20 ≈ eye-line (good for "head and shoulders" framing).
 # CSRT still tracks the whole-body bbox for stability; only the aim point shifts.
 HEAD_TRACK_FRACTION = 0.15
+
+# One line in comms.log every CV_TIMING_REPORT_S while the feed runs: where
+# the time goes, and how often the tracker loses the person.
+#
+# Added 2026-09-25.  On the production PC (a 4-core 7th-gen i5) the video was
+# smooth but the box moved only about every 0.8 s, and the camera went
+# move-stop-move.  Slow ticks, a slow display, slow YOLO, or a tracker that
+# keeps losing the person between detections could each do that, and each
+# wants a different fix.  This measures; it changes nothing.
+CV_TIMING_REPORT_S = 10.0
+
+
+def _timed(fn, arg, stats, bucket: str):
+    """Run fn(arg) on a worker thread and record its duration in ms.
+
+    The bucket is looked up when the job ENDS, so a job that straddles a
+    report lands in the window it finished in."""
+    t0 = time.perf_counter()
+    try:
+        return fn(arg)
+    finally:
+        getattr(stats, bucket).append((time.perf_counter() - t0) * 1000.0)
+
+
+class _CvStats:
+    """One report window.  The two workers only append durations to their
+    lists; every other field is written on the Qt thread, in _tick."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.t0             = time.monotonic()
+        self.cpu0           = time.process_time()
+        self.ticks          = 0
+        self.no_frame       = 0      # ticks with nothing from the camera yet
+        self.tick_ms: list  = []     # the whole tick, display included
+        self.show_ms: list  = []     # handing the frame to the display
+        self.detect_ms: list = []    # YOLO, measured on its worker
+        self.track_ms: list  = []    # tracker update, measured on its worker
+        self.detect_results = 0
+        self.detect_gaps: list = []  # seconds between YOLO results
+        self.track_ok       = 0
+        self.track_fail     = 0
+        self.tracking_ticks = 0      # ticks with a person selected
+        self.lost_ticks     = 0      # ...of which the tracker had lost them
+        self.stale_drives   = 0      # ...and the mount was driven anyway, on
+                                     # the last position the tracker gave
+        self.reanchors      = 0
+        self.stops          = 0      # stop commands sent for a lost track
+        self.gave_up        = 0      # tracks abandoned (tracking_lost)
+
+
+def _ms(v: float) -> str:
+    return f"{v:.1f}" if v < 10 else f"{v:.0f}"
+
+
+def _avg_max(v: list) -> str:
+    if not v:
+        return "none"
+    return f"{_ms(sum(v) / len(v))} ms avg / {_ms(max(v))} max"
+
 
 DEFAULT_GAIN_PAN  = 2.0
 DEFAULT_GAIN_TILT = 2.0
@@ -147,6 +212,12 @@ class TrackingLoop(QObject):
         self._detect_pending: concurrent.futures.Future | None = None
         self._track_pending:  concurrent.futures.Future | None = None
         self._last_track:     TrackResult | None = None
+
+        # CV TIMING — see CV_TIMING_REPORT_S.
+        self._stats            = _CvStats()
+        self._context_logged   = False
+        self._last_detect_t    = 0.0
+        self._frames_at_report = getattr(capture, "frames_grabbed", None)
 
         self._timer = QTimer(self)
         self._timer.setInterval(TRACK_INTERVAL)
@@ -261,21 +332,39 @@ class TrackingLoop(QObject):
     # ------------------------------------------------------------------
 
     def _tick(self) -> None:
+        t0 = time.perf_counter()
+        self._tick_body()
+        st = self._stats
+        st.ticks += 1
+        st.tick_ms.append((time.perf_counter() - t0) * 1000.0)
+        if time.monotonic() - st.t0 >= CV_TIMING_REPORT_S:
+            self._report_timing()
+
+    def _tick_body(self) -> None:
+        st = self._stats
         frame = self._capture.get_frame()
         if frame is None:
+            st.no_frame += 1
             return
 
         self._frame_h, self._frame_w = frame.shape[:2]
         self._tick_count += 1
+        if not self._context_logged:
+            self._log_context()
 
         # ── YOLO detection (every DETECT_EVERY_N ticks) ───────────────────
         if (self._tick_count % DETECT_EVERY_N == 0
                 and self._detect_pending is None
                 and self._detector.available):
             self._detect_pending = self._detect_exec.submit(
-                self._detector.detect, frame.copy())
+                _timed, self._detector.detect, frame.copy(), st, "detect_ms")
 
         if self._detect_pending is not None and self._detect_pending.done():
+            now = time.monotonic()
+            st.detect_results += 1
+            if self._last_detect_t:
+                st.detect_gaps.append(now - self._last_detect_t)
+            self._last_detect_t = now
             try:
                 dets = self._detect_pending.result()
                 self._detections = dets
@@ -301,11 +390,15 @@ class TrackingLoop(QObject):
                 else:
                     small = frame.copy()
                 self._track_pending = self._track_exec.submit(
-                    self._tracker.update, small)
+                    _timed, self._tracker.update, small, st, "track_ms")
 
             if self._track_pending is not None and self._track_pending.done():
                 try:
                     raw = self._track_pending.result()
+                    if raw.success:
+                        st.track_ok += 1
+                    else:
+                        st.track_fail += 1
                     # Scale bbox coordinates back to full resolution.
                     if TRACK_SCALE < 1.0 and raw.bbox is not None:
                         inv = 1.0 / TRACK_SCALE
@@ -324,8 +417,13 @@ class TrackingLoop(QObject):
 
         # ── Control law ───────────────────────────────────────────────────
         if self._tracking:
+            st.tracking_ticks += 1
+            if not self._tracker.active:
+                st.lost_ticks += 1
             result = self._last_track
             if result is not None and result.success:
+                if not self._tracker.active:
+                    st.stale_drives += 1
                 self._csrt_misses   = 0
                 self._selected_bbox = result.bbox
                 # Derive head position from the top of the tracked bbox rather
@@ -341,12 +439,14 @@ class TrackingLoop(QObject):
             elif result is not None and not result.success:
                 # Stop the mount immediately so it doesn't drift blindly.
                 self._csrt_misses += 1
+                st.stops += 1
                 pt_preset = self._mm.state(self._mount_id).active_pt_preset
                 self._mm.send_jog(self._mount_id, 0, 0, 0, 0, pt_preset=pt_preset)
                 if self._csrt_misses >= MAX_CSRT_MISSES:
                     # YOLO had enough time to re-anchor and couldn't — give up.
                     self._tracking      = False
                     self._selected_bbox = None
+                    st.gave_up += 1
                     self.tracking_lost.emit()
 
         # ── Annotate frame — selected person green bbox ───────────────────
@@ -362,7 +462,67 @@ class TrackingLoop(QObject):
             cv2.line(display, (cx_px - 10, cy_px), (cx_px + 10, cy_px), (80, 210, 80), 1)
             cv2.line(display, (cx_px, cy_px - 10), (cx_px, cy_px + 10), (80, 210, 80), 1)
 
+        # The display slot is connected directly on this thread, so the
+        # emit IS the display: scaling, overlay and paint.
+        t_show = time.perf_counter()
         self.frame_ready.emit(display)
+        st.show_ms.append((time.perf_counter() - t_show) * 1000.0)
+
+    def _log_context(self) -> None:
+        """Once per feed: what the timings below were measured with."""
+        self._context_logged = True
+        torch = sys.modules.get("torch")
+        threads = torch.get_num_threads() if torch is not None else "not loaded"
+        log.info("CV TIMING context: frame %dx%d, tracker %s requested, "
+                 "YOLO %s at %s px, torch threads %s, %s CPU cores",
+                 self._frame_w, self._frame_h, self._tracker_kind.value,
+                 "available" if self._detector.available else "unavailable",
+                 getattr(self._detector, "_imgsz", "?"), threads, os.cpu_count())
+
+    def _report_timing(self) -> None:
+        """The CV TIMING line — see CV_TIMING_REPORT_S."""
+        st   = self._stats
+        secs = max(1e-6, time.monotonic() - st.t0)
+        cpu  = (time.process_time() - st.cpu0) / secs * 100.0
+
+        parts = [f"{st.ticks / secs:.1f} ticks/s (target {TRACK_RATE_HZ})"
+                 + (f", {st.no_frame} with no frame yet" if st.no_frame else "")]
+        tick = f"tick {_avg_max(st.tick_ms)}"
+        if st.show_ms:
+            tick += f", of which display {_avg_max(st.show_ms)}"
+        parts.append(tick)
+
+        grabbed = getattr(self._capture, "frames_grabbed", None)
+        if grabbed is not None and self._frames_at_report is not None:
+            parts.append(f"camera {(grabbed - self._frames_at_report) / secs:.1f} fps")
+        self._frames_at_report = grabbed
+
+        if self._detector.available:
+            yolo = (f"YOLO {st.detect_results / secs:.1f} results/s, "
+                    f"{_avg_max(st.detect_ms)} each")
+            if st.detect_gaps:
+                yolo += (f", a result every {sum(st.detect_gaps) / len(st.detect_gaps):.2f} s"
+                         f" (longest {max(st.detect_gaps):.2f})")
+            parts.append(yolo)
+        else:
+            parts.append("YOLO unavailable")
+
+        if st.tracking_ticks:
+            name = self._tracker.kind_name or self._tracker_kind.value
+            parts.append(f"tracker {name} {(st.track_ok + st.track_fail) / secs:.1f}/s, "
+                         f"{_avg_max(st.track_ms)}, {st.track_ok} ok / "
+                         f"{st.track_fail} lost the person")
+            parts.append(f"lost {100.0 * st.lost_ticks / st.tracking_ticks:.0f}% "
+                         f"of tracking time, driving on a stale position for "
+                         f"{100.0 * st.stale_drives / st.tracking_ticks:.0f}%, "
+                         f"{st.reanchors} re-anchors, {st.stops} stop commands, "
+                         f"{st.gave_up} tracks given up")
+        else:
+            parts.append("not tracking")
+
+        parts.append(f"CPU {cpu:.0f}% of one core ({os.cpu_count()} cores)")
+        log.info("CV TIMING %.0f s: %s", secs, " | ".join(parts))
+        st.reset()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -413,4 +573,5 @@ class TrackingLoop(QObject):
             small, scaled = frame, bbox
         self._tracker.init(small, scaled, self._tracker_kind)
         self._selected_bbox = bbox
+        self._stats.reanchors += 1
         log.debug(f"tracker re-anchored to YOLO detection {bbox}")

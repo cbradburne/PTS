@@ -210,6 +210,9 @@ class Tracker:
     def __init__(self):
         self._tracker: Optional[cv2.Tracker] = None
         self._active  = False
+        # Which constructor actually started, for the CV TIMING line — the
+        # requested kind is not always the one this OpenCV build has.
+        self.kind_name = ""
         self._frame_w = 0
         self._frame_h = 0
 
@@ -233,6 +236,7 @@ class Tracker:
                 if result is not False:
                     self._tracker = candidate
                     self._active  = True
+                    self.kind_name = name
                     log.debug(f"Correlation tracker started: {name}")
                     break
                 else:

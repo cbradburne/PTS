@@ -45,6 +45,9 @@ class CaptureSource:
         self._lock   = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        # Frames the device has delivered, for the CV TIMING line's camera
+        # rate.  Only the grab thread writes it.
+        self.frames_grabbed = 0
 
     def open(self, device_index: int = 0,
              width: int = 1280, height: int = 720) -> bool:
@@ -112,3 +115,4 @@ class CaptureSource:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 with self._lock:
                     self._frame = frame
+                self.frames_grabbed += 1
