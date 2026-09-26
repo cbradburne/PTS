@@ -226,10 +226,13 @@ SCRIPTS = [
     [True, [["mark", 0.8], ["note", 0.7, 1], ["offer", 11.0, 2]]],
 ] + [[g, confirmed_script(g)] for g in [True, False] * 60]
 
+POINTS = [[rng.uniform(-100, 100), rng.uniform(-100, 100)] for _ in range(200)]
+POINTS += [[1, 0], [0, 1], [-1, 0], [0, -1], [3, -4]]
+
 cases = {
     "builders": [[name, args] for name, _fn, arglists in BUILDERS for args in arglists],
     "frames": FRAMES, "steps": STEPS, "hues": HUES, "mags": MAGS, "rgbs": RGBS,
-    "hsv": HSV, "rgb01": RGB01, "scripts": SCRIPTS,
+    "hsv": HSV, "rgb01": RGB01, "scripts": SCRIPTS, "points": POINTS,
 }
 
 harness = PURE + r"""
@@ -247,6 +250,8 @@ out.rgb = C.rgb01.map(([r, g, b]) => rgbToHsv(r, g, b));
 // Direction: every hue, placed on the wheel and read back, is itself; and
 // the order runs counter-clockwise from red at the top.
 out.roundtrip = C.hues.map(h => { const a = wheelAngle(h); return wheelHue(Math.cos(a), Math.sin(a)); });
+out.angles = C.hues.map(h => wheelAngle(h));
+out.pointhues = C.points.map(([dx, dy]) => wheelHue(dx, dy));
 out.at = [0, 1/6, 1/3, 1/2, 2/3, 5/6].map(h => [Math.cos(wheelAngle(h)), Math.sin(wheelAngle(h))]);
 out.scripts = C.scripts.map(([gated, ops]) => {
     const c = new Confirmed(gated), trace = [];
@@ -354,6 +359,13 @@ wheel = wheel[:wheel.index("\n}\n")]
 assert "wheelAngle(t0)" in wheel and "wheelAngle(hm[0])" in wheel and "wheelHue(dx, dy)" in wheel, \
     "the ring, the puck and the drag no longer share wheelAngle / wheelHue"
 print("   hue round-trips the wheel; R top, Y G left, C bottom, B M right OK")
+# ...and the PC app's wheel goes the same way, so a grade reads the same on both.
+for h, a in zip(HUES, J["angles"]):
+    assert close(a, CW._hue_angle(h)), (h, a, CW._hue_angle(h))
+for (dx, dy), hj in zip(POINTS, J["pointhues"]):
+    hp = CW._angle_hue(dx, dy)
+    assert close(hj, hp, 1e-9) or close(abs(hj - hp), 1.0, 1e-9), ((dx, dy), hj, hp)
+print("   the PC app's wheel places and reads every hue the same way      OK")
 
 # 3f. the f-number and focal-length readouts: shown only once known to be new
 for (gated, ops), got in zip(SCRIPTS, J["scripts"]):

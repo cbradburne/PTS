@@ -95,6 +95,47 @@ for deg in (0, 45, 130, 200, 305):
     assert err < 2.0, f"puck round-trip off by {err:.1f}px at {deg}deg"
 print("3. puck round-trip     max error < 2px over 5 angles")
 
+# ---- 3b. the colour under the finger is the colour sent -------------------
+# The round-trip above passes whichever way round the puck goes, as long as
+# the drag goes the same way — and until 2026-09-26 both went clockwise while
+# the ring was painted counter-clockwise: a press on the violet at the right
+# sent green.  So read the ring off the rendered widget and compare.
+import colorsys
+w = ColourWheel("Lift", span=0.5, centre=0.0, lo=-2.0, hi=2.0)
+w.resize(240, 240 + w._FOOT)
+img = w.grab().toImage()
+c, rad = w._ring()
+
+
+def hue_gap(a, b):
+    d = abs(a - b) % 1.0
+    return min(d, 1.0 - d)
+
+
+worst = 0.0
+for deg in range(0, 360, 30):
+    a = math.radians(deg)
+    px = img.pixelColor(int(round(c.x() + (rad - 5) * math.cos(a))),
+                        int(round(c.y() + (rad - 5) * math.sin(a))))
+    ring = colorsys.rgb_to_hsv(px.red() / 255, px.green() / 255, px.blue() / 255)[0]
+    w._apply(Ev(c.x() + rad * 0.8 * math.cos(a), c.y() + rad * 0.8 * math.sin(a)))
+    sent_hue, _mag = w._hue_mag()
+    worst = max(worst, hue_gap(ring, sent_hue))
+    assert hue_gap(ring, sent_hue) < 0.03, (
+        f"at {deg} deg the ring shows hue {ring:.3f} but a press there sends "
+        f"{sent_hue:.3f} — r g b {tuple(round(v, 3) for v in w.values()[:3])}")
+# and the named colours land where a vectorscope has them
+for name, hue, want in (("yellow", 1 / 6, "upper left"), ("blue", 2 / 3, "lower right")):
+    r_, g_, b_ = colorsys.hsv_to_rgb(hue, 1, 1)
+    m_ = (r_ + g_ + b_) / 3
+    w.set_values(r_ - m_, g_ - m_, b_ - m_, 0.0)
+    p = w._puck()
+    left, up = p.x() < c.x(), p.y() < c.y()
+    got = ("upper " if up else "lower ") + ("left" if left else "right")
+    assert got == want, f"{name} puck sits {got}, not {want}"
+print(f"3b. ring colour = colour sent at 12 angles (worst {worst:.3f} of a turn);"
+      f" yellow upper left, blue lower right")
+
 # ---- 4. master strip sits under the ring ---------------------------------
 for h in (240, 320, 460):
     g.resize(210, h)

@@ -50,6 +50,23 @@ def _hue_unit(hue: float) -> float:
     return math.sqrt((r - m) ** 2 + (g - m) ** 2 + (b - m) ** 2) or 1.0
 
 
+# Which way round the wheel goes: counter-clockwise from the top, the way
+# QConicalGradient paints the ring — red at the top, then yellow, green, cyan,
+# blue and magenta going round to the left, a vectorscope's order.  The puck
+# and a drag both go through these two, so the colour under the finger is the
+# colour that is sent.  Until 2026-09-26 they went CLOCKWISE while the ring
+# went the other way: only red and cyan agreed, and a press on the violet at
+# the right sent green.  The web app's wheel uses the same pair.
+def _hue_angle(hue: float) -> float:
+    """Where a hue sits on the ring, as a screen angle (radians, y down)."""
+    return -math.pi / 2 - hue * 2 * math.pi
+
+
+def _angle_hue(dx: float, dy: float) -> float:
+    """The hue at an offset from the wheel's centre (screen axes, y down)."""
+    return ((-math.pi / 2 - math.atan2(dy, dx)) / (2 * math.pi)) % 1.0
+
+
 class ColourWheel(QWidget):
     changed = pyqtSignal(float, float, float, float)   # r, g, b, y
 
@@ -153,10 +170,9 @@ class ColourWheel(QWidget):
         h, mag = self._hue_mag()
         if mag < 1e-6:
             return c
-        ang = h * 2 * math.pi
+        ang = _hue_angle(h)
         rr = min(1.0, mag / max(1e-6, self._span)) * rad * 0.86
-        return QPointF(c.x() + rr * math.cos(ang - math.pi / 2),
-                       c.y() + rr * math.sin(ang - math.pi / 2))
+        return QPointF(c.x() + rr * math.cos(ang), c.y() + rr * math.sin(ang))
 
     # -- painting ---------------------------------------------------------
     def paintEvent(self, _ev) -> None:
@@ -231,8 +247,7 @@ class ColourWheel(QWidget):
         else:
             dx, dy = pos.x() - c.x(), pos.y() - c.y()
             dist = min(math.hypot(dx, dy), rad * 0.86)
-            ang = math.atan2(dy, dx) + math.pi / 2
-            hue = (ang / (2 * math.pi)) % 1.0
+            hue = _angle_hue(dx, dy)
             mag = (dist / max(1e-6, rad * 0.86)) * self._span
             off = _hue_to_offsets(hue, mag)
             # Offsets ride on the neutral: zero for lift and gamma, ONE for gain.
