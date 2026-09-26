@@ -54,6 +54,9 @@
       the hub's live pairing table, forgets a retired mount, and resolves
       same-number conflicts (Replace / Ignore) — so a hub plus a phone is a
       complete rig (<a href="pairing.html">Pairing &amp; identity</a>).</li>
+      <li><strong>Control the Blackmagic cameras</strong> — autofocus, ISO, white
+      balance, recording, and the full colour-correction surface, the same as the
+      PC app's Camera Control (<a href="#camera">below</a>).</li>
     </ul>
     <p>The layout adapts to <strong>portrait and landscape</strong>, so it's usable
     held either way.</p>
@@ -85,6 +88,41 @@
     <div class="note"><b>When a number box sends</b> Numeric fields commit when you
     leave them — press Enter, or tap elsewhere. Typing alone changes nothing on the
     mount, so a half-typed value is never transmitted. Toggles send immediately.</div>
+
+    <h2 id="camera">Camera control</h2>
+    <p>Blackmagic camera control over each mount's Bluetooth link — the same panels
+    as the PC app's <a href="camera.html">Camera Control</a>, sending the same
+    commands. Open it with <strong>◎ Camera</strong> in the bottom bar of the
+    portrait, landscape and GC screens, or the <strong>Camera</strong> tab of the
+    extended view.</p>
+    <ul>
+      <li><strong>One row per camera</strong> — Auto Focus, ISO − / +, WB − / + and
+      Record, with the camera's link state spelled out: <em>camera ready</em>,
+      <em>camera off</em>, <em>no camera paired</em>, <em>no camera support</em> or
+      <em>mount offline</em>. What each one asks of you is in
+      <a href="camera.html">Blackmagic camera control</a>.</li>
+      <li><strong>Advanced…</strong> — the full surface for one camera: ISO,
+      Shutter, Balance, Auto WB; Iris, Zoom and Focus; the Lift, Gamma and Gain
+      wheels with Contrast, Saturation, Hue, Pivot, Lum Mix and Tint. On a phone
+      the wheels show one at a time — pick Lift, Gamma or Gain above them; each
+      has a ↺ to put it back to neutral.</li>
+    </ul>
+    <p>ISO, WB and the Record button show what the <em>camera</em> reports, never
+    what was sent, so a number changes only once the camera confirms it. The
+    colour controls only take effect while the camera records RAW — see
+    <a href="camera.html#raw">Record in RAW</a> — and the camera never reports
+    them back, so they show what <em>this device</em> last sent.</p>
+
+    <h3 id="focus-buttons">Focus buttons</h3>
+    <p>Switch on <strong>Focus buttons on the main screen</strong> at the foot of
+    the camera panel and a red crosshair appears on the main screens: one tap is
+    one Auto Focus on that camera. In portrait and landscape it sits between the
+    two speed controls and acts on the selected camera; on the GC screen it
+    follows position 10, and in the extended view each camera row has its own,
+    as on the PC app's grid. It turns grey when that camera cannot take the
+    command, and flashes green to show the command was sent. The setting is kept
+    per device — off unless you want it, since without Blackmagic cameras it
+    could never do anything.</p>
 
     <h2>Game controller</h2>
     <p>Pair a Bluetooth game controller — PlayStation, Xbox or similar — to your phone

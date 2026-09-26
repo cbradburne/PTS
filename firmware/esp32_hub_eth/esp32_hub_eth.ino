@@ -2399,6 +2399,100 @@ static void dispatch_disp_msg(uint8_t type, uint8_t len, const uint8_t *d) {
 }
 
 // ---------------------------------------------------------------------------
+// Camera reports for WebSocket clients — the web app's camera panel
+// ---------------------------------------------------------------------------
+// The phone's camera panel shows what the PC app's does: the camera's own ISO,
+// white balance, recording and lens reports, and whether each mount's camera is
+// linked.  Until 2026-09-26 neither reached a WebSocket client at all.
+//
+// CMD_CAM_STATUS is NOT forwarded wholesale.  A mount with a camera re-offers
+// one cached report every 300 ms (CAM_REPLAY_MS in ble_camera.h) on top of the
+// camera's own notifications, and this AP shares its radio with ESP-NOW — the
+// reason STATUS is rate-limited above.  So a phone is sent only the parameters
+// the web app shows, each one only when its value changes, and also:
+//   - again after any WebSocket client connects, so a phone that has just
+//     arrived fills in from the mount's own replay (a ~12 s round) instead of
+//     waiting for somebody to change a setting;
+//   - again every CAM_WS_REFRESH_MS, so a report dropped by a full client queue
+//     (setCloseClientOnQueueFull(false) drops rather than disconnects) is not
+//     missing for good;
+//   - never during a jog.  A report skipped then is NOT marked as sent, so the
+//     mount's next replay of it goes out instead.
+// The PC app is untouched by all of this: TCP and Serial still get every
+// report, through broadcast_to_all().
+static const uint8_t CAM_WS_PARAMS[][2] = {
+    {0, 0}, {0, 2}, {0, 3}, {0, 7}, {0, 8},   // lens: focus, aperture (APEX), iris,
+                                              //       focal length, zoom
+    {1, 2}, {1, 12}, {1, 14},                 // video: white balance + tint,
+                                              //        shutter speed, ISO
+    {8, 0}, {8, 1}, {8, 2}, {8, 4}, {8, 5}, {8, 6},  // colour correction, should
+                                              // a camera ever report it (the
+                                              // Pocket 4K does not)
+    {10, 1},                                  // media: transport — is it recording
+};
+#define CAM_WS_NPARAM      (sizeof(CAM_WS_PARAMS) / sizeof(CAM_WS_PARAMS[0]))
+#define CAM_WS_REFRESH_MS  30000UL
+// A lens report streams while the lens is moving.  One per parameter per 200 ms
+// is plenty for a readout, and the value it settles on still arrives: on the
+// next change, or on the mount's next replay of it.
+#define CAM_WS_MIN_GAP_MS  200UL
+
+struct CamWsSent { uint32_t hash, ms, gen; };   // gen 0 = never sent
+static CamWsSent _cam_ws_sent[NUM_MOUNTS][CAM_WS_NPARAM];
+
+// Bumped by on_ws_event (the AsyncTCP task) on every connect, read by the main
+// loop.  One writer and an aligned 32-bit word, so no lock.
+static volatile uint32_t _ws_connects      = 0;
+static uint32_t          _ws_connects_seen = 0;
+
+// Each mount's latest bridge health, kept as the packet that carried it, so a
+// phone that connects is told every camera's link state at once rather than up
+// to ten seconds later, when each mount next reports.
+static uint8_t  _cam_health_pkt[NUM_MOUNTS][PKT_BUF_SIZE];
+static uint16_t _cam_health_len[NUM_MOUNTS] = {};
+
+static uint32_t cam_ws_hash(const uint8_t *p, uint8_t n) {   // FNV-1a
+    uint32_t h = 2166136261u;
+    for (uint8_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+// Whether this camera report (a CMD_CAM_STATUS payload, BMD framing: [4] is the
+// category and [5] the parameter) should go to the WebSocket clients now.
+static bool cam_ws_due(int m, const uint8_t *p, uint8_t n, uint32_t now) {
+    if (n < 8 || m < 0 || m >= NUM_MOUNTS) return false;
+    int k = -1;
+    for (unsigned i = 0; i < CAM_WS_NPARAM; i++)
+        if (CAM_WS_PARAMS[i][0] == p[4] && CAM_WS_PARAMS[i][1] == p[5]) {
+            k = (int)i;
+            break;
+        }
+    if (k < 0) return false;                          // the web app does not show it
+    if (now - _ws_last_jog_ms < WS_JOG_SUPPRESS_MS) return false;   // radio busy
+    if (_ws.count() == 0) return false;               // nobody to tell
+    CamWsSent &s  = _cam_ws_sent[m][k];
+    uint32_t   h   = cam_ws_hash(p, n);
+    uint32_t   gen = _ws_connects;
+    bool due = (s.gen != gen)                          // a client arrived since
+            || (now - s.ms >= CAM_WS_REFRESH_MS)       // heal a dropped frame
+            || (h != s.hash && now - s.ms >= CAM_WS_MIN_GAP_MS);   // it changed
+    if (!due) return false;
+    s.hash = h;
+    s.ms   = now;
+    s.gen  = gen;
+    return true;
+}
+
+// One parsed packet to every WebSocket client, on its own.  The relay message
+// it came in may carry others, which the whitelist below judges separately.
+static void ws_send_parsed(const ParsedPacket &pk) {
+    uint8_t  b[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(b, pk.mount_id, pk.seq, pk.cmd,
+                              pk.payload, pk.payload_len);
+    _ws.binaryAll(b, (size_t)n);
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket event handler
 // ---------------------------------------------------------------------------
 
@@ -2409,6 +2503,9 @@ static void on_ws_event(AsyncWebSocket *server, AsyncWebSocketClient *client,
         // closing the connection.  Queue pressure comes from mount STATUS bursts;
         // the phone UI only needs ~10 Hz updates so dropped frames are fine.
         client->setCloseClientOnQueueFull(false);
+        // The camera reports go again for this newcomer — see cam_ws_due() —
+        // and the main loop replays each mount's camera link state.
+        _ws_connects = _ws_connects + 1;
         Serial.printf("WS client %u connected from %s\n",
                       client->id(), client->remoteIP().toString().c_str());
         // Trigger all known-online mounts to resend STATUS + full state so
@@ -4586,6 +4683,12 @@ void loop() {
                                           rec ? "RECORDING" : "stopped recording");
                         }
                     }
+                    // The camera's reports, for the phone's camera panel —
+                    // filtered, see cam_ws_due().
+                    if (pkt.cmd == CMD_CAM_STATUS
+                            && cam_ws_due(msg.src_idx, pkt.payload,
+                                          pkt.payload_len, millis()))
+                        ws_send_parsed(pkt);
                     // The bridge's own health carries whether its camera is
                     // connected.  Offset 19 of the 24-byte PayloadHealth —
                     // node_type(1) reset(1) uptime(4) heap(4) minheap(4)
@@ -4601,6 +4704,15 @@ void loop() {
                                           msg.src_idx + 1,
                                           linked ? "linked" : "not linked");
                         }
+                        // To the phones as well: the camera panel reads its
+                        // link state from these flags, exactly as the PC app
+                        // does.  One per mount every 10 s, so unfiltered.
+                        // Kept for the next phone to connect — see loop().
+                        uint16_t hn = build_packet(_cam_health_pkt[msg.src_idx],
+                                                   pkt.mount_id, pkt.seq, pkt.cmd,
+                                                   pkt.payload, pkt.payload_len);
+                        _cam_health_len[msg.src_idx] = hn;
+                        _ws.binaryAll(_cam_health_pkt[msg.src_idx], (size_t)hn);
                     }
                     // Forward limits-found notification to display
                     if (pkt.cmd == CMD_LIMITS_FOUND
@@ -4705,6 +4817,17 @@ void loop() {
             _tcp_count = tc; _ws_count = wc;
             disp_update_clients(tc, wc);
         }
+    }
+
+    // ---- A phone has just connected: every camera's link state, now ----
+    // Rather than when each mount next reports its health, up to 10 s away —
+    // long enough to read "checking…" as a fault.  Only for mounts still being
+    // heard; a stale record would claim a camera on a mount that has gone.
+    if (_ws_connects != _ws_connects_seen) {
+        _ws_connects_seen = _ws_connects;
+        for (int i = 0; i < NUM_MOUNTS; i++)
+            if (_cam_health_len[i] && _mount_last_seen[i] > 0)
+                _ws.binaryAll(_cam_health_pkt[i], (size_t)_cam_health_len[i]);
     }
 
     // ---- WebSocket housekeeping (every loop — required by mathieucarbou fork) ----
