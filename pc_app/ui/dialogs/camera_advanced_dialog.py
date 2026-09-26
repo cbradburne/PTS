@@ -20,7 +20,7 @@ implementation:
   It cannot ASK the camera anything. There is no "get" in the protocol, only
   "set" and the camera's own unsolicited reports. What the app has heard since
   it started is therefore all it knows, and a control the camera never mentions
-  — shutter, ND, the whole of colour correction — can only show what this app
+  — shutter, the whole of colour correction — can only show what this app
   last sent, which is not the same as what the camera holds if someone changed
   it at the body.
 
@@ -292,8 +292,6 @@ class CameraAdvancedDialog(QDialog):
         # each camera change, and is the operator's alone after that.
         self._iris_seeded = False
         self.setWindowTitle("Camera Control — Advanced")
-        self.resize(1500, 1000)
-        self.setMinimumSize(1240, 860)
         self.setStyleSheet(
             "QDialog{background:#1b1d20;} QLabel{color:#cfd3d8;}"
             # Style the entry widgets explicitly — left to the platform they
@@ -355,6 +353,14 @@ class CameraAdvancedDialog(QDialog):
         self._refresh_link()
         self._show_known()
 
+        # Sized to its content.  The camera column is the tallest thing on the
+        # panel, so the window ends where Auto Focus does.  It was a fixed 1000
+        # px, which after Filter (ND) went left about 170 px of nothing under
+        # Auto Focus and under the correction sliders.
+        h = self.sizeHint().height()
+        self.setMinimumSize(1240, h)
+        self.resize(1500, h)
+
     # ── left: camera settings ────────────────────────────────────────────
     def _build_camera_panel(self) -> QWidget:
         box = QFrame()
@@ -368,12 +374,10 @@ class CameraAdvancedDialog(QDialog):
         head.setStyleSheet("color:#e6e8ec; font-size:14px; font-weight:600;")
         lay.addWidget(head)
 
-        self._nd = QDoubleSpinBox(); self._nd.setRange(0, 12); self._nd.setSingleStep(0.5)
-        self._nd.setSuffix(" stop")
-        self._spin(self._nd)
-        self._nd.valueChanged.connect(
-            lambda v: self._send(self._mm.send_cam_nd, v))
-        _row(lay, "Filter (ND)", self._stepper(self._nd))
+        # No Filter (ND) control: the Blackmagic Pocket Cinema Camera 4K has no
+        # built-in ND filters, so the control could only ever send a value the
+        # camera ignores.  The command stays available (send_cam_nd) for bodies
+        # that do have them.
 
         # ISO, and no separate Gain control.  Category 1 parameter 13 (gain in
         # dB) and parameter 14 (ISO) are two scales for one sensor
@@ -425,7 +429,9 @@ class CameraAdvancedDialog(QDialog):
             wbrow.addWidget(b)
         lay.addLayout(wbrow)
 
-        lay.addStretch(1)
+        # A fixed gap between the Camera and Lens groups — a stretch here took a
+        # share of any spare height and pushed the groups apart unevenly.
+        lay.addSpacing(_ROW_GAP)
         lens = QLabel("Lens")
         lens.setStyleSheet("color:#e6e8ec; font-size:14px; font-weight:600;")
         lay.addWidget(lens)
@@ -789,7 +795,7 @@ class CameraAdvancedDialog(QDialog):
         Called when a report arrives, when the dialog opens, and when the
         camera is switched.  The last two matter: without them the panel was
         built neutral and stayed neutral until the camera next volunteered
-        something — which for gain, shutter, ND and the whole of colour
+        something — which for gain, shutter and the whole of colour
         correction is never, because the camera does not report those at all.
 
         The source is mount_manager.cam_known(), which merges what the camera
@@ -867,8 +873,6 @@ class CameraAdvancedDialog(QDialog):
             if ("shutter_speed" in adv and adv["shutter_speed"] in _SHUTTERS
                     and not self._held(self._shut)):
                 self._shut.setCurrentIndex(_SHUTTERS.index(adv["shutter_speed"]))
-            if "nd" in adv:
-                self._set_if_free(self._nd, float(adv["nd"]))
         finally:
             self._loading = False
         self._refresh_readouts()

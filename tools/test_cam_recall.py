@@ -34,7 +34,6 @@ class M:
     _note_cam       = MountManager._note_cam
     cam_known       = MountManager.cam_known
     send_cam_iso          = MountManager.send_cam_iso
-    send_cam_nd           = MountManager.send_cam_nd
     send_cam_shutter_speed= MountManager.send_cam_shutter_speed
     send_cam_iris         = MountManager.send_cam_iris
     send_cam_zoom_norm    = MountManager.send_cam_zoom_norm
@@ -59,7 +58,6 @@ mm = M()
 d = CameraAdvancedDialog(mm, mount_id=1); d.resize(1500, 1000); d.show(); app.processEvents()
 d._iso.set_value_of(1250)
 d._shut.setCurrentIndex(_SHUTTERS.index(250))
-d._nd.setValue(4.0)
 d._wb.setValue(3200)
 d._sliders["Tint"].setValue(-18)
 d._iris.setValue(72); d._zoom.setValue(35); d._focus.setValue(61)
@@ -74,7 +72,7 @@ app.processEvents()
 
 before = {
     "ISO": d._iso.value_of(),
-    "Shutter":  d._shut.currentData(), "ND": d._nd.value(),
+    "Shutter":  d._shut.currentData(),
     "Balance":  d._wb.value(),         "Tint": d._sliders["Tint"].value(),
     "Iris": d._iris.value(), "Zoom": d._zoom.value(), "Focus": d._focus.value(),
     "Contrast": d._sliders["Contrast"].value(), "Pivot": d._sliders["Pivot"].value(),
@@ -88,7 +86,7 @@ d.close()
 d2 = CameraAdvancedDialog(mm, mount_id=1); d2.resize(1500, 1000); d2.show(); app.processEvents()
 after = {
     "ISO": d2._iso.value_of(),
-    "Shutter":  d2._shut.currentData(), "ND": d2._nd.value(),
+    "Shutter":  d2._shut.currentData(),
     "Balance":  d2._wb.value(),         "Tint": d2._sliders["Tint"].value(),
     "Iris": d2._iris.value(), "Zoom": d2._zoom.value(), "Focus": d2._focus.value(),
     "Contrast": d2._sliders["Contrast"].value(), "Pivot": d2._sliders["Pivot"].value(),

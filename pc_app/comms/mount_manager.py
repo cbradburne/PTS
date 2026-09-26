@@ -898,6 +898,8 @@ class MountManager(QObject):
     def send_cam_shutter_angle(self, m, deg):
         self._note_cam(m, "shutter_angle", deg);    self._send(pkt_cam_shutter_angle(m, deg))
 
+    # Not on the Advanced panel: the Pocket 4K has no built-in ND filters.
+    # Kept for camera bodies that do.
     def send_cam_nd(self, m, stop):
         self._note_cam(m, "nd", stop);              self._send(pkt_cam_nd(m, stop))
 
