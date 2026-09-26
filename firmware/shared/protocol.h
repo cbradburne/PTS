@@ -7,7 +7,7 @@
  * parts of it and are VERIFIED AGAINST IT by tools/check_protocol.py (run
  * automatically by the pre-commit hook in .githooks/):
  *   - pc_app/comms/protocol.py           (Python enums + encoders/decoders)
- *   - firmware/esp32_hub/web_app.h       (JS constants inside the web app)
+ *   - firmware/shared/web_app.h       (JS constants inside the web app)
  * firmware/teensy41_mount/protocol.h is a one-line shim including this file.
  * When you change the protocol: edit HERE first, then update the mirrors —
  * the checker will list exactly what is missing or mismatched.

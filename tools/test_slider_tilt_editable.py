@@ -25,7 +25,7 @@ import os, sys, pathlib, re
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
-WEB  = (REPO / "firmware/esp32_hub/web_app.h").read_text()
+WEB  = (REPO / "firmware/shared/web_app.h").read_text()
 DISP = (REPO / "firmware/esp32_display/hub_display.cpp").read_text()
 INO  = (REPO / "firmware/teensy41_mount/teensy41_mount.ino").read_text()
 

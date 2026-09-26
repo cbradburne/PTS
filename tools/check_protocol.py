@@ -4,7 +4,7 @@ check_protocol.py — protocol single-source-of-truth verifier.
 
 Canonical definition:  firmware/shared/protocol.h
 Verified mirrors:      pc_app/comms/protocol.py   (Python enums/constants)
-                       firmware/esp32_hub/web_app.h (JS constants in the web app)
+                       firmware/shared/web_app.h (JS constants in the web app)
                        firmware/teensy41_mount/protocol.h (must be a shim)
 
 Plus a CROSS-LANGUAGE GOLDEN TEST: compiles firmware/shared/protocol.h with the
@@ -31,7 +31,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 C_HEADER  = REPO / "firmware" / "shared" / "protocol.h"
 TEENSY_H  = REPO / "firmware" / "teensy41_mount" / "protocol.h"
-WEB_APP_H = REPO / "firmware" / "esp32_hub" / "web_app.h"
+WEB_APP_H = REPO / "firmware" / "shared" / "web_app.h"
 PC_APP    = REPO / "pc_app"
 GOLDEN_C  = REPO / "tools" / "protocol_golden.cpp"
 
@@ -210,7 +210,7 @@ def check_python(canon: dict[str, int]):
 # ---------------------------------------------------------------------------
 
 def check_js(canon: dict[str, int]):
-    print("\n[js] firmware/esp32_hub/web_app.h vs shared/protocol.h")
+    print("\n[js] firmware/shared/web_app.h vs shared/protocol.h")
     text = WEB_APP_H.read_text(encoding="utf-8", errors="replace")
     n_checked = 0
     for m in re.finditer(r"^\s*const\s+([A-Z][A-Z0-9_]*)\s*=\s*"

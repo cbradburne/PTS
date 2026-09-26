@@ -1,65 +1,59 @@
 /*
- * esp32_hub_eth — THE TEST HUB.  Not yet the production firmware.
+ * esp32_hub_eth — the hub firmware, for both hub boards.
  *
- * firmware/esp32_hub/ is what is running on the rig and must keep working.
- * This folder is where its replacement is proven first, on the bench, before
- * the two are swapped.
+ * One source, two builds, chosen by the board it is compiled for (HUB_WIRED,
+ * below):
  *
- * Differences from esp32_hub:
+ *   Waveshare ESP32-S3-ETH     The wired hub (HUB_WIRED 1).  Ethernet — a W5500
+ *                              over SPI, PoE — to the satellites, which serve
+ *                              mounts too far from this hub's radio.
+ *   Seeed Studio XIAO ESP32S3  The simple kit (HUB_WIRED 0): hub, phone and game
+ *                              controller.  WiFi only — no Ethernet chip, so no
+ *                              satellites.  Everything else is this same code.
  *
- *   - Waveshare ESP32-S3-ETH instead of the XIAO: Ethernet (W5500 over SPI,
- *     PoE), which is what makes a wired backbone possible.  ETH bring-up is
- *     non-blocking and harmless with no W5500 fitted, so this also runs on a
- *     XIAO for testing everything else.
- *   - A settable location name in the AP SSID: "PTS-Concert Hall".  The
- *     production hub stays "CamMount"; the mount firmware accepts BOTH
- *     prefixes so the two can be tested side by side.
- *   - A satellite listener on port 7778 and per-mount routing, so mounts too
- *     far to hear this hub can be served over Ethernet.
+ * Until 2026-09-26 the XIAO ran its own firmware, esp32_hub/esp32_hub.ino.  It
+ * fell a month behind this one — no recovery ladders, no stall detector, no hub
+ * name — which is what two copies of one hub always do.  Now there is one.  The
+ * folder keeps its old name so existing build setups keep working.
  *
- * web_app.h and hub_types.h are INCLUDED from ../esp32_hub/, not copied — a
- * second copy of either is exactly how the 9-byte STATUS bug happened.
- *
- * Bench test with hub + display + mount:
- *   1. tools/build.sh flash hubeth
- *   2. Display comes up, mount pairs, positions recall — i.e. nothing regressed.
- *   3. curl -d "name=Bench" http://<hub-ip>/hubname   → restarts as "PTS-Bench"
- *   4. Long-press the mount, scan, confirm "PTS-Bench" is listed and pairs.
- *   5. [ETH] lines appear if a W5500 is present; harmless if not.
- */
-/*
- * esp32_hub_eth.ino — WiFi AP + ESP-NOW hub  (Waveshare ESP32-S3-ETH)
- *
- * This board handles all networking: WiFi AP, ESP-NOW to mounts, Ethernet to
- * the satellites, TCP and WebSocket to PC/phone clients.  Display output is
- * forwarded to a separate Waveshare ESP32-S3-Touch-LCD-7 board over UART using
- * the disp_uart protocol.
+ * web_app.h and hub_types.h are INCLUDED from ../shared/, not copied — a second
+ * copy of either is exactly how the 9-byte STATUS bug happened.
  *
  * Architecture:
  *   [PC 1]    ── TCP (port 7777) ──┐
  *   [PC 2]    ── TCP (port 7777) ──┤
- *   [PC USB]  ── Serial 921600   ──┤── S3-ETH Hub ────────┬── Mount 1 ESP32
+ *   [PC USB]  ── Serial 921600   ──┤── Hub ───────────────┬── Mount 1 ESP32
  *   [Phone]   ── WS  (port 80)   ──┘   (WiFi AP+ESP-NOW)  ├── Mount 2 ESP32
  *   [Tablet]  ── WS  (port 80)         │        │         ├── Mount 3 ESP32
  *                                UART  │        │ Ethernet├── Mount 4 ESP32
- *                    Waveshare display ┘        │         └── Mount 5 ESP32
+ *                    Waveshare display ┘        │ (wired  └── Mount 5 ESP32
+ *                    (optional)                 │  build)
  *                                          [satellites] ───── distant mounts
  *
- * UART wiring to display (3 wires):
+ * UART wiring to the optional display (3 wires), the same pins on both boards —
+ * GPIO43/44 are D6/D7 on the XIAO:
  *   Hub GPIO43 (TX)  →  Waveshare display GPIO13 (RX)
  *   Hub GPIO44 (RX)  ←  Waveshare display GPIO12 (TX)
  *   Hub GND          —  Waveshare display GND
  *
- * Arduino IDE board settings for THIS board (Waveshare ESP32-S3-ETH).  These
- * must match FQBN_HUBETH in tools/build.sh — the scripted build is the one
- * that gets flashed, and a Tools-menu difference produces a different binary
- * from the same source:
- *   Board            : ESP32S3 Dev Module
- *   USB CDC On Boot  : Enabled
- *   USB Mode         : Hardware CDC and JTAG
- *   Flash Size       : 16MB (128Mb)
- *   Partition Scheme : 8M with spiffs (3MB APP/1.5MB SPIFFS)
- *   PSRAM            : Disabled
+ * Arduino IDE board settings.  These must match tools/build.sh — the scripted
+ * build is the one that gets flashed, and a Tools-menu difference produces a
+ * different binary from the same source.
+ *
+ *   Waveshare ESP32-S3-ETH   (build.sh "hubeth", FQBN_HUBETH):
+ *     Board            : ESP32S3 Dev Module
+ *     USB CDC On Boot  : Enabled
+ *     USB Mode         : Hardware CDC and JTAG
+ *     Flash Size       : 16MB (128Mb)
+ *     Partition Scheme : 8M with spiffs (3MB APP/1.5MB SPIFFS)
+ *     PSRAM            : Disabled
+ *
+ *   Seeed Studio XIAO ESP32S3   (build.sh "hub", FQBN_HUB):
+ *     Board            : XIAO_ESP32S3
+ *     USB CDC On Boot  : Enabled   (the XIAO's menu key for this is "default")
+ *     USB Mode         : Hardware CDC and JTAG
+ *     Flash Size       : 8MB (64Mb)
+ *     Partition Scheme : Default with spiffs (3MB APP/1.5MB SPIFFS)
  *
  * On the USB mode, which is a real trade-off and not a free choice.  The S3
  * wires the host's DTR/RTS straight to reset and boot0 in silicon — that is
@@ -70,15 +64,33 @@
  *
  * So: Hardware CDC keeps flashing button-free and accepts that the host can
  * reset the hub.  USB-OTG (TinyUSB) can refuse the reset via
- * Serial.enableReboot(false) — which is why esp32_hub.ino on the XIAO demands
- * it — but then reflashing needs BOOT held, RESET tapped, released, upload.
- * The VID/PID changes too, so Windows may hand out a new COM port.
- * Hardware CDC is chosen here because this board lives in an enclosure.
+ * Serial.enableReboot(false) — which is why the old XIAO firmware demanded it —
+ * but then reflashing needs BOOT held, RESET tapped, released, upload.  The
+ * VID/PID changes too, so Windows may hand out a new COM port.  Hardware CDC is
+ * chosen for both boards: the wired hub lives in an enclosure, and the simple
+ * kit is for people whose only use for a PC is flashing.
  *
  * Requires libraries:
  *   mathieucarbou/ESPAsyncWebServer  (ESP-IDF v5 compatible fork)
  *   mathieucarbou/AsyncTCP
  */
+
+// ---------------------------------------------------------------------------
+// Which hub this is
+// ---------------------------------------------------------------------------
+//   1  the wired hub: Ethernet brought up, satellites listened for
+//   0  the XIAO, WiFi only: neither.  The satellite code still compiles but
+//      never runs — nothing can connect without the listener — so every mount
+//      is routed over this hub's own radio, which is what "direct" means.
+//
+// Chosen from the board the sketch is compiled for; -DHUB_WIRED=0/1 overrides.
+#ifndef HUB_WIRED
+  #if defined(ARDUINO_XIAO_ESP32S3)
+    #define HUB_WIRED 0
+  #else
+    #define HUB_WIRED 1
+  #endif
+#endif
 
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -90,8 +102,8 @@
 #include <esp_mac.h>      // esp_read_mac() — MAC-derived default hub name
 #include <lwip/sockets.h> // SOL_SOCKET / SO_SNDTIMEO for the satellite link
 #include "../shared/disp_uart.h"
-#include "../esp32_hub/web_app.h"
-#include "../esp32_hub/hub_types.h"
+#include "../shared/web_app.h"
+#include "../shared/hub_types.h"
 #include <ESPmDNS.h>
 // sat_link.h first: it owns the hostname, and board_eth.h needs it to have been
 // defined by the time it is included.
@@ -115,7 +127,9 @@
 //#define ETH_SUBNET     "255.255.255.0"
 //#define ETH_GATEWAY    "192.169.1.1"
 
-#include "../shared/board_eth.h"
+#if HUB_WIRED
+#include "../shared/board_eth.h"   // W5500 pins and bring-up — the wired board only
+#endif
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
 
 // ---------------------------------------------------------------------------
@@ -3690,6 +3704,7 @@ void setup() {
     }
     _tcp_server.begin();
     for (int i = 0; i < NUM_MOUNTS; i++) _mount_sat[i] = -1;   // local until proven otherwise
+#if HUB_WIRED
     _sat_server.begin();
     Serial.printf("Satellite listener on port %d\n", SAT_LINK_PORT);
 
@@ -3722,6 +3737,11 @@ void setup() {
                           eip.toString().c_str(), apip.toString().c_str(),
                           AP_SUBNET.toString().c_str());
     }
+#else
+    // The XIAO: no Ethernet chip, so no satellite could ever reach a listener.
+    // Not starting one keeps every mount on this hub's radio.
+    Serial.println("Satellites : none in this build (WiFi-only hub, HUB_WIRED 0)");
+#endif
 
     // Answering to "pts-hub.local" is what makes a DHCP address workable: the
     // satellites resolve the name rather than holding an IP that changes under
@@ -4096,7 +4116,9 @@ void loop() {
 
     // One-shot if the wire never comes up.  Silence here would look exactly
     // like a satellite that is switched off, so it is worth a line in the log.
+#if HUB_WIRED
     eth_report_once_if_down(now, 8000);
+#endif
 
     // Deferred restart after a rename (see the /hubname POST handler).  A full
     // restart rather than re-raising the AP in place: the SSID is baked into

@@ -85,7 +85,7 @@
 
 #include "../shared/board_eth.h"
 #include "../shared/sat_link.h"
-#include "../esp32_hub/web_app.h"   // the page itself — shared, never copied
+#include "../shared/web_app.h"   // the page itself — shared, never copied
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -226,7 +226,7 @@ static uint32_t _uplink_backoff_ms  = 1000;
 //
 //   [phone] --WiFi/WS--> [satellite] --TCP 7777--> [hub]
 //
-// The page comes from esp32_hub/web_app.h, not a copy, so the two surfaces
+// The page comes from shared/web_app.h, not a copy, so the two surfaces
 // cannot drift.  The URL is http://192.168.4.1 either way — a SoftAP defaults
 // to that address, hub or satellite — so nothing in the documentation changes.
 //

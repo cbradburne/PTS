@@ -75,7 +75,7 @@ flowchart TB
 | Mount bridge | Waveshare ESP32-S3 Touch AMOLED 1.75″ (466×466 round, LVGL 9) | [`firmware/esp_mount_amoled175`](firmware/esp_mount_amoled175) |
 | Motion controller | Teensy 4.1 @ 600 MHz, TMC2209 ×4, TeensyStep4 | [`firmware/teensy41_mount`](firmware/teensy41_mount) |
 | PC app | Python 3.11+, PyQt6, OpenCV (+ optional YOLO) | [`pc_app`](pc_app) |
-| Web app | Served by the hub itself — join its `PTS-<name>` WiFi | embedded in [`web_app.h`](firmware/esp32_hub/web_app.h) |
+| Web app | Served by the hub itself — join its `PTS-<name>` WiFi | embedded in [`web_app.h`](firmware/shared/web_app.h) |
 
 One binary per board type — **no per-unit configuration anywhere in source**.
 Identity, pairing and calibration live in NVS/EEPROM, set from touchscreens.
@@ -166,10 +166,11 @@ PC app machine — same `/pts/...` addresses on both, full reference in
 
 ```
 firmware/
-  shared/               canonical protocol + display UART framing
-  esp32_hub_eth/        hub: Ethernet, ESP-NOW star, AP, TCP/WS/OSC, self-recovery
+  shared/               canonical protocol, display UART framing, the web app
+  esp32_hub_eth/        hub, for both boards: ESP-NOW star, AP, TCP/WS/OSC,
+                        self-recovery — plus Ethernet and satellites on the
+                        Waveshare ESP32-S3-ETH, WiFi-only on the XIAO ESP32S3
   esp32_satellite/      relay: extends ESP-NOW to another room over Ethernet
-  esp32_hub/            WiFi-only hub — superseded, kept for its web app
   esp32_display/        7" hub touchscreen (LVGL 9)
   esp_mount_amoled175/  mount bridge + round touchscreen, pairing UI
   teensy41_mount/       motion control: TMC2209, StallGuard, look-at solver

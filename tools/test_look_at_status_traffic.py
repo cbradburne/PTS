@@ -31,7 +31,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 INO  = (REPO / "firmware/teensy41_mount/teensy41_mount.ino").read_text()
 HUB  = (REPO / "firmware/esp32_hub_eth/esp32_hub_eth.ino").read_text()
-WEB  = (REPO / "firmware/esp32_hub/web_app.h").read_text()
+WEB  = (REPO / "firmware/shared/web_app.h").read_text()
 MW   = (REPO / "pc_app/ui/main_window.py").read_text()
 
 # ---- 1. no timer drives it --------------------------------------------------

@@ -142,10 +142,12 @@ REM ---------------------------------------------------------------------------
 set "FQBN="
 set "SKETCH="
 set "SKETCHNAME="
+REM The XIAO ESP32S3 builds the same hub firmware as hubeth, WiFi-only.  Its
+REM CDCOnBoot keys are the reverse of the generic S3's: "default" is ENABLED.
 if /i "%~1"=="hub" (
-    set "FQBN=esp32:esp32:XIAO_ESP32S3:USBMode=default,CDCOnBoot=default,PartitionScheme=default_8MB,FlashSize=8M"
-    set "SKETCH=firmware\esp32_hub"
-    set "SKETCHNAME=esp32_hub.ino"
+    set "FQBN=esp32:esp32:XIAO_ESP32S3:USBMode=hwcdc,CDCOnBoot=default,PartitionScheme=default_8MB,FlashSize=8M"
+    set "SKETCH=firmware\esp32_hub_eth"
+    set "SKETCHNAME=esp32_hub_eth.ino"
 )
 if /i "%~1"=="hubeth" (
     set "FQBN=esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=disabled"

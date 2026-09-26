@@ -28,7 +28,8 @@
     <h2>The boards</h2>
     <table>
       <tr><th style="width:24%">Part</th><th style="width:40%">Hardware</th><th>Firmware</th></tr>
-      <tr><td><strong>Hub</strong></td><td>Waveshare ESP32-S3-ETH (W5500)</td><td><code>firmware/esp32_hub_eth</code></td></tr>
+      <tr><td><strong>Hub</strong> — wired</td><td>Waveshare ESP32-S3-ETH (W5500): Ethernet and satellites</td><td><code>firmware/esp32_hub_eth</code>, target <code>hubeth</code></td></tr>
+      <tr><td><strong>Hub</strong> — simple kit</td><td>Seeed Studio XIAO ESP32S3: WiFi only, no satellites</td><td><code>firmware/esp32_hub_eth</code>, target <code>hub</code></td></tr>
       <tr><td><strong>Satellite</strong></td><td>Waveshare ESP32-S3-ETH (W5500)</td><td><code>firmware/esp32_satellite</code></td></tr>
       <tr><td><strong>Hub display</strong></td><td>Waveshare ESP32-S3 Touch LCD 7″ (800×480, LVGL 9)</td><td><code>firmware/esp32_display</code></td></tr>
       <tr><td><strong>Mount bridge</strong></td><td>Waveshare ESP32-S3 Touch AMOLED 1.75″ (466×466 round, LVGL 9)</td><td><code>firmware/esp_mount_amoled175</code></td></tr>
@@ -49,15 +50,21 @@
     Tools-menu state to get wrong:</p>
     <pre><code>tools/build.sh                      # compile every target
 tools/build.sh hubeth display       # compile a subset
-tools/build.sh flash hubeth [port]  # compile + upload one target</code></pre>
+tools/build.sh flash hubeth [port]  # compile + upload one target
+tools/build.sh flash hub [port]     # the same hub firmware, for the XIAO</code></pre>
+    <p>Both hubs run <strong>one firmware</strong>. Built for the XIAO it leaves
+    out Ethernet and the satellite link, and everything else — recovery, OSC,
+    the web app, the optional 7″ display — is the same code, so a fix to one is
+    a fix to both.</p>
     <p>It needs the esp32 (3.x) and Teensy cores, which <code>arduino-cli</code>
     shares with an existing Arduino IDE 2.x install — so an existing setup needs
     nothing extra. Build output goes to <code>.build/</code> (gitignored).</p>
 
     <h2>First bring-up</h2>
     <ol class="steps">
-      <li>Flash the <strong>hub</strong> (<code>hubeth</code>), any
-      <strong>satellites</strong>, and the <strong>mounts</strong>.</li>
+      <li>Flash the <strong>hub</strong> (<code>hubeth</code> for the wired hub,
+      <code>hub</code> for the XIAO), any <strong>satellites</strong>, and the
+      <strong>mounts</strong>.</li>
       <li>Power everything up.</li>
       <li><strong>Pair each mount</strong> from its own screen: hold ~1.5 s → pick
       CAM 1–5 → pick your hub → Save. The hub needs no action — it learns mounts on

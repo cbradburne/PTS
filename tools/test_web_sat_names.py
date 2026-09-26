@@ -22,7 +22,7 @@ import re, json, shutil, subprocess, tempfile
 from comms.protocol import (decode_sat_names, Cmd, SAT_SLOTS, SAT_NAME_LEN,
                             SAT_NAMES_PAYLOAD_LEN)
 
-WEB = (REPO / "firmware/esp32_hub/web_app.h").read_text()
+WEB = (REPO / "firmware/shared/web_app.h").read_text()
 
 # ---- 1. the constants the browser slices with ------------------------------
 # Wrong stride here and every name comes out mangled, so these are not allowed

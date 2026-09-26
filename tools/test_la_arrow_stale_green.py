@@ -31,7 +31,7 @@ PROTO = (REPO / "firmware/shared/protocol.h").read_text()
 PY    = (REPO / "pc_app/comms/protocol.py").read_text()
 INO   = (REPO / "firmware/teensy41_mount/teensy41_mount.ino").read_text()
 MW    = (REPO / "pc_app/ui/main_window.py").read_text()
-WEB   = (REPO / "firmware/esp32_hub/web_app.h").read_text()
+WEB   = (REPO / "firmware/shared/web_app.h").read_text()
 DISP  = (REPO / "firmware/esp32_display/hub_display.cpp").read_text()
 
 # ---- 1. one canonical meaning for the two bits ------------------------------

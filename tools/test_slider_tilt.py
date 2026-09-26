@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO / "pc_app"))
 
 PROTO_H  = (REPO / "firmware/shared/protocol.h").read_text()
 INO      = (REPO / "firmware/teensy41_mount/teensy41_mount.ino").read_text()
-WEB      = (REPO / "firmware/esp32_hub/web_app.h").read_text()
+WEB      = (REPO / "firmware/shared/web_app.h").read_text()
 DISPLAY  = (REPO / "firmware/esp32_display/hub_display.cpp").read_text()
 
 # ---- 1. one agreed length, and the tilt is inside it -------------------------

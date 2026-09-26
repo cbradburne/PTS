@@ -47,7 +47,13 @@ case "${AP_PASSWORD:-}" in
           exit 1 ;;
 esac
 
-FQBN_HUB="esp32:esp32:XIAO_ESP32S3:USBMode=default,CDCOnBoot=default,PartitionScheme=default_8MB,FlashSize=8M"
+# The XIAO ESP32S3 builds the same hub firmware as hubeth, WiFi-only (the sketch
+# sees ARDUINO_XIAO_ESP32S3 and sets HUB_WIRED 0).  Hardware CDC for the same
+# reason as hubeth: flashing with no BOOT button.  MIND THE XIAO'S KEYS: its
+# CDCOnBoot menu is the reverse of the generic S3 board's — "default" is
+# ENABLED and "cdc" is DISABLED — so "default" is right here and would be wrong
+# on FQBN_HUBETH.
+FQBN_HUB="esp32:esp32:XIAO_ESP32S3:USBMode=hwcdc,CDCOnBoot=default,PartitionScheme=default_8MB,FlashSize=8M"
 FQBN_DISPLAY="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
 FQBN_AMOLED="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
 # Waveshare ESP32-S3-ETH.  GPIO33-37 are broken out on this board, so the module
@@ -71,8 +77,8 @@ out_for() {
 
 sketch_for() {
     case "$1" in
-        hub)     echo "$REPO/firmware/esp32_hub" ;;
-        hubdemo) echo "$REPO/firmware/esp32_hub" ;;
+        hub)     echo "$REPO/firmware/esp32_hub_eth" ;;   # one hub firmware, two boards
+        hubdemo) echo "$REPO/firmware/esp32_hub_eth" ;;
         display) echo "$REPO/firmware/esp32_display" ;;
         amoled)  echo "$REPO/firmware/esp_mount_amoled175" ;;
         bench)   echo "$REPO/firmware/espnow_bench" ;;
