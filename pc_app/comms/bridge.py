@@ -1236,6 +1236,18 @@ class Bridge:
                 if h.scan_devices:
                     n32txt += " | last scan held %d devices (%dk)" % (
                         h.scan_devices, h.scan_freed_kb)
+            # Heartbeats since the last report, on firmware that counts them:
+            # a measurement of a suspected fault, not a fixed one (see
+            # _hb_stale in the mount firmware). Printed at zero too, because
+            # zero is the reading that clears the suspicion. While the Teensy
+            # sends STATUS every 100 ms the 5 s beat never falls due, so on a
+            # healthy mount this reads about zero.
+            if h.hb_sent is not None:
+                n32txt += " | heartbeats %d" % h.hb_sent
+                if h.hb_stale or h.probe_stale:
+                    n32txt += (" (%d on a stale clock, %d with a send in flight)"
+                               " | stale Teensy probes %d") % (
+                        h.hb_stale, h.hb_stale_busy, h.probe_stale)
         elif h.node_type == HEALTH_NODE_SATELLITE:
             # Same packing, different pair: refusals high, self-restart streak
             # low.  The streak is spelled out rather than left as a number

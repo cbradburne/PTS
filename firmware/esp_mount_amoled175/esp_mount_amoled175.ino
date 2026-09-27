@@ -1047,6 +1047,44 @@ static uint32_t _msec_max[MSEC_N] = {};   // microseconds, worst per section
 static uint32_t _health_last_txfail = 0;
 static bool     _health_first_sent  = false;
 
+// STATUS heartbeats and Teensy probes sent since the last health report, and
+// how many of each went out only because loop()'s clock was stale.
+//
+// SUSPECTED, NOT YET SEEN (2026-09-27).  loop() reads `now` once, before
+// lv_timer_handler(), and drains the Teensy again after it.  A STATUS handled
+// in that second drain stamps _last_heartbeat_ms and _last_teensy_st_ms with a
+// fresh millis(), which is later than `now` whenever the clock has ticked since
+// it was read.  The heartbeat and the probe then age themselves against `now`,
+// and the unsigned difference wraps to about 4.29e9: both read as days overdue.
+//
+// If that happens, the heartbeat puts a STATUS on the air that the change-only
+// filter (teensy_frame_worth_sending) exists to keep off it, and periodic_held
+// waves it through a busy radio, because an age of days is past its overdue
+// escape.  The probe asks the Teensy for a STATUS it sent milliseconds ago.
+// The Teensy ACKs every command before acting on it and that ACK is forwarded
+// to the hub, so the probe costs a frame as well, and the STATUS it answers
+// with can land in the next pass's second drain and start the whole thing
+// again.
+//
+// Counted before anything is changed, because the story fits and nobody has
+// watched it happen.  hb_stale near zero clears it.  hb_stale close to hb_sent
+// means nearly every heartbeat is this, and hb_stale_busy says how many went
+// out with a send already in flight, which is what the cap exists to stop.
+// Counting changes nothing about when either one is sent.
+static uint16_t _hb_sent       = 0;
+static uint16_t _hb_stale      = 0;
+static uint16_t _hb_stale_busy = 0;
+static uint16_t _probe_stale   = 0;
+
+// Called just BEFORE the heartbeat goes, so the in-flight test sees the radio
+// as this send found it, rather than counting the send itself.
+static inline void hb_note_sent(bool stale) {
+    if (_hb_sent < 0xFFFF) _hb_sent++;
+    if (!stale) return;
+    if (_hb_stale < 0xFFFF) _hb_stale++;
+    if (espnow_tx_saturated() && _hb_stale_busy < 0xFFFF) _hb_stale_busy++;
+}
+
 // ---------------------------------------------------------------------------
 // Colours
 // ---------------------------------------------------------------------------
@@ -1760,10 +1798,16 @@ static void send_health(bool anomaly) {
     t.nomem_cured         = _nomem_cured;
     t.scan_devices        = _bc_scan_devices;
     t.scan_freed_kb       = _bc_scan_freed_kb;
+    t.hb_sent             = _hb_sent;
+    t.hb_stale            = _hb_stale;
+    t.hb_stale_busy       = _hb_stale_busy;
+    t.probe_stale         = _probe_stale;
     encode_health_bridge_tail(p + 24, &t);
     send_to_hub(CMD_HEALTH, p, sizeof(p));   // no-op while unpaired (send_to_hub guards)
     _health_last_ms     = millis();
     _health_loop_max_ms = 0;
+    // Per window, like loop_max_ms, so each report reads as a rate.
+    _hb_sent = _hb_stale = _hb_stale_busy = _probe_stale = 0;
     // Cleared with loop_max_ms and in the same place, or the worst section
     // would be a since-boot figure sitting beside a windowed one and the two
     // would stop describing the same pass.
@@ -4493,19 +4537,30 @@ void loop() {
     static bool hb_held = false;
     uint32_t hb_int = STATUS_HEARTBEAT_MS;
     uint32_t hb_age = now - _last_heartbeat_ms;
+    // This age can wrap too: the second Teensy drain stamps _last_heartbeat_ms
+    // after `now` was read.  Suspected, not seen, so it is counted here rather
+    // than corrected: see _hb_stale.
+    bool hb_stale = (int32_t)hb_age < 0;
     if (_runs_report_due) {
         hb_int = 0;
         hb_age = millis() - _runs_due_ms;
+        hb_stale = false;        // due on its own clock, stale or not
     }
     if (hb_age >= hb_int &&
-            !periodic_held(hb_age, hb_int, &hb_held))
+            !periodic_held(hb_age, hb_int, &hb_held)) {
+        hb_note_sent(hb_stale);
         send_status_heartbeat();
+    }
 
     // ── Health telemetry (10 s cadence, jog-deferred, anomaly-triggered) ─
     health_check_bridge(now);
 
     // ── Teensy probe ─────────────────────────────────────────────────────
     if (now - _last_teensy_st_ms >= TEENSY_PROBE_MS) {
+        // Stamped by the same STATUS as the heartbeat, so it can be stale in
+        // the same way.  Counted, not yet corrected: see _hb_stale.
+        if ((int32_t)(now - _last_teensy_st_ms) < 0 && _probe_stale < 0xFFFF)
+            _probe_stale++;
         uint8_t probe[PKT_BUF_SIZE + 4];
         uint16_t plen = build_packet(probe, _mount_id, ++_tx_seq,
                                      CMD_GET_STATUS, nullptr, 0);

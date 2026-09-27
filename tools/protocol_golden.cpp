@@ -136,6 +136,10 @@ static int do_emit() {
         t.nomem_cured         = 3;
         t.scan_devices        = 87;
         t.scan_freed_kb       = 0x0102;
+        t.hb_sent             = 0x0B0C;
+        t.hb_stale            = 41;
+        t.hb_stale_busy       = 0xFFFF;
+        t.probe_stale         = 0x0D0E;
         encode_health_bridge_tail(hp + 24, &t);
         n = build_packet(buf, 2, 0x0203, CMD_HEALTH, hp, sizeof(hp));
         emit_pkt("health_bridge_tail", buf, n);

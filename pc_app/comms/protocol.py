@@ -865,6 +865,12 @@ class HealthPayload:
     nomem_cured:         Optional[int] = None   # NO_MEM runs the ladder ended
     scan_devices:        Optional[int] = None   # what the last camera scan held
     scan_freed_kb:       Optional[int] = None   # ...and freeing it gave back
+    # Since the previous report, not since boot.  A measurement of a suspected
+    # fault (see _hb_stale in the mount firmware), not of a fixed one.
+    hb_sent:             Optional[int] = None   # STATUS heartbeats, any cause
+    hb_stale:            Optional[int] = None   # ...sent only because `now` was stale
+    hb_stale_busy:       Optional[int] = None   # ...with a send already in flight
+    probe_stale:         Optional[int] = None   # Teensy probes, same stale `now`
 
     @property
     def anomaly(self) -> bool:
@@ -889,10 +895,14 @@ def decode_health(payload: bytes) -> HealthPayload:
         (tail["iram_free"], tail["iram_min"], tail["iram_largest"],
          tail["nomem_healed"], tail["nomem_healed_max_ms"]) = struct.unpack(
             ">IIIHH", payload[24:24 + _HEALTH_BRIDGE_TAIL_V1])
-    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+    if len(payload) >= 24 + _HEALTH_BRIDGE_TAIL_V2:
         (tail["reserve_held"], tail["nomem_cured"], tail["scan_devices"],
          tail["scan_freed_kb"]) = struct.unpack(
-            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V1:24 + HEALTH_BRIDGE_TAIL_LEN])
+            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V1:24 + _HEALTH_BRIDGE_TAIL_V2])
+    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+        (tail["hb_sent"], tail["hb_stale"], tail["hb_stale_busy"],
+         tail["probe_stale"]) = struct.unpack(
+            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V2:24 + HEALTH_BRIDGE_TAIL_LEN])
     return HealthPayload(
         node_type=node_type, reset_reason=reset_reason, uptime_s=uptime_s,
         free_heap=free_heap, min_free_heap=min_free, loop_max_ms=loop_max_ms,
@@ -1901,9 +1911,12 @@ MOUNT_NOMEM_STEP_NO_RESERVE   = 0x08   # its turn came and none was held
 # A bridge's CMD_HEALTH carries this many bytes after the uniform 24: internal
 # RAM free / lowest / largest block and NO_MEM runs that ended by themselves
 # (the first 16, since 466477d), then the reserve held, runs the ladder ended,
-# and what the last camera scan held and gave back (to 24, since the ladder).
-HEALTH_BRIDGE_TAIL_LEN        = 24
+# and what the last camera scan held and gave back (to 24, since the ladder),
+# then the heartbeats and probes sent since the last report and how many went
+# on a stale clock (to 32, since 2026-09-27).
+HEALTH_BRIDGE_TAIL_LEN        = 32
 _HEALTH_BRIDGE_TAIL_V1        = 16
+_HEALTH_BRIDGE_TAIL_V2        = 24
 CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
 
 

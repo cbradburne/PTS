@@ -1002,7 +1002,16 @@ typedef struct __attribute__((packed)) {
 //   [42..43] NO_MEM runs the ladder ENDED, since boot        u16 sat
 //   [44..45] devices the last finished camera scan held      u16
 //   [46..47] internal RAM freeing them gave back, KB         u16
-#define HEALTH_BRIDGE_TAIL_LEN  24
+// ...added 2026-09-27 to measure a suspected fault before anything fixes it
+// (see _hb_stale in esp_mount_amoled175.ino).  Counted since the PREVIOUS
+// health report, not since boot, so each line reads as one window:
+//   [48..49] STATUS heartbeats sent, any cause               u16 sat
+//   [50..51] ...of those, sent only because loop()'s `now`   u16 sat
+//            was older than the stamp it was aged against
+//   [52..53] ...of those, sent with a send already in        u16 sat
+//            flight — through the cap the guard enforces
+//   [54..55] Teensy probes sent for the same stale `now`     u16 sat
+#define HEALTH_BRIDGE_TAIL_LEN  32
 typedef struct {
     uint32_t iram_free;
     uint32_t iram_min;
@@ -1013,6 +1022,10 @@ typedef struct {
     uint16_t nomem_cured;
     uint16_t scan_devices;
     uint16_t scan_freed_kb;
+    uint16_t hb_sent;
+    uint16_t hb_stale;
+    uint16_t hb_stale_busy;
+    uint16_t probe_stale;
 } HealthBridgeTail;
 
 // The moment of a mount's first NO_MEM refusal — see MOUNT_EVENT_NOMEM_REBOOT
@@ -1318,6 +1331,10 @@ static inline void encode_health_bridge_tail(uint8_t p[HEALTH_BRIDGE_TAIL_LEN],
     write_be16(p + 18, t->nomem_cured);
     write_be16(p + 20, t->scan_devices);
     write_be16(p + 22, t->scan_freed_kb);
+    write_be16(p + 24, t->hb_sent);
+    write_be16(p + 26, t->hb_stale);
+    write_be16(p + 28, t->hb_stale_busy);
+    write_be16(p + 30, t->probe_stale);
 }
 
 // The ladder, written straight after the snapshot.

@@ -284,8 +284,9 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
         "health_bridge_tail": (2, 0x0203, Cmd.HEALTH,
                                struct.pack(">BBIIIHHbBI", 1, 1, 36000, 8400000,
                                            8390000, 10, 3, -33, 0x02, 0x07010010)
-                               + struct.pack(">IIIHHHHHH", 142000, 118000, 0xF00D,
-                                             2, 0x04D2, 12288, 3, 87, 0x0102)),
+                               + struct.pack(">IIIHHHHHHHHHH", 142000, 118000, 0xF00D,
+                                             2, 0x04D2, 12288, 3, 87, 0x0102,
+                                             0x0B0C, 41, 0xFFFF, 0x0D0E)),
         "mount_event_nomem": (1, 0x0A0B, Cmd.MOUNT_EVENT,
                               bytes([pyproto.MOUNT_EVENT_NOMEM_REBOOT, 0x00, 0x03,
                                      0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
@@ -419,11 +420,20 @@ def check_golden(pyproto):
                     ht.nomem_cured, ht.scan_devices, ht.scan_freed_kb)
                 != (142000, 118000, 0xF00D, 2, 0x04D2, 12288, 3, 87, 0x0102)):
             fail("decode_health() misread the C-built bridge tail")
+        if ((ht.hb_sent, ht.hb_stale, ht.hb_stale_busy, ht.probe_stale)
+                != (0x0B0C, 41, 0xFFFF, 0x0D0E)):
+            fail("decode_health() misread the heartbeat counts in the C-built tail")
         # A tail from 466477d (16 bytes) must still read its fields, and none
         # of the ladder's.
         h16 = pyproto.decode_health(c_pkts["health_bridge_tail"][7:-2][:24 + 16])
         if h16.iram_free != 142000 or h16.reserve_held is not None:
             fail("decode_health() mishandles the 16-byte tail of the older firmware")
+        # And one from the ladder's firmware (24 bytes) — every mount on the rig
+        # until the heartbeat counts ship — keeps its fields and gains none.
+        h24 = pyproto.decode_health(c_pkts["health_bridge_tail"][7:-2][:24 + 24])
+        if (h24.reserve_held, h24.nomem_cured, h24.scan_devices,
+                h24.scan_freed_kb) != (12288, 3, 87, 0x0102) or h24.hb_sent is not None:
+            fail("decode_health() mishandles the 24-byte tail of the ladder's firmware")
         ev = c_pkts["mount_event_nomem"][7:-2]
         if len(ev) != pyproto.MOUNT_EVENT_NOMEM_PAYLOAD_LEN or ev[0] != 4:
             fail("the C-built NO_MEM event is not the length or kind Python expects")
