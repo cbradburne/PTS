@@ -786,12 +786,14 @@ static uint16_t  _la_dir_seq = 0;       // sequence counter for hub-injected CMD
 
 #include "esp_attr.h"
 
-// "Mount is alive" = STATUS seen within this.  Was 7 s against a 10 Hz STATUS
+// "Mount is active" = STATUS seen within this.  Was 7 s against a 10 Hz STATUS
 // stream, which made it unmissable.  The mount now sends STATUS on CHANGE plus a
 // 5 s refresh, so 7 s left exactly one refresh of margin: a single lost packet
-// dropped a healthy mount out of the live set, and this window gates the hub's
-// wedge detector, its reinit ladder and its own restart.  16 s tolerates three
-// consecutive misses and is still far inside any real outage.
+// dropped a healthy mount out of the live set.  16 s tolerates three
+// consecutive misses and is still far inside any real outage.  The OSC feedback
+// and speed controls, the maintenance restart's idle check and the health
+// report's txfail sum go by it; the self-recovery ladder and the peer refresh
+// no longer do — they go by any frame, mount_heard_recently() below.
 #define SELF_WEDGE_ALIVE_MS     MOUNT_PRESENCE_TIMEOUT_MS  // see shared/protocol.h
 
 // Is this mount being heard?  Written out six times before this existed, and
@@ -810,6 +812,34 @@ static inline bool mount_is_active(int i, uint32_t now) {
 #define SELF_WIFI_REINIT_COOLDOWN_MS 90000UL
 #define SELF_REINIT_COOLDOWN_MS  30000UL  // min gap between reinits (PC- or self-triggered)
 #define SELF_RESTART_AFTER_MS    25000UL  // wedge age → esp_restart()
+
+// Is the hub still hearing this mount — any frame at all, as mount_heard()
+// stamps it?  The self-recovery ladder and the peer refresh go by this, where
+// mount_is_active() above is the STATUS test.
+//
+// Any frame, because the case that most needs recovering is a mount whose
+// STATUS has not registered.  2026-09-27 22:54, bench: after a hub restart cam1
+// was heard for 31 s before its first STATUS counted, and every send to it
+// failed meanwhile.  Keyed to STATUS, neither the ladder nor the peer refresh
+// could act; the PC's own detector reinit'd the radio at 5.2 s and cam1
+// answered 0.3 s later.  With no PC connected, nothing would have.
+//
+// A short window, because a mount that is switched off has to drop out of it
+// before its failed sends can age to the first rung: its frames stop the moment
+// it goes, and its failures only start then.  A second short of the first rung
+// makes that certain.  The 16 s STATUS window did not: the wedge clock started
+// on the bench at 22:11:59 when cam1 was power-cycled, and only cam1 coming
+// back stopped it.  A live mount sends several frames a second, so 5 s without
+// one is not a pause.
+//
+// Aged against a fresh millis(): the relay loop stamps _mount_heard_ms and can
+// run after a caller read its `now`, and unsigned, now - stamp would then read
+// as 49 days of silence.
+#define SELF_WEDGE_HEARD_MS     (SELF_REINIT_AFTER_MS - 1000UL)
+static inline bool mount_heard_recently(int i) {
+    uint32_t heard = _mount_heard_ms[i];
+    return heard && (millis() - heard) < SELF_WEDGE_HEARD_MS;
+}
 
 // The rung the 14-hour outage needed.
 //
@@ -4118,9 +4148,10 @@ void send_heartbeat() {
 // ---------------------------------------------------------------------------
 
 // Detect the hub→mount TX wedge and run the reinit→restart ladder without
-// needing the PC.  Signature: sends to a mount FAIL back-to-back while its
-// STATUS keeps arriving.  The 2 s heartbeat guarantees the fail counter moves
-// even with no client traffic.
+// needing the PC.  Signature: sends to a mount FAIL back-to-back while the hub
+// keeps hearing it — any frame, not only a STATUS (mount_heard_recently()).
+// The 2 s heartbeat guarantees the fail counter moves even with no client
+// traffic.
 static void check_self_recovery(uint32_t now) {
     // The streak only exists to stop a ~40 s boot loop, and surviving this much
     // uptime proves we aren't in one — so clear it on uptime alone.  Requiring
@@ -4137,7 +4168,7 @@ static void check_self_recovery(uint32_t now) {
     int      worst_i   = -1;
     for (int i = 0; i < NUM_MOUNTS; i++) {
         // A satellite-relayed mount is NOT judged by this radio.  It is alive
-        // (its STATUS arrives over the wire) and unreachable from here by
+        // (its frames arrive over the wire) and unreachable from here by
         // design — being out of radio range is precisely why it has a
         // satellite — so "alive but our sends fail" describes it permanently.
         // This detector predates satellites and read that as a wedge: one rig
@@ -4146,13 +4177,13 @@ static void check_self_recovery(uint32_t now) {
         // exist.  Each restart then dropped the satellite link and took that
         // mount down for real.
         if (_mount_sat[i] >= 0) { _tx_wedge_since_ms[i] = 0; continue; }
-        bool alive   = mount_is_active(i, now);
+        bool alive   = mount_heard_recently(i);
         bool failing = _espnow_fail_run[i] >= SELF_WEDGE_MIN_FAILS;
         if (alive && failing) {
             if (!_tx_wedge_since_ms[i]) {
                 _tx_wedge_since_ms[i] = now ? now : 1;
                 Serial.printf("[SELF] TX wedge suspected on mount %d "
-                              "(sends failing, STATUS still arriving)\n", i + 1);
+                              "(sends failing, still hearing it)\n", i + 1);
             }
             _last_wedge_ms = now;
             uint32_t age = now - _tx_wedge_since_ms[i];
@@ -4258,7 +4289,7 @@ static void check_self_recovery(uint32_t now) {
     bool tx_proven_ok = false;
     for (int k = 0; k < NUM_MOUNTS && !_cb_stall_active; k++) {
         if (k == worst_i) continue;
-        bool k_alive = mount_is_active(k, now);
+        bool k_alive = mount_heard_recently(k);
         if (k_alive && _espnow_fail_run[k] == 0) { tx_proven_ok = true; break; }
     }
     if (tx_proven_ok) {
@@ -4443,16 +4474,17 @@ void loop() {
     }
 
     // ---- ESP-NOW peer refresh (triggered by consecutive send failures) ----
-    // Only meaningful for a mount we can actually hear: if its STATUS keeps
-    // arriving while our sends fail, the peer entry may be stale and re-adding
-    // it can clear that.  A mount that simply isn't powered fails every send
-    // forever, so refreshing it churns del_peer/add_peer on the WiFi driver
-    // several times a second, permanently, for no possible gain — and that
-    // churn is shared state with the peers that do work.
+    // Only meaningful for a mount we can actually hear: if frames keep arriving
+    // from it — any frame, not only a STATUS — while our sends fail, the peer
+    // entry may be stale and re-adding it can clear that.  A mount that simply
+    // isn't powered fails every send forever, so refreshing it churns
+    // del_peer/add_peer on the WiFi driver several times a second, permanently,
+    // for no possible gain — and that churn is shared state with the peers that
+    // do work.  Switched off, it is out of mount_heard_recently() within 5 s.
     for (int i = 0; i < NUM_MOUNTS; i++) {
         if (!_espnow_need_refresh[i]) continue;
         _espnow_need_refresh[i] = false;
-        bool alive = mount_is_active(i, now);
+        bool alive = mount_heard_recently(i);
         if (!alive) continue;   // absent mount — failures are expected, don't churn
         Serial.printf("ESP-NOW: refreshing peer %d after %d consecutive send failures\n",
                       i + 1, ESPNOW_MAX_CONSEC_FAILS);

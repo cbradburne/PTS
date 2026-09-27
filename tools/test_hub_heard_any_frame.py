@@ -27,7 +27,26 @@ it is alive.  So:
                              (re)binding forgets heard too
   30 s of nothing is absent  a mount switched off is still not transmitted to
 
-The stamp, the route and the gate are lifted out of the .ino and run here.
+And the hub's own recovery goes by the same frames.  2026-09-27 22:54, the
+first boot of the change above: cam1 was heard for 31 s before its first STATUS
+counted, every send to it failing.  The hub's ladder (reinit at 6 s) and its
+peer refresh both asked for a STATUS, so neither could act; the PC's detector
+reinit'd the radio and cam1 answered 0.3 s later.  With no PC, nothing would.
+
+  heard, not STATUS          the wedge detector, its "another mount is fine"
+                             proof and the peer refresh all ask
+                             mount_heard_recently(): any frame within 5 s
+  switched off is not stuck  the window is shorter than the first rung, so a
+                             mount switched off drops out of it before its
+                             failed sends can age to a reinit — at the 16 s
+                             STATUS window it did not
+  fresh clock, zero = never  aged against millis(), not a caller's `now`; a
+                             mount never heard is not heard at boot
+  STATUS where STATUS counts the maintenance restart's "is anything moving"
+                             still needs a STATUS: it reads the state in one
+
+The stamp, the route, the gate and the recovery checks are lifted out of the
+.ino and run here — and run again with the old STATUS rule, which must fail.
 
 Run directly, or via tools/run_tests.sh with the rest.
 """
@@ -88,6 +107,58 @@ for m in re.finditer(r"_mount_last_seen\[(cur|slot)\]\s*= 0;", HUB):
         f"heard is not forgotten beside last-seen at {HUB[:m.start()].count(chr(10)) + 1}"
 print("   stamped for every bound frame, ghosts aside; the gate reads it; the\n"
       "   route moved with it; last-seen still the STATUS; bindings start cold   OK")
+
+
+def code_only(text: str) -> str:
+    return "\n".join(l.split("//")[0] for l in text.splitlines())
+
+
+def braced(i: int) -> str:
+    """From HUB[i] to the brace that closes the first one opened after it."""
+    j = HUB.index("{", i)
+    depth = 0
+    for k in range(j, len(HUB)):
+        depth += {"{": 1, "}": -1}.get(HUB[k], 0)
+        if depth == 0:
+            return HUB[i:k + 1]
+    raise AssertionError("unbalanced braces")
+
+
+# ---- 1b. the hub's own recovery goes by the same frames -----------------------
+print("\n1b. the recovery path:")
+helper = block("static inline bool mount_heard_recently(int i)")
+hcode = code_only(helper)
+assert "_mount_heard_ms[i]" in hcode and "_mount_last_seen" not in hcode, \
+    "mount_heard_recently() does not read the any-frame stamp"
+assert "millis() - heard" in hcode, \
+    "mount_heard_recently() ages the stamp against something other than a fresh\n" \
+    "    millis() — the relay loop can stamp after a caller read its `now`, and\n" \
+    "    unsigned, now - stamp is then 49 days of silence"
+rec = block("static void check_self_recovery(uint32_t now)")
+rcode = code_only(rec)
+assert "bool alive   = mount_heard_recently(i);" in rcode, \
+    "the wedge detector still needs a STATUS to call a mount alive — the 22:54\n" \
+    "    case (heard, no STATUS, every send failing) never arms the ladder"
+assert "bool k_alive = mount_heard_recently(k);" in rcode, \
+    "'another mount is acknowledging' still needs that mount's STATUS, so a\n" \
+    "    mount heard and answering before its STATUS registers proves nothing"
+assert "mount_is_active(" not in rcode, \
+    "the self-recovery ladder still has a STATUS-only presence test in it"
+assert "STATUS still arriving" not in code_only(HUB), \
+    "the wedge line still says STATUS is arriving — it is judged on any frame now"
+ref_at = HUB.index("        if (!_espnow_need_refresh[i]) continue;")
+ref_at = HUB.rindex("    for (int i = 0; i < NUM_MOUNTS; i++) {", 0, ref_at)
+refresh = braced(ref_at)
+assert "bool alive = mount_heard_recently(i);" in code_only(refresh) and \
+       "mount_is_active(" not in code_only(refresh), \
+    "the peer refresh still needs a STATUS — a mount heard but failing every\n" \
+    "    send is exactly the one whose peer entry may need re-adding"
+maint = code_only(block("static void check_maintenance_restart("))
+assert "bool connected = mount_is_active(i, now);" in maint, \
+    "the maintenance restart no longer asks for a STATUS before it reads a\n" \
+    "    mount's state — a mount heard but not yet reporting has no state to read"
+print("   the wedge detector, its proof and the peer refresh ask for any frame\n"
+      "   within the window; the maintenance restart still asks for a STATUS   OK")
 
 # ---- 2. the stamp, the route and the gate, run -------------------------------
 if not shutil.which("c++"):
@@ -163,5 +234,161 @@ assert out["zero"] == "1 1", \
     f"a frame heard at millis() 0 was stored as 0, 'never heard', and lost: {out['zero']}"
 print("   any frame opens it, for 30 s; the route follows, announced once per\n"
       "   change; millis() 0 still counts   OK")
+
+# ---- 3. the recovery checks, run ---------------------------------------------
+# The detector's per-mount loop, the tx_proven_ok loop and the peer refresh,
+# lifted verbatim, with the real helper and window.  Then the same code again
+# with the helper swapped for the rule before (STATUS within 16 s): it has to
+# fail these cases, or they tell nothing apart.
+defs = "\n".join(re.search(rf"^#define {n}\b.*$", HUB, re.M).group(0)
+                 for n in ("SELF_WEDGE_MIN_FAILS", "SELF_REINIT_AFTER_MS", "SELF_WEDGE_HEARD_MS"))
+detect = rec[rec.index("uint32_t worst_age = 0;"):
+             rec.index("// Hub-wide, and checked before the per-mount verdict below.")]
+proof = rec[rec.index("bool tx_proven_ok = false;"):rec.index("if (tx_proven_ok) {")]
+PROT = (REPO / "firmware/shared/protocol.h").read_text()
+status_refresh = int(re.search(r"#define MOUNT_STATUS_REFRESH_MS\s+(\d+)UL", PROT).group(1))
+old_rule = ("static inline bool mount_heard_recently(int i) {   // the rule before: a STATUS\n"
+            f"    return _mount_last_seen[i] && (millis() - _mount_last_seen[i]) < "
+            f"{3 * status_refresh + 1000}UL;\n}}")
+rig = r"""
+#include <cstdint>
+#include <cstdio>
+#define NUM_MOUNTS 5
+#define ESPNOW_MAX_CONSEC_FAILS 4
+@DEFS@
+static uint32_t _millis;
+static uint32_t millis() { return _millis; }
+static uint32_t _mount_heard_ms[NUM_MOUNTS], _mount_last_seen[NUM_MOUNTS];
+static int8_t   _mount_sat[NUM_MOUNTS];
+static uint8_t  _espnow_fail_run[NUM_MOUNTS];
+static uint32_t _tx_wedge_since_ms[NUM_MOUNTS], _last_wedge_ms;
+static bool     _restart_block_logged, _cb_stall_active, _espnow_need_refresh[NUM_MOUNTS];
+static int      refreshed[NUM_MOUNTS];
+static void refresh_espnow_peer(int i) { refreshed[i]++; }
+static struct { template <class... A> void printf(const char *, A...) {} } Serial;
+@HELPER@
+static uint32_t age_out; static int who_out;
+static void detect_pass(uint32_t now) {
+@DETECT@
+    age_out = worst_age; who_out = worst_i;
+}
+static bool proven(int worst_i) {
+@PROOF@
+    return tx_proven_ok;
+}
+static void refresh_pass() {
+@REFRESH@
+}
+static void reset() {
+    for (int i = 0; i < NUM_MOUNTS; i++) {
+        _mount_heard_ms[i] = _mount_last_seen[i] = _tx_wedge_since_ms[i] = 0;
+        _mount_sat[i] = -1; _espnow_fail_run[i] = 0;
+        _espnow_need_refresh[i] = false; refreshed[i] = 0;
+    }
+    _cb_stall_active = false;
+}
+// The 500 ms self-check over [base, base + ms], cam1's sends failing all along;
+// cam1 heard every 100 ms while `heard_too`.  Returns the oldest wedge age seen.
+static uint32_t run(uint32_t base, uint32_t ms, bool heard_too) {
+    uint32_t oldest = 0;
+    for (uint32_t t = 0; t <= ms; t += 100) {
+        _millis = base + t;
+        if (heard_too) _mount_heard_ms[0] = _millis;
+        _espnow_fail_run[0] = 10;
+        if (t % 500 == 0) {
+            detect_pass(_millis);
+            if (who_out == 0 && age_out > oldest) oldest = age_out;
+        }
+    }
+    return oldest;
+}
+int main() {
+    printf("window %lu %lu\n", (unsigned long)SELF_WEDGE_HEARD_MS,
+           (unsigned long)SELF_REINIT_AFTER_MS);
+    // A. 22:54 - heard ten times a second, no STATUS, every send failing
+    reset();
+    printf("deaf %lu\n", (unsigned long)run(100000, 8000, true));
+    // B. switched off - healthy for 10 s (STATUS every 5 s, the last as it
+    //    goes), then nothing heard and every send failing from that instant
+    reset();
+    for (uint32_t t = 0; t <= 10000; t += 100) {
+        _millis = 200000 + t;
+        _mount_heard_ms[0] = _millis;
+        if (t % 5000 == 0) _mount_last_seen[0] = _millis;
+    }
+    uint32_t off = run(_millis, 30000, false);
+    printf("off %lu %lu\n", (unsigned long)off, (unsigned long)_tx_wedge_since_ms[0]);
+    // C. a mount relayed by a satellite, deaf to this radio by design
+    reset(); _mount_sat[0] = 0;
+    printf("sat %lu %d\n", (unsigned long)run(300000, 8000, true), who_out);
+    // D. cam1 failing; cam2 heard 0.2 s ago, answering, its STATUS not in yet -
+    //    and then cam2 last heard 6 s ago
+    reset(); _millis = 400000;
+    _mount_heard_ms[1] = _millis - 200;
+    int p1 = proven(0);
+    _mount_heard_ms[1] = _millis - 6000;
+    printf("proof %d %d\n", p1, (int)proven(0));
+    // E. four sends in a row failed: cam1 heard 0.1 s ago (no STATUS), cam3
+    //    switched off 6 s ago
+    reset(); _millis = 500000;
+    _mount_heard_ms[0] = _millis - 100;  _espnow_need_refresh[0] = true;
+    _mount_heard_ms[2] = _millis - 6000; _espnow_need_refresh[2] = true;
+    refresh_pass();
+    printf("refresh %d %d %d\n", refreshed[0], refreshed[2], (int)_espnow_need_refresh[2]);
+    // F. one second after boot, a mount never heard
+    reset(); _millis = 1000;
+    printf("boot %d\n", (int)mount_heard_recently(3));
+    return 0;
+}
+"""
+
+
+def run_rig(helper_src: str) -> dict:
+    src = (rig.replace("@DEFS@", defs).replace("@HELPER@", helper_src)
+              .replace("@DETECT@", detect).replace("@PROOF@", proof)
+              .replace("@REFRESH@", refresh))
+    (d / "r.cpp").write_text(src)
+    c = subprocess.run(["c++", "-std=c++17", "-Wall", "-o", str(d / "r"), str(d / "r.cpp")],
+                       capture_output=True, text=True)
+    assert c.returncode == 0, f"the lifted recovery code did not compile:\n{c.stderr[:1500]}"
+    lines = subprocess.run([str(d / "r")], capture_output=True, text=True).stdout.strip()
+    return dict(l.split(" ", 1) for l in lines.splitlines())
+
+
+print("\n3. the recovery checks, run:")
+got = run_rig(helper)
+window, reinit = (int(x) for x in got["window"].split())
+deaf = int(got["deaf"])
+assert deaf >= reinit, \
+    f"the 22:54 case — cam1 heard, no STATUS, every send failing — ages only to " \
+    f"{deaf} ms, short of the {reinit} ms reinit: the hub cannot rescue it alone"
+off, since = (int(x) for x in got["off"].split())
+assert off < reinit, \
+    f"a mount switched off ages to {off} ms of 'wedge', and the reinit is due at " \
+    f"{reinit} ms — the hub would reinit its radio, and at 14 s bounce its WiFi, " \
+    "because someone turned a mount off"
+assert since == 0, "a mount switched off 30 s ago still has the wedge clock running"
+assert window < reinit, \
+    f"the heard window ({window} ms) is not shorter than the first rung ({reinit} ms)"
+assert got["sat"] == "0 -1", \
+    f"a satellite-relayed mount armed the wedge detector: {got['sat']}"
+assert got["proof"] == "1 0", \
+    f"'another mount is answering' reads {got['proof']} (heard 0.2 s ago, heard " \
+    "6 s ago): a mount heard and acknowledging must prove this radio fine, one " \
+    "gone quiet must not"
+assert got["refresh"] == "1 0 0", \
+    f"peer refresh (heard mount, switched-off mount, flag left set) = {got['refresh']}"
+assert got["boot"] == "0", "a mount never heard reads as heard in the first seconds after boot"
+print(f"   heard with no STATUS: the reinit comes due ({deaf} ms of failing)\n"
+      f"   switched off: never past {off} ms, then cleared — the rung is {reinit} ms\n"
+      f"   a satellite mount never arms it; a mount heard and answering proves the\n"
+      f"   radio, one quiet for 6 s does not; the refresh goes to the one heard   OK")
+
+was = run_rig(old_rule)
+assert int(was["deaf"]) < reinit and int(was["off"].split()[0]) >= reinit and \
+       was["proof"] == "0 0" and was["refresh"] == "0 0 0", \
+    f"the rule before this change passes these cases too, so they prove nothing: {was}"
+print(f"   and the old STATUS rule fails them: never arms at 22:54, and ages a\n"
+      f"   switched-off mount to {was['off'].split()[0]} ms   OK")
 
 print("\nALL CHECKS PASSED")
