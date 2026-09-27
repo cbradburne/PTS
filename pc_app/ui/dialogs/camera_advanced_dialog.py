@@ -774,9 +774,15 @@ class CameraAdvancedDialog(QDialog):
 
     # ── lined up under the main window's row ─────────────────────────────
     def showEvent(self, event) -> None:
+        # QDialog's own showEvent centres the dialog on its parent.  Line up
+        # straight after that, still inside the show event — before the window
+        # is on the screen — because macOS does not honour a move made once it
+        # is: moved a moment later, the dialog stayed where it had been centred,
+        # 22 px out, on the bench iMac, while Windows took the same move fine.
         super().showEvent(event)
-        # After the window manager has placed it: before that, where the
-        # buttons are on screen is not yet known.
+        self._line_up_with_main_row()
+        # And again once it is placed.  Before that the window's frame is not
+        # known, and on Windows the frame is part of the position.
         QTimer.singleShot(0, self._line_up_with_main_row)
 
     def _main_cam_rects(self):
@@ -816,12 +822,16 @@ class CameraAdvancedDialog(QDialog):
         self._picker.setSpacing(max(0, min(gaps)))
         self.layout().activate()
         dx = rects[0].left() - btns[0].mapToGlobal(QPoint(0, 0)).x()
-        x = self.x() + dx
+        # Never off the screen: the shift stops where the frame meets its edge.
         scr = self.screen().availableGeometry() if self.screen() else None
         if scr is not None:
-            x = max(scr.left(), min(x, scr.right() + 1 - self.frameGeometry().width()))
-        if x != self.x():
-            self.move(x, self.y())
+            fg = self.frameGeometry()
+            dx = max(scr.left() - fg.left(), min(dx, scr.right() - fg.right()))
+        if dx:
+            # The client area, shifted — not move(), whose position includes a
+            # frame that is not known until the window exists: moved by it from
+            # inside showEvent, the dialog shifted vertically as well.
+            self.setGeometry(self.geometry().translated(dx, 0))
 
     # ── hands off while the operator is working ──────────────────────────
     def _touch(self, w) -> None:

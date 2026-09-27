@@ -95,16 +95,18 @@ def main_window(row_x=None, gap=10, height=64):
     return m
 
 
-def advanced(main, at=(237, 72)):
-    """Opened as the app opens it: from Camera Control, parented to it, and
-    placed wherever the window manager puts it."""
+def advanced(main, line_up=True):
+    """Opened as the app opens it: from Camera Control, parented to it, placed
+    by Qt (QDialog centres it on its parent) — nothing moves it first.  With
+    line_up=False the line-up is skipped: the control, where Qt alone puts it."""
     cc = QDialog(main)
     cc.setGeometry(300, 300, 900, 500)
     cc.show()
     d = CameraAdvancedDialog(FakeMM(), cc, mount_id=1)
-    d.move(*at)
+    if not line_up:
+        d._line_up_with_main_row = lambda: None
     d.show()
-    QTest.qWait(80)                 # its line-up runs once it has been shown
+    QTest.qWait(80)                 # and the second pass, once it is shown
     return d
 
 
@@ -139,6 +141,11 @@ rects = m.cam_selector_rects()
 assert rects[1].width() > S.px(150) + 20, \
     "the long name did not widen its button — the case this has to copy is not being made"
 main_gaps = {rects[i + 1].left() - rects[i].right() - 1 for i in range(4)}
+ctrl = advanced(m, line_up=False)
+qt_y = ctrl.frameGeometry().y()               # where Qt alone opens it vertically
+assert abs(on_screen(ctrl._cam_btns[1]).left() - rects[0].left()) > 5, \
+    "Qt already opens it lined up here, so this proves nothing about the line-up"
+ctrl.close()
 d = advanced(m)
 got = [on_screen(d._cam_btns[i]) for i in range(1, 6)]
 for i, (a, b) in enumerate(zip(got, rects), start=1):
@@ -147,14 +154,30 @@ for i, (a, b) in enumerate(zip(got, rects), start=1):
     assert a.height() == b.height(), f"Cam {i} is {a.height()} high under one {b.height()} high"
 print(f"   every button edge within 1 px of the one above; gaps {sorted(main_gaps)} px as above;\n"
       f"   Cam 2 {rects[1].width()} px wide for its name, as above   OK")
-assert d.y() == 72, f"the dialog moved vertically, to y={d.y()} — only sideways was asked for"
+assert d.frameGeometry().y() == qt_y, \
+    f"the dialog opened at y={d.frameGeometry().y()}, not where Qt places it ({qt_y}) — " \
+    "only sideways was asked for, and higher covers the main row"
 print("   moved sideways only                                         OK")
 d.close()
+
+# ---- 2b. lined up BEFORE the window is on screen -----------------------------------
+# macOS does not honour a move made once the window is shown: the first build
+# moved it a moment after showing, which worked on Windows and left the bench
+# iMac's row 22 px out (reproduced on this Mac with real windows: 140 px out,
+# 0 once the line-up ran inside showEvent).  The offscreen screen here honours
+# either, so this is checked in the source.
+import inspect
+src_show = inspect.getsource(CameraAdvancedDialog.showEvent)
+body = src_show[src_show.index("super().showEvent(event)"):]
+assert "self._line_up_with_main_row()" in body and \
+       body.index("self._line_up_with_main_row()") < body.index("QTimer.singleShot"), \
+    "the line-up only runs after the window is shown — macOS keeps the dialog where it was centred"
+print("\n2b. lined up inside showEvent, before macOS places the window   OK")
 
 # ---- 3. never pushed off the screen -------------------------------------------
 print("\n3. a row at the screen's edge:")
 m2 = main_window(row_x=0)
-d2 = advanced(m2, at=(400, 72))
+d2 = advanced(m2)
 fg = d2.frameGeometry()
 assert fg.left() >= scr.left() and fg.right() <= scr.right(), \
     f"lining up pushed the dialog off the screen: {fg} on {scr}"
