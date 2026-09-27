@@ -21,11 +21,12 @@ Fallback workflow (ultralytics not installed)
 from __future__ import annotations
 
 import logging
+import threading
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSlider, QSizePolicy, QFrame
 )
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QPointF, QRectF, QTimer
 from PyQt6.QtGui import (
     QImage, QPixmap, QPainter, QPen, QColor, QBrush,
     QMouseEvent, QFont
@@ -35,7 +36,7 @@ import numpy as np
 import cv2
 
 from cv.capture import CaptureSource
-from cv.tracker import TrackerKind
+from cv.tracker import TrackerKind, PersonDetector
 from cv.tracking_loop import TrackingLoop
 from comms.mount_manager import MountManager
 from config.mount_config import AppConfig
@@ -96,6 +97,13 @@ class VideoLabel(QLabel):
         self._end_pt      = QPoint()
         self._bbox_ready: tuple | None = None
 
+        # "Something is happening" spinner — see set_busy().
+        self._busy_text: str | None = None
+        self._busy_angle = 0
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(16)          # ~60 fps
+        self._busy_timer.timeout.connect(self._busy_step)
+
     # ------------------------------------------------------------------
     # Public setters
     # ------------------------------------------------------------------
@@ -131,6 +139,61 @@ class VideoLabel(QLabel):
     def clear_bbox(self) -> None:
         self._bbox_ready = None
         self._drawing    = False
+
+    # ------------------------------------------------------------------
+    # Busy spinner
+    # ------------------------------------------------------------------
+
+    def set_busy(self, text: str | None) -> None:
+        """Spin in the middle of the video area over a line of text; None stops.
+
+        For the wait between Start Feed and the first picture — seconds on the
+        M710q, while the capture device opens and person detection loads.  It
+        can only turn because that work is done on another thread: anything
+        slow on this one would freeze the spinner along with everything else.
+        """
+        self._busy_text = text
+        if text:
+            if not self._busy_timer.isActive():
+                self._busy_timer.start()
+        else:
+            self._busy_timer.stop()
+        self.update()
+
+    @property
+    def busy(self) -> bool:
+        return self._busy_text is not None
+
+    def _busy_step(self) -> None:
+        self._busy_angle = (self._busy_angle + 6) % 360     # one turn a second
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)                           # the picture, if any
+        if not self._busy_text:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = QPointF(self.width() / 2, self.height() / 2)
+        r = 26.0
+        track = QPen(QColor(255, 255, 255, 40), 6)
+        p.setPen(track)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(c, r, r)
+        arc = QPen(QColor("#4FC3F7"), 6)                    # the detection-box blue
+        arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(arc)
+        # Qt counts sixteenths of a degree, anticlockwise: negative turns it
+        # clockwise, the way a loading wheel is expected to go.
+        p.drawArc(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r),
+                  -self._busy_angle * 16, 100 * 16)
+        font = QFont()
+        font.setPixelSize(14)
+        p.setFont(font)
+        p.setPen(QColor("#90A4AE"))
+        p.drawText(QRectF(0, c.y() + r + 16, self.width(), 24),
+                   int(Qt.AlignmentFlag.AlignHCenter), self._busy_text)
+        p.end()
 
     # ------------------------------------------------------------------
     # Frame display
@@ -339,6 +402,14 @@ class VideoLabel(QLabel):
 class CVWindow(QWidget):
     """Emitted when tracking starts or stops: (mount_id, is_active)."""
     tracking_changed = pyqtSignal(int, bool)
+    # From the start-up thread: (the device opened, the PersonDetector loaded).
+    # A signal, so the result lands on the Qt thread whatever thread sent it.
+    _feed_opened = pyqtSignal(bool, object)
+
+    # How long the spinner waits for a first picture before saying so.  An open
+    # device that sends nothing — wrong input, source unplugged — would
+    # otherwise look exactly like a slow one, spinning for ever.
+    FIRST_FRAME_WAIT_MS = 10000
 
     def __init__(self, mount_id: int, mount_manager: MountManager,
                  config: AppConfig, parent=None):
@@ -352,6 +423,16 @@ class CVWindow(QWidget):
         self._capture  = CaptureSource()
         self._tracking_loop: TrackingLoop | None = None
         self._yolo_mode = False   # True once YOLO is confirmed available
+        # Start Feed is in flight: the device opening and the detector loading
+        # on a thread of their own.  The Event is how that thread learns the
+        # window went away meanwhile, so it closes the device itself.
+        self._starting = False
+        self._start_cancel: threading.Event | None = None
+        self._feed_opened.connect(self._on_feed_opened)
+        self._first_frame_timer = QTimer(self)
+        self._first_frame_timer.setSingleShot(True)
+        self._first_frame_timer.setInterval(self.FIRST_FRAME_WAIT_MS)
+        self._first_frame_timer.timeout.connect(self._on_no_first_frame)
 
         self.setWindowTitle("CV Tracking")
         self.resize(960, 640)
@@ -404,10 +485,9 @@ class CVWindow(QWidget):
         refresh_btn.clicked.connect(self._refresh_devices)
         ctrl.addWidget(refresh_btn)
 
-        self._feed_btn = QPushButton("Start Feed")
+        self._feed_btn = QPushButton()
         self._feed_btn.setFixedHeight(36)
-        self._feed_btn.setStyleSheet(
-            "background:#1B5E20; color:white; border:none; border-radius:5px; padding:0 10px;")
+        self._set_feed_btn("stopped")
         self._feed_btn.clicked.connect(self._toggle_feed)
         ctrl.addWidget(self._feed_btn)
 
@@ -495,6 +575,23 @@ class CVWindow(QWidget):
         f.setStyleSheet("color:#333;")
         return f
 
+    # Green to start, red to stop — as Stop Tracking beside it is red — and a
+    # quiet grey while starting, when pressing it again would do nothing.
+    _FEED_BTN = {
+        "stopped":  ("Start Feed",  "#1B5E20", "white"),
+        "starting": ("Starting…",   "#37474F", "#90A4AE"),
+        "running":  ("Stop Feed",   "#B71C1C", "white"),
+    }
+
+    def _set_feed_btn(self, state: str) -> None:
+        text, bg, fg = self._FEED_BTN[state]
+        self._feed_btn.setText(text)
+        self._feed_btn.setEnabled(state != "starting")
+        self._feed_btn.setStyleSheet(
+            f"QPushButton {{ background:{bg}; color:{fg}; border:none;"
+            f" border-radius:5px; padding:0 10px; }}"
+            f"QPushButton:disabled {{ background:{bg}; color:{fg}; }}")
+
     # ------------------------------------------------------------------
     # Device list
     # ------------------------------------------------------------------
@@ -526,19 +623,61 @@ class CVWindow(QWidget):
             self._start_feed()
 
     def _start_feed(self) -> None:
+        """Open the device and load person detection — on a thread of their
+        own, both being slow: seconds on the M710q, between opening a capture
+        card and importing torch.  Done here, they froze the whole window for
+        that long.  The spinner turns until the first picture arrives."""
         device = self._device_combo.currentData()
         if device is None:
             self._status.setText("No capture device found.")
             return
-        if not self._capture.open(device_index=device):
+        if self._starting:
+            return
+        self._starting = True
+        cancel = threading.Event()
+        self._start_cancel = cancel
+        self._set_feed_btn("starting")
+        self._video.clear()                  # no frozen picture under the spinner
+        self._video.set_busy("Starting the feed…")
+        self._status.setText("Opening the capture device and loading person detection…")
+
+        capture, imgsz, opened = self._capture, self._config.cv_detect_size, self._feed_opened
+
+        def start() -> None:
+            ok = capture.open(device_index=device)
+            detector = PersonDetector(imgsz=imgsz) if ok and not cancel.is_set() else None
+            if cancel.is_set():
+                capture.close()              # the window went meanwhile: tidy up here
+                return
+            try:
+                opened.emit(ok, detector)
+            except RuntimeError:             # ...or went just now
+                capture.close()
+
+        threading.Thread(target=start, name="cv-start", daemon=True).start()
+
+    @pyqtSlot(bool, object)
+    def _on_feed_opened(self, ok: bool, detector) -> None:
+        if not self._starting:
+            return
+        self._starting = False
+        self._start_cancel = None
+        if not ok:
+            self._video.set_busy(None)
+            self._set_feed_btn("stopped")
             self._status.setText("Failed to open capture device.")
             return
 
-        self._feed_btn.setText("Stop Feed")
+        self._set_feed_btn("running")
+        # Still spinning: the device is open, but the picture is what the
+        # operator is waiting for, and the first frame can be a while behind.
+        self._video.set_busy("Waiting for the picture…")
+        self._first_frame_timer.start()
 
         loop = TrackingLoop(self._mm, self._capture, self,
                             tracker_kind=self._config.cv_tracker,
-                            detect_size=self._config.cv_detect_size)
+                            detect_size=self._config.cv_detect_size,
+                            detector=detector)
         loop.set_mount(self._mount_id)
         loop.frame_ready.connect(self._on_frame)
         loop.tracking_lost.connect(self._on_tracking_lost)
@@ -551,12 +690,23 @@ class CVWindow(QWidget):
         self._configure_for_detector(loop.detector_available)
 
     def _stop_feed(self) -> None:
+        self._video.set_busy(None)
+        self._first_frame_timer.stop()
+        if self._starting:
+            # Still opening on its own thread.  Closing the device under it
+            # would race the open, so tell it instead: it closes the device
+            # itself once the open returns.
+            self._start_cancel.set()
+            self._starting = False
+            self._start_cancel = None
+            self._set_feed_btn("stopped")
+            return
         if self._tracking_loop:
             self._tracking_loop.stop_tracking()
             self._tracking_loop.shutdown()
             self._tracking_loop = None
         self._capture.close()
-        self._feed_btn.setText("Start Feed")
+        self._set_feed_btn("stopped")
         self._stop_btn.setEnabled(False)
         self._start_btn.setEnabled(False)
         self._start_btn.setVisible(False)
@@ -651,7 +801,16 @@ class CVWindow(QWidget):
 
     @pyqtSlot(object)
     def _on_frame(self, frame) -> None:
+        if self._video.busy:                 # the first picture: the wait is over
+            self._video.set_busy(None)
+            self._first_frame_timer.stop()
         self._video.set_frame(frame)
+
+    def _on_no_first_frame(self) -> None:
+        self._video.set_busy(None)
+        self._status.setText(
+            "The capture device is open but has sent no picture — check the "
+            "source is on and connected.  The feed will appear if it starts.")
 
     @pyqtSlot(list)
     def _on_detections_updated(self, detections: list) -> None:

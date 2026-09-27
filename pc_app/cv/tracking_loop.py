@@ -166,7 +166,12 @@ class TrackingLoop(QObject):
 
     def __init__(self, mount_manager: MountManager,
                  capture: CaptureSource, parent=None,
-                 tracker_kind: str = "mosse", detect_size: int = 416):
+                 tracker_kind: str = "mosse", detect_size: int = 416,
+                 detector=None):
+        # `detector`: a PersonDetector already loaded.  Loading one imports
+        # torch and runs a warm-up pass, seconds on the M710q; the CV window
+        # does that on a worker thread so its spinner can turn, then hands the
+        # result in here.  None loads one now, as before.
         super().__init__(parent)
         self._mm       = mount_manager
         self._capture  = capture
@@ -200,7 +205,8 @@ class TrackingLoop(QObject):
         self._frame_h = 720
 
         # ── Workers ────────────────────────────────────────────────────────
-        self._detector = PersonDetector(imgsz=detect_size)
+        self._detector = (detector if detector is not None
+                          else PersonDetector(imgsz=detect_size))
         self._tracker  = Tracker()
 
         # Separate executors so detection and tracking run in parallel.
