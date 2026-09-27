@@ -155,6 +155,10 @@ SCALAR_MAP = {
     "NAME_MAX_BYTES":                ("NAME_MAX_BYTES", True),
     "NAME_SLOT_CAMERA":              ("NAME_SLOT_CAMERA", True),
     "NAMES_REV_PAYLOAD_LEN":         ("NAMES_REV_PAYLOAD_LEN", True),
+    # The mount's runs, in the byte its bridge appends to STATUS.
+    "STATUS_RUN_BYTE":               ("STATUS_RUN_BYTE", True),
+    "STATUS_RUN_POSITIONS":          ("STATUS_RUN_POSITIONS", True),
+    "STATUS_RUN_LOOK_AT":            ("STATUS_RUN_LOOK_AT", True),
 }
 
 # C enum members that are C-side only (none currently).  Add here if a value

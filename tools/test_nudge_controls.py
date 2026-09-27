@@ -17,7 +17,7 @@ against the constants that produced it proves nothing.
 
 Run directly, or via tools/run_tests.sh with the rest.
 """
-import os, sys, pathlib, math
+import os, sys, pathlib, math, re
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "pc_app"))
@@ -433,9 +433,15 @@ print("   and back when a slider does have one              OK")
 # and a panel that changes shape per camera is harder to use than one that does
 # not.
 assert "set_enabled" in (REPO / "pc_app/ui/widgets/nudge_controls.py").read_text()
-assert "setVisible" not in SRC, \
+# The track and the zoom column, which is what changes per camera.  The focus
+# crosshair is shown or hidden by a Config option, not by the camera, and its
+# per-camera state is greyed like everything else — test_focus_button pins it.
+assert not re.search(r"_(track|zoom)\.(setVisible|hide|show)\(", SRC), \
     "the track is being hidden rather than greyed — the panel then changes shape\n" \
     "    depending on which camera is selected"
+assert "self._focus_btn.setVisible(show)" in SRC and \
+       SRC.count("setVisible") == 1, \
+    "something besides the Config-driven focus crosshair is shown or hidden"
 print("   greyed, not hidden, so the panel keeps its shape   OK")
 
 # Nothing inside the panel may carry a raw pixel count any more — that is the

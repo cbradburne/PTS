@@ -45,7 +45,7 @@ from .protocol import (
     pkt_get_subjects, pkt_add_subject_start, pkt_add_subject_set_a,
     pkt_add_subject_set_b, pkt_add_subject_abort, pkt_delete_subject,
     pkt_set_ref, pkt_set_slider_move, pkt_start_look_at_move,
-    pkt_switch_subject,
+    pkt_switch_subject, pkt_start_run, pkt_stop_run,
     MAX_SUBJECTS,
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
@@ -298,6 +298,11 @@ class MountState_:
     slider_max:  Optional[int] = None
     zoom_min:    Optional[int] = None
     zoom_max:    Optional[int] = None
+
+    # The runs the MOUNT has going (STATUS byte [10], STATUS_RUN_*), or None
+    # for bridge firmware that predates mount-owned position runs — in which
+    # case the main window drives a position run itself, as it always did.
+    run_flags:   Optional[int] = None
 
     # Active speed presets (from STATUS extended fields / STATE_REPORT)
     # Blackmagic camera, as REPORTED by the camera — never what we last sent.
@@ -1006,6 +1011,15 @@ class MountManager(QObject):
         self._send(pkt_start_look_at_move(mount_id, subject_id, direction,
                                           speed_preset, repeat))
 
+    def send_start_run(self, mount_id: int) -> None:
+        """Have the MOUNT cycle its stored positions (STATUS byte [10] says it is).
+        Only for a mount whose STATUS carries that byte — see run_flags."""
+        self._send(pkt_start_run(mount_id))
+
+    def send_stop_run(self, mount_id: int) -> None:
+        """End the mount's run, either kind — see pkt_stop_run."""
+        self._send(pkt_stop_run(mount_id))
+
     def send_switch_subject(self, mount_id: int, subject_id: int) -> None:
         """Switch to a different subject mid look-at move."""
         self._send(pkt_switch_subject(mount_id, subject_id))
@@ -1257,6 +1271,7 @@ class MountManager(QObject):
                 # last known value alone rather than clobbering it with "none".
                 if s.la_subject_present:
                     st.active_subject_id = s.active_la_subject  # 0-7 or 0xFF (none)
+                st.run_flags = s.run_flags
 
                 if not was_online:
                     # Request full state so slot coordinates are populated via STATE_REPORT

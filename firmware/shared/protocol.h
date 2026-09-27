@@ -426,6 +426,21 @@ typedef enum : uint8_t {
     CMD_START_LOOK_AT_MOVE = 0x27,  // start tracking: subject_id(1)+direction(1)+speed_preset(1) = 3B
     CMD_SWITCH_SUBJECT     = 0x28,  // switch tracking target mid-move: subject_id(1)
     CMD_GET_SUBJECTS       = 0x29,  // request subject list (no payload)
+    // Cycle this mount's stored positions until told otherwise — go to each in
+    // slot order, on to the next the moment it is there.  No payload.  The
+    // MOUNT runs it (its ESP32 bridge, shared/pos_run.h), not the client that
+    // asked, so it carries on when a phone locks or the PC app closes, and
+    // every client sees it in STATUS byte [10].  Ended by CMD_STOP_RUN, by
+    // anything that means the operator has taken over — a jog that moves an
+    // axis, E-STOP, a goto — or by the mount losing every base for
+    // RUN_DEADMAN_MS.  Consumed by the bridge; never reaches the Teensy.
+    CMD_START_RUN          = 0x2A,
+    // End this mount's run, either kind, and nothing more: the leg under way
+    // finishes where it was going.  No payload.  Stop was a zero jog, but a
+    // zero jog is also the PC's speed-preset announcement and every screen's
+    // safety stop on its way out, so it ended runs nobody meant to end.
+    // Consumed by the bridge; never reaches the Teensy.
+    CMD_STOP_RUN           = 0x2B,
 
     // Mount -> PC
     CMD_STATUS           = 0x80,
@@ -818,6 +833,16 @@ typedef enum : uint8_t {
 #define FLAG_REF_SET        0x20   // v2: pan/tilt session reference has been established
 #define FLAG_LOOK_AT_ACTIVE 0x40   // v2: look-at move is currently running
 #define FLAG_LOOK_AT_MODE   0x80   // v2: slider uses 3D triangulation mode
+
+// STATUS byte [10]: the mount's runs.  Not the Teensy's — build_status() is 10
+// bytes — but appended by the mount's ESP32 bridge, which owns runs, on every
+// STATUS it sends.  Every flag bit above is taken, so it is a byte of its own.
+// Its PRESENCE is also a capability: a 10-byte STATUS is bridge firmware from
+// before mount-owned position runs, and a client drives such a run itself, as
+// the PC app always did.
+#define STATUS_RUN_BYTE        10
+#define STATUS_RUN_POSITIONS 0x01   // cycling its stored positions (CMD_START_RUN)
+#define STATUS_RUN_LOOK_AT   0x02   // ping-ponging a subject (START_LOOK_AT_MOVE, repeat)
 
 // ---------------------------------------------------------------------------
 // Why esp_now_send() refused a frame

@@ -12,8 +12,13 @@ Layout:
         │   pan / tilt  │   column
         ╰───────────────╯
   ╭─────────────────────────────╮
-  │  slider track, −100 … +100  │
+  │  slider track, −100 … +100  │   (+)  focus
   ╰─────────────────────────────╯
+
+The focus crosshair is the grid's (widgets/focus_button.py), shown by the same
+Config option: this panel covers the grid, and with it the crosshair of the
+camera being framed.  It sits under the zoom column, with the other lens
+control, in a corner that was empty.
 
 Pan and tilt are a dial of four separated arc groups, with a legend in the hub
 naming which way each axis lies; the slider is a track of four tap zones.
@@ -55,6 +60,7 @@ from PyQt6.QtGui import QColor, QFont
 
 from comms.mount_manager import MountManager
 from ..ui_scale import px as _px
+from .focus_button import FocusButton
 from .nudge_controls import (RadialNudge, SliderTrack, ZoomColumn,
                              _R_OUT_1 as DIAL_OUTER_FRAC)
 
@@ -78,6 +84,7 @@ _CLOSE_F    =  48 / 800     # close button, square
 _TRACK_H_F  =  76 / 800     # slider track height
 _ZOOM_W_F   =  96 / 800
 _ZOOM_H_F   = 300 / 800
+_FOCUS_F    =  64 / 800     # focus crosshair, square, under the zoom column
 _BORDER_F   =   6 / 800     # panel frame
 _RADIUS_F   =  14 / 800
 
@@ -112,6 +119,8 @@ class NudgeOverlay(QFrame):
     """
 
     closed = pyqtSignal()
+    # One autofocus on the camera being moved, as the grid's crosshair sends.
+    focus_requested = pyqtSignal(int)       # mount_id
 
     # Hardware constants — edit these if microstepping or mechanics change.
     # Derived steps/deg and steps/mm are computed automatically below.
@@ -150,6 +159,9 @@ class NudgeOverlay(QFrame):
         # zones would stay grey until the panel was closed and reopened.
         self._mm.mount_status_updated.connect(self._on_mount_status)
 
+        # Which cameras can take an autofocus, as main_window tells the grid.
+        self._cam_ready: dict[int, bool] = {}
+
         self._side = 0          # set by _apply_scale(), which runs before show
         self._build()
         self._apply_scale(_px(_PANEL_REF))
@@ -182,6 +194,7 @@ class NudgeOverlay(QFrame):
         self._track.set_steps(nudge_mm_small, nudge_mm_large)
         self._sync_runs()
         self._sync_track()
+        self._sync_focus()
 
         self._centre_on_parent()
         self.show()
@@ -191,6 +204,25 @@ class NudgeOverlay(QFrame):
         """Switch the active camera while the overlay is open."""
         self._mount_id = mount_id
         self._sync_runs()
+        self._sync_focus()
+
+    def set_focus_button(self, show: bool) -> None:
+        """Show or hide the focus crosshair: Config's option for the grid's."""
+        self._focus_btn.setVisible(show)
+
+    def set_cam_ready(self, mount_id: int, ready: bool) -> None:
+        """Whether that mount's camera is linked and can take an autofocus —
+        told for every mount, as the grid is, so switching camera here needs
+        no fresh answer."""
+        self._cam_ready[mount_id] = ready
+        if mount_id == self._mount_id:
+            self._sync_focus()
+
+    def _sync_focus(self) -> None:
+        # Grey and untappable with no camera link, as on the grid.
+        ready = self._cam_ready.get(self._mount_id, False)
+        self._focus_btn.setEnabled(ready)
+        self._focus_btn.setToolTip("Auto focus" if ready else "Auto focus — no camera link")
 
     def _centre_on_parent(self) -> None:
         """Size the panel for this screen, then put it in the middle.
@@ -249,6 +281,10 @@ class NudgeOverlay(QFrame):
         self._track.setMinimumHeight(f(_TRACK_H_F))
         self._zoom.set_metrics(f(_ZOOM_W_F), f(_ZOOM_H_F))
         self._zoom_gutter.setFixedWidth(f(_ZOOM_W_F))
+        # None: the style's default would make the gutter taller than the track
+        # whenever the crosshair shows, and the dial above would shrink for it.
+        self._gutter.setContentsMargins(0, 0, 0, 0)
+        self._focus_btn.setFixedSize(f(_FOCUS_F), f(_FOCUS_F))
 
         # The track is measured off the dial, so the dial has to have its new
         # geometry first. Without this the sync runs against whatever the dial
@@ -291,7 +327,16 @@ class NudgeOverlay(QFrame):
         self._bottom.addStretch(1)
         self._bottom.addWidget(self._track)
         self._bottom.addStretch(1)
+        # The zoom column's width, so the track stays centred under the dial —
+        # and the focus crosshair's place, when Config shows it.
         self._zoom_gutter = QWidget()
+        self._gutter = QHBoxLayout(self._zoom_gutter)
+        self._focus_btn = FocusButton()
+        self._focus_btn.setEnabled(False)       # until a camera says it is linked
+        self._focus_btn.hide()                  # until Config says to show it
+        self._focus_btn.clicked.connect(
+            lambda _=False: self.focus_requested.emit(self._mount_id))
+        self._gutter.addWidget(self._focus_btn, 0, Qt.AlignmentFlag.AlignCenter)
         self._bottom.addWidget(self._zoom_gutter)
         self._root.addLayout(self._bottom)
 

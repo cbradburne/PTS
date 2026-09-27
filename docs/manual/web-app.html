@@ -50,6 +50,10 @@
       <li><strong>Set speed presets</strong> per camera.</li>
       <li><strong>Look-at</strong> — pick a subject and run ◀ / ▶ moves
       (<a href="lookat.html">Look-at tracking</a>).</li>
+      <li><strong>Run</strong> — press <strong>RUN</strong>, then a camera, and
+      it goes round its stored shots until you tap it again. The mount runs it,
+      so it carries on with the phone locked, and the PC app shows it too
+      (<a href="positions.html#run">Running through the shots</a>).</li>
       <li><strong>Manage pairing</strong> — the <strong>Mounts</strong> page shows
       the hub's live pairing table, forgets a retired mount, and resolves
       same-number conflicts (Replace / Ignore) — so a hub plus a phone is a
@@ -122,8 +126,9 @@
     the camera panel and a red crosshair appears on the main screens: one tap is
     one Auto Focus on that camera. In portrait and landscape it sits between the
     two speed controls and acts on the selected camera; on the GC screen it
-    follows position 10, and in the extended view each camera row has its own,
-    as on the PC app's grid. It turns grey when that camera cannot take the
+    follows position 10, and its <strong>MOVE</strong> popup has one between the
+    faders and the stick; in the extended view each camera row has its own, as on
+    the PC app's grid. It turns grey when that camera cannot take the
     command, and flashes green to show the command was sent. The setting is kept
     per device — off unless you want it, since without Blackmagic cameras it
     could never do anything.</p>
@@ -146,8 +151,13 @@
     (bottom-left) for a layout built for phone-in-controller mounts, where the pad
     holds the phone. It drops the on-screen joystick and faders — the controller
     handles those — and leaves just what you still reach for on the touchscreen: the
-    camera tabs, the position grid, the two speed dials, Set / Clear and E-STOP. Tap
-    GC again to bring the joystick back.</p>
+    camera tabs, the position grid, the two speed dials, Set / Clear and E-STOP,
+    with <strong>MOVE</strong> and <strong>RUN</strong> either side of the hub
+    status in the bottom bar. Tap GC again to bring the joystick back.</p>
+    <p><strong>MOVE</strong> puts the on-screen controls back for a moment, for
+    when the pad is not to hand: the zoom and slider faders and the pan/tilt stick
+    in a popup, on the selected camera. Close it with <strong>✕</strong> or a tap
+    outside it — closing lets go of everything, so the mount stops.</p>
     <div class="note"><b>Browser support</b> Controller input uses the browser's Gamepad
     API, supported by Safari and Chrome on recent iOS and Android. Most controllers only
     show up after the first button press, so give any button a tap once it's paired.</div>

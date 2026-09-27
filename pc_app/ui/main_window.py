@@ -45,6 +45,7 @@ from comms.mount_manager import MountManager
 from comms.protocol import (TARGET_SLOT_LA_MIN, TARGET_SLOT_LA_MAX,
                             SLOT_LA_LEFT_END, SLOT_LA_RIGHT_END)
 from comms.protocol import MountState, MountFlag, Axis
+from comms.protocol import STATUS_RUN_POSITIONS, STATUS_RUN_LOOK_AT
 from config.mount_config import AppConfig, save_config
 from config.position_store import PositionStore
 from motion.joystick import JoystickHandler
@@ -351,6 +352,7 @@ class MainWindow(QMainWindow):
         # ---- Nudge overlay (child of central widget, floats above grid) ----
         self._nudge_overlay = NudgeOverlay(self._mm, parent=central)
         self._nudge_overlay.closed.connect(self._on_nudge_closed)
+        self._nudge_overlay.set_focus_button(self._config.focus_buttons)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
@@ -573,6 +575,7 @@ class MainWindow(QMainWindow):
         self._grid.slider_jog_started.connect(self._on_slider_jog_start)
         self._grid.slider_jog_stopped.connect(self._on_slider_jog_stop)
         self._grid.focus_requested.connect(self._mm.send_cam_autofocus)
+        self._nudge_overlay.focus_requested.connect(self._mm.send_cam_autofocus)
 
         # The focus crosshairs follow each camera's link.  It rides on the 10 s
         # health, so a 2 s poll is plenty — Camera Control's own cadence.
@@ -716,6 +719,13 @@ class MainWindow(QMainWindow):
             self._status_label.setText(
                 f"Camera {mount_id}: need 2+ saved positions to start a run sequence.")
             return
+        if st.run_flags is not None:
+            # The mount runs it (CMD_START_RUN, shared/pos_run.h), so it keeps
+            # going whatever happens to this app.  Nothing is set here: the
+            # button waits for the mount's STATUS to say the run is going.
+            self._mm.send_start_run(mount_id)
+            return
+        # Bridge firmware from before mount-owned runs: drive it from here.
         rs = self._run_states[mount_id]
         rs['active']      = True
         rs['slots']       = slots
@@ -741,7 +751,6 @@ class MainWindow(QMainWindow):
                 f"Camera {mount_id}: select a subject before starting look-at run.")
             return
         rs = self._run_states[mount_id]
-        rs['active']  = True
         rs['la_dir']  = 0        # start toward min limit
         rs['la_subj'] = subj
         rs['slots']   = []       # not used in look-at mode
@@ -750,7 +759,11 @@ class MainWindow(QMainWindow):
         # the run's single point of failure, and it is gone.
         self._mm.send_start_look_at_move(
             mount_id, subj, 0, self._grid.get_sl_preset(mount_id), repeat=True)
-        self._update_run_cam_btn(mount_id)
+        if self._mm.state(mount_id).run_flags is None:
+            # Older bridge firmware says nothing about its runs: assume it.
+            # A newer one reports it in STATUS, and the button waits for that.
+            rs['active'] = True
+            self._update_run_cam_btn(mount_id)
 
     def _stop_run(self, mount_id: int) -> None:
         # The mount owns the run now, so Stop has to SAY so.  Clearing a local
@@ -759,9 +772,15 @@ class MainWindow(QMainWindow):
         # going until told, and would have carried on after the button was
         # pressed.
         #
-        # A zero jog, which is how Stop is already expressed everywhere else:
-        # the firmware's stopAll decelerates every axis cleanly, and the mount
-        # reads any jog as the operator taking over and ends the run.
+        # A mount that reports its runs (STATUS byte [10]) takes STOP_RUN, and
+        # says when it has stopped; the button follows that.  It no longer
+        # takes a zero jog as Stop: this app sends one to announce every speed
+        # change, which ended runs nobody meant to end — see pkt_stop_run.
+        if self._mm.state(mount_id).run_flags is not None:
+            self._mm.send_stop_run(mount_id)
+            return
+        # Older bridge firmware: a zero jog, which it reads as the operator
+        # taking over — the only Stop it knows for its look-at run.
         self._mm.send_jog(mount_id, 0, 0, 0, 0)
         self._run_states[mount_id]['active'] = False
         self._update_run_cam_btn(mount_id)
@@ -1087,6 +1106,16 @@ class MainWindow(QMainWindow):
 
         # ---- Run sequence advancement ----
         rs = self._run_states[mount_id]
+        if st.run_flags is not None:
+            # The mount owns its runs (STATUS byte [10]): show what it reports
+            # and advance nothing.  That is also how a run started on a phone
+            # shows "■ Stop" here, and how one the mount ended — a jog, losing
+            # the hub, a goto it could not make — stops showing it.
+            running = bool(st.run_flags & (STATUS_RUN_POSITIONS | STATUS_RUN_LOOK_AT))
+            if running != rs['active']:
+                rs['active'] = running
+                self._update_run_cam_btn(mount_id)
+            return
         if not rs['active']:
             return
 
@@ -1168,7 +1197,10 @@ class MainWindow(QMainWindow):
         self._conn_label.setText(f"Cam {mount_id} disconnected")
         self._conn_label.setStyleSheet(_qss("color:#EF5350; font-size:10px;"))
         self._cam_containers[mount_id].set_connected(False)
-        if self._run_mode and self._run_states[mount_id]['active']:
+        # A run this app drives cannot go on without it; one the MOUNT owns
+        # goes on, and stops itself if the mount loses its base.
+        if (self._run_mode and self._run_states[mount_id]['active']
+                and self._mm.state(mount_id).run_flags is None):
             self._stop_run(mount_id)
 
         # Zero slot masks immediately so all position borders go grey while the
@@ -1274,6 +1306,7 @@ class MainWindow(QMainWindow):
         if conn_now != getattr(self, "_conn_snapshot", None) or not self._bridge.connected:
             self._connect_bridge()
         self._grid.set_focus_buttons(self._config.focus_buttons)
+        self._nudge_overlay.set_focus_button(self._config.focus_buttons)
         for mid in range(1, 6):
             self._grid.set_has_slider(mid, self._config.mount(mid).has_slider)
             self._grid.set_look_at_mode(mid, self._config.mount(mid).look_at_mode)
@@ -1285,6 +1318,7 @@ class MainWindow(QMainWindow):
             ready = (self._mm.state(mid).connected
                      and self._bridge.cam_ble_link(mid) is True)
             self._grid.set_cam_ready(mid, ready)
+            self._nudge_overlay.set_cam_ready(mid, ready)
 
     def _open_camera_control(self) -> None:
         """Blackmagic camera control over each mount's BLE link.

@@ -116,6 +116,8 @@ class Cmd(IntEnum):
     START_LOOK_AT_MOVE = 0x27   # start tracking: slider_slot(1)+subject_id(1)+max_pt_deg_s(4f) = 6B
     SWITCH_SUBJECT     = 0x28   # switch tracking target mid-move: subject_id(1)
     GET_SUBJECTS       = 0x29   # request full subject list (no payload)
+    START_RUN          = 0x2A   # cycle the stored positions — the MOUNT runs it (no payload)
+    STOP_RUN           = 0x2B   # end the mount's run, either kind (no payload)
 
     # Mount → PC
     STATUS            = 0x80
@@ -231,6 +233,13 @@ class MountFlag(IntEnum):
     REF_SET         = 0x20   # v2: pan/tilt session reference established
     LOOK_AT_ACTIVE  = 0x40   # v2: look-at move currently running
     LOOK_AT_MODE    = 0x80   # v2: slider uses 3D triangulation mode
+
+
+# STATUS byte [10], added by the mount's bridge: the runs the mount owns.  Its
+# presence says the mount can run positions itself (see StatusPayload.run_flags).
+STATUS_RUN_BYTE      = 10
+STATUS_RUN_POSITIONS = 0x01   # cycling its stored positions (Cmd.START_RUN)
+STATUS_RUN_LOOK_AT   = 0x02   # ping-ponging a subject (START_LOOK_AT_MOVE, repeat)
 
 
 class EspnowRejectCode(IntEnum):
@@ -580,6 +589,11 @@ class StatusPayload:
     # missing byte as 0xFF wiped a known subject on every short packet and made
     # the stored-location border flicker red/green several times a second.
     la_subject_present:  bool = False
+    # Byte [10], appended by the mount's bridge: the runs the MOUNT owns
+    # (STATUS_RUN_POSITIONS / STATUS_RUN_LOOK_AT).  None when absent — bridge
+    # firmware from before mount-owned position runs, where the app drives a
+    # position run itself.  Absent is a capability answer, not "no run".
+    run_flags:          Optional[int] = None
 
     @property
     def at_min_limit(self) -> bool:
@@ -660,6 +674,8 @@ def decode_status(payload: bytes) -> StatusPayload:
         target_slot        = fields[6],
         active_la_subject  = active_la_subject,
         la_subject_present = has_la_subject,
+        run_flags          = (payload[STATUS_RUN_BYTE]
+                              if len(payload) > STATUS_RUN_BYTE else None),
     )
 
 
@@ -1776,6 +1792,24 @@ def pkt_switch_subject(mount_id: int, subject_id: int) -> bytes:
 def pkt_get_subjects(mount_id: int) -> bytes:
     """Request the full subject list from the mount."""
     return build_packet(mount_id, Cmd.GET_SUBJECTS)
+
+
+def pkt_start_run(mount_id: int) -> bytes:
+    """Cycle the mount's stored positions — run BY the mount (shared/pos_run.h).
+    pkt_stop_run ends it, as it ends the look-at run."""
+    return build_packet(mount_id, Cmd.START_RUN)
+
+
+def pkt_stop_run(mount_id: int) -> bytes:
+    """End the mount's run, either kind; the leg under way finishes.
+
+    Stop used to be a zero jog.  But this app also sends a zero jog to announce
+    a speed preset (CommandDispatcher.send_preset_announce) — on every speed
+    change and every mount connect — so a run ended whenever a speed was
+    changed, and a mount the app saw reconnect lost the run it had kept going.
+    Only for a mount whose STATUS carries byte [10]; older bridge firmware
+    still takes the zero jog."""
+    return build_packet(mount_id, Cmd.STOP_RUN)
 
 
 # ---------------------------------------------------------------------------

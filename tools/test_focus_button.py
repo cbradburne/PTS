@@ -23,6 +23,16 @@ WHAT THIS TEST IS PROTECTING.
   the setting survives        Config ticks it, OK saves it, the next start
                               loads it; a config file from before has it off
 
+2026-09-27: the Move panel (NudgeOverlay) covers the grid, crosshairs and all,
+so it has one of its own — for the camera it moves, under the zoom column.
+
+  the same switch             hidden until Config shows the grid's, and follows
+                              it at start and on OK
+  the camera it moves         a tap sends the panel's mount, and switching
+                              camera with the panel open switches the button
+                              to that camera's link
+  nothing moves for it        the track stays under the dial, shown or not
+
 Run directly, or via tools/run_tests.sh with the rest.
 """
 import os, sys, pathlib, tempfile
@@ -213,15 +223,25 @@ class _FakeGrid:
     def set_look_at_mode(self, *a): pass
 
 
+class _FakeOverlay:
+    def __init__(self): self.ready = {}; self.focus = []
+    def set_cam_ready(self, m, r): self.ready[m] = r
+    def set_focus_button(self, s): self.focus.append(s)
+
+
 fake = type("W", (), {})()
 fake._mm = _FakeMM({1: True, 2: True, 3: True, 4: True, 5: False})
 fake._bridge = _FakeBridge({1: True, 2: False, 3: "unpaired", 4: None, 5: True})
 fake._grid = _FakeGrid()
+fake._nudge_overlay = _FakeOverlay()
 mw.MainWindow._refresh_cam_links(fake)
 assert fake._grid.ready == {1: True, 2: False, 3: False, 4: False, 5: False}, \
     f"ready should be connected AND linked, nothing else: {fake._grid.ready}"
+assert fake._nudge_overlay.ready == fake._grid.ready, \
+    f"the Move panel was told {fake._nudge_overlay.ready}, the grid {fake._grid.ready}"
 print("   linked only when connected and the link is True — off, unpaired,\n"
-      "   no camera support and an offline mount are all grey   OK")
+      "   no camera support and an offline mount are all grey; the Move panel\n"
+      "   is told the same   OK")
 
 # ---- 7. the setting survives, and the grid follows it ----------------------
 print("\n7. Config:")
@@ -256,11 +276,97 @@ fake._active_la_subject = {}
 fake._grid.focus = []
 mw.MainWindow._on_config_accepted(fake)
 assert fake._grid.focus == [True], "accepting Config does not apply the option to the grid"
+assert fake._nudge_overlay.focus == [True], \
+    "accepting Config does not apply the option to the Move panel"
 src = (REPO / "pc_app/ui/main_window.py").read_text()
 assert "self._grid.set_focus_buttons(self._config.focus_buttons)\n        root.addWidget(self._grid" in src, \
     "the grid is not told the setting when the window is built"
 assert "self._grid.focus_requested.connect(self._mm.send_cam_autofocus)" in src, \
     "a tap is not wired to the autofocus command"
-print("   old files load it off; OK saves it; the grid follows at start and on OK   OK")
+assert ("self._nudge_overlay = NudgeOverlay(self._mm, parent=central)\n"
+        "        self._nudge_overlay.closed.connect(self._on_nudge_closed)\n"
+        "        self._nudge_overlay.set_focus_button(self._config.focus_buttons)") in src, \
+    "the Move panel is not told the setting when the window is built"
+assert "self._nudge_overlay.focus_requested.connect(self._mm.send_cam_autofocus)" in src, \
+    "a tap on the Move panel's crosshair is not wired to the autofocus command"
+print("   old files load it off; OK saves it; the grid and the Move panel follow\n"
+      "   at start and on OK   OK")
+
+# ---- 8. the Move panel's own crosshair ---------------------------------------
+print("\n8. the Move panel:")
+from PyQt6.QtCore import QObject, pyqtSignal
+import ui.ui_scale as SCALE
+SCALE.init_ui_scale(1080)
+from ui.widgets.nudge_overlay import NudgeOverlay
+
+
+class _NSt:
+    active_pt_preset = 2; active_sl_preset = 2
+    slider_min = 1000; slider_max = 241000; has_slider = True
+
+
+class _NMM(QObject):
+    mount_status_updated = pyqtSignal(int)
+    def state(self, m): return _NSt()
+    def send_move_rel(self, *a): pass
+    def send_jog(self, *a): pass
+
+
+host = QWidget(); host.resize(1920, 918)
+ov = NudgeOverlay(_NMM(), parent=host)
+host.show()
+
+
+def panel_geometry():
+    for _ in range(3):
+        app.processEvents(); ov.layout().activate()
+    at = lambda w: w.mapTo(ov, QPoint(0, 0))
+    fb, zm, tr = ov._focus_btn, ov._zoom, ov._track
+    return dict(track=(at(tr).x(), at(tr).y(), tr.width(), tr.height()),
+                zoom=(at(zm).x(), zm.width()),
+                focus=(at(fb).x(), at(fb).y(), fb.width(), fb.height()) if fb.isVisible() else None)
+
+
+ov.show_for(2)
+hidden = panel_geometry()
+assert hidden["focus"] is None, "the Move panel's crosshair shows with the option off"
+ov.set_focus_button(True)
+shown = panel_geometry()
+assert shown["focus"] is not None, "set_focus_button(True) did not show it"
+assert shown["track"] == hidden["track"] and shown["zoom"] == hidden["zoom"], \
+    f"showing the crosshair moved the track or the zoom column: {hidden} -> {shown}"
+fx, fy, fw, fh = shown["focus"]
+zx, zw = shown["zoom"]
+tx, ty, tw, th = shown["track"]
+assert abs((fx + fw / 2) - (zx + zw / 2)) <= 1, \
+    f"the crosshair is not under the zoom column: {shown}"
+assert fy < ty + th and ty < fy + fh, f"the crosshair is not on the track's row: {shown}"
+assert fw == fh and fw <= zw, f"the crosshair is {fw}x{fh} in a {zw}px column"
+
+asked = []
+ov.focus_requested.connect(asked.append)
+ov._focus_btn.click()
+assert asked == [] and not ov._focus_btn.isEnabled(), \
+    "the crosshair takes a tap before any camera is known to be linked"
+ov.set_cam_ready(3, True)
+assert not ov._focus_btn.isEnabled(), "another mount's link enabled this camera's crosshair"
+ov.set_cam_ready(2, True)
+ov._focus_btn.click()
+assert asked == [2], f"a tap sent {asked}, not the panel's camera 2"
+ov.set_mount(4)
+assert not ov._focus_btn.isEnabled(), \
+    "switching to a camera with no link left the crosshair live"
+ov.set_mount(3)
+ov._focus_btn.click()
+assert asked == [2, 3], f"after switching to camera 3 a tap sent {asked[-1:]}"
+ov.set_cam_ready(3, False)
+assert not ov._focus_btn.isEnabled(), "the camera's link dropped and the crosshair stayed live"
+ov.hide(); ov.show_for(5)
+assert not ov._focus_btn.isEnabled(), "reopened on an unlinked camera, the crosshair was live"
+ov.set_focus_button(False)
+assert panel_geometry()["focus"] is None, "set_focus_button(False) did not hide it"
+host.close()
+print(f"   hidden until switched on; {fw}px under the zoom column on the track's row,\n"
+      "   nothing else moved; each tap is the panel's camera, grey without its link   OK")
 
 print("\nALL CHECKS PASSED")

@@ -91,6 +91,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .cam-btn .cam-nm{display:inline-block;max-width:calc(100% - 12px);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}
 .cam-btn .dot.on{background:var(--green-lit);}
+/* Run, in the PC app's colours: the armed Run button green; a camera whose
+   run the MOUNT reports as going wears an amber border and reads "■ STOP". */
+.run-btn.run-on{background:#1A3A1A;border-color:#4CAF50;color:#A5D6A7;}
+.cam-btn.running{border:2px solid #FF9800;color:#FFF9C4;background:#3a2a00;}
 
 /* ---- portrait position grid ---- */
 /* Grid keeps its natural (2-row) height and never shrinks, so the position
@@ -267,7 +271,21 @@ canvas.hsl-c{display:block;touch-action:none;}
   padding:6px 10px max(6px,env(safe-area-inset-bottom)) 10px;
   background:var(--surf);border-top:1px solid var(--border);flex-shrink:0;
   font-size:11px;color:var(--dim);}
-#gc-bottom .gc-stat{flex:1;text-align:center;}
+/* MOVE and RUN sit either side of the hub status, as one group in the middle,
+   well clear of E-STOP. */
+#gc-bottom .gc-mid{flex:1;display:flex;align-items:center;justify-content:center;gap:14px;min-width:0;}
+#gc-bottom .gc-mid .ctrl-btn{flex:0 0 auto;padding:10px 22px;}
+#gc-bottom .gc-stat{text-align:center;white-space:nowrap;}
+/* Held upright this landscape screen is too narrow for either row as it
+   stands.  The dials and CLEAR/SET tighten up to fit one line, and the bottom
+   bar gives the MOVE/status/RUN group a line of its own, above the one E-STOP
+   is on. */
+@media (orientation:portrait){
+  #gc-ctrl-row{gap:12px;}
+  #gc-ctrl-row .ctrl-btn{padding:12px 18px;}
+  #gc-bottom{flex-wrap:wrap;row-gap:6px;}
+  #gc-bottom .gc-mid{order:-1;flex:1 0 100%;}
+}
 #gc-estop{background:var(--red);border-color:var(--red);color:#fff;flex:0 0 auto;padding:10px 22px;}
 #gc-estop:active{background:var(--red-lit);}
 #gc-exit{background:var(--blue);border-color:var(--blue-lit);color:#fff;flex:0 0 auto;}
@@ -432,6 +450,37 @@ canvas.hsl-c{display:block;touch-action:none;}
 .ext-pos-row .focus-btn svg{transform:scale(.5);}
 
 /* ============================================================
+   Move  (the GC screen's missing jog controls, in a closable popup)
+   ============================================================ */
+#move-sheet{position:fixed;inset:0;z-index:45;display:none;align-items:center;
+  justify-content:center;background:rgba(0,0,0,.6);
+  padding:max(8px,env(safe-area-inset-top)) max(8px,env(safe-area-inset-right))
+          max(8px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));}
+#move-sheet.show{display:flex;}
+.move-card{width:min(100%,920px);height:min(100%,560px);display:flex;flex-direction:column;
+  background:var(--cam-bg);border:1px solid var(--border);border-radius:14px;overflow:hidden;}
+.move-head{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 14px;flex-shrink:0;
+  background:var(--surf);border-bottom:1px solid var(--border);}
+.move-title{flex:1;font-size:15px;font-weight:600;color:var(--cam-color);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.move-close{width:44px;height:44px;border-radius:10px;border:1px solid var(--border);
+  background:var(--surf2);color:var(--text);font-size:20px;cursor:pointer;flex-shrink:0;}
+.move-close:active{background:var(--blue);}
+.move-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:space-around;
+  gap:12px;padding:10px 14px;}
+.move-faders{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;
+  align-items:center;gap:14px;}
+.move-joy{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;}
+/* Taller than wide (a phone held upright): the faders above the stick, as on
+   the portrait screen.  Set by sizeMoveControls, which sizes them to match. */
+.move-body.tall{flex-direction:column;justify-content:center;}
+.move-body.tall .move-faders,.move-body.tall .move-joy{flex:0 0 auto;width:100%;}
+#mv-focus{width:56px;height:56px;}    /* MV_FOCUS in sizeMoveControls */
+/* Upright, the card can be taller: the stick gets what the faders and the
+   focus button leave. */
+@media (orientation:portrait){ .move-card{height:min(100%,680px);} }
+
+/* ============================================================
    Camera control  (a sheet over the phone views; a page in Extended)
    ============================================================ */
 #cam-sheet{position:fixed;inset:0;z-index:40;background:var(--bg);display:none;
@@ -593,6 +642,7 @@ canvas.hsl-c{display:block;touch-action:none;}
   <!-- CLEAR / SET right under the positions they act on. -->
   <div class="ctrl-bar">
     <button class="ctrl-btn" id="btn-clear-p">CLEAR</button>
+    <button class="ctrl-btn run-btn" id="btn-run-p">RUN</button>
     <button class="ctrl-btn" id="btn-set">SET</button>
   </div>
   <div id="p-ctrl-area">
@@ -678,8 +728,8 @@ canvas.hsl-c{display:block;touch-action:none;}
 
 <!-- =================================================== GAME-CONTROLLER -->
 <!-- Stripped-down landscape screen for when a Bluetooth pad handles motion:
-     pick the camera, recall/set/clear positions and set speeds; no on-screen
-     jog controls. -->
+     pick the camera, recall/set/clear positions, run them and set speeds; no
+     on-screen jog controls, unless MOVE opens them in a popup. -->
 <div id="gc-view" class="view">
   <div class="cam-bar" id="gc-cam-bar"></div>
   <div class="pos-grid gc-pos-grid" id="gc-pos-grid"></div>
@@ -700,7 +750,12 @@ canvas.hsl-c{display:block;touch-action:none;}
       <button class="view-toggle-btn" id="gc-exit">&#127918; GC</button>
       <button class="view-toggle-btn" id="gc-cam">&#9678; Camera</button>
     </div>
-    <div class="gc-stat"><span class="ws-dot" id="gc-dot"></span><span id="gc-stat">Connecting…</span></div>
+    <div class="gc-mid">
+      <!-- The on-screen jog controls this screen leaves out, when wanted -->
+      <button class="ctrl-btn" id="gc-move">MOVE</button>
+      <div class="gc-stat"><span class="ws-dot" id="gc-dot"></span><span id="gc-stat">Connecting…</span></div>
+      <button class="ctrl-btn run-btn" id="gc-run">RUN</button>
+    </div>
     <button class="ctrl-btn" id="gc-estop">E-STOP</button>
   </div>
 </div>
@@ -723,6 +778,37 @@ canvas.hsl-c{display:block;touch-action:none;}
     <div class="pair-btns">
       <button class="pair-btn pair-replace" id="pair-replace-btn">Replace</button>
       <button class="pair-btn" id="pair-ignore-btn">Ignore</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ MOVE -->
+<!-- The on-screen jog controls the GC screen leaves out — zoom, slider and the
+     pan/tilt stick — for when the pad is not to hand.  Closable: tap ✕ or
+     outside it. -->
+<div id="move-sheet">
+  <div class="move-card" id="move-card">
+    <div class="move-head">
+      <span class="move-title" id="move-title">Move</span>
+      <button class="move-close" id="move-close" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="move-body" id="move-body">
+      <div class="move-faders">
+        <div class="hsl-group">
+          <span class="joy-title">&#8592; ZOOM &#8594;</span>
+          <canvas class="hsl-c" id="mv-hsl-zoom"></canvas>
+        </div>
+        <div class="hsl-group">
+          <span class="joy-title">&#8592; SLIDER &#8594;</span>
+          <canvas class="hsl-c" id="mv-hsl-slider"></canvas>
+        </div>
+      </div>
+      <!-- Between the faders and the stick, as between the dials on the phone
+           screens; shown by the same switch as every other focus button. -->
+      <button class="focus-btn" id="mv-focus" data-cam="sel"></button>
+      <div class="move-joy">
+        <canvas class="jc" id="mv-joy"></canvas>
+      </div>
     </div>
   </div>
 </div>
@@ -867,6 +953,7 @@ canvas.hsl-c{display:block;touch-action:none;}
               <span class="dial-lbl">Slider</span>
             </div>
             <button id="ext-pos-clear-btn" class="ext-pos-act-btn">CLEAR</button>
+            <button id="ext-pos-run-btn" class="ext-pos-act-btn run-btn">RUN</button>
             <button id="ext-pos-set-btn" class="ext-pos-act-btn">SET</button>
             <div class="ext-dial-wrap">
               <canvas id="ext-pos-dial-pt" width="70" height="70"></canvas>
@@ -931,6 +1018,11 @@ const CMD_ADD_SUBJECT_ABORT  = 0x23;  // no payload — cancel calibration
 const CMD_SET_REF            = 0x25;  // 1B: subject_id — set pan/tilt session reference
 const CMD_START_LOOK_AT_MOVE = 0x27;  // 3B: subject_id, direction(0=left/1=right), speed_preset
 const CMD_SWITCH_SUBJECT     = 0x28;  // 1B: subject_id
+const CMD_START_RUN          = 0x2A;  // no payload: the MOUNT cycles its stored positions
+const CMD_STOP_RUN           = 0x2B;  // no payload: the mount ends its run, either kind
+const STATUS_RUN_BYTE        = 10;    // STATUS byte the mount's bridge appends: its runs
+const STATUS_RUN_POSITIONS   = 0x01;  // cycling stored positions
+const STATUS_RUN_LOOK_AT     = 0x02;  // ping-ponging a look-at subject
 const CMD_LOOK_AT_STATUS     = 0x91;  // 14B: slider_mm(4f)+pan_deg(4f)+tilt_deg(4f)+subj_id(1)+flags(1)
 const CMD_STATUS             = 0x80;
 const CMD_CONFIG_REPORT      = 0x86;  // 77B: ori(1)+speeds(72)+stall(2)+tilt(2)
@@ -1395,11 +1487,14 @@ function mkSwitchSubject(id, subjId) {
     return buildPkt(id, CMD_SWITCH_SUBJECT, p);
 }
 
-function mkStartLookAtMove(id, subjId, direction, speedPreset) {
-    const p = new Uint8Array(3);
+function mkStartLookAtMove(id, subjId, direction, speedPreset, repeat) {
+    // Byte 3 `repeat`: the mount ping-pongs by itself until stopped — the
+    // look-at Run.  Left off, a single leg, as it has always been.
+    const p = new Uint8Array(repeat ? 4 : 3);
     p[0] = subjId & 0x07;
     p[1] = direction;     // 0 = go left/min, 1 = go right/max
     p[2] = speedPreset;
+    if (repeat) p[3] = 1;
     return buildPkt(id, CMD_START_LOOK_AT_MOVE, p);
 }
 
@@ -1574,6 +1669,8 @@ function makeCamState() {
                                    // visible from the phone.
         slThresh:         null,    // slider StallGuard threshold (0–255) from CONFIG_REPORT
         zmThresh:         null,    // zoom   StallGuard threshold (0–255) from CONFIG_REPORT
+        runFlags:         null,    // STATUS byte [10]: the mount's runs, or null
+                                   // for bridge firmware from before them
     };
 }
 
@@ -1709,10 +1806,7 @@ function escHtml(s) {
 
 // Redraw every place a name shows.
 function namesChanged() {
-    document.querySelectorAll('.cam-btn').forEach(btn => {
-        const nm = btn.querySelector('.cam-nm');
-        if (nm) nm.textContent = camName(parseInt(btn.dataset.cam, 10));
-    });
+    refreshCamBtnLabels();
     for (let i = 1; i <= NUM_MOUNTS; i++) {
         ['ext-pos-cam-lbl-', 'camc-nm-', 'ext-cfg-nm-'].forEach(p => {
             const el = document.getElementById(p + i);
@@ -1886,6 +1980,10 @@ function _onOnePkt(buf, off) {
                 const subj = v.getUint8(9);
                 cs.activeLaSubject = (subj <= 7) ? subj : -1;
             }
+            // Byte [10], added by the mount's bridge: the runs the MOUNT has
+            // going (STATUS_RUN_*).  Absent = bridge firmware from before
+            // mount-owned runs, which this page cannot run positions on.
+            cs.runFlags = (plen > STATUS_RUN_BYTE) ? v.getUint8(STATUS_RUN_BYTE) : null;
         } else {
             cs.targetSlot = 0xFF;
         }
@@ -2148,7 +2246,7 @@ function makeCamBtns(containerId) {
         btn.className = 'cam-btn';
         btn.dataset.cam = i;
         btn.innerHTML = `<span class="cam-nm"></span><span class="dot" id="${containerId}-dot${i}"></span>`;
-        btn.querySelector('.cam-nm').textContent = camName(i);   // text, never markup
+        btn.querySelector('.cam-nm').textContent = camBtnLabel(i);   // text, never markup
         btn.addEventListener('click', () => {
             // Positions cam bar: CLEAR armed → clear all 10 slots for this camera
             if (containerId === 'ext-pos-cam-bar' && _extClearMode) {
@@ -2164,6 +2262,10 @@ function makeCamBtns(containerId) {
             // EDIT armed: rename the camera, as the PC app does — for every
             // device, since the name is the hub's.
             if (uiMode === 'edit') { renameCamera(i); return; }
+            // Run armed, or this camera running: start or stop its run, as the
+            // PC app's camera buttons do — a running camera's button stops it
+            // even with Run disarmed, rather than selecting it.
+            if (_runMode || camRunning(i)) { toggleRun(i); return; }
             selCam = i;
             const col = CAM_ACCENT[i];
             document.documentElement.style.setProperty('--cam-color', col);
@@ -2194,6 +2296,23 @@ function refreshCamBtns() {
     });
     // A focus button follows the selected camera and whether its mount is up.
     refreshFocusBtns();
+    refreshCamBtnLabels();
+}
+
+// What a camera button says: its name — or, as on the PC app, "■ STOP" while
+// that camera is running and "▶ RUN" for the others while Run is armed.
+function camBtnLabel(i) {
+    if (camRunning(i)) return '■ STOP';
+    if (_runMode)      return '▶ RUN';
+    return camName(i);
+}
+function refreshCamBtnLabels() {
+    document.querySelectorAll('.cam-btn').forEach(btn => {
+        const i = parseInt(btn.dataset.cam, 10), nm = btn.querySelector('.cam-nm');
+        if (nm) nm.textContent = camBtnLabel(i);
+        btn.classList.toggle('running', camRunning(i));
+    });
+    if (_moveOpen) moveTitle();     // a rename, or another camera picked under it
 }
 
 // ============================================================
@@ -2381,6 +2500,9 @@ function onPosClick(slot) {
 
 function setUiMode(m) {
     uiMode = m;
+    // SET, EDIT and CLEAR each give a camera button another meaning; Run is
+    // one more, so arming any of them disarms it — as on the PC app.
+    if (m !== 'move' && _runMode) setRunMode(false);
     document.getElementById('btn-edit').classList.toggle('armed', m === 'edit');
     const editBtnExt = document.getElementById('btn-edit-ext');
     if (editBtnExt) editBtnExt.classList.toggle('armed', m === 'edit');
@@ -3156,6 +3278,7 @@ function setGcView(on) {
         setPreset('sz', cs.activeSlPreset, false);
         setWsSt(!!(ws && ws.readyState === WebSocket.OPEN));
     } else {
+        closeMove();                     // its controls belong to this screen
         _curView = '';
         document.getElementById('gc-view').classList.remove('show');
         checkOrientation();
@@ -3856,6 +3979,112 @@ function setFocusBtns(on) {
     refreshFocusBtns();
     // Landscape narrows its speed arcs to make room between them.
     if (_curView === 'landscape') requestAnimationFrame(sizeJoysticks);
+    if (_moveOpen) requestAnimationFrame(sizeMoveControls);
+}
+
+// ============================================================
+//  Run — the PC app's, run BY THE MOUNT
+// ============================================================
+// Arm Run, then tap a camera: it cycles its stored positions — or, on a
+// look-at mount, bounces between the rail's ends following its subject — until
+// its button is tapped again.  The MOUNT runs it (shared/pos_run.h and the
+// look-at run beside it), not this page, so it carries on when the phone locks
+// or leaves the page.  Every button follows what the mount reports in STATUS
+// byte [10], so a run started on the PC app shows here and the other way round.
+let _runMode = false;
+
+function toast(msg) { _padToast(msg); }
+
+function camRunning(i) {
+    const f = camSt[i] && camSt[i].runFlags;
+    return !!(f && (f & (STATUS_RUN_POSITIONS | STATUS_RUN_LOOK_AT)));
+}
+
+function setRunMode(on) {
+    _runMode = on;
+    if (on && uiMode !== 'move') setUiMode('move');   // Run and SET/EDIT/CLEAR exclude
+    if (on && (_extSetMode || _extClearMode || _extLaSetMode)) {
+        _extSetMode = _extClearMode = _extLaSetMode = false;
+        if (_extActive && _extPage === 'positions') refreshExtPositions();
+    }
+    document.querySelectorAll('.run-btn').forEach(b => b.classList.toggle('run-on', on));
+    refreshCamBtnLabels();
+}
+
+function toggleRun(i) {
+    const cs = camSt[i];
+    if (!cs.connected) { toast(camName(i) + ' is offline'); return; }
+    // Stop is STOP_RUN, as on the PC app.  Not a zero jog: that is also the
+    // PC's speed announcement and this page's own safety stop on every screen
+    // change, so the mount no longer reads one as anybody taking over.
+    if (camRunning(i)) { wsSend(buildPkt(i, CMD_STOP_RUN, null)); return; }
+    if (cs.runFlags === null) {
+        // No byte [10]: this mount's firmware predates runs a phone can start
+        // and follow.  Said, rather than started blind.
+        toast(camName(i) + ': update this mount\'s firmware to run it from here');
+        return;
+    }
+    if (camIsLookAt(i)) {
+        let subj = cs.activeLaSubject;
+        for (let s = 0; subj < 0 && s < 8; s++)
+            if (cs.slotOccupied & (1 << s)) subj = s;
+        if (subj < 0) { toast(camName(i) + ': store a subject to run between'); return; }
+        wsSend(mkStartLookAtMove(i, subj, 0, cs.activeSlPreset || 2, true));
+        return;
+    }
+    let stored = 0;
+    for (let s = 0; s < NUM_SLOTS; s++) if (cs.slotOccupied & (1 << s)) stored++;
+    if (stored < 2) { toast(camName(i) + ': store two or more positions to run'); return; }
+    wsSend(buildPkt(i, CMD_START_RUN, null));
+    // Nothing shown yet: the button changes when the mount says it is running.
+}
+
+// ============================================================
+//  Move — the GC screen's jog controls, in a closable popup
+// ============================================================
+// The GC screen leaves out the faders and the stick, because a pad does their
+// job.  This puts them back for the moment the pad is not to hand, on the
+// selected camera, through the same jog path as the landscape screen, with that
+// camera's focus button between them.  Closing it lets go of anything held,
+// which stops the mount.
+let _moveOpen = false;
+let mvHslZoom = null, mvHslSlider = null, mvJoy = null;
+const MV_FOCUS = 56 + 12;       // #mv-focus and one gap, when focus buttons show
+
+function moveTitle() {
+    document.getElementById('move-title').textContent = 'Move — ' + camName(selCam);
+}
+function openMove() {
+    _moveOpen = true;
+    moveTitle();
+    document.getElementById('move-sheet').classList.add('show');
+    requestAnimationFrame(sizeMoveControls);
+}
+function closeMove() {
+    if (!_moveOpen) return;
+    [mvHslZoom, mvHslSlider, mvJoy].forEach(w => w && w.cancel && w.cancel());
+    _stopJogLoop();
+    _moveOpen = false;
+    document.getElementById('move-sheet').classList.remove('show');
+}
+function sizeMoveControls() {
+    const body = document.getElementById('move-body');
+    if (!_moveOpen || !body || !body.offsetParent) return;
+    const w    = body.clientWidth - 28;          // inside .move-body's padding
+    const h    = body.clientHeight - 20;
+    const tall = h > w;
+    body.classList.toggle('tall', tall);
+    // Side by side, each half of what the focus button leaves; stacked, the
+    // full width, and the stick has what the two faders, their labels and the
+    // focus button leave of the height.
+    const fb   = focusBtnsOn ? MV_FOCUS : 0;
+    const colW = tall ? w : (w - fb) / 2 - 12;
+    const slW  = Math.max(120, Math.min(colW, 380));
+    const slH  = tall ? 56 : Math.max(40, Math.min(70, Math.floor((h - 60) / 2)));
+    const joy  = tall ? Math.min(w, h - 2 * slH - 80 - fb, 320) : Math.min(colW, h, 320);
+    if (mvHslZoom)   mvHslZoom.resize(slW, slH);
+    if (mvHslSlider) mvHslSlider.resize(slW, slH);
+    if (mvJoy)       mvJoy.resize(Math.max(100, joy));
 }
 
 // ============================================================
@@ -4615,7 +4844,10 @@ window.addEventListener('DOMContentLoaded', () => {
                (extJoy && extJoy.active) ||
                (extPosHslZoom && extPosHslZoom.active) ||
                (extPosHslSlider && extPosHslSlider.active) ||
-               (extPosJoy && extPosJoy.active);
+               (extPosJoy && extPosJoy.active) ||
+               (mvHslZoom && mvHslZoom.active) ||
+               (mvHslSlider && mvHslSlider.active) ||
+               (mvJoy && mvJoy.active);
     }
     hslZoom   = new HSlider('hsl-zoom',   v => {
         _jl.y = v;  // right = zoom in = positive
@@ -4647,9 +4879,26 @@ window.addEventListener('DOMContentLoaded', () => {
         if (_curView !== 'portrait') return;
         if (_anyActive()) _startJogLoop(); else _stopJogLoop();
     });
+    // The Move popup's own set, live only while it is open.
+    mvHslZoom = new HSlider('mv-hsl-zoom', v => {
+        _jl.y = v;
+        if (!_moveOpen) return;
+        if (_anyActive()) _startJogLoop(); else _stopJogLoop();
+    });
+    mvHslSlider = new HSlider('mv-hsl-slider', v => {
+        _jl.x = v;
+        if (!_moveOpen) return;
+        if (_anyActive()) _startJogLoop(); else _stopJogLoop();
+    });
+    mvJoy = new Joystick('mv-joy', (x, y) => {
+        _jr.x = x; _jr.y = y;
+        if (!_moveOpen) return;
+        if (_anyActive()) _startJogLoop(); else _stopJogLoop();
+    });
 
     checkOrientation();
     window.addEventListener('resize', () => {
+        if (_moveOpen) sizeMoveControls();
         if (_extActive) {
             if (_extPage === 'positions') sizeExtPosControls();
             else sizeExtControls();
@@ -4672,6 +4921,7 @@ window.addEventListener('DOMContentLoaded', () => {
     buildCamAdvanced();
     wireFocusBtn(document.getElementById('p-focus'));
     wireFocusBtn(document.getElementById('l-focus'));
+    wireFocusBtn(document.getElementById('mv-focus'));
     const focusOpt = document.getElementById('camc-focus-opt');
     focusOpt.classList.toggle('on', focusBtnsOn);
     focusOpt.addEventListener('click', () => setFocusBtns(!focusBtnsOn));
@@ -4718,6 +4968,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const cs = camSt[selCam];
         const la = camIsLookAt(selCam);
         _extClearMode = false;  // SET disarms CLEAR
+        if (_runMode) setRunMode(false);   // ...and Run
         if (la && cs.calibPhase === CP_WAIT_SET_B) {
             wsSend(mkAddSubjectSetB(selCam));
             _extLaSetMode = false;
@@ -4733,8 +4984,18 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('ext-pos-clear-btn').addEventListener('click', () => {
         _extSetMode = false;    // CLEAR disarms SET
         _extLaSetMode = false;
+        if (_runMode) setRunMode(false);   // ...and Run
         _extClearMode = !_extClearMode;
         refreshExtPositions();
+    });
+
+    // ---- Run and Move ----
+    ['btn-run-p', 'gc-run', 'ext-pos-run-btn'].forEach(id =>
+        document.getElementById(id).addEventListener('click', () => setRunMode(!_runMode)));
+    document.getElementById('gc-move').addEventListener('click', openMove);
+    document.getElementById('move-close').addEventListener('click', closeMove);
+    document.getElementById('move-sheet').addEventListener('click', e => {
+        if (e.target === e.currentTarget) closeMove();   // a tap outside the card
     });
 
     // ---- Extended view: button wiring ----

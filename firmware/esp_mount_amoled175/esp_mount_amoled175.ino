@@ -41,6 +41,7 @@
 #include <esp_task_wdt.h>
 #include <Wire.h>
 #include "../shared/protocol.h"
+#include "../shared/pos_run.h"      // cycling stored positions — the mount's own run
 #include "../shared/crash_report.h"
 #include "ble_camera.h"   // Blackmagic camera control over BLE
 #include "ui_types.h"   // ArcStrip struct — must be included before Arduino auto-prototypes
@@ -571,11 +572,51 @@ static void run_send_leg() {
                                     CMD_START_LOOK_AT_MOVE, p, sizeof(p)));
 }
 
+// ── The position run, owned here too ─────────────────────────────────────
+// Cycling the stored positions (CMD_START_RUN) — the decisions are in
+// shared/pos_run.h; this sends the gotos and says what is happening.
+static PosRun _prun = {};
+
+// STATUS byte [10] — which runs this mount has going.
+static uint8_t run_flags() {
+    return (uint8_t)((_prun.active ? STATUS_RUN_POSITIONS : 0)
+                   | (_run_active  ? STATUS_RUN_LOOK_AT   : 0));
+}
+
+// A run started or ended: every client should hear it now, not at the next
+// STATUS the Teensy happens to send, which may be seconds away with nothing
+// moving.  Flagged here and sent by the heartbeat on its next pass — through
+// periodic_held, like every other report — rather than sent from here, where
+// it could land beside a forwarded STATUS or the periodic reports: the burst
+// that guard exists to prevent.  send_status_heartbeat() clears it.
+static bool     _runs_report_due = false;
+static uint32_t _runs_due_ms     = 0;
+static void runs_changed() {
+    if (!_runs_report_due) { _runs_report_due = true; _runs_due_ms = millis(); }
+}
+
+static void prun_goto(uint8_t slot) {
+    // The slot alone: the Teensy then uses its own active presets, so a speed
+    // dial turned mid-run takes effect on the next leg — as it did when the PC
+    // sent each goto with the dials' presets.
+    uint8_t buf[PKT_BUF_SIZE + 4];
+    Serial1.write(buf, build_packet(buf, _mount_id, ++_tx_seq,
+                                    CMD_GOTO_SLOT, &slot, 1));
+}
+
+static void prun_stop(const char *why) {
+    if (!_prun.active) return;
+    pos_run_stop(&_prun);
+    Serial.printf("[RUN] positions stopped: %s\n", why);
+    runs_changed();
+}
+
 static void run_stop(const char *why) {
     if (!_run_active) return;
     _run_active     = false;
     _run_leg_active = false;
     Serial.printf("[RUN] stopped: %s\n", why);
+    runs_changed();
 }
 static uint32_t _last_heartbeat_ms   = 0;
 static int8_t   _last_rssi           = 0;
@@ -1603,8 +1644,11 @@ static void send_preset_to_teensy(uint8_t group, uint8_t preset) {
 // than from the mount actually deselecting the subject.
 //
 // Keep this in step with shared/protocol.h if the payload ever grows again.
+// Plus byte [10], which is this bridge's and not the Teensy's: the runs it
+// owns (STATUS_RUN_BYTE).  Every STATUS leaving here carries it — this one and
+// each forwarded from the Teensy — so no client ever sees the byte come and go.
 static void send_status_heartbeat() {
-    uint8_t p[10];
+    uint8_t p[11];
     p[0] = _ms.state;
     p[1] = _ms.flags;
     p[2] = _ms.pt_preset;
@@ -1615,8 +1659,10 @@ static void send_status_heartbeat() {
     p[7] =  _ms.slot_at & 0xFF;
     p[8] =  _ms.target_slot;
     p[9] =  _ms.active_la_subject;   // 0-7, or 0xFF for none
+    p[STATUS_RUN_BYTE] = run_flags();  // the bridge's own addition — see protocol.h
     send_to_hub(CMD_STATUS, p, sizeof(p));
     _last_heartbeat_ms = millis();
+    _runs_report_due   = false;        // this one says what the runs are
 }
 
 // ---- Uniform health telemetry (bridge node) --------------------------------
@@ -2048,8 +2094,40 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
         return;
     }
 
+    // Cycle the stored positions: the mount's own run, like the look-at one
+    // below.  Consumed here — the Teensy has no idea what a run is.
+    if (pkt.cmd == CMD_START_RUN) {
+        if (_ms.flags & FLAG_LOOK_AT_MODE) {
+            // A look-at mount's slots are subjects, not positions; its run is
+            // START_LOOK_AT_MOVE with repeat, which the clients send instead.
+            Serial.println("[RUN] positions: ignored — this mount is in look-at mode");
+            return;
+        }
+        run_stop("a position run was started");
+        uint8_t first = pos_run_start(&_prun, _ms.slot_occupied, millis());
+        if (first == 0xFF) {
+            Serial.println("[RUN] positions: not started — fewer than two stored");
+            runs_changed();            // so a client waiting on the byte hears "no"
+            return;
+        }
+        Serial.printf("[RUN] positions started at %u — mount owns it\n", first + 1);
+        prun_goto(first);
+        runs_changed();
+        return;
+    }
+    // Stop, either kind — the leg under way finishes where it was going.  Said
+    // back even when nothing was running, so a device showing a stale "■ Stop"
+    // hears the truth now rather than at the next beat.  Consumed here too.
+    if (pkt.cmd == CMD_STOP_RUN) {
+        run_stop("stopped by a client");
+        prun_stop("stopped by a client");
+        runs_changed();
+        return;
+    }
+
     // A run is a property of the mount now, not a sequence the PC drives.
     if (pkt.cmd == CMD_START_LOOK_AT_MOVE && pkt.payload_len >= 3) {
+        prun_stop("a look-at move was started");
         _run_subj   = pkt.payload[0] & 0x07;
         _run_dir    = pkt.payload[1] & 1;
         _run_preset = pkt.payload[2];
@@ -2059,17 +2137,31 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
         if (rep && !_run_active) {
             Serial.println("[RUN] started — mount owns it");
             _run_leg_active = false;   // this leg has not been seen running yet
+            _run_active = true;
+            runs_changed();
+        } else if (!rep) {
+            run_stop("single leg requested");   // says so, if one was going
         }
-        if (!rep) run_stop("single leg requested");
-        _run_active = rep;
     }
-    // Anything that means "the operator has taken over" ends the run.  A jog is
-    // a person moving the rig by hand; continuing to ping-pong underneath them
-    // would be the mount arguing with the operator.
-    if (pkt.cmd == CMD_E_STOP)  run_stop("E-STOP");
-    if (pkt.cmd == CMD_JOG)     run_stop("operator jogged");
-    if (pkt.cmd == CMD_GOTO || pkt.cmd == CMD_GOTO_SLOT || pkt.cmd == CMD_MOVE_REL)
+    // Anything that means "the operator has taken over" ends a run.  A jog is
+    // a person moving the rig by hand; continuing underneath them would be the
+    // mount arguing with the operator.  But only a jog that MOVES something
+    // (jog_moves, shared/pos_run.h): a zero jog is also the PC's speed-preset
+    // announcement and every screen's safety stop on its way out, and ending
+    // runs on those stopped one whenever a speed was changed anywhere.  Stop is
+    // CMD_STOP_RUN.
+    if (pkt.cmd == CMD_E_STOP) {
+        run_stop("E-STOP");
+        prun_stop("E-STOP");
+    }
+    if (pkt.cmd == CMD_JOG && jog_moves(pkt.payload, pkt.payload_len)) {
+        run_stop("operator jogged");
+        prun_stop("operator jogged");
+    }
+    if (pkt.cmd == CMD_GOTO || pkt.cmd == CMD_GOTO_SLOT || pkt.cmd == CMD_MOVE_REL) {
         run_stop("a move was commanded");
+        prun_stop("a move was commanded");
+    }
 
     uint8_t fwd[PKT_BUF_SIZE + 4];
     Serial1.write(fwd, build_packet(fwd, pkt.mount_id, pkt.seq,
@@ -2189,6 +2281,24 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
             upd(_ms.active_la_subject, pkt.payload[9]);
         }
         if (changed) ui_update();
+        // The position run's turn: every decision is in shared/pos_run.h.
+        uint8_t next = 0xFF;
+        const char *why = nullptr;
+        switch (pos_run_on_status(&_prun, _ms.state, _ms.slot_occupied,
+                                  _ms.slot_at, millis(), &next)) {
+        case PR_GOTO:
+            Serial.printf("[RUN] positions: on to %u\n", next + 1);
+            prun_goto(next);
+            break;
+        case PR_STOP_JOGGED:  why = "the mount is jogging";            break;
+        case PR_STOP_TOO_FEW: why = "fewer than two positions stored"; break;
+        case PR_STOP_STALLED: why = "a goto the mount did not act on"; break;
+        default:              break;
+        }
+        if (why) {
+            Serial.printf("[RUN] positions stopped: %s\n", why);
+            runs_changed();
+        }
     }
     // Track active look-at subject for green dot display
     if (pkt.cmd == CMD_LOOK_AT_STATUS && pkt.payload_len >= 13) {
@@ -2221,6 +2331,16 @@ static void handle_teensy_packet(const ParsedPacket &pkt) {
     if (!_cfg_valid) return;   // unpaired — don't forward Teensy traffic anywhere
     if (!teensy_frame_worth_sending(pkt)) return;
     uint8_t fwd[PKT_BUF_SIZE + 4];
+    if (pkt.cmd == CMD_STATUS && pkt.payload_len == STATUS_RUN_BYTE) {
+        // The Teensy's ten bytes and the bridge's own [10]: its runs.  Only
+        // onto a STATUS of exactly the known length — appended to any other,
+        // the byte would land somewhere a client reads as something else.
+        uint8_t st[STATUS_RUN_BYTE + 1];
+        memcpy(st, pkt.payload, STATUS_RUN_BYTE);
+        st[STATUS_RUN_BYTE] = run_flags();
+        espnow_tx(fwd, build_packet(fwd, _mount_id, pkt.seq, pkt.cmd, st, sizeof(st)));
+        return;
+    }
     espnow_tx(fwd, build_packet(fwd, _mount_id, pkt.seq,
                                 pkt.cmd, pkt.payload,
                                 pkt.payload_len));
@@ -4283,6 +4403,10 @@ void loop() {
     // seconds later if contact does not come back.
     if (_run_active && (millis() - _last_hub_rx_ms) > RUN_DEADMAN_MS)
         run_stop("no contact with any base");
+    // The same for a position run: one leg at a time, so it ends where the
+    // current leg ends — the goto already under way is not undone.
+    if (_prun.active && (millis() - _last_hub_rx_ms) > RUN_DEADMAN_MS)
+        prun_stop("no contact with any base");
 
     if (!_watchdog_fired && (millis() - _last_hub_rx_ms > WATCHDOG_MS)) {
         _watchdog_fired = true;
@@ -4358,10 +4482,23 @@ void loop() {
     // Deferred rather than skipped: _last_heartbeat_ms is written inside the
     // send, so not calling it leaves this test true and the next pass tries
     // again. See espnow_defer_periodic().
+    //
+    // A run starting or ending (runs_changed) is due at once rather than at
+    // the next beat: interval 0, aged from when it was flagged, so the guard
+    // holds it at most the same 400 ms for the radio as any other report.
+    // Aged against a FRESH millis(), not `now`: the flag is set by packets
+    // handled after `now` was read, and a stamp from after `now` would wrap
+    // to an age of days — overdue, so the guard would wave it straight
+    // through a saturated radio.  Read here, it is never older than the stamp.
     static bool hb_held = false;
+    uint32_t hb_int = STATUS_HEARTBEAT_MS;
     uint32_t hb_age = now - _last_heartbeat_ms;
-    if (hb_age >= STATUS_HEARTBEAT_MS &&
-            !periodic_held(hb_age, STATUS_HEARTBEAT_MS, &hb_held))
+    if (_runs_report_due) {
+        hb_int = 0;
+        hb_age = millis() - _runs_due_ms;
+    }
+    if (hb_age >= hb_int &&
+            !periodic_held(hb_age, hb_int, &hb_held))
         send_status_heartbeat();
 
     // ── Health telemetry (10 s cadence, jog-deferred, anomaly-triggered) ─
