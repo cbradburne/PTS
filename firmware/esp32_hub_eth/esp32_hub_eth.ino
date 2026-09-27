@@ -732,6 +732,12 @@ static QueueHandle_t _ws_rx_queue;
 
 static int8_t    _mount_rssi[NUM_MOUNTS]      = {};
 static uint32_t  _mount_last_seen[NUM_MOUNTS] = {};
+// When ANYTHING was last heard from each mount — STATUS, health, camera status,
+// an ACK.  Any frame proves the mount is there, and this is what decides
+// whether the hub sends to it (espnow_send_if_present).  _mount_last_seen stays
+// the time of the last STATUS: the display's tiles, the outage accounting and
+// the connect transition need what a STATUS says, not merely that one came.
+static uint32_t  _mount_heard_ms[NUM_MOUNTS]  = {};
 // Paces the rig-wide refresh a client connection triggers — see the accept path.
 #define ACCEPT_BURST_MIN_MS  5000UL
 // Seeded one interval in the past (unsigned wrap) so the FIRST client of a
@@ -984,6 +990,7 @@ static uint8_t mount_table_observe(const uint8_t mac[6], uint8_t claimed_id,
         send_pair_event((uint8_t)cur, 1 /*renumber*/, mac);
         memset(_mount_mac[cur], 0, 6);
         _mount_last_seen[cur]   = 0;
+        _mount_heard_ms[cur]   = 0;   // a new binding is not the old one heard
         _mount_last_state[cur]  = 0xFF;
         _mount_rssi[cur]        = 0;
         _espnow_fails[cur]      = 0;
@@ -1034,6 +1041,7 @@ static void pair_decide(uint8_t cam, uint8_t decision, const uint8_t *mac) {
             send_pair_event((uint8_t)cur, 2 /*replace*/, mac);
             memset(_mount_mac[cur], 0, 6);
             _mount_last_seen[cur]  = 0;
+            _mount_heard_ms[cur]   = 0;   // a new binding is not the old one heard
             _mount_last_state[cur] = 0xFF;
             disp_set_disconnected((uint8_t)(cur + 1));
         }
@@ -1046,6 +1054,7 @@ static void pair_decide(uint8_t cam, uint8_t decision, const uint8_t *mac) {
         mount_table_save();
         refresh_espnow_peer(slot);
         _mount_last_seen[slot]   = 0;
+        _mount_heard_ms[slot]   = 0;   // a new binding is not the old one heard
         _mount_last_state[slot]  = 0xFF;
         _espnow_fails[slot]      = 0;
         _espnow_fail_run[slot]   = 0;
@@ -1080,6 +1089,7 @@ static void pair_forget(uint8_t cam) {
     memset(_mount_mac[slot], 0, 6);
     mount_table_save();
     _mount_last_seen[slot]   = 0;
+    _mount_heard_ms[slot]   = 0;   // a new binding is not the old one heard
     _mount_last_state[slot]  = 0xFF;
     _espnow_fails[slot]      = 0;
     _espnow_fail_run[slot]   = 0;
@@ -1191,9 +1201,19 @@ static PacketParser _serial_parser;
 // This does not prove the theory, but transmitting to a device known to be
 // absent is wrong regardless, and if the wedges thin out the theory is right.
 //
-// A live mount is heard from constantly (STATUS at 10 Hz, health every 10 s),
-// so 30 s of silence means genuinely gone.  It resumes on its own the moment
-// the mount is switched on, because the mount announces itself.
+// A live mount is heard from constantly — health every 10 s, its Teensy's
+// every 10 s, STATUS on every change and every 5 s at the least — so 30 s of
+// silence means genuinely gone.  It resumes on its own the moment the mount is
+// switched on, because the mount announces itself.
+//
+// ANY frame counts (_mount_heard_ms), not only a STATUS.  Counting only STATUS
+// was harmless while mounts sent one ten times a second, but after a hub
+// restart it left the hub sending nothing to a mount it could plainly hear
+// until that mount's next STATUS registered.  On the bench, 2026-09-27, one
+// never did — why is not known — and the hub heard cam1 every 10 s for half an
+// hour while sending it nothing.  The mount's own recovery read that one-way
+// silence as the hub's fault and waited, and only a power cycle of the mount
+// brought it back.
 //
 // NOTE: if the hub's own ESP-NOW RX ever wedged, every mount would look absent
 // and this would stop all sends.  That is acceptable — a hub that cannot hear
@@ -1329,8 +1349,8 @@ static void espnow_tx_pump(uint32_t now) {
 static void espnow_send_if_present(int idx, const uint8_t *raw, uint16_t len) {
     if (idx < 0 || idx >= NUM_MOUNTS) return;
     if (!mount_mac_valid(idx)) return;
-    uint32_t seen = _mount_last_seen[idx];
-    if (seen == 0 || (millis() - seen) > MOUNT_PRESENT_MS) return;   // not here
+    uint32_t heard = _mount_heard_ms[idx];       // any frame — see MOUNT_PRESENT_MS
+    if (heard == 0 || (millis() - heard) > MOUNT_PRESENT_MS) return;   // not here
     if (len > sizeof(_entx_q[0].data)) return;
 
     uint32_t now = millis();
@@ -2376,6 +2396,33 @@ static void disp_calib_prompt(uint8_t mount_id, uint8_t sub_state) {
     disp_unlock();
 }
 
+// A frame arrived from a bound mount, so it is there.  Stamps _mount_heard_ms —
+// what decides whether the hub sends to it — and moves the route to wherever
+// the frame came from.
+//
+// Route follows the traffic, in both directions.  This is the only place
+// _mount_sat[] is written from traffic, so a mount that returns to the hub's
+// own radio is un-attributed by the same rule that attributed it — which is
+// what the satellite-side-only version never did.  It moved here from the
+// STATUS handler along with the presence it belongs to: the route decides
+// where commands are SENT, so it has to follow the same frames that let the
+// hub send at all.  Left on STATUS alone, a mount heard first through its
+// satellite after a hub restart would be sent to directly, out of range,
+// until its next STATUS.
+static void mount_heard(const RelayMsg &msg) {
+    uint8_t  i   = msg.src_idx;
+    uint32_t now = millis();
+    _mount_heard_ms[i] = now ? now : 1;          // 0 means never heard
+    if (_mount_sat[i] != msg.via_sat) {
+        _mount_sat[i] = msg.via_sat;
+        if (msg.via_sat < 0)
+            Serial.printf("[SAT] mount %d back to local ESP-NOW\n", i + 1);
+        else
+            Serial.printf("[SAT] mount %d now via satellite %d\n", i + 1, msg.via_sat + 1);
+        send_mount_route();   // clients redraw the badge
+    }
+}
+
 static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &pkt) {
     if (pkt.cmd != CMD_STATUS)     return;
     if (pkt.payload_len < 2)       return;   // need at least state + flags
@@ -2409,19 +2456,8 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
     _mount_rssi[msg.src_idx]      = msg.rssi;
     _mount_last_seen[msg.src_idx] = millis();
 
-    // Route follows the traffic, in both directions.  This is the only place
-    // _mount_sat[] is written, so a mount that returns to the hub's own radio
-    // is un-attributed by the same rule that attributed it — which is what the
-    // satellite-side-only version never did.
-    if (_mount_sat[msg.src_idx] != msg.via_sat) {
-        _mount_sat[msg.src_idx] = msg.via_sat;
-        if (msg.via_sat < 0)
-            Serial.printf("[SAT] mount %d back to local ESP-NOW\n", mount_id);
-        else
-            Serial.printf("[SAT] mount %d now via satellite %d\n",
-                          mount_id, msg.via_sat + 1);
-        send_mount_route();   // clients redraw the badge
-    }
+    // The route has already followed this frame: mount_heard(), which every
+    // frame from a mount passes through, not only a STATUS.
 
     if (was_offline) {
         // Real connect transition — log it so the PC can compare a genuine
@@ -4786,6 +4822,11 @@ void loop() {
             }
         }
         if (msg.src_idx >= NUM_MOUNTS) continue;
+
+        // Any frame from a bound mount proves it is there — see mount_heard().
+        // A ghost frame (rssi 0) proves nothing, just as it never marks a mount
+        // connected: the same guard as process_status_for_display, same toggle.
+        if (msg.rssi != 0 || !HUB_DROP_GHOST_RSSI0) mount_heard(msg);
 
         broadcast_to_all(msg.data, msg.len);   // serial + TCP (full rate)
 

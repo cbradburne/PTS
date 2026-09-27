@@ -89,11 +89,17 @@ print("   PC app: subject_id only                            OK")
 
 # ---- 5. liveness is unaffected ---------------------------------------------
 print("\n5. the 'I'm alive' path:")
-seg = HUB[HUB.index("_mount_last_seen[msg.src_idx] = millis();") - 600:]
-seg = seg[:700]
-assert "CMD_LOOK_AT_STATUS" not in seg and "CMD_STATUS" not in seg, \
-    "the hub's last-seen refresh is now tied to a specific command"
-print("   hub refreshes last-seen on ANY packet              OK")
+# This used to look 600 characters either side of the last-seen stamp for a
+# command name, and passed for two months while that stamp sat inside
+# process_status_for_display, behind `if (pkt.cmd != CMD_STATUS) return;` —
+# further up than the window reached.  The hub was STATUS-only all along.  Now
+# the liveness that decides sending is _mount_heard_ms, stamped by
+# mount_heard() for every frame; tools/test_hub_heard_any_frame.py pins it.
+relay = HUB[HUB.index("while (xQueueReceive(_relay_queue, &msg, 0) == pdTRUE) {"):]
+relay = relay[:relay.index("broadcast_to_all(msg.data, msg.len);")]
+assert "mount_heard(msg);" in relay and "pkt.cmd" not in relay, \
+    "the hub's liveness is no longer stamped for every frame before any command is looked at"
+print("   hub counts ANY packet as the mount being there     OK")
 mm = (REPO / "pc_app/comms/mount_manager.py").read_text()
 assert "ANY packet from a mount proves it is alive" in mm, \
     "the PC app's any-packet liveness comment/behaviour has changed"
