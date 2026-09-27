@@ -1050,27 +1050,27 @@ static bool     _health_first_sent  = false;
 // STATUS heartbeats and Teensy probes sent since the last health report, and
 // how many of each went out only because loop()'s clock was stale.
 //
-// SUSPECTED, NOT YET SEEN (2026-09-27).  loop() reads `now` once, before
-// lv_timer_handler(), and drains the Teensy again after it.  A STATUS handled
-// in that second drain stamps _last_heartbeat_ms and _last_teensy_st_ms with a
-// fresh millis(), which is later than `now` whenever the clock has ticked since
-// it was read.  The heartbeat and the probe then age themselves against `now`,
-// and the unsigned difference wraps to about 4.29e9: both read as days overdue.
+// loop() reads `now` once, before lv_timer_handler(), and drains the Teensy
+// again after it.  A STATUS handled in that second drain stamps
+// _last_heartbeat_ms and _last_teensy_st_ms with a fresh millis(), later than
+// `now` whenever the clock has ticked since it was read.  The heartbeat and the
+// probe aged themselves against `now`, and the unsigned difference wrapped to
+// about 4.29e9: both read as days overdue.  The heartbeat put a STATUS on the
+// air that the change-only filter (teensy_frame_worth_sending) exists to keep
+// off it, through periodic_held's overdue escape, and the probe asked the
+// Teensy for a STATUS it had sent milliseconds before — which it ACKs, and the
+// ACK is forwarded, so that cost a frame too.
 //
-// If that happens, the heartbeat puts a STATUS on the air that the change-only
-// filter (teensy_frame_worth_sending) exists to keep off it, and periodic_held
-// waves it through a busy radio, because an age of days is past its overdue
-// escape.  The probe asks the Teensy for a STATUS it sent milliseconds ago.
-// The Teensy ACKs every command before acting on it and that ACK is forwarded
-// to the hub, so the probe costs a frame as well, and the STATUS it answers
-// with can land in the next pass's second drain and start the whole thing
-// again.
+// SEEN ON THE BENCH, 2026-09-27, before anything was changed: every heartbeat
+// the mount sent was this — 985 of 985 in 14 minutes, about 12 per 10 s where
+// a healthy mount sends none, 239 of them with a send already in flight — and
+// 983 stale probes with them.  About a sixth of the mount's frames.  Both now
+// age against a fresh millis() (loop(), below).
 //
-// Counted before anything is changed, because the story fits and nobody has
-// watched it happen.  hb_stale near zero clears it.  hb_stale close to hb_sent
-// means nearly every heartbeat is this, and hb_stale_busy says how many went
-// out with a send already in flight, which is what the cap exists to stop.
-// Counting changes nothing about when either one is sent.
+// The counts stay, as the check that it stays fixed.  An idle mount's
+// heartbeats should now read about zero: the Teensy's STATUS every 100 ms keeps
+// the beat from falling due.  hb_stale and probe_stale are still worked out
+// against `now`, so they climb only if either age is taken against `now` again.
 static uint16_t _hb_sent       = 0;
 static uint16_t _hb_stale      = 0;
 static uint16_t _hb_stale_busy = 0;
@@ -4536,11 +4536,13 @@ void loop() {
     // through a saturated radio.  Read here, it is never older than the stamp.
     static bool hb_held = false;
     uint32_t hb_int = STATUS_HEARTBEAT_MS;
-    uint32_t hb_age = now - _last_heartbeat_ms;
-    // This age can wrap too: the second Teensy drain stamps _last_heartbeat_ms
-    // after `now` was read.  Suspected, not seen, so it is counted here rather
-    // than corrected: see _hb_stale.
-    bool hb_stale = (int32_t)hb_age < 0;
+    // The beat itself is aged against a fresh millis() for the same reason:
+    // the second Teensy drain stamps _last_heartbeat_ms after `now` was read,
+    // and against `now` that stamp wrapped to days overdue — every heartbeat
+    // the bench mount sent (see _hb_stale).  hb_stale is still worked out
+    // against `now`, as the check: it reads 0 while this holds.
+    uint32_t hb_age = millis() - _last_heartbeat_ms;
+    bool hb_stale = (int32_t)(now - _last_heartbeat_ms) < 0;
     if (_runs_report_due) {
         hb_int = 0;
         hb_age = millis() - _runs_due_ms;
@@ -4556,9 +4558,10 @@ void loop() {
     health_check_bridge(now);
 
     // ── Teensy probe ─────────────────────────────────────────────────────
-    if (now - _last_teensy_st_ms >= TEENSY_PROBE_MS) {
-        // Stamped by the same STATUS as the heartbeat, so it can be stale in
-        // the same way.  Counted, not yet corrected: see _hb_stale.
+    // Aged against a fresh millis(), as the heartbeat is: the STATUS that
+    // stamps _last_teensy_st_ms may be the one handled in the second drain.
+    if (millis() - _last_teensy_st_ms >= TEENSY_PROBE_MS) {
+        // The check that it stays fixed: 0 while the age above is fresh.
         if ((int32_t)(now - _last_teensy_st_ms) < 0 && _probe_stale < 0xFFFF)
             _probe_stale++;
         uint8_t probe[PKT_BUF_SIZE + 4];

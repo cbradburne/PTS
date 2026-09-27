@@ -83,7 +83,7 @@ print("   anomaly health bounded, and retried not dropped   OK")
 # INSIDE the send.
 print("\n2. a deferred report is retried, not dropped:")
 assert "_last_heartbeat_ms = millis();" in INO, "the heartbeat stamp moved"
-hb = INO[INO.index("uint32_t hb_age = now - _last_heartbeat_ms;"):]
+hb = INO[INO.index("uint32_t hb_age = millis() - _last_heartbeat_ms;"):]
 hb = hb[:hb.index("send_status_heartbeat();") + 30]
 assert "_last_heartbeat_ms =" not in hb, \
     "the heartbeat timestamp is written at the call site, so a deferred beat is\n" \
