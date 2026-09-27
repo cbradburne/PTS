@@ -120,11 +120,12 @@ def main() -> None:
     from ui import virtual_keyboard
     virtual_keyboard.set_enabled(config.virtual_keyboard)
     store    = PositionStore()
-    # Names (50 positions + 5 cameras): load the startup defaults from
-    # ~/Documents/PTS/Default.json (created from the numeric/"Cam N" defaults
-    # on first run).  See config/name_store.py.
+    # Names (50 positions + 5 cameras) are the hub's since 2026-09-26 — see
+    # config/name_sync.py.  Until it answers, show what it last said
+    # (Documents/PTS/hub_names.json); a PC that has never met such a hub opens
+    # on Default.json as before.  See config/name_store.py.
     from config import name_store
-    name_store.load_default(store, config)
+    name_store.load_startup(store, config)
     bridge   = Bridge()
     mm       = MountManager(bridge)
     # Log axis travel to comms.log.  Silent while nothing moves; prints a

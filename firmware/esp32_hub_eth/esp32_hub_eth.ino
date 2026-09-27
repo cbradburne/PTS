@@ -104,6 +104,7 @@
 #include "../shared/disp_uart.h"
 #include "../shared/web_app.h"
 #include "../shared/hub_types.h"
+#include "../shared/names.h"      // camera and position names, shared by every client
 #include <ESPmDNS.h>
 // sat_link.h first: it owns the hostname, and board_eth.h needs it to have been
 // defined by the time it is included.
@@ -1424,11 +1425,15 @@ static void demo_tick();
 static void intercept_la_move_dir(uint8_t mount_id, uint8_t dir);
 static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
                               const uint8_t *payload, uint8_t plen);
+// Defined with the names further down; ui_send_to_mount() calls it above.
+static void names_note_mount_cmd(uint8_t mount_id, uint8_t cmd,
+                                 const uint8_t *payload, uint8_t plen);
 
 // ---------------------------------------------------------------------------
 
 static void ui_send_to_mount(uint8_t mount_id, CmdType cmd,
                               const uint8_t *payload, uint8_t plen) {
+    names_note_mount_cmd(mount_id, cmd, payload, plen);   // a display CLEAR too
 #if DEMO_MODE
     if (demo_consume_cmd(mount_id, cmd, payload, plen)) return;   // display presses
 #endif
@@ -1856,6 +1861,147 @@ static void bcast_pair_conflict(uint8_t cam, const uint8_t *new_mac,
     _ws.binaryAll(raw, (size_t)n);
 }
 
+// ---------------------------------------------------------------------------
+// Camera and position names — held here, shown by every client
+// ---------------------------------------------------------------------------
+// The store itself is shared/names.h; this is its storage and its voice.
+//
+// Saved in NVS, one blob per named camera ("names"/"c1".."c32") plus a mask of
+// which exist, so loading never has to probe for missing keys.  Saved a second
+// after edits stop rather than per edit, so a Load of a whole set from the PC
+// costs one write per camera instead of one per name.
+//
+// Sent one camera per NAMES_TX_GAP_MS, never as a burst.  A request for five
+// cameras is five packets to every client at once — USB, TCP and WebSocket —
+// and this hub has already been caught dropping frames off a full serial
+// buffer and a full WebSocket queue.  A client that still misses one hears the
+// rev move in the next CMD_NAMES_REV and asks again.
+static NameStore _names;
+static uint32_t  _names_saved_mask = 0;   // cameras with a blob in NVS
+static uint32_t  _names_dirty_ms   = 0;   // last edit, for the save delay
+static uint32_t  _names_tx_ms      = 0;
+static uint32_t  _names_rev_ms     = 0;
+static uint32_t  _names_rev_sent   = 0;
+static bool      _names_rev_owed   = false;
+static uint16_t  _names_seq        = 0;
+#define NAMES_TX_GAP_MS      25UL
+#define NAMES_REV_EVERY_MS   10000UL
+#define NAMES_SAVE_AFTER_MS  1000UL
+
+static void names_load() {
+    memset(&_names, 0, sizeof(_names));
+    _prefs.begin("names", false);        // r/w so a missing namespace is created quietly
+    uint32_t mask = _prefs.getUInt("mask", 0);
+    uint8_t  rec[PKT_BUF_SIZE];
+    for (uint8_t c = 1; c <= NAMES_MAX_CAMS; c++) {
+        if (!(mask & names_bit(c))) continue;
+        char key[6];
+        snprintf(key, sizeof(key), "c%u", c);
+        size_t n = _prefs.getBytesLength(key);
+        if (n == 0 || n > sizeof(rec)) continue;
+        _prefs.getBytes(key, rec, n);
+        if (!names_unpack(&_names, rec, (uint16_t)n))
+            Serial.printf("[NAMES] camera %u: saved names unreadable, ignored\n", c);
+    }
+    _prefs.end();
+    _names_saved_mask = mask;
+    // Random, so a restarted hub never repeats a number a client already holds:
+    // every client sees it move and fetches the names again.
+    _names.rev = esp_random();
+    Serial.printf("[NAMES] %d camera(s) named\n",
+                  __builtin_popcount(names_named_mask(&_names)));
+}
+
+static void names_save() {
+    uint32_t named = names_named_mask(&_names);
+    _prefs.begin("names", false);
+    uint8_t rec[PKT_BUF_SIZE];
+    for (uint8_t c = 1; c <= NAMES_MAX_CAMS; c++) {
+        if (!(_names.dirty & names_bit(c))) continue;
+        char key[6];
+        snprintf(key, sizeof(key), "c%u", c);
+        if (named & names_bit(c)) {
+            uint16_t n = names_pack(&_names, c, rec);
+            if (_prefs.putBytes(key, rec, n) != n) {
+                // Kept in RAM and still shown everywhere; only a restart would
+                // lose it.  Said, because a name that comes back after a power
+                // cut as something else is otherwise a mystery.
+                Serial.printf("[NAMES] camera %u NOT saved — hub storage full?\n", c);
+                named &= ~names_bit(c);
+            }
+        } else if (_names_saved_mask & names_bit(c)) {
+            _prefs.remove(key);
+        }
+    }
+    _prefs.putUInt("mask", named);
+    _prefs.end();
+    _names_saved_mask = named;
+    _names.dirty = 0;
+}
+
+static void names_send(CmdType cmd, const uint8_t *p, uint16_t n) {
+    uint8_t  buf[PKT_BUF_SIZE + 4];
+    uint16_t len = build_packet(buf, HUB_SENTINEL, ++_names_seq, cmd, p, (uint8_t)n);
+    broadcast_to_all(buf, len);          // USB + TCP
+    _ws.binaryAll(buf, (size_t)len);     // phones
+}
+
+static void names_tick(uint32_t now) {
+    if (_names.pending) {
+        if (now - _names_tx_ms < NAMES_TX_GAP_MS) return;
+        uint8_t  rec[PKT_BUF_SIZE];
+        uint8_t  cam = names_next_pending(&_names);
+        names_send(CMD_NAMES, rec, names_pack(&_names, cam, rec));
+        _names_tx_ms = now;
+        // After the last camera, the number — so a client that asked knows
+        // what it now holds, even if nothing it asked for has a name.
+        if (!_names.pending) _names_rev_owed = true;
+        return;
+    }
+    if (_names.dirty && now - _names_dirty_ms >= NAMES_SAVE_AFTER_MS) names_save();
+    if ((_names_rev_owed || _names.rev != _names_rev_sent
+            || now - _names_rev_ms >= NAMES_REV_EVERY_MS)
+            && now - _names_tx_ms >= NAMES_TX_GAP_MS) {
+        uint8_t p[NAMES_REV_PAYLOAD_LEN];
+        names_send(CMD_NAMES_REV, p, names_rev_payload(&_names, p));
+        _names_rev_ms   = now;
+        _names_rev_sent = _names.rev;
+        _names_rev_owed = false;
+    }
+}
+
+// Commands that change what a mount stores, seen on their way out whoever sent
+// them — a client, the hub display, or the hub's own OSC.
+static void names_note_mount_cmd(uint8_t mount_id, uint8_t cmd,
+                                 const uint8_t *payload, uint8_t plen) {
+    if (cmd == CMD_CLEAR_POS && plen >= 1
+            && names_on_clear_pos(&_names, mount_id, payload[0])) {
+        _names_dirty_ms = millis();
+        Serial.printf("[NAMES] camera %u position %u cleared, name with it\n",
+                      mount_id, payload[0] + 1);
+    }
+}
+
+// Hub-scoped name commands from any client.  Returns true if consumed.
+static bool handle_names_cmd(const ParsedPacket &pkt) {
+    switch (pkt.cmd) {
+    case CMD_NAMES_GET:
+        names_request(&_names, pkt.payload, pkt.payload_len);
+        _names_rev_owed = true;
+        return true;
+    case CMD_NAME_SET: {
+        int n = names_apply_set(&_names, pkt.payload, pkt.payload_len);
+        if (n > 0) {
+            _names_dirty_ms = millis();
+            Serial.printf("[NAMES] %d name(s) changed\n", n);
+        }
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 // Hub-scoped pairing commands from any client (TCP / WebSocket / USB).  The hub
 // owns the mount table; these view / set / clear it and must NOT reach a mount.
 // Returns true if consumed (the caller then stops — does not forward).
@@ -2107,6 +2253,7 @@ static inline bool cmd_is_client_activity(uint8_t cmd) {
         case CMD_GET_STATUS:
         case CMD_GET_SUBJECTS:
         case CMD_PING:
+        case CMD_NAMES_GET:
             return false;      // polling, not activity
         default:
             return true;
@@ -2116,6 +2263,8 @@ static inline bool cmd_is_client_activity(uint8_t cmd) {
 static void forward_to_mounts(const ParsedPacket &pkt) {
     if (cmd_is_client_activity(pkt.cmd)) _last_client_cmd_ms = millis();
     if (handle_pairing_cmd(pkt)) return;   // hub-scoped pairing — handled here, not sent to mounts
+    if (handle_names_cmd(pkt)) return;     // hub-scoped names — likewise
+    names_note_mount_cmd(pkt.mount_id, pkt.cmd, pkt.payload, pkt.payload_len);
 #if DEMO_MODE
     if (demo_consume_cmd(pkt.mount_id, pkt.cmd, pkt.payload, pkt.payload_len)) return;
 #endif
@@ -3764,6 +3913,7 @@ void setup() {
     // Load the paired-mount table from NVS and register a peer per bound slot.
     // Unbound slots pair automatically on first contact (mount_table_observe).
     mount_table_load();
+    names_load();
     // Before the first loop pass, so the first osc_feedback_poll() already has
     // somewhere to send.  _fb_valid[] starts false, so the restored peer gets
     // the same paced full send a newly-met one does.
@@ -4818,6 +4968,9 @@ void loop() {
             disp_update_clients(tc, wc);
         }
     }
+
+    // ---- Names: owed cameras, one at a time; saving; the rev beacon ----
+    names_tick(now);
 
     // ---- A phone has just connected: every camera's link state, now ----
     // Rather than when each mount next reports its health, up to 10 s away —

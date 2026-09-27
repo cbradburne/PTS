@@ -147,6 +147,14 @@ SCALAR_MAP = {
     "MOUNT_NOMEM_BLE_LINKED":        ("MOUNT_NOMEM_BLE_LINKED", True),
     "MOUNT_NOMEM_BLE_BONDED":        ("MOUNT_NOMEM_BLE_BONDED", True),
     "HEALTH_BRIDGE_TAIL_LEN":        ("HEALTH_BRIDGE_TAIL_LEN", True),
+    # Names, held by the hub: the limits size a wire record at both ends, and
+    # the sentinel addresses every name packet.
+    "HUB_SENTINEL":                  ("HUB_SENTINEL", True),
+    "NAMES_MAX_CAMS":                ("NAMES_MAX_CAMS", True),
+    "NAMES_SLOTS":                   ("NAMES_SLOTS", True),
+    "NAME_MAX_BYTES":                ("NAME_MAX_BYTES", True),
+    "NAME_SLOT_CAMERA":              ("NAME_SLOT_CAMERA", True),
+    "NAMES_REV_PAYLOAD_LEN":         ("NAMES_REV_PAYLOAD_LEN", True),
 }
 
 # C enum members that are C-side only (none currently).  Add here if a value

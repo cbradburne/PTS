@@ -50,6 +50,8 @@ from .protocol import (
     # pairing management (hub mount-table view / set / clear)
     pkt_get_mount_table, pkt_pair_decide, pkt_pair_forget,
     decode_mount_table, decode_mount_route, decode_sat_names, decode_sat_ips,
+    # camera and position names (the hub's)
+    pkt_names_get, pkts_name_set, decode_names, decode_names_rev,
     MOUNT_EVENT_PAYLOAD_LEN, MOUNT_EVENT_ISOLATED, MOUNT_EVENT_TX_WEDGE,
     MOUNT_EVENT_TX_WEDGE_REBOOT,
     MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_CURED,
@@ -387,6 +389,9 @@ class MountManager(QObject):
     mount_route_updated    = pyqtSignal(list)          # [5 × int]; 0 = direct, N = via satellite N
     sat_names_updated      = pyqtSignal(dict)          # {slot: name} for slots that gave one
     pair_conflict          = pyqtSignal(object)        # PairConflictPayload; cam 0 = dismiss
+    # Camera and position names, held by the hub (config/name_sync.py owns them)
+    names_received         = pyqtSignal(int, str, list)  # cam, its name, [position names]; "" = none
+    names_rev_received     = pyqtSignal(dict)          # decode_names_rev(): rev, named, limits
 
     def __init__(self, bridge: Bridge, parent=None):
         super().__init__(parent)
@@ -475,6 +480,17 @@ class MountManager(QObject):
 
     def send_find_home(self, mount_id: int, axis: Axis, stall_threshold: int = 80) -> None:
         self._send(pkt_find_home(mount_id, axis, stall_threshold))
+
+    # ---- Camera and position names (the hub keeps them; see name_sync.py) ----
+    def request_names(self, cams) -> None:
+        """Ask the hub for these cameras' names: a CMD_NAMES each, then the rev."""
+        self._send(pkt_names_get(list(cams)))
+
+    def send_names(self, entries) -> None:
+        """(cam, slot, name) entries to the hub — slot NAME_SLOT_CAMERA for the
+        camera itself, "" to clear.  The hub sends every client the result."""
+        for pkt in pkts_name_set(entries):
+            self._send(pkt)
 
     # ---- Pairing management (hub owns the table; view / set / clear it) ----
     def request_mount_table(self) -> None:
@@ -1058,6 +1074,21 @@ class MountManager(QObject):
                 self.pair_conflict.emit(decode_pair_conflict(pkt.payload))
             except Exception as e:
                 log.error(f"PAIR_CONFLICT decode failed: {e}")
+            return
+        # Names are the hub's, for any camera number — including ones this app
+        # does not show, which NameSync keeps and ignores.
+        if pkt.cmd == Cmd.NAMES:
+            try:
+                cam, name, slots = decode_names(pkt.payload)
+                self.names_received.emit(cam, name, slots)
+            except Exception as e:
+                log.error(f"NAMES decode failed: {e}")
+            return
+        if pkt.cmd == Cmd.NAMES_REV:
+            try:
+                self.names_rev_received.emit(decode_names_rev(pkt.payload))
+            except Exception as e:
+                log.error(f"NAMES_REV decode failed: {e}")
             return
 
         mid = pkt.mount_id

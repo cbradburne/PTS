@@ -2,8 +2,16 @@
 Name sets — the 50 position names (10 × 5 cameras) plus the 5 camera names,
 saved as JSON files in the user's Documents folder.
 
-Model (as requested):
-  - Files live in ~/Documents/PTS/.
+Since 2026-09-26 the names themselves are the HUB's, shared by every PC app
+and phone (config/name_sync.py).  What is left here:
+  - Save / Load of whole sets, for keeping one per show.  Load sends the set
+    to the hub, so every device takes it.
+  - hub_names.json: the names this PC last heard from the hub, so it opens
+    showing them before the hub has answered, and still has them when the hub
+    cannot be reached.
+
+With a hub whose firmware predates names, the app falls back to the model it
+had before, which the user specified in July:
   - Default.json holds the startup names.  On launch the app loads it (and
     creates it, seeded from the current numeric/"Cam N" defaults, if missing).
   - Editing a name writes the current full set to temp.json ONLY — no saved
@@ -33,6 +41,9 @@ NUM_POSITIONS = 10
 NAMES_DIR    = Path.home() / "Documents" / "PTS"
 DEFAULT_PATH = NAMES_DIR / "Default.json"
 TEMP_PATH    = NAMES_DIR / "temp.json"
+# The hub's names as this PC last heard them.  Its existence also records that
+# this PC has met a hub that keeps names — see name_sync.NameSync.migrated.
+CACHE_PATH   = NAMES_DIR / "hub_names.json"
 
 
 def ensure_dir() -> None:
@@ -108,6 +119,41 @@ def save_temp(store, config) -> None:
 def save_default(store, config) -> None:
     """'Set Defaults' — make the current names the startup default."""
     save_to(DEFAULT_PATH, store, config)
+
+
+def entries(store, config, cams=range(1, NUM_MOUNTS + 1)) -> list[tuple]:
+    """Every name for these cameras as (cam, slot, name) for the hub.
+
+    A default goes as "" — the hub keeps no name, and every client shows its
+    own default — so a camera still called "Cam 2", or a slot still called
+    "3", does not become a stored name that happens to look like one.
+    """
+    from comms.protocol import NAME_SLOT_CAMERA
+    out = []
+    for m in cams:
+        lbl = config.mount(m).label.strip()
+        out.append((m, NAME_SLOT_CAMERA, "" if lbl == f"Cam {m}" else lbl))
+        for s in range(NUM_POSITIONS):
+            name = store.get_label(m, s)
+            out.append((m, s, "" if name == str(s + 1) else name))
+    return out
+
+
+def load_startup(store, config) -> str:
+    """What the app shows before the hub has answered.
+
+    A PC that has met a hub keeping names opens on what that hub last said;
+    one that has not keeps the July behaviour and opens on Default.json.
+    Returns which: "cache" or "default".
+    """
+    if CACHE_PATH.exists():
+        try:
+            load_from(CACHE_PATH, store, config)
+            return "cache"
+        except Exception as e:
+            log.warning("Could not read %s (%s) — using Default.json", CACHE_PATH, e)
+    load_default(store, config)
+    return "default"
 
 
 def load_default(store, config) -> bool:

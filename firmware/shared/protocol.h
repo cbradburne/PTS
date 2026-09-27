@@ -34,6 +34,7 @@
 #define PKT_START_1         0xAA
 #define PKT_START_2         0x55
 #define MOUNT_BROADCAST     0x00
+#define HUB_SENTINEL        0xFE   // mount_id of a packet to or from the hub itself
 #define NUM_MOUNTS          5
 #define NUM_POSITIONS       10
 #define PACKET_MIN_SIZE     9
@@ -140,6 +141,26 @@
 #define MOUNT_OUTAGE_PER_MOUNT      12
 #define MOUNT_OUTAGE_PAYLOAD_LEN    (NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT)
 #define MOUNT_OUTAGE_FLAG_NOW       0x01
+
+// Camera and position names, held by the hub so every PC app and phone shows
+// the same ones (CMD_NAMES_GET / NAME_SET / NAMES / NAMES_REV).
+//
+// Sized for more cameras than this rig has.  Everything about names is keyed
+// by CAMERA NUMBER, never by a row on somebody's screen: one device may show
+// cameras 1-5 and another 6-10, and each asks for, and edits, its own.
+// NAMES_MAX_CAMS is what the hub keeps — not NUM_MOUNTS, which is what it
+// drives today — and it is 32 because the hub tracks cameras in 32-bit masks.
+#define NAMES_MAX_CAMS             32
+#define NAMES_SLOTS                10   // position names per camera (NUM_POSITIONS)
+// UTF-8 BYTES, not characters.  Real names run to a word or two ("Balcony",
+// "Piano"); 20 bytes is room for three words, and it keeps one camera's whole
+// record (2 + 11 × (1 + 20) = 233 bytes) inside one packet.
+#define NAME_MAX_BYTES             20
+#define NAME_SLOT_CAMERA         0xFF   // NAME_SET slot: the camera's own name
+// rev(4, BE) + cameras with any name(1) + NAMES_MAX_CAMS(1) + NAMES_SLOTS(1)
+// + NAME_MAX_BYTES(1).  The limits travel with it so a client never needs to
+// guess what the hub it is talking to can hold.
+#define NAMES_REV_PAYLOAD_LEN       8
 
 #define MOUNT_EVENT_ISOLATED        1   // restarted itself: no RX and no TX
 // Transmit wedged one-way — sends failing fast while RX stayed healthy, so the
@@ -614,6 +635,29 @@ typedef enum : uint8_t {
     // than what it last asked for.  A control that echoes its own commands
     // lies whenever the camera is also being operated by hand.
     CMD_CAM_STATUS        = 0xA2,  // mount→hub→clients, 1-40B: BMD status, as-is
+
+    // Camera and position names — the hub's, shared by every client.  All four
+    // carry the hub sentinel (0xFE) and never reach a mount.  (0xAA is skipped:
+    // it is the packet's start byte.)
+    //
+    // client → hub, 0-32B: camera numbers, one byte each.  The hub answers with
+    // one CMD_NAMES per camera, named or not, then a CMD_NAMES_REV.  Empty =
+    // every camera that has any name.
+    CMD_NAMES_GET         = 0xAB,
+    // client → hub: one or more {cam, slot, len, UTF-8 × len}.  slot 0-9 is a
+    // position, NAME_SLOT_CAMERA the camera itself; len 0 clears it back to the
+    // default ("Cam N", the slot number).  Saved on the hub at once — it
+    // survives a restart — and sent to every client as CMD_NAMES.
+    CMD_NAME_SET          = 0xAC,
+    // hub → clients: one camera's names, {cam, n_slots, then 1 + n_slots
+    // × {len, UTF-8 × len}} — the camera's own name first.  Always the whole
+    // camera, so applying one can never leave a client half-updated.
+    CMD_NAMES             = 0xAD,
+    // hub → clients, NAMES_REV_PAYLOAD_LEN: a number that changes whenever any
+    // name does, every 10 s and after every change.  A client that missed a
+    // CMD_NAMES — a full WebSocket queue drops frames rather than disconnect —
+    // sees the number move and asks again.
+    CMD_NAMES_REV         = 0xAE,
 
 
                                    //   0        = direct, on the hub's own ESP-NOW radio

@@ -86,6 +86,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .cam-btn.sel{background:var(--blue);border-color:var(--blue-lit);}
 .cam-btn .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
   background:var(--dim);margin-left:3px;vertical-align:middle;}
+/* The camera's name — the hub's, up to 20 bytes — shortened with an ellipsis
+   rather than stretching one button wider than its neighbours. */
+.cam-btn .cam-nm{display:inline-block;max-width:calc(100% - 12px);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}
 .cam-btn .dot.on{background:var(--green-lit);}
 
 /* ---- portrait position grid ---- */
@@ -136,7 +140,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
 .mnt-row{display:flex;align-items:center;gap:10px;padding:12px;margin-bottom:8px;
   background:var(--surf);border:1px solid var(--border);border-radius:10px;}
 .mnt-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0;}
-.mnt-cam{font-weight:600;color:var(--text);font-size:14px;width:64px;flex-shrink:0;}
+.mnt-cam{font-weight:600;color:var(--text);font-size:14px;min-width:64px;max-width:120px;
+  flex-shrink:0;}
+.mnt-cam small{display:block;font-size:11px;font-weight:400;color:var(--dim);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .mnt-mac{flex:1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;color:var(--text);}
 .mnt-mac.un{color:var(--dim);font-family:inherit;font-style:italic;}
 .mnt-forget{padding:8px 16px;border-radius:8px;border:1px solid var(--red);
@@ -296,8 +303,10 @@ canvas.hsl-c{display:block;touch-action:none;}
    shrinking on short windows instead of overflowing and hiding CAM 5. */
 .ext-pos-table{display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;height:100%;}
 .ext-pos-row{display:flex;gap:4px;align-items:stretch;flex:1 1 0;min-height:0;}
-.ext-pos-cam-lbl{width:56px;flex-shrink:0;font-size:11px;font-weight:700;
-  text-align:right;padding-right:8px;align-self:center;}
+.ext-pos-cam-lbl{width:64px;flex-shrink:0;font-size:11px;font-weight:700;
+  text-align:right;padding-right:8px;align-self:center;line-height:1.2;
+  overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;}
 .ext-pos-cells{display:flex;gap:4px;flex:1;min-height:0;}
 /* No fixed aspect-ratio: cells fill the (flexing) row height, so the grid
    scales with the window rather than being locked to a width-derived square. */
@@ -305,6 +314,9 @@ canvas.hsl-c{display:block;touch-action:none;}
   border:4px solid var(--border);font-size:24px;color:var(--dim);
   display:flex;align-items:center;justify-content:center;cursor:pointer;
   text-align:center;padding:2px;line-height:1.1;word-break:break-all;overflow:hidden;}
+/* A named cell: the 24 px number size broke "Podium" into "Podiu / m", so a
+   name gets a size that fits a word to the cell, and wraps between words. */
+.ext-pcell.named{font-size:clamp(11px,1.25vw,16px);word-break:normal;overflow-wrap:anywhere;}
 .ext-pcell.stored{border-color:var(--red-lit);color:var(--text);}
 .ext-pcell.at-pos{background:rgba(102,187,106,.15);border-color:var(--green-lit);color:var(--text);}
 .ext-pcell.moving{border-color:var(--yellow);}
@@ -495,8 +507,9 @@ canvas.hsl-c{display:block;touch-action:none;}
 /* ---- advanced: the full surface for one camera ---- */
 .camc-adv-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .camc-pick{display:flex;gap:6px;flex:1;min-width:260px;}
-.camc-pick button{flex:1;height:48px;border-radius:12px;border:3px solid #333;
-  font-size:15px;font-weight:700;cursor:pointer;}
+.camc-pick button{flex:1;min-width:0;height:48px;border-radius:12px;border:3px solid #333;
+  font-size:15px;font-weight:700;cursor:pointer;padding:0 6px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .camc-link{font-size:12.5px;text-align:center;color:#e0a030;}
 .camc-link.ok{color:#7dc47d;}
 .camc-adv-body{display:grid;grid-template-columns:1fr;gap:10px;align-items:start;}
@@ -946,6 +959,14 @@ const HEALTH_NODE_BRIDGE     = 1;     // the mount's ESP32, which holds the came
 const HEALTH_FLAG_BLE_BUILD  = 0x02;  // its firmware has camera support at all
 const HEALTH_FLAG_BLE_LINK   = 0x04;  // ...and its camera is linked now
 const HEALTH_FLAG_CAM_UNPAIRED = 0x40;  // no camera paired: the normal state, not a fault
+const HUB_SENTINEL           = 0xFE;  // mount_id of a packet to or from the hub itself
+const CMD_NAMES_GET          = 0xAB;  // →hub: camera numbers, 1B each
+const CMD_NAME_SET           = 0xAC;  // →hub: {cam, slot | 0xFF, len, UTF-8} repeated
+const CMD_NAMES              = 0xAD;  // hub→: one camera's names, its own first
+const CMD_NAMES_REV          = 0xAE;  // hub→: rev(u32 BE) + named + the hub's limits
+const NAMES_SLOTS            = 10;    // position names per camera
+const NAME_MAX_BYTES         = 20;    // UTF-8 bytes per name
+const NAME_SLOT_CAMERA       = 0xFF;  // NAME_SET slot: the camera's own name
 // CalibPrompt sub-states (mirrors protocol.h CalibPrompt enum)
 const CP_MOVING_TO_A = 0x01;  // slider moving to home — wait
 const CP_WAIT_SET_A  = 0x02;  // at home: aim then Set A
@@ -1244,6 +1265,70 @@ class Confirmed {
 }
 // END camera-pure
 
+// ============================================================
+//  Camera and position names — the parts that touch no page
+// ============================================================
+// The names are the HUB's (shared/names.h), shared with every PC app and
+// phone.  Its wire format, byte for byte as the hub and protocol.py write it;
+// tools/test_hub_names.py runs this block in node against both.
+// BEGIN names-pure
+
+// names_clean() / fit_name(): control characters out, spaces trimmed, and at
+// most NAME_MAX_BYTES of UTF-8 — cut at a whole character, never through one.
+// The hub does the same to whatever it is sent; doing it here as well means
+// the name shown while the edit is in flight is the one that comes back.
+function fitName(s) {
+    let b = Array.from(new TextEncoder().encode(String(s)))
+        .filter(x => x >= 0x20 && x !== 0x7F);
+    let a = 0, m = b.length;
+    while (a < m && b[a] === 0x20) a++;
+    while (m > a && b[m - 1] === 0x20) m--;
+    b = b.slice(a, m);
+    if (b.length > NAME_MAX_BYTES) {
+        let cut = NAME_MAX_BYTES;
+        while (cut > 0 && (b[cut] & 0xC0) === 0x80) cut--;   // mid-character: back off
+        b = b.slice(0, cut);
+        while (b.length && b[b.length - 1] === 0x20) b.pop();
+    }
+    return b;
+}
+// CMD_NAME_SET payloads for [cam, slot, name] entries — as many as it takes.
+// 250, not 256: a packet's length byte counts 4 header bytes as well.
+function nameSetPayloads(entries) {
+    const out = [];
+    let body = [];
+    for (const [cam, slot, name] of entries) {
+        const raw = fitName(name);
+        const e = [cam & 0xFF, slot & 0xFF, raw.length].concat(raw);
+        if (body.length + e.length > 250) { out.push(body); body = []; }
+        body = body.concat(e);
+    }
+    if (body.length) out.push(body);
+    return out;
+}
+// CMD_NAMES → {cam, name, slots[]} ("" = no name), or null if malformed.
+function parseNames(p) {
+    if (!p || p.length < 2) return null;
+    const cam = p[0], n = p[1], dec = new TextDecoder();
+    const names = [];
+    let i = 2;
+    for (let k = 0; k < 1 + n; k++) {
+        if (i >= p.length) return null;
+        const len = p[i];
+        if (i + 1 + len > p.length) return null;
+        names.push(dec.decode(Uint8Array.from(Array.prototype.slice.call(p, i + 1, i + 1 + len))));
+        i += 1 + len;
+    }
+    return {cam: cam, name: names[0], slots: names.slice(1)};
+}
+// CMD_NAMES_REV → {rev, named, maxCams, slots, nameMax}, or null.
+function parseNamesRev(p) {
+    if (!p || p.length < 8) return null;
+    return {rev: ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0,
+            named: p[4], maxCams: p[5], slots: p[6], nameMax: p[7]};
+}
+// END names-pure
+
 // Per-mount accent colours — match the AMOLED MOUNT_ACCENT_HEX array (bright, for arcs)
 const CAM_ACCENT = ['', '#A5D6A7', '#90CAF9', '#D4B800', '#80CBC4', '#CE93D8'];
 // Per-mount dark tile colours — match the hub display C_CAM_BG array (muted, for button fills)
@@ -1352,7 +1437,11 @@ function refreshMounts() {
         const mac = macStr(mountTable[i - 1]);
         h += '<div class="mnt-row">'
            +   '<span class="mnt-dot" style="background:' + (CAM_ACCENT[i] || '#888') + '"></span>'
-           +   '<span class="mnt-cam">CAM ' + i + '</span>'
+           // The number first: pairing is about which mount is which number.
+           +   '<span class="mnt-cam">CAM ' + i
+           +     (camNames[i] && camNames[i].name
+                    ? '<small>' + escHtml(camNames[i].name) + '</small>' : '')
+           +   '</span>'
            +   '<span class="mnt-mac' + (mac ? '' : ' un') + '">'
            +     (mac || '— unpaired —') + '</span>'
            +   (mountRoute[i - 1] ? '<span class="mnt-via">via '
@@ -1548,21 +1637,98 @@ function camLinkState(m) {
     return l ? 'ready' : 'off';
 }
 
-// ---- Labels only in localStorage (coords live on Teensy) ----
-function lblKey(cam, slot) { return `cm_c${cam}_s${slot}_lbl`; }
-function loadLabel(cam, slot) {
+// ---- Camera and position names: the HUB's, shared by every device ----
+// Until 2026-09-26 each phone kept its own position names in browser storage,
+// so two phones and the PC could call one shot three things.  The hub keeps
+// them now (shared/names.h) and tells every client each change.
+//
+// Keyed by camera NUMBER.  SHOWN_CAMS is what this page shows and asks the hub
+// for; names the hub sends for any other camera are kept and not drawn, so a
+// page showing a different set of cameras needs only a different list.
+const SHOWN_CAMS = [];
+for (let i = 1; i <= NUM_MOUNTS; i++) SHOWN_CAMS.push(i);
+const camNames = {};            // cam -> {name, slots[]} as the hub last said
+let _namesRev = null;           // the hub's rev, from CMD_NAMES_REV
+let _namesWant = new Set();     // cameras asked for and not yet heard
+let _namesAskedAt = 0;
+let _namesLocalDone = false;    // this phone's old names dealt with
+
+function _namesOf(cam) {
+    return camNames[cam] || (camNames[cam] = {name: '', slots: new Array(NAMES_SLOTS).fill('')});
+}
+function loadLabel(cam, slot) { const c = camNames[cam]; return (c && c.slots[slot]) || ''; }
+function camName(cam)         { const c = camNames[cam]; return (c && c.name) || ('CAM ' + cam); }
+function saveLabel(cam, slot, label) { setName(cam, slot, label); }
+function clearLabel(cam, slot)       { setName(cam, slot, ''); }
+
+// Change a name.  Shown here at once, as the hub will keep it, and sent; the
+// hub's answer to every device confirms it.  A position called by its own
+// number is no name at all.
+function setName(cam, slot, name) {
+    let text = new TextDecoder().decode(Uint8Array.from(fitName(name)));
+    if (slot !== NAME_SLOT_CAMERA && text === String(slot + 1)) text = '';
+    const c = _namesOf(cam);
+    if (slot === NAME_SLOT_CAMERA) c.name = text; else c.slots[slot] = text;
+    nameSetPayloads([[cam, slot, text]])
+        .forEach(p => wsSend(buildPkt(HUB_SENTINEL, CMD_NAME_SET, p)));
+    namesChanged();
+}
+function askNames(cams) {
+    cams.forEach(c => _namesWant.add(c));
+    _namesAskedAt = Date.now();
+    wsSend(buildPkt(HUB_SENTINEL, CMD_NAMES_GET, cams));
+}
+function renameCamera(cam) {
+    const cur = (camNames[cam] && camNames[cam].name) || '';
+    const v = prompt('Name for camera ' + cam + ' (clear it to go back to "CAM ' + cam + '"):', cur);
+    if (v !== null) setName(cam, NAME_SLOT_CAMERA, v);
+}
+
+// This phone's names from before the hub kept them: sent to the hub once if
+// it has none, and removed from the phone either way, so an old name can never
+// come back over one set since on another device.
+function _takeLocalNames() {
+    const out = [];
     try {
-        const v = localStorage.getItem(lblKey(cam, slot)) || '';
-        // Strip legacy default labels ('Subject N', 'P1'–'P10') that should never persist
-        if (/^Subject \d+$/.test(v) || /^P\d+$/.test(v)) { localStorage.removeItem(lblKey(cam, slot)); return ''; }
-        return v;
-    } catch(e) { return ''; }
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+            const k = localStorage.key(i), m = /^cm_c(\d+)_s(\d+)_lbl$/.exec(k || '');
+            if (!m) continue;
+            const v = localStorage.getItem(k) || '';
+            localStorage.removeItem(k);
+            if (!v || /^Subject \d+$/.test(v) || /^P\d+$/.test(v)) continue;   // old defaults
+            out.push([parseInt(m[1], 10), parseInt(m[2], 10), v]);
+        }
+    } catch (e) {}
+    return out;
 }
-function saveLabel(cam, slot, label) {
-    try { localStorage.setItem(lblKey(cam, slot), label); } catch(e) {}
+
+function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, ch =>
+        ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[ch]);
 }
-function clearLabel(cam, slot) {
-    try { localStorage.removeItem(lblKey(cam, slot)); } catch(e) {}
+
+// Redraw every place a name shows.
+function namesChanged() {
+    document.querySelectorAll('.cam-btn').forEach(btn => {
+        const nm = btn.querySelector('.cam-nm');
+        if (nm) nm.textContent = camName(parseInt(btn.dataset.cam, 10));
+    });
+    for (let i = 1; i <= NUM_MOUNTS; i++) {
+        ['ext-pos-cam-lbl-', 'camc-nm-', 'ext-cfg-nm-'].forEach(p => {
+            const el = document.getElementById(p + i);
+            if (el) el.textContent = camName(i);
+        });
+    }
+    const pick = document.getElementById('camc-pick');
+    if (pick) pick.querySelectorAll('button').forEach(b => {
+        b.textContent = camName(parseInt(b.dataset.cam, 10));
+    });
+    refreshPosGrid();
+    if (_extActive) {
+        if (_extPage === 'positions') refreshExtPositions();
+        else if (_extPage === 'mounts') refreshMounts();
+    }
+    if (camPanelShown() && _camMode === 'adv') advRefreshLink();
 }
 
 // ============================================================
@@ -1618,7 +1784,7 @@ function wsConnect() {
         sock.binaryType = 'arraybuffer';
         // Capture `sock` (not `ws`) in each handler so a stale socket's events
         // never operate on a newer socket that has already replaced `ws`.
-        sock.onopen    = () => { if (ws === sock) { setWsSt(true); reqMountTable(); } };
+        sock.onopen    = () => { if (ws === sock) { setWsSt(true); reqMountTable(); askNames(SHOWN_CAMS); } };
         sock.onclose   = () => { if (ws === sock) { setWsSt(false); _wsScheduleRetry(); } };
         sock.onerror   = () => sock.close();   // close THIS socket, not whatever ws points to now
         sock.onmessage = e => onPkt(new Uint8Array(e.data));
@@ -1904,7 +2070,47 @@ function _onOnePkt(buf, off) {
         for (const k in upd) { c.heard[k] = upd[k]; c.heardAt[k] = now; any = true; }
         if (any) camChanged(mountId);
     }
+
+    // One camera's names, whole — the hub's answer to a request, or its word
+    // that some device changed one.
+    if (cmd === CMD_NAMES && plen >= 2) {
+        const r = parseNames(buf.subarray(off + 7, off + 7 + plen));
+        if (r && r.cam >= 1) {
+            const c = _namesOf(r.cam);
+            c.name = r.name;
+            for (let s = 0; s < NAMES_SLOTS; s++) c.slots[s] = r.slots[s] || '';
+            _namesWant.delete(r.cam);
+            if (SHOWN_CAMS.indexOf(r.cam) >= 0) namesChanged();
+        }
+    }
+
+    // The hub's rev: it moves whenever any name does, so a phone that missed a
+    // change — a full WebSocket queue drops frames — sees it move and asks.
+    if (cmd === CMD_NAMES_REV && plen >= 8) {
+        const info = parseNamesRev(buf.subarray(off + 7, off + 7 + plen));
+        if (info && !_namesLocalDone) {
+            _namesLocalDone = true;
+            const local = _takeLocalNames();
+            if (local.length && info.named === 0) {
+                nameSetPayloads(local)
+                    .forEach(p => wsSend(buildPkt(HUB_SENTINEL, CMD_NAME_SET, p)));
+            }
+        }
+        // Moved: ask for everything shown, even with an answer outstanding —
+        // waiting on that one would miss a change to a different camera.
+        if (info && info.rev !== _namesRev) {
+            _namesRev = info.rev;
+            askNames(SHOWN_CAMS);
+        }
+    }
 }
+
+// A name asked for and not heard within 4 s went missing on the way: ask again.
+setInterval(() => {
+    if (_namesWant.size && Date.now() - _namesAskedAt > 4000
+            && ws && ws.readyState === WebSocket.OPEN)
+        askNames(Array.from(_namesWant));
+}, 1000);
 
 // Disconnect detection — no STATUS for 3 s
 setInterval(() => {
@@ -1941,7 +2147,8 @@ function makeCamBtns(containerId) {
         const btn = document.createElement('button');
         btn.className = 'cam-btn';
         btn.dataset.cam = i;
-        btn.innerHTML = `CAM ${i}<span class="dot" id="${containerId}-dot${i}"></span>`;
+        btn.innerHTML = `<span class="cam-nm"></span><span class="dot" id="${containerId}-dot${i}"></span>`;
+        btn.querySelector('.cam-nm').textContent = camName(i);   // text, never markup
         btn.addEventListener('click', () => {
             // Positions cam bar: CLEAR armed → clear all 10 slots for this camera
             if (containerId === 'ext-pos-cam-bar' && _extClearMode) {
@@ -1954,6 +2161,9 @@ function makeCamBtns(containerId) {
                 if (_extActive && _extPage === 'positions') refreshExtPositions();
                 return;
             }
+            // EDIT armed: rename the camera, as the PC app does — for every
+            // device, since the name is the hub's.
+            if (uiMode === 'edit') { renameCamera(i); return; }
             selCam = i;
             const col = CAM_ACCENT[i];
             document.documentElement.style.setProperty('--cam-color', col);
@@ -2060,7 +2270,8 @@ function refreshPosGrid() {
             const isTarget  = (cs.targetSlot !== 0xFF && cs.targetSlot === s);
             const lbl       = loadLabel(selCam, s);
 
-            btn.textContent = lbl || `${s + 1}`;
+            // A name shows while the position holds a shot, as on the PC app.
+            btn.textContent = (occupied && lbl) || `${s + 1}`;
 
             let cls = 'pos-btn';
             if (isTarget) {
@@ -2143,7 +2354,10 @@ function onPosClick(slot) {
     } else if (uiMode === 'edit') {
         const occupied = !!(cs.slotOccupied & (1 << slot));
         if (!occupied) return;
-        const cur = loadLabel(selCam, slot) || `P${slot+1}`;
+        // The slot's own number as the starting text, not "P3": the name is
+        // shared now, and an OK pressed on a made-up default would give every
+        // device a name nobody chose.
+        const cur = loadLabel(selCam, slot) || String(slot + 1);
         const lbl = prompt('Position name (clear to delete):', cur);
         if (lbl === null) return;
         if (lbl.trim() === '') {
@@ -3006,8 +3220,11 @@ function buildExtPositionsTable() {
         row.className = 'ext-pos-row';
         const lbl = document.createElement('div');
         lbl.className = 'ext-pos-cam-lbl';
-        lbl.textContent = 'CAM ' + i;
+        lbl.id = 'ext-pos-cam-lbl-' + i;
+        lbl.textContent = camName(i);
         lbl.style.color = CAM_ACCENT[i];
+        // EDIT armed: the row's name renames the camera, like its CAM button.
+        lbl.addEventListener('click', () => { if (uiMode === 'edit') renameCamera(i); });
         row.appendChild(lbl);
         const cells = document.createElement('div');
         cells.className = 'ext-pos-cells';
@@ -3015,7 +3232,7 @@ function buildExtPositionsTable() {
             const cell = document.createElement('div');
             cell.className = 'ext-pcell';
             cell.id = 'ext-pcell-' + i + '-' + s;
-            cell.textContent = loadLabel(i, s) || (s + 1);
+            cell.textContent = s + 1;          // names arrive with the first refresh
             cell.addEventListener('click', () => {
                 const cs2 = camSt[i];
                 if (!cs2.connected) return;            // camera offline
@@ -3177,8 +3394,11 @@ function refreshExtPositions() {
                 cell.className = cls;
                 continue;
             }
-            cell.textContent = loadLabel(i, s) || (s + 1);
             const occ = !!(cs.slotOccupied & (1 << s));
+            // A position's name shows while it holds a shot, as on the PC app;
+            // a look-at subject's shows regardless, as before.
+            const named = (occ || la) && loadLabel(i, s);
+            cell.textContent = named || (s + 1);
             // LA subjects: green = currently tracked subject (activeLaSubject), not slotAt
             const at  = la ? (s === cs.activeLaSubject) : !!(cs.slotAt & (1 << s));
             const tgt = (cs.targetSlot !== 0xFF && cs.targetSlot === s);
@@ -3198,6 +3418,7 @@ function refreshExtPositions() {
             else if (occ && at)     cls += ' at-pos';
             else if (occ)           cls += ' stored';
             if (uiMode === 'edit')  cls += ' edit-mode';
+            if (named)              cls += ' named';
             cell.className = cls;
         }
         // Per-row speed dials
@@ -3242,7 +3463,8 @@ function buildExtConfig() {
         // ---- Header ----
         card.innerHTML = '<div class="ext-cfg-name">'
             + '<div class="ext-cfg-dot" id="ext-cfg-dot' + i + '"></div>'
-            + '<span style="color:' + accent + '">CAM ' + i + '</span>'
+            + '<span style="color:' + accent + '" id="ext-cfg-nm-' + i + '">'
+            + escHtml(camName(i)) + '</span>'
             + '</div>';
 
         // ---- Action buttons (top) ----
@@ -3706,7 +3928,8 @@ function buildCamRows() {
         row.className = 'camc-row';
         row.style.setProperty('--acc', CAM_ACCENT[m]);
         row.innerHTML =
-            '<div class="camc-id"><span class="camc-name">CAM ' + m + '</span>'
+            '<div class="camc-id"><span class="camc-name" id="camc-nm-' + m + '">'
+          +   escHtml(camName(m)) + '</span>'
           +   '<span class="camc-state" id="camc-st-' + m + '">—</span></div>'
           + '<button class="camc-btn blue camc-af" id="camc-af-' + m + '">Auto Focus</button>'
           + '<div class="camc-steps">'
@@ -3831,7 +4054,7 @@ function buildCamAdvanced() {
     const pick = _el('camc-pick');
     for (let m = 1; m <= NUM_MOUNTS; m++) {
         const b = document.createElement('button');
-        b.textContent = 'Cam ' + m;
+        b.textContent = camName(m);
         b.dataset.cam = m;
         b.style.background = CAM_BG[m];
         b.style.color = CAM_ACCENT[m];
@@ -4116,7 +4339,7 @@ const ADV_LINK_TEXT = {
 };
 function advRefreshLink() {
     const st = camLinkState(_advCam), el = _el('camc-link');
-    el.textContent = 'Cam ' + _advCam + ': ' + ADV_LINK_TEXT[st];
+    el.textContent = camName(_advCam) + ': ' + ADV_LINK_TEXT[st];
     el.className = 'camc-link' + (st === 'ready' ? ' ok' : '');
 }
 

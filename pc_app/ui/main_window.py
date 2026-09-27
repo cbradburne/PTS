@@ -290,6 +290,13 @@ class MainWindow(QMainWindow):
         self._joy     = joystick
 
         self._dispatcher   = CommandDispatcher(joystick, mount_manager, self)
+        # Camera and position names are the hub's, shared by every device.
+        # This window shows cameras 1-5; the names are keyed by camera number,
+        # so a window showing another set would pass it here.
+        from config.name_sync import NameSync
+        self._names = NameSync(mount_manager, bridge, position_store, config,
+                               shown=range(1, 6), parent=self)
+        self._names.changed.connect(self._reload_names_ui)
         self._active_mount = 1
         self._mode         = MODE_MOVE
         self._edit_active  = False   # Edit button (label-edit) toggle
@@ -801,25 +808,23 @@ class MainWindow(QMainWindow):
             current
         )
         if ok:
-            self._config.mount(mount_id).label = text.strip()
-            # Name changes are written to the working temp.json only — never to
-            # a saved set (Default.json / user files); those change only via the
-            # Config dialog's Save / Set Defaults buttons.
-            from config import name_store
-            name_store.save_temp(self._store, self._config)
-            # Update both cam and clear buttons
+            # To the hub, which gives it to every device — or, with hub firmware
+            # from before names, to temp.json as it always was.  See NameSync.
+            self._names.set_camera_name(mount_id, text)
             new_label = self._config.mount_label(mount_id)
             self._cam_btns[mount_id - 1].setText(new_label)
 
     def _on_label_edited(self, mount_id: int, slot: int, label: str) -> None:
-        # A position name was edited — persist the working set to temp.json only.
-        from config import name_store
-        name_store.save_temp(self._store, self._config)
+        # A position name was edited: to the hub, as a camera rename is.
+        self._names.set_position_name(mount_id, slot, label)
 
     def _reload_names_ui(self) -> None:
-        """Refresh every camera button + position button after a name Load."""
+        """Refresh every camera button + position button after names change —
+        a Load here, or an edit on any other device, which the hub passes on.
+        Through _update_run_cam_btn, because a name can now arrive in the middle
+        of a run sequence, and must not overwrite "■ Stop" with it."""
         for mid in range(1, 6):
-            self._cam_btns[mid - 1].setText(self._config.mount_label(mid))
+            self._update_run_cam_btn(mid)
             for slot in range(10):
                 self._grid.refresh_button(mid, slot)
 
@@ -873,7 +878,9 @@ class MainWindow(QMainWindow):
         for slot in range(10):
             if st.slot_occupied_mask & (1 << slot):
                 self._mm.send_clear_pos(mount_id, slot)
-        self._store.clear_mount(mount_id)
+        # All ten names go, stored or not — the hub drops a name when it sees
+        # its position cleared, but only for the positions cleared above.
+        self._names.clear_positions(mount_id, range(10))
         self._exit_clear_mode()
 
     # ------------------------------------------------------------------
@@ -1231,7 +1238,8 @@ class MainWindow(QMainWindow):
         # the macOS fullscreen wobble.
         self._conn_snapshot = (self._config.bridge_mode, self._config.bridge_host,
                                self._config.bridge_tcp_port, self._config.bridge_port)
-        dlg = ConfigDialog(self._config, self._mm, self._bridge, self._store, self)
+        dlg = ConfigDialog(self._config, self._mm, self._bridge, self._store, self,
+                           name_sync=self._names)
         self._config_dlg = dlg
         dlg.names_changed.connect(self._reload_names_ui)
         # Shown exactly like the CV window (which floats correctly over macOS

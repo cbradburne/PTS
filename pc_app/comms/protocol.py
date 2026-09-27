@@ -161,6 +161,11 @@ class Cmd(IntEnum):
     MOUNT_OUTAGE      = 0xA9   # hub→clients, 5×12B: how long each mount was uncontrollable
     CAM_CONTROL        = 0xA1   # client→hub→mount: Blackmagic camera command, relayed verbatim
     CAM_STATUS         = 0xA2   # mount→clients: Blackmagic status, relayed verbatim
+    # Camera and position names, held by the hub (see shared/names.h).
+    NAMES_GET          = 0xAB   # client→hub: camera numbers, 1B each; empty = every named one
+    NAME_SET           = 0xAC   # client→hub: {cam, slot | 0xFF, len, UTF-8} repeated
+    NAMES              = 0xAD   # hub→clients: one camera's names, the camera's own first
+    NAMES_REV          = 0xAE   # hub→clients, 8B: rev u32 BE + named count + the hub's limits
 
 
 # CMD_HEALTH node_type values (payload byte [0])
@@ -1778,6 +1783,19 @@ def pkt_get_subjects(mount_id: int) -> bytes:
 # Hub-scoped, so these carry the hub sentinel mount_id (like HUB_RESTART).
 # ---------------------------------------------------------------------------
 HUB_SENTINEL              = 0xFE
+
+# Camera and position names — the hub's, shown by every client.  Keyed by
+# camera NUMBER, and NAMES_MAX_CAMS is more than NUM_MOUNTS on purpose: a
+# device may show cameras 1-5 and another 6-10, each asking for its own.
+NAMES_MAX_CAMS            = 32
+NAMES_SLOTS               = 10   # position names per camera
+NAME_MAX_BYTES            = 20   # UTF-8 bytes, not characters
+NAME_SLOT_CAMERA          = 0xFF # NAME_SET slot: the camera's own name
+NAMES_REV_PAYLOAD_LEN     = 8
+# How much of a CMD_NAME_SET to fill before starting another.  NOT
+# PACKET_MAX_PAYLOAD: the length byte counts the 4 header bytes too, so no
+# payload can pass 251, and 256 would wrap it into a corrupt packet.
+NAME_SET_BUDGET           = 250
 MOUNT_TABLE_PAYLOAD_LEN   = 30   # 5 × MAC(6)
 PAIR_CONFLICT_PAYLOAD_LEN = 13   # cam(1) + new_mac(6) + old_mac(6)
 MOUNT_ROUTE_PAYLOAD_LEN   = 5    # one byte per cam
@@ -1928,6 +1946,81 @@ def decode_mount_nomem_ladder(lad: bytes) -> MountNomemLadder:
 def pkt_get_mount_table() -> bytes:
     """Ask the hub to push its current CMD_MOUNT_TABLE."""
     return build_packet(HUB_SENTINEL, Cmd.GET_MOUNT_TABLE)
+
+
+# ---- Camera and position names (the hub's) ---------------------------------
+
+def fit_name(name: str) -> bytes:
+    """A name as the hub will keep it: control characters out, trimmed, and
+    no more than NAME_MAX_BYTES of UTF-8 — cut at a whole character.
+
+    The hub does the same to anything it is sent, so this is not a gate; it is
+    so the name this app shows while the edit is in flight is the one that
+    comes back, not a longer one that silently shrinks a moment later.
+    """
+    # Byte for byte what names_clean() in shared/names.h does, in its order.
+    raw = bytes(b for b in str(name).encode("utf-8") if b >= 0x20 and b != 0x7F)
+    raw = raw.strip(b" ")
+    if len(raw) > NAME_MAX_BYTES:
+        cut = NAME_MAX_BYTES
+        while cut > 0 and (raw[cut] & 0xC0) == 0x80:   # mid-character: back off
+            cut -= 1
+        raw = raw[:cut].rstrip(b" ")
+    return raw
+
+
+def pkt_names_get(cams) -> bytes:
+    """Ask the hub for these cameras' names — one CMD_NAMES each, named or
+    not, then a CMD_NAMES_REV.  An empty list asks for every named camera."""
+    return build_packet(HUB_SENTINEL, Cmd.NAMES_GET,
+                        bytes(c for c in cams if 1 <= c <= NAMES_MAX_CAMS))
+
+
+def pkts_name_set(entries) -> list[bytes]:
+    """CMD_NAME_SET packets for (cam, slot, name) entries — slot 0-9 or
+    NAME_SLOT_CAMERA, and "" clears back to the default.  As many packets as
+    it takes: a whole name set is 55 names, more than one packet holds."""
+    pkts, body = [], b""
+    for cam, slot, name in entries:
+        raw = fit_name(name)
+        entry = bytes([cam & 0xFF, slot & 0xFF, len(raw)]) + raw
+        if len(body) + len(entry) > NAME_SET_BUDGET:
+            pkts.append(build_packet(HUB_SENTINEL, Cmd.NAME_SET, body))
+            body = b""
+        body += entry
+    if body:
+        pkts.append(build_packet(HUB_SENTINEL, Cmd.NAME_SET, body))
+    return pkts
+
+
+def decode_names(payload: bytes) -> tuple[int, str, list[str]]:
+    """CMD_NAMES → (camera, its own name, [position names]).  "" = no name.
+
+    Takes however many slots the hub sent, so a hub with more or fewer than
+    this app expects still decodes; the caller keeps the ones it shows.
+    """
+    if len(payload) < 2:
+        raise ParseError(f"NAMES payload too short: {len(payload)}")
+    cam, slots = payload[0], payload[1]
+    names, i = [], 2
+    for _ in range(1 + slots):
+        if i >= len(payload):
+            raise ParseError("NAMES payload ends mid-record")
+        n = payload[i]
+        if i + 1 + n > len(payload):
+            raise ParseError("NAMES payload name runs past the end")
+        names.append(payload[i + 1:i + 1 + n].decode("utf-8", "replace"))
+        i += 1 + n
+    return cam, names[0], names[1:]
+
+
+def decode_names_rev(payload: bytes) -> dict:
+    """CMD_NAMES_REV → rev, how many cameras have a name, and the hub's limits."""
+    if len(payload) < NAMES_REV_PAYLOAD_LEN:
+        raise ParseError(f"NAMES_REV payload too short: {len(payload)}")
+    rev, named, max_cams, slots, name_max = struct.unpack(">IBBBB", payload[:8])
+    return {"rev": rev, "named": named, "max_cams": max_cams,
+            "slots": slots, "name_max": name_max}
 
 
 def pkt_pair_decide(cam: int, decision: int, mac: bytes) -> bytes:

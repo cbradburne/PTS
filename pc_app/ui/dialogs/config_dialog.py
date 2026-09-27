@@ -54,7 +54,8 @@ class ConfigDialog(QWidget):
     names_changed = pyqtSignal() # emitted after a name set is Loaded
 
     def __init__(self, config: AppConfig, mount_manager: MountManager,
-                 bridge: Bridge, position_store=None, parent=None):
+                 bridge: Bridge, position_store=None, parent=None,
+                 name_sync=None):
         # Exactly what CVWindow uses, because CVWindow has never had the macOS
         # fullscreen problem: a parented QWidget with the Dialog flag, shown
         # with show() + raise_() and NO activateWindow().
@@ -68,6 +69,7 @@ class ConfigDialog(QWidget):
         self._result = 0
         self._config  = config
         self._store   = position_store
+        self._names   = name_sync     # NameSync: the hub's names, or None
         self._mm      = mount_manager
         self._bridge  = bridge
         self._tabs    = None   # set in _build
@@ -157,15 +159,58 @@ class ConfigDialog(QWidget):
             options=QFileDialog.Option.DontUseNativeDialog)
         if not path:
             return
+        on_hub = getattr(self, "_names", None) is not None and self._names.mode == "hub"
+        if on_hub:
+            from PyQt6.QtWidgets import QMessageBox
+            if QMessageBox.question(
+                    self, "Load Names",
+                    "Send this set to the hub?\n\nIt replaces the camera and "
+                    "position names on every PC app and phone.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    ) != QMessageBox.StandardButton.Yes:
+                return
         try:
             name_store.load_from(path, self._store, self._config)
-            name_store.save_temp(self._store, self._config)   # loaded set becomes the working copy
+            if on_hub:
+                self._names.upload_all()                       # every device takes it
+            else:
+                name_store.save_temp(self._store, self._config)   # loaded set becomes the working copy
             self.names_changed.emit()                          # refresh grid + cam buttons
             self._names_status.setStyleSheet("color:#7fbf72; font-size:11px;")
-            self._names_status.setText(f"Loaded ← {path}")
+            self._names_status.setText(
+                f"Loaded ← {path}" + (" — sent to every device" if on_hub else ""))
         except Exception as e:
             self._names_status.setStyleSheet("color:#EF5350; font-size:11px;")
             self._names_status.setText(f"Load failed: {e}")
+
+    def _on_names_mode(self, _mode: str) -> None:
+        self._refresh_names_box()
+
+    def _refresh_names_box(self) -> None:
+        """Say where the names live — the hub, or (older hub firmware) this PC."""
+        # getattr: the tabs are also built on their own, without __init__.
+        names = getattr(self, "_names", None)
+        mode = names.mode if names is not None else "local"
+        if mode == "hub":
+            self._names_note.setText(
+                "Camera and position names are kept on the hub and shared with "
+                "every PC app and phone: a change on any of them shows on all "
+                "of them, and survives a restart.\nSave keeps the current names "
+                "as a file in your Documents/PTS folder; Load sends a saved set "
+                "to every device.")
+        elif mode == "unknown":
+            self._names_note.setText(
+                "Checking whether the hub keeps the names…  Until it answers, "
+                "names are kept on this PC as well.")
+        else:
+            self._names_note.setText(
+                "This hub's firmware keeps no names, so they are kept on this PC: "
+                "the 5 camera names and 50 position names load from Default.json "
+                "at startup.  Editing a name updates the working copy only — use "
+                "these buttons to save, load, or set the startup defaults.\n"
+                "Files live in your Documents/PTS folder.")
+        # Startup defaults only mean anything where this PC keeps the names.
+        self._names_defaults_btn.setVisible(mode != "hub")
 
     def _names_set_defaults(self) -> None:
         from config import name_store
@@ -476,27 +521,28 @@ class ConfigDialog(QWidget):
         # ---- Camera & position names (save / load / defaults) ----
         names_box = QGroupBox("Camera && Position Names")
         names_vl  = QVBoxLayout(names_box)
-        names_note = QLabel(
-            "The 5 camera names and 50 position names load from Default.json at "
-            "startup.  Editing a name updates the working copy only — use these "
-            "buttons to save, load, or set the startup defaults.\nFiles live in "
-            "your Documents/PTS folder.")
-        names_note.setWordWrap(True)
-        names_vl.addWidget(names_note)
+        self._names_note = QLabel()
+        self._names_note.setWordWrap(True)
+        names_vl.addWidget(self._names_note)
         names_row = QHBoxLayout()
         save_names_btn     = QPushButton("Save…")
         load_names_btn     = QPushButton("Load…")
-        defaults_names_btn = QPushButton("Set as Defaults")
+        self._names_defaults_btn = QPushButton("Set as Defaults")
         save_names_btn.clicked.connect(self._names_save)
         load_names_btn.clicked.connect(self._names_load)
-        defaults_names_btn.clicked.connect(self._names_set_defaults)
-        for b in (save_names_btn, load_names_btn, defaults_names_btn):
+        self._names_defaults_btn.clicked.connect(self._names_set_defaults)
+        for b in (save_names_btn, load_names_btn, self._names_defaults_btn):
             names_row.addWidget(b)
         names_vl.addLayout(names_row)
         self._names_status = QLabel("")
         self._names_status.setStyleSheet("color:#7fbf72; font-size:11px;")
         names_vl.addWidget(self._names_status)
         form.addRow(names_box)
+        self._refresh_names_box()
+        if getattr(self, "_names", None) is not None:
+            # A bound method, not a lambda: PyQt drops the connection when this
+            # window is destroyed, where a lambda would outlive it.
+            self._names.mode_changed.connect(self._on_names_mode)
 
         # ---- Slider / Zoom / Ref grid (all 5 cameras) ----
         # "&&" — a lone '&' is a Qt mnemonic marker and renders as an underscore.
