@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QSizePolicy, QFrame, QInputDialog,
     QDialog, QDialogButtonBox, QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QTimer
+from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QPoint, QRect
 from PyQt6.QtGui import QFont, QColor, QPainter, QPaintEvent
 
 from .widgets.position_grid import (
@@ -453,6 +453,12 @@ class MainWindow(QMainWindow):
             self._cam_containers[mid] = container
             hl.addWidget(container)
         return w
+
+    def cam_selector_rects(self) -> list[QRect]:
+        """The Cam 1-5 buttons as they sit on the screen, in order.  For a
+        dialog that repeats this row directly under it (Camera Control —
+        Advanced) to take the same sizes and line itself up."""
+        return [QRect(b.mapToGlobal(QPoint(0, 0)), b.size()) for b in self._cam_btns]
 
     def _build_bottom_bar(self) -> QWidget:
         # Three-column grid so Run is always perfectly centred.

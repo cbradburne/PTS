@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import Qt, QTimer, QObject, QEvent
+from PyQt6.QtCore import Qt, QTimer, QObject, QEvent, QPoint
 from PyQt6.QtGui import QValidator
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QAbstractSpinBox,
@@ -56,6 +56,9 @@ from ui.widgets.colour_wheel import LabelledWheel
 # The one palette both this dialog and the main window read, so the picker
 # cannot drift out of step with the buttons behind it.
 from ui.widgets.position_grid import CAM_COLORS
+# The main window's scale, so the picker's buttons are drawn at the size of the
+# ones they sit under.
+from ui.ui_scale import px, qss
 
 _SHUTTERS = [24, 25, 30, 48, 50, 60, 100, 120, 125, 200, 250, 500, 1000, 2000]
 
@@ -311,19 +314,25 @@ class CameraAdvancedDialog(QDialog):
         # the main window directly behind this dialog.  A QTabBar cannot carry
         # a per-tab background — stylesheets have no way to address one tab —
         # so these are buttons wearing the main window's own palette.
+        #
+        # And its sizes: the dialog opens straight under that row, so any
+        # difference shows.  Drawn as the main row is — _build_cam_selector's
+        # px(60) high and px(150) wide, px(4) apart between containers that
+        # each add px(0) (which is 1) a side — and then, once shown, measured
+        # against the real row: see _line_up_with_main_row().
         self._cam_btns: dict[int, QPushButton] = {}
-        picker = QHBoxLayout()
-        picker.setSpacing(12)
-        picker.addStretch(1)
+        self._picker = QHBoxLayout()
+        self._picker.setSpacing(px(4) + 2 * px(0))
+        self._picker.addStretch(1)
         for i in range(1, NUM_MOUNTS + 1):
             b = QPushButton(f"Cam {i}")
-            b.setFixedHeight(58)
-            b.setMinimumWidth(150)
+            b.setFixedHeight(px(60))
+            b.setMinimumWidth(px(150))
             b.clicked.connect(lambda _c, m=i: self._select_cam(m))
             self._cam_btns[i] = b
-            picker.addWidget(b)
-        picker.addStretch(1)
-        root.addLayout(picker)
+            self._picker.addWidget(b)
+        self._picker.addStretch(1)
+        root.addLayout(self._picker)
 
         self._link = QLabel("")
         self._link.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -749,18 +758,70 @@ class CameraAdvancedDialog(QDialog):
 
     def _paint_cam_btns(self) -> None:
         """Selected camera wears its accent; the rest wear the same grey the
-        main window uses, so the two rows read as one control."""
+        main window uses, so the two rows read as one control — with its type,
+        padding and corners too, scaled as its _cam_btn_style is."""
         for mid, b in self._cam_btns.items():
             col = CAM_COLORS[mid]
             border = col["accent"].name() if mid == self._mount else "#333333"
-            b.setStyleSheet(f"""
+            b.setStyleSheet(qss(f"""
                 QPushButton {{
                     background: {col['btn_bg']}; color: {col['btn_text']};
                     border: 5px solid {border};
-                    border-radius: 20px; font-size: 24px; font-weight: bold;
-                    padding: 4px 12px;
+                    border-radius: 20px; font-size: 28px; font-weight: bold;
+                    padding: 6px 14px;
                 }}
-            """)
+            """))
+
+    # ── lined up under the main window's row ─────────────────────────────
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # After the window manager has placed it: before that, where the
+        # buttons are on screen is not yet known.
+        QTimer.singleShot(0, self._line_up_with_main_row)
+
+    def _main_cam_rects(self):
+        """The main window's Cam 1-5 buttons on screen, from whichever window
+        up the chain is the main one (the parent is Camera Control); None
+        when there is none — a test, or the dialog opened on its own."""
+        w = self.parentWidget()
+        while w is not None:
+            rects = getattr(w, "cam_selector_rects", None)
+            if callable(rects):
+                return rects()
+            w = w.parentWidget()
+        return None
+
+    def _line_up_with_main_row(self) -> None:
+        """Sit this row exactly under the main window's.
+
+        It opens straight below that row, so any difference between the two
+        shows — and it did: its buttons 12 px apart against the main row's 6,
+        and the row centred on the Camera Control window rather than under the
+        main one, so Cam 1 sat about 32 px left of the Cam 1 above it and Cam 5
+        about 7 px (the operator's screenshot, 2026-09-27).
+        Each button now takes the size of the one above it and the gaps take
+        the gap between those, which also holds when a camera's name makes its
+        button wider.  Then the dialog moves sideways until the rows share
+        their edges.  Only sideways: where it opens vertically is left alone,
+        and it is never pushed off the screen to do it.
+        """
+        rects = self._main_cam_rects()
+        btns = [self._cam_btns[m] for m in sorted(self._cam_btns)]
+        if not rects or len(rects) != len(btns):
+            return
+        for b, r in zip(btns, rects):
+            b.setFixedSize(r.size())
+        gaps = [rects[i + 1].left() - rects[i].left() - rects[i].width()
+                for i in range(len(rects) - 1)]
+        self._picker.setSpacing(max(0, min(gaps)))
+        self.layout().activate()
+        dx = rects[0].left() - btns[0].mapToGlobal(QPoint(0, 0)).x()
+        x = self.x() + dx
+        scr = self.screen().availableGeometry() if self.screen() else None
+        if scr is not None:
+            x = max(scr.left(), min(x, scr.right() + 1 - self.frameGeometry().width()))
+        if x != self.x():
+            self.move(x, self.y())
 
     # ── hands off while the operator is working ──────────────────────────
     def _touch(self, w) -> None:
