@@ -403,4 +403,38 @@ print("\n4. hub: names handled before any mount; client AND display clears take 
 print("   loaded at boot, ticked in the loop, and a request is not activity.")
 print("   web app: no names of its own; asks the hub for the cameras it shows")
 
+# ---- 5. the PC does not wait for an ACK the hub never sends -----------------
+# The hub answers NAMES_GET and NAME_SET with the names themselves (CMD_NAMES,
+# and the NAMES_REV beacon moving).  ACK-tracked, the bench's names sync read
+# "CMD hub 0/3 acknowledged (0.000%)" at WARNING (2026-09-27) — a warning that
+# is always wrong.  Still logged: the TX line is the only record a rename went.
+import io as _io, logging as _logging, threading as _threading
+from comms.bridge import Bridge
+
+_buf = _io.StringIO()
+_hnd = _logging.StreamHandler(_buf)
+_blog = _logging.getLogger("comms.bridge")
+_saved = (_blog.handlers, _blog.level, _blog.propagate)
+_blog.handlers, _blog.propagate = [_hnd], False
+_blog.setLevel(_logging.INFO)
+br = Bridge.__new__(Bridge)
+br._diag_lock = _threading.Lock()
+br._pending_acks, br._cmd_ledger, br._cmd_stat = {}, {}, {}
+br._tx_cmd_sent, br._last_tracked_tx_t = 0, 0.0
+for pkt in [P.pkt_names_get([1, 2, 3])] + P.pkts_name_set([(1, 0, "Drums"), (2, 0xFF, "Balcony")]):
+    br._note_tx_command(pkt)
+assert br._pending_acks == {} and br._cmd_stat == {} and br._tx_cmd_sent == 0, \
+    f"a names command waits for an ACK the hub never sends: pending {br._pending_acks}, " \
+    f"stats {br._cmd_stat} — it would read as lost ('CMD hub 0/N acknowledged')"
+logged = _buf.getvalue()
+assert "TX → NAMES_GET" in logged and "TX → NAME_SET" in logged, \
+    f"the names commands are no longer logged — a rename would leave no trace: {logged!r}"
+assert "awaiting ACK" not in logged and "not an ACK" in logged, logged
+br._note_tx_command(P.pkt_goto_slot(3, 4))
+assert len(br._pending_acks) == 1 and br._cmd_stat.get(3, {}).get("sent") == 1, \
+    "an ordinary mount command is no longer ACK-tracked"
+_blog.handlers, _blog.level, _blog.propagate = _saved
+print("\n5. the PC: names commands logged, never waited on for an ACK; a mount")
+print("   command still is                                                 OK")
+
 print("\nALL CHECKS PASSED")

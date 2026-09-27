@@ -66,6 +66,12 @@ _TX_QUIET_CMDS = frozenset({
     # be ACK-tracked or they would themselves look like wedged commands.
     int(Cmd.HUB_REINIT_ESPNOW), int(Cmd.HUB_RESTART),
 })
+# Hub-scoped and answered with the names themselves (CMD_NAMES, and the
+# NAMES_REV beacon moving) rather than an ACK.  Logged — the TX line is the
+# only record that a rename went out — but not ACK-tracked: tracked, the
+# names sync read "CMD hub 0/3 acknowledged (0.000%)" at WARNING on the bench
+# (2026-09-27), the same always-wrong warning GET_MOUNT_TABLE had above.
+_TX_UNACKED_CMDS = frozenset({int(Cmd.NAMES_GET), int(Cmd.NAME_SET)})
 
 # Packet byte offsets (see protocol.py packet format)
 _PKT_OFF_MOUNT = 3
@@ -1750,6 +1756,10 @@ class Bridge:
         seq = (data[_PKT_OFF_SEQ_HI] << 8) | data[_PKT_OFF_SEQ_LO]
         mount = data[_PKT_OFF_MOUNT]
         name = _cmd_name(cmd_val)
+        if cmd_val in _TX_UNACKED_CMDS:
+            log.info("TX → %-18s mount=%d seq=%d (%d bytes) — answered with names, "
+                     "not an ACK", name, mount, seq, len(data))
+            return
         now = time.monotonic()
         self._tx_cmd_sent += 1
         self._last_tracked_tx_t = now
