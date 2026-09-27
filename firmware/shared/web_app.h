@@ -366,6 +366,22 @@ canvas.hsl-c{display:block;touch-action:none;}
   border:1px solid var(--border);color:var(--text);font-size:14px;font-weight:600;cursor:pointer;text-align:center;}
 .ext-pos-act-btn.armed{background:var(--orange);border-color:var(--orange);color:#fff;}
 .ext-pos-act-btn.clear-armed{background:var(--red-lit);border-color:var(--red-lit);color:#fff;}
+/* Held upright a tablet leaves the middle too narrow for that one row, and it
+   wrapped: Slider dial, CLEAR, RUN / SET, Pan/Tilt dial.  Three lines instead
+   — CLEAR and SET, RUN centred under them, then the two dials side by side,
+   each under the button on its side.  Four equal columns make the three
+   buttons one width, and the lines are well apart: a finger meant for one
+   must not catch the next. */
+@media (orientation:portrait){
+  .ext-pos-ctrls{display:grid;align-self:center;align-content:center;gap:40px 16px;
+    grid-template-columns:repeat(4,1fr);
+    grid-template-areas:"clr clr set set" ". run run ." "sz sz pt pt";}
+  #ext-pos-clear-btn{grid-area:clr;}
+  #ext-pos-run-btn{grid-area:run;}
+  #ext-pos-set-btn{grid-area:set;}
+  #ext-pos-dial-sz-wrap{grid-area:sz;}
+  #ext-pos-dial-pt-wrap{grid-area:pt;}
+}
 /* Joystick section */
 .ext-pos-joy-wrap{display:flex;flex-direction:column;align-items:center;
   justify-content:center;padding:6px 8px;flex-shrink:0;}
@@ -946,16 +962,17 @@ canvas.hsl-c{display:block;touch-action:none;}
         <!-- Middle: cam selector + SET/CLEAR + speed dials -->
         <div class="ext-pos-middle">
           <div class="cam-bar" id="ext-pos-cam-bar" style="flex-wrap:wrap;gap:4px;margin-bottom:auto;"></div>
-          <!-- Slider dial | CLEAR | SET | Pan/Tilt dial — same row order as the GC screen -->
+          <!-- Slider dial | CLEAR | RUN | SET | Pan/Tilt dial — the GC screen's
+               order.  Held upright: CLEAR SET / RUN / both dials. -->
           <div class="ext-pos-ctrls">
-            <div class="ext-dial-wrap">
+            <div class="ext-dial-wrap" id="ext-pos-dial-sz-wrap">
               <canvas id="ext-pos-dial-sz" width="70" height="70"></canvas>
               <span class="dial-lbl">Slider</span>
             </div>
             <button id="ext-pos-clear-btn" class="ext-pos-act-btn">CLEAR</button>
             <button id="ext-pos-run-btn" class="ext-pos-act-btn run-btn">RUN</button>
             <button id="ext-pos-set-btn" class="ext-pos-act-btn">SET</button>
-            <div class="ext-dial-wrap">
+            <div class="ext-dial-wrap" id="ext-pos-dial-pt-wrap">
               <canvas id="ext-pos-dial-pt" width="70" height="70"></canvas>
               <span class="dial-lbl">Pan / Tilt</span>
             </div>
