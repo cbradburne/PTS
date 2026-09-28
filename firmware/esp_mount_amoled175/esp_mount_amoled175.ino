@@ -914,9 +914,11 @@ static portMUX_TYPE      _rf_mux      = portMUX_INITIALIZER_UNLOCKED;
 static inline void rf_accumulate(int8_t rssi, int8_t nf) {
     portENTER_CRITICAL_ISR(&_rf_mux);
     if (!_rf_frames) {
-        _rf_rssi_min = _rf_rssi_max = rssi;
-        _rf_nf_min   = _rf_nf_max   = nf;
-        _rf_rssi_sum = _rf_nf_sum  = 0;
+        // One assignment each: a chained one reads the volatile back, which
+        // C++20 deprecates.
+        _rf_rssi_min = rssi;  _rf_rssi_max = rssi;
+        _rf_nf_min   = nf;    _rf_nf_max   = nf;
+        _rf_rssi_sum = 0;     _rf_nf_sum   = 0;
     } else {
         if (rssi < _rf_rssi_min) _rf_rssi_min = rssi;
         if (rssi > _rf_rssi_max) _rf_rssi_max = rssi;

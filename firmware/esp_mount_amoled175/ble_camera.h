@@ -569,7 +569,7 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
-        _bc_notifies++;
+        _bc_notifies = _bc_notifies + 1;   // ++ on a volatile is deprecated in C++20
         // Hand the bytes up untouched — the mount does not decode camera
         // status any more than it decodes camera commands.
         if (ev->notify_rx.om) {
