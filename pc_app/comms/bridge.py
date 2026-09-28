@@ -1237,10 +1237,13 @@ class Bridge:
                 if h.nomem_cured:
                     n32txt += " | NO_MEM ENDED BY THE LADDER %d%s" % (
                         h.nomem_cured, "+" if h.nomem_cured == 0xFFFF else "")
-                # What the camera scan collects and the mount used to keep for
-                # the whole boot: forty students' phones cost cam5 ~60 KB.
+                # How many devices the camera scan heard, and how much internal
+                # RAM holding them cost: forty students' phones cost cam5 ~60 KB.
+                # Since the scan stopped keeping what it hears the cost is 0k,
+                # and the count stays as the size of the crowd.  "heard ...
+                # held" reads true for a mount on either firmware.
                 if h.scan_devices:
-                    n32txt += " | last scan held %d devices (%dk)" % (
+                    n32txt += " | last scan heard %d devices (%dk held)" % (
                         h.scan_devices, h.scan_freed_kb)
             # Heartbeats since the last report, on firmware that counts them:
             # a measurement of a suspected fault, not a fixed one (see

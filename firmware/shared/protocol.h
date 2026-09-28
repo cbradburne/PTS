@@ -237,6 +237,8 @@ static_assert(MOUNT_EVENT_NOMEM_PAYLOAD_LEN ==
               "the NO_MEM event is the common 14 bytes, the snapshot, the ladder");
 #define MOUNT_NOMEM_STEP_BLE_PAUSED     0x01   // a scan or connect attempt was stopped
 #define MOUNT_NOMEM_STEP_SCAN_FREED     0x02   // ...and what the scan held was freed
+                                               // (older firmware only: the scan now keeps
+                                               // nothing, so there is nothing to free)
 #define MOUNT_NOMEM_STEP_RESERVE        0x04   // the internal-RAM reserve was released
 #define MOUNT_NOMEM_STEP_NO_RESERVE     0x08   // its turn came and none was held
 // WiFi and BLE share one radio on the S3, arbitrated in software.  Whether BLE
@@ -1000,8 +1002,9 @@ typedef struct __attribute__((packed)) {
 // payload is long enough, so a 16-byte tail still reads as it always did:
 //   [40..41] internal-RAM reserve held now, bytes (0 = none) u16
 //   [42..43] NO_MEM runs the ladder ENDED, since boot        u16 sat
-//   [44..45] devices the last finished camera scan held      u16
-//   [46..47] internal RAM freeing them gave back, KB         u16
+//   [44..45] devices the last finished camera scan heard     u16
+//   [46..47] internal RAM freeing them gave back, KB — 0 from u16
+//            firmware whose scan keeps nothing (ble_camera.h)
 // ...added 2026-09-27 to measure a suspected fault before anything fixes it
 // (see _hb_stale in esp_mount_amoled175.ino).  Counted since the PREVIOUS
 // health report, not since boot, so each line reads as one window:

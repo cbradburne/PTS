@@ -326,7 +326,7 @@ assert "NO_MEM CLEARED ITSELF 2 (longest 1234 ms)" in healed, healed
 assert new.index("n32 1") < new.index("iram"), \
     "the tail is not appended after the existing fields"
 lad = health(struct.pack(">IIIHHHHHH", 142000, 118000, 60000, 0, 0, 12288, 3, 87, 58))
-for want in ("reserve 12k", "NO_MEM ENDED BY THE LADDER 3", "last scan held 87 devices (58k)"):
+for want in ("reserve 12k", "NO_MEM ENDED BY THE LADDER 3", "last scan heard 87 devices (58k held)"):
     assert want in lad, f"missing {want!r} in: {lad}"
 none = health(struct.pack(">IIIHHHHHH", 9800, 400, 5000, 1, 1505, 0, 0, 0, 0))
 assert "no reserve" in none and "LADDER" not in none and "last scan" not in none, none
@@ -338,14 +338,13 @@ _lg.handlers, _lg.level, _lg.propagate = _saved
 # ---- 8. the ladder, in the firmware ---------------------------------------------
 print("\n8. the ladder:")
 step = body(INO, "static void nomem_ladder_step(")
-i_pause, i_free, i_res = (step.index("ble_cam_nomem_pause("), step.index("ble_cam_free_scan()"),
-                          step.index("nomem_reserve_release_into("))
-assert i_pause < i_free < i_res, "the steps are not in order: BLE, scan, reserve"
-assert "age >= (uint32_t)l.t_pause_ms + NOMEM_SCAN_FREE_GAP_MS" in step, \
-    "the scan is freed without waiting after the stop — a report the BLE task was\n" \
-    "    already handling would be walking the map as it is deleted"
-assert "(l.ble_stopped & MOUNT_NOMEM_BLE_SCANNING)" in step, \
-    "the scan is freed when no scan was stopped"
+i_pause, i_res = step.index("ble_cam_nomem_pause("), step.index("nomem_reserve_release_into(")
+assert i_pause < i_res, "the steps are not in order: BLE, then the reserve"
+# The camera scan keeps nothing now (section 9), so a step freeing what a stopped
+# scan collected would free nothing — and still be recorded as the cure.
+assert "ble_cam_free_scan" not in step and "MOUNT_NOMEM_STEP_SCAN_FREED" not in step, \
+    "the ladder still frees the camera scan's results, which the scan no longer\n" \
+    "    keeps — a step that did nothing would be credited with ending the run"
 assert "age >= NOMEM_RESERVE_AFTER_MS" in step, "the reserve is released at once"
 crits = [step[a:step.index("portEXIT_CRITICAL", a)]
          for a in [i for i in range(len(step)) if step.startswith("portENTER_CRITICAL", i)]]
@@ -361,11 +360,9 @@ pause = body(BLE, "static uint8_t ble_cam_nomem_pause(")
 assert "ble_gap_terminate" not in pause, \
     "the pause drops an established camera link — it is meant to stop a scan or\n" \
     "    an attempt, not disconnect a working camera"
-assert "BLEDevice::getScan()->stop()" in pause and "ble_gap_disc_cancel" not in pause, \
-    "the scan is cancelled behind BLEScan's back, so the library's own state (and\n" \
-    "    bc_scan_done) never hear that it ended"
-assert "clearResults" not in pause and "ble_cam_free_scan" not in pause, \
-    "the pause frees the scan in the same breath as it stops it"
+assert "bc_scan_stop()" in pause and "ble_gap_disc_cancel" not in pause, \
+    "the pause cancels the scan without bc_scan_stop() — a cancelled discovery sends\n" \
+    "    no completion, so bc_scan_done never runs and the mount thinks it is scanning"
 poll = body(BLE, "static void ble_cam_poll(")
 assert "!busy && !held &&" in poll, "the hold is not honoured when starting a scan"
 
@@ -390,34 +387,40 @@ for need, why in (("_nomem_since_ms) return", "while a run is open"),
                   ("NOMEM_RESERVE_RETAKE_MS", "straight after a release"),
                   ("MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA", "from outside the WiFi driver's pool")):
     assert need in tend, f"the reserve can be taken {why}"
-print("   BLE, then scan, then reserve; outside the lock; no link dropped  OK")
+print("   BLE, then reserve; outside the lock; no link dropped    OK")
 
-# ---- 9. the scan's haul -------------------------------------------------------------
-print("\n9. what the camera scan collects:")
-consume = poll[poll.index("_bc_scan_ready = false;"):poll.index("if (!bc_choose())")]
-assert "ble_cam_free_scan();" in consume, \
-    "a finished scan's results are kept after they have been read — the last scan\n" \
-    "    before the camera connects sits in internal RAM for the whole boot"
-free = body(BLE, "static uint32_t ble_cam_free_scan(")
-assert "clearResults()" in free and "getCount()" in free, \
-    "the free does not count what it freed, so the log cannot say what a room cost"
-assert "if (!n) return 0;" in free, \
-    "an empty free overwrites the figures of the one before it"
-cb = BLE[BLE.index("class BcScanCb"):]
-cb = cb[:cb.index("\n};")]
-assert "void onResult(BLEAdvertisedDevice dev)" in cb and "BLEAdvertisedDevice *" not in cb, \
-    "the scan callback keeps a pointer into the library's results — freeing them\n" \
-    "    would leave it dangling. It must copy what it needs, as it did."
-print("   freed once read, counted, and nothing points into them  OK")
+# ---- 9. the scan keeps nothing ------------------------------------------------------
+# 2026-09-28, the Foyer: cam5's camera off from 11:39 to 13:42, and every scan
+# BLEScan ran held the crowd — 130-210 devices, 40-67 KB of internal RAM — until
+# the NO_MEM ladder had run 194 times. Freeing a scan once it ended could not help
+# while one ran. The scan is NimBLE's own discovery now and keeps a dozen fixed
+# slots; tools/test_ble_scan_no_hoard.py runs it. This is what it must not use.
+print("\n9. what the camera scan keeps:")
+BLE_CODE = "\n".join(l.split("//")[0] for l in BLE.splitlines())
+for gone in ("BLEScan", "BLEAdvertisedDevice", "getScan(", "clearResults", "ble_cam_free_scan"):
+    assert gone not in BLE_CODE, \
+        f"{gone} is back in ble_camera.h — BLEScan keeps every advertiser it hears"
+start = body(BLE, "static bool bc_scan_start(")
+assert "ble_gap_disc(" in start and "bc_disc_event" in start, \
+    "the camera scan is not NimBLE's own discovery"
+ev = "\n".join(l.split("//")[0] for l in body(BLE, "static int bc_disc_event(").splitlines())
+for alloc in ("new ", "malloc(", "String", "std::", "BLEAddress"):
+    assert alloc not in ev, \
+        f"the scan's report handler allocates ({alloc.strip()}) — once for every\n" \
+        "    advertiser in the room, which is the hoard this replaced"
+assert "t.scan_devices        = _bc_scan_heard;" in INO and \
+       "t.scan_freed_kb       = 0;" in INO, \
+    "the health report no longer carries the size of the crowd the scan heard, or\n" \
+    "    claims a scan that keeps nothing freed something"
+print("   no BLEScan, and nothing allocated per report                 OK")
 
 # ---- 10. a camera switched off must not send the mount scanning ------------------
 # The foyer test on 2026-09-23: camera off for ten minutes, and the mount
 # scanned 5 s in every 20 because its 10 s retry landed inside a 15 s connect
 # attempt, NimBLE refused it (EALREADY), and that read as "could not start —
 # rescan". Every scan held 127-165 devices; all eight NO_MEM runs came out of
-# them. And two of the eight began after a scan had FINISHED, while its results
-# sat waiting up to five seconds for the next retry to free them.
-print("\n10. an absent camera, and a finished scan:")
+# them.
+print("\n10. an absent camera, and a scan's end:")
 FLATB = re.sub(r"\s+", " ", BLE)
 assert re.search(r"bool busy = _bc_connected \|\| _bc_conn != BLE_HS_CONN_HANDLE_NONE "
                  r"\|\| _bc_scanning \|\| ble_gap_conn_active\(\);", FLATB), \
@@ -430,28 +433,23 @@ assert "_bc_retry_ms = t ? t : 1;" in fail_blk, \
     "a failed attempt does not restart the retry clock, so with the busy fix the\n" \
     "    next attempt is already due and BLE holds the radio back to back"
 done = body(BLE, "static void bc_scan_done(")
-assert "_bc_scan_end_ms" in done and done.index("_bc_scan_end_ms") < done.index("_bc_scan_ready  = true"), \
-    "the scan's end is not stamped before it is announced, so the gap below is\n" \
-    "    measured from an older scan"
-assert "ble_cam_free_scan" not in done and "clearResults" not in done, \
-    "results are freed on the BLE task, inside the library's own callback"
-early = poll[poll.index("if (_bc_scan_ready && !ble_gap_disc_active() &&"):]
-early = early[:early.index(";") + 1]
-assert "(uint32_t)(now - _bc_scan_end_ms) >= BC_SCAN_FREE_GAP_MS" in early and \
-       "ble_cam_free_scan()" in early, \
-    "a finished scan is freed without the gap after it ended — after a CANCEL a\n" \
-    "    report may still be walking the results"
-assert poll.index("if (_bc_scan_ready && !ble_gap_disc_active() &&") < \
+assert "_bc_scan_heard" in done and \
+       done.index("_bc_scan_heard") < done.index("_bc_scan_ready  = true"), \
+    "the scan's count is not recorded before the scan is announced as over, so the\n" \
+    "    health report can carry the previous scan's"
+stop = body(BLE, "static bool bc_scan_stop(")
+assert "ble_gap_disc_cancel()" in stop and "bc_scan_done();" in stop, \
+    "stopping a scan does not say it is over — a cancelled discovery sends no\n" \
+    "    completion, so the mount would believe it was still scanning"
+guard = poll[poll.index("if (_bc_scanning && !ble_gap_disc_active() &&"):]
+guard = guard[:guard.index(";") + 1]
+assert "BC_SCAN_MS + 2000UL" in guard and "bc_scan_done()" in guard, \
+    "a scan whose end never came (the host reset under it) leaves the mount\n" \
+    "    believing it is scanning, and it never looks for its camera again"
+assert poll.index("if (_bc_scanning && !ble_gap_disc_active() &&") < \
        poll.index("if (!busy && !held &&"), \
-    "the early free sits behind the retry gate, so it still waits for `due`"
-assert re.search(r"#define NOMEM_SCAN_FREE_GAP_MS\s+BC_SCAN_FREE_GAP_MS", INO), \
-    "the ladder and the camera code keep separate numbers for the same safety gap"
-assert "_bc_scan_freed_at_ms = t ? t : 1;" in body(BLE, "static uint32_t ble_cam_free_scan("), \
-    "the free is not stamped, so the ladder cannot see one made during its run"
-assert "(int32_t)(fa - since) >= 0" in step and "_bc_scan_freed_at_ms" in step, \
-    "the ladder does not record a scan freed during the run by ble_cam_poll(), so\n" \
-    "    that cure would be credited to whatever step came next"
-print("   an attempt in progress is busy; a finished scan is freed at once  OK")
+    "the stuck-scan guard sits behind the retry gate, which a scanning mount never passes"
+print("   an attempt in progress is busy; every scan ends, even a lost one  OK")
 
 # ---- 11. a reconnect attempt must leave WiFi the radio ----------------------------
 # With cam5's camera off for ten minutes on 2026-09-24, and the mount retrying it

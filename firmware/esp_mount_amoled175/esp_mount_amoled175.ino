@@ -1245,7 +1245,7 @@ static void espnow_peer_long_range(const uint8_t *mac) {
 #define NOMEM_RESTART_MS 3000UL
 #endif
 
-// ── ...and first, the ladder: three things to try before the reboot ────────
+// ── ...and first, the ladder: two things to try before the reboot ──────────
 //
 // The first capture (cam5, 2026-09-23 10:27) put the fault in a different
 // place from the one this was built around.  The radio had not stopped: a send
@@ -1258,16 +1258,19 @@ static void espnow_peer_long_range(const uint8_t *mac) {
 //
 //   at once   take BLE off the radio: stop a scan or a connect attempt, and
 //             hold off new ones for NOMEM_BLE_HOLD_MS (ble_cam_nomem_pause)
-//   +200 ms   free what the stopped scan had collected, once a report the BLE
-//             task was already handling has had time to finish
 //   +1 s      release the internal-RAM reserve this mount has held since boot
 //   +3 s      reboot, as before (NOMEM_RESTART_MS)
+//
+// There was a third, at +200 ms: free what the stopped scan had collected.  It
+// went when the scan stopped collecting — the camera scan keeps a dozen fixed
+// slots now and nothing else (ble_camera.h), so a stopped scan holds nothing
+// to give back, and a step that freed nothing would still have been recorded
+// as the cure.
 //
 // Each is a switch: 0 skips it, and the ladder goes on to the next.
 #ifndef NOMEM_BLE_HOLD_MS
 #define NOMEM_BLE_HOLD_MS       10000UL
 #endif
-#define NOMEM_SCAN_FREE_GAP_MS    BC_SCAN_FREE_GAP_MS   // one number, in ble_camera.h
 #ifndef NOMEM_RESERVE_AFTER_MS
 #define NOMEM_RESERVE_AFTER_MS   1000UL
 #endif
@@ -1303,7 +1306,6 @@ static uint32_t         _nomem_ladder_run = 0;   // the run (its since) this is 
 static uint8_t          _nomem_tried      = 0;   // steps attempted, internal only
 static MountNomemLadder _nomem_lad;
 #define NOMEM_TRIED_PAUSE    0x01
-#define NOMEM_TRIED_FREE     0x02
 #define NOMEM_TRIED_RESERVE  0x04
 // A cured run, copied out when it ended, waiting for loop() to report it.
 static volatile bool    _nomem_cured_due = false;
@@ -1412,7 +1414,6 @@ static void nomem_heal() {
         _nomem_since_ms = 0;
         cured = since == _nomem_ladder_run &&
                 (_nomem_lad.steps & (MOUNT_NOMEM_STEP_BLE_PAUSED |
-                                     MOUNT_NOMEM_STEP_SCAN_FREED |
                                      MOUNT_NOMEM_STEP_RESERVE));
         if (cured) {
             _nomem_cured_snap = _nomem_snap;
@@ -1505,28 +1506,9 @@ static void nomem_ladder_step(uint32_t since, uint32_t now) {
             acted = true;
         }
     }
-    // 2. Once a report the BLE task was already handling has finished: free
-    //    what the stopped scan collected.  Never in the same pass as the stop.
-    if ((l.ble_stopped & MOUNT_NOMEM_BLE_SCANNING) && !(_nomem_tried & NOMEM_TRIED_FREE)
-            && l.t_pause_ms != 0xFFFF && age >= (uint32_t)l.t_pause_ms + NOMEM_SCAN_FREE_GAP_MS) {
-        _nomem_tried |= NOMEM_TRIED_FREE;
-        ble_cam_free_scan();
-        l.steps          |= MOUNT_NOMEM_STEP_SCAN_FREED;
-        l.t_free_ms       = nomem_sat16(age);
-        l.iram_after_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        acted = true;
-    }
-    //    ...or a FINISHED scan's results, freed by ble_cam_poll() during this
-    //    run.  Not the ladder's doing, but the same remedy, and a cure the
-    //    record did not mention would be credited to whatever came next.
-    uint32_t fa = _bc_scan_freed_at_ms;
-    if (!(l.steps & MOUNT_NOMEM_STEP_SCAN_FREED) && fa && (int32_t)(fa - since) >= 0) {
-        l.steps          |= MOUNT_NOMEM_STEP_SCAN_FREED;
-        l.t_free_ms       = nomem_sat16(fa - since);
-        l.iram_after_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        acted = true;
-    }
-    // 3. At NOMEM_RESERVE_AFTER_MS: give the reserve back.
+    // (Freeing a stopped scan's haul was step 2.  The scan keeps nothing now,
+    // so there is nothing to free, and t_free_ms stays at "never".)
+    // 2. At NOMEM_RESERVE_AFTER_MS: give the reserve back.
     if (NOMEM_RESERVE_AFTER_MS && age >= NOMEM_RESERVE_AFTER_MS
             && !(_nomem_tried & NOMEM_TRIED_RESERVE)) {
         _nomem_tried |= NOMEM_TRIED_RESERVE;
@@ -1796,8 +1778,10 @@ static void send_health(bool anomaly) {
     t.nomem_healed_max_ms = _nomem_healed_max_ms;
     t.reserve_held        = _nomem_reserve ? (uint16_t)NOMEM_RESERVE_BYTES : 0;
     t.nomem_cured         = _nomem_cured;
-    t.scan_devices        = _bc_scan_devices;
-    t.scan_freed_kb       = _bc_scan_freed_kb;
+    // How many devices the last camera scan heard — the crowd.  It holds none
+    // of them any more, so there is never anything freed to report.
+    t.scan_devices        = _bc_scan_heard;
+    t.scan_freed_kb       = 0;
     t.hb_sent             = _hb_sent;
     t.hb_stale            = _hb_stale;
     t.hb_stale_busy       = _hb_stale_busy;

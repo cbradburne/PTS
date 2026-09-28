@@ -863,8 +863,9 @@ class HealthPayload:
     nomem_healed_max_ms: Optional[int] = None
     reserve_held:        Optional[int] = None   # internal-RAM reserve held, bytes
     nomem_cured:         Optional[int] = None   # NO_MEM runs the ladder ended
-    scan_devices:        Optional[int] = None   # what the last camera scan held
-    scan_freed_kb:       Optional[int] = None   # ...and freeing it gave back
+    scan_devices:        Optional[int] = None   # devices the last camera scan heard
+    scan_freed_kb:       Optional[int] = None   # ...and KB freeing them gave back (0 once
+                                                # the scan keeps nothing)
     # Since the previous report, not since boot.  A measurement of a suspected
     # fault (see _hb_stale in the mount firmware), not of a fixed one.
     hb_sent:             Optional[int] = None   # STATUS heartbeats, any cause

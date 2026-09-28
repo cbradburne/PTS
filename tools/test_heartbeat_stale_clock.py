@@ -356,7 +356,7 @@ assert "| heartbeats 2" in quiet and "stale" not in quiet, \
 bad = line(struct.pack(">HHHH", 41, 40, 7, 39))
 assert "| heartbeats 41 (40 on a stale clock, 7 with a send in flight)" in bad, bad
 assert "| stale Teensy probes 39" in bad, bad
-assert bad.index("last scan held") < bad.index("heartbeats"), \
+assert bad.index("last scan heard") < bad.index("heartbeats"), \
     "the counts are not appended after the existing fields"
 print("   " + bad[bad.index("| heartbeats"):])
 print("   absent -> silent, zero -> 'heartbeats 0', stale -> spelled out OK")

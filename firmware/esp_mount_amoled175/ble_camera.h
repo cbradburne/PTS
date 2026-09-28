@@ -78,8 +78,6 @@
 #include <esp_task_wdt.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
-#include <BLEScan.h>
-#include <BLEAdvertisedDevice.h>
 #include <BLESecurity.h>
 #include <host/ble_store.h>
 
@@ -164,7 +162,6 @@ static bool bc_is_bonded(const uint8_t *nat) {
 // camera, and the scan code that owns it is defined further down.
 static bool _bc_chosen = false;
 
-static BLEAdvertisedDevice  *_bc_found  = nullptr;
 static volatile bool         _bc_connected = false;
 static volatile uint32_t     _bc_notifies  = 0;
 static uint32_t              _bc_report_ms = 0;
@@ -636,7 +633,6 @@ static bool bc_connect(const char *addr_text) {
 }
 
 static int                   _bc_best_rssi = -999;
-static bool                  _bc_by_name   = false;
 static char                  _bc_pick_text[20] = {};
 
 // Every device the scan turned up, so a human can pick one.
@@ -653,7 +649,8 @@ static char                  _bc_pick_text[20] = {};
 // menu said DF:50:B4:9F:FD:90 for the same device.  toString() is the form
 // everything else in the system uses, and BLEAddress can be rebuilt from it.
 struct BcCand { char addr[20]; char name[26]; uint8_t nat[6];
-                int16_t rssi; bool svc; bool named; };
+                int16_t rssi; bool svc; bool named;
+                bool name_full; uint8_t adv_type; uint8_t addr_type; };
 static BcCand  _bc_cand[BC_MAX_CAND];
 static uint8_t _bc_ncand = 0;
 // The name from the camera's Bluetooth menu.  Substring, so "BMPCC" matches
@@ -668,102 +665,261 @@ static uint8_t _bc_ncand = 0;
 // have blocked the only camera in the room on a bench with one.
 #define CAM_WEAK_RSSI  (-65)
 
-class BcScanCb : public BLEAdvertisedDeviceCallbacks {
-    void onResult(BLEAdvertisedDevice dev) override {
-        // EVERY device, named or not.  The service-UUID filter alone was
-        // matching a nameless device that is not the camera at all — the camera
-        // advertises the name set in its Bluetooth menu ("Colin BMPCC"), and
-        // that name is the only thing here that identifies it beyond doubt.
-        // Chasing the wrong device is why the camera never showed a pairing
-        // code: nothing was ever talking to it.
-        // getName() returns only the COMPLETE local name (AD type 0x09).  This
-        // camera advertises a SHORTENED one (0x08), so getName() was empty and
-        // the name looked absent — it was there the whole time:
-        //   1E 08 436F6C696E20424D504343  ->  "Colin BMPCC"
-        String nm = dev.getName();
-        if (!nm.length()) {
-            uint8_t *pl = dev.getPayload();
-            size_t   pn = dev.getPayloadLength();
-            for (size_t i = 0; i + 1 < pn; ) {
-                uint8_t fl = pl[i];
-                if (!fl || i + fl >= pn + 1) break;
-                uint8_t ty = pl[i + 1];
-                if ((ty == 0x08 || ty == 0x09) && fl > 1) {
-                    char t[27]; uint8_t n = fl - 1;
-                    if (n > sizeof(t) - 1) n = sizeof(t) - 1;
-                    memcpy(t, pl + i + 2, n); t[n] = 0;
-                    nm = String(t);
-                    break;
-                }
-                i += fl + 1;
-            }
+// ── The camera scan: hears everyone, keeps a dozen ─────────────────────────
+//
+// NimBLE's own discovery, not the BLE library's BLEScan.  BLEScan keeps a heap
+// object for EVERY advertiser it hears — address string, parsed payload, map
+// node — until the scan is cleared, all of it in internal RAM, where the WiFi
+// driver's buffers come from.  So a mount looking for its camera in a crowd
+// held the crowd: cam5 in the Foyer on 2026-09-28, its camera switched off from
+// 11:39 to 13:42, heard 130-210 devices a scan (40-67 KB held), ran internal
+// RAM down to nothing and needed the NO_MEM ladder 194 times, losing about one
+// command in thirty, until the camera came back.  Freeing each scan once it
+// ended (2603d3d, 25f5016) could not help while one was running.
+//
+// ble_gap_disc() hands each report to bc_disc_event() and keeps nothing.  What
+// the choice needs is copied into _bc_cand — a dozen fixed slots, as BcScanCb
+// did — and everyone else is counted and forgotten.  The listening is BLEScan's
+// exactly, as ble_cam_setup() set it: active, 80 ms in every 100, five seconds,
+// each device reported once by the controller.
+
+// The camera's service as it travels: a 128-bit UUID goes least significant
+// byte first, the reverse of the way it is written.  Worked out once, from
+// CAM_SERVICE, in ble_cam_setup().
+static uint8_t _bc_svc_le[16];
+static bool    _bc_svc_ok = false;
+
+static int bc_hex(char c) {
+    return (c >= '0' && c <= '9') ? c - '0'
+         : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+         : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+}
+static bool bc_svc_parse() {
+    uint8_t b[16];
+    int n = 0;
+    for (const char *p = CAM_SERVICE; *p; p++) {
+        if (*p == '-') continue;
+        int hi = bc_hex(p[0]), lo = p[1] ? bc_hex(p[1]) : -1;
+        if (hi < 0 || lo < 0 || n >= 16) return false;
+        b[n++] = (uint8_t)(hi << 4 | lo);
+        p++;
+    }
+    if (n != 16) return false;
+    for (int i = 0; i < 16; i++) _bc_svc_le[i] = b[15 - i];
+    return true;
+}
+
+// One advertisement or scan response, read in place for the two things the
+// choice uses.  The name: complete (0x09) or shortened (0x08) — this camera
+// sends the shortened one, which getName() never returned — and a complete one
+// wins.  The service: whether the camera's is among the 128-bit UUIDs listed
+// (0x06, 0x07).  A malformed length ends the walk and keeps what came before.
+static void bc_adv_fields(const uint8_t *d, uint8_t len, char *name, size_t name_sz,
+                          bool *name_full, bool *svc) {
+    for (unsigned i = 0; i + 1 < len; ) {
+        unsigned fl = d[i];                       // covers the type and the data
+        if (!fl || i + 1 + fl > len) break;
+        uint8_t        ty = d[i + 1];
+        const uint8_t *v  = d + i + 2;
+        unsigned       vn = fl - 1;
+        if (vn && (ty == 0x09 || (ty == 0x08 && !name[0]))) {
+            size_t n = vn < name_sz - 1 ? vn : name_sz - 1;
+            memcpy(name, v, n);
+            name[n] = 0;
+            *name_full = (ty == 0x09);
+        } else if ((ty == 0x06 || ty == 0x07) && _bc_svc_ok) {
+            for (unsigned k = 0; k + 16 <= vn; k += 16)
+                if (memcmp(v + k, _bc_svc_le, 16) == 0) *svc = true;
         }
-        bool svc = dev.haveServiceUUID() &&
-                   dev.isAdvertisingService(BLEUUID(CAM_SERVICE));
-        bool named = nm.length() && (nm.indexOf(CAM_NAME) >= 0);
-        Serial.printf("[CAM]  seen \"%s\" %s %d dBm%s%s\n",
-                      nm.c_str(), dev.getAddress().toString().c_str(),
-                      dev.getRSSI(), svc ? " [svc]" : "", named ? " [NAME MATCH]" : "");
-        // Remembered whether or not it looks like a camera: the whole point is
-        // that our idea of "looks like a camera" has been wrong twice.
-        String as = dev.getAddress().toString();
-        bool dup = false;
-        for (uint8_t i = 0; i < _bc_ncand; i++)
-            if (as == _bc_cand[i].addr) { _bc_cand[i].rssi = dev.getRSSI(); dup = true; break; }
-        if (!dup && _bc_ncand < BC_MAX_CAND) {
-            BcCand &c = _bc_cand[_bc_ncand++];
-            snprintf(c.addr, sizeof(c.addr), "%s", as.c_str());
-            snprintf(c.name, sizeof(c.name), "%s", nm.c_str());
-            memcpy(c.nat, dev.getAddress().getNative(), 6);
-            c.rssi = dev.getRSSI(); c.svc = svc; c.named = named;
+        i += 1 + fl;
+    }
+}
+
+// How many different devices a scan heard: the size of the crowd, which the
+// health report shows ("last scan heard N devices") so a busy room can still
+// be seen now that nothing is kept.  One bit per address, hashed — 256 bytes,
+// cleared as each scan starts.  Two addresses on one bit count once, so a
+// crowd of 200 reads about 190.
+#define BC_HEARD_BITS 2048
+static uint8_t           _bc_heard_map[BC_HEARD_BITS / 8];
+static volatile uint16_t _bc_heard      = 0;
+static uint16_t          _bc_scan_heard = 0;   // the last finished scan's count
+
+static void bc_heard_note(const ble_addr_t *a) {
+    uint32_t h = 2166136261u;                     // FNV-1a
+    for (int i = 0; i < 6; i++) { h ^= a->val[i]; h *= 16777619u; }
+    h ^= a->type;
+    h *= 16777619u;
+    uint32_t bit = h % BC_HEARD_BITS;
+    uint8_t  m   = (uint8_t)(1u << (bit & 7));
+    if (_bc_heard_map[bit >> 3] & m) return;
+    _bc_heard_map[bit >> 3] |= m;
+    if (_bc_heard < 0xFFFF) _bc_heard = _bc_heard + 1;
+}
+
+// The bonded cameras, read from the bond store as each scan starts, so the
+// scan can tell its own camera at a glance without asking the store for every
+// report — several hundred of them in a crowd.
+static ble_addr_t _bc_scan_bonded[8];
+static int        _bc_scan_nbonded = 0;
+static bool bc_scan_is_bonded(const uint8_t *nat) {
+    for (int i = 0; i < _bc_scan_nbonded; i++)
+        if (memcmp(_bc_scan_bonded[i].val, nat, 6) == 0) return true;
+    return false;
+}
+// Worth a slot even when the list is full: the camera this mount is bonded to,
+// or anything that looks like a Blackmagic camera.
+static bool bc_cand_wanted(const BcCand &c) {
+    return c.svc || c.named || bc_scan_is_bonded(c.nat);
+}
+
+static volatile bool     _bc_scanning      = false;
+static volatile bool     _bc_scan_ready    = false;
+static volatile uint32_t _bc_scan_start_ms = 0;
+#define BC_SCAN_MS 5000UL
+
+// Runs on the BLE task when a scan completes, or on the caller's when one is
+// stopped (bc_scan_stop), so it does no work beyond saying the scan is over.
+// Choosing can wait fifteen seconds for a keystroke, which has no business
+// happening on that task.
+static void bc_scan_done() {
+    _bc_scan_heard = _bc_heard;    // before _bc_scan_ready, which is what is read
+    _bc_scanning   = false;
+    _bc_scan_ready  = true;
+}
+
+static int bc_disc_event(struct ble_gap_event *ev, void *) {
+    if (ev->type == BLE_GAP_EVENT_DISC_COMPLETE) {
+        bc_scan_done();
+        return 0;
+    }
+    // A report NimBLE was already handling when the scan was stopped: the scan
+    // is over, and the choice may be reading the list.
+    if (ev->type != BLE_GAP_EVENT_DISC || !_bc_scanning) return 0;
+    const struct ble_gap_disc_desc &d = ev->disc;
+    bc_heard_note(&d.addr);
+
+    char nm[sizeof(_bc_cand[0].name)] = {};
+    bool full = false, svc = false;
+    bc_adv_fields(d.data, d.length_data, nm, sizeof(nm), &full, &svc);
+
+    // An advertisement and its scan response come as two reports, and what
+    // either carries belongs to the one device — the name is often only in the
+    // response.  So look the address up before deciding anything.
+    BcCand *c = nullptr;
+    for (uint8_t i = 0; i < _bc_ncand; i++)
+        if (memcmp(_bc_cand[i].nat, d.addr.val, 6) == 0) { c = &_bc_cand[i]; break; }
+    bool fresh = (c == nullptr);
+    if (fresh) {
+        // EVERY device, named or not, while there is room: the list is what a
+        // human picks from, and our idea of "looks like a camera" has been
+        // wrong twice — the service filter alone once matched a nameless device
+        // that was not the camera at all.
+        //
+        // Full, it still makes room for one that matters.  BcScanCb kept the
+        // first twelve devices it heard and nothing after, so in a crowd of
+        // two hundred whether a mount's own camera made the list was luck.
+        if (_bc_ncand < BC_MAX_CAND) {
+            c = &_bc_cand[_bc_ncand++];
+        } else {
+            BcCand probe = {};
+            memcpy(probe.nat, d.addr.val, 6);
+            probe.svc   = svc;
+            probe.named = nm[0] && strstr(nm, CAM_NAME) != nullptr;
+            if (!bc_cand_wanted(probe)) return 0;         // heard, counted, not kept
+            int weakest = -1;                             // the weakest one that doesn't matter
+            for (uint8_t i = 0; i < _bc_ncand; i++)
+                if (!bc_cand_wanted(_bc_cand[i]) &&
+                        (weakest < 0 || _bc_cand[i].rssi < _bc_cand[weakest].rssi))
+                    weakest = i;
+            if (weakest < 0) return 0;                    // twelve cameras: keep them
+            c = &_bc_cand[weakest];
         }
-        if (!named && !svc) return;
-        if (_bc_found && _bc_by_name && !named) return;
-        if (named && !_bc_by_name) { _bc_best_rssi = -999; _bc_by_name = true; }
+        memset(c, 0, sizeof(*c));
+        // BLEAddress::toString()'s form — lower case, most significant byte
+        // first, the reverse of ble_addr_t.val — which bc_connect() parses
+        // back and the list prints.
+        snprintf(c->addr, sizeof(c->addr), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 d.addr.val[5], d.addr.val[4], d.addr.val[3],
+                 d.addr.val[2], d.addr.val[1], d.addr.val[0]);
+        memcpy(c->nat, d.addr.val, 6);
+        c->addr_type = d.addr.type;
+        c->adv_type  = 0xFF;
+    }
+    bool was = c->named || c->svc;
+    c->rssi = d.rssi;
+    if (d.event_type != BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP) c->adv_type = d.event_type;
+    if (nm[0] && (!c->name[0] || (full && !c->name_full))) {
+        snprintf(c->name, sizeof(c->name), "%s", nm);
+        c->name_full = full;
+    }
+    c->svc   = c->svc || svc;
+    c->named = c->name[0] && strstr(c->name, CAM_NAME) != nullptr;
+    if (fresh)
+        Serial.printf("[CAM]  seen \"%s\" %s %d dBm%s%s\n", c->name, c->addr, c->rssi,
+                      c->svc ? " [svc]" : "", c->named ? " [NAME MATCH]" : "");
+    if (!was && (c->named || c->svc)) {
         // "connect failed" on its own is useless — it was, on the rig.  These
-        // four fields separate the causes that look identical from outside:
-        //   connectable=0  the camera is broadcasting, not accepting.  Nothing
+        // fields separate the causes that look identical from outside:
+        //   connectable 0  the camera is broadcasting, not accepting.  Nothing
         //                  we do on this side will help; it needs putting into
         //                  a state where it accepts a central.
         //   addrtype 1     a random address.  connect() must be told, or it
         //                  tries the wrong type and fails without reaching the
         //                  camera — which matches "no sign of it at the camera".
+        // And the report that made the match, as it came off the air, so the
+        // matching can be confirmed rather than trusted.
         Serial.printf("[CAM] found \"%s\" %s | rssi %d | addrtype %u | "
                       "advtype %u | connectable %d | payload %u B\n",
-                      dev.getName().c_str(), dev.getAddress().toString().c_str(),
-                      dev.getRSSI(), (unsigned)dev.getAddressType(),
-                      (unsigned)dev.getAdvType(), (int)dev.isConnectable(),
-                      (unsigned)dev.getPayloadLength());
-        // Keep the STRONGEST, do not stop at the first.
-        //
-        // A rig has a Blackmagic camera on several mounts, and they all
-        // advertise this service.  Stopping at the first match meant a mount
-        // trying to connect to a camera across the building — seen at -81 dBm,
-        // when the one bolted to this mount is centimetres away and should be
-        // -30 to -50.  Signal strength is the only thing that distinguishes
-        // "mine" from "someone else's" here, and it distinguishes it easily.
-        // Dump the raw advertisement once per device.  The name is empty, which a
-        // BMPCC4K should not be, so the filter matching is worth confirming
-        // rather than trusting: this prints what actually came off the air.
-        static uint8_t seen[6] = {};
-        if (memcmp(seen, dev.getAddress().getNative(), 6) != 0) {
-            memcpy(seen, dev.getAddress().getNative(), 6);
-            uint8_t *pl = dev.getPayload();
-            size_t   n  = dev.getPayloadLength();
-            Serial.print("[CAM] raw adv: ");
-            for (size_t i = 0; i < n && i < 62; i++) Serial.printf("%02X", pl[i]);
-            Serial.println();
-            Serial.printf("[CAM] svc uuid: %s | count %d\n",
-                          dev.getServiceUUID().toString().c_str(),
-                          (int)dev.getServiceDataCount());
-        }
-        if (!_bc_found || dev.getRSSI() > _bc_best_rssi) {
-            if (_bc_found) delete _bc_found;
-            _bc_found = new BLEAdvertisedDevice(dev);
-            _bc_best_rssi = dev.getRSSI();
-        }
+                      c->name, c->addr, c->rssi, (unsigned)c->addr_type,
+                      (unsigned)c->adv_type,
+                      (int)(c->adv_type == BLE_HCI_ADV_RPT_EVTYPE_ADV_IND ||
+                            c->adv_type == BLE_HCI_ADV_RPT_EVTYPE_DIR_IND),
+                      (unsigned)d.length_data);
+        Serial.print("[CAM] raw adv: ");
+        for (unsigned i = 0; i < d.length_data && i < 62; i++) Serial.printf("%02X", d.data[i]);
+        Serial.println();
     }
-};
+    return 0;
+}
+
+// Five seconds of listening, as BLEScan's start(5, ...) gave it: active (the
+// scan request draws out the scan response, where many devices keep their
+// name), 80 ms in every 100, and each device reported once by the controller.
+// Returns false if NimBLE would not start it, which leaves nothing running.
+static bool bc_scan_start() {
+    memset(_bc_heard_map, 0, sizeof(_bc_heard_map));
+    _bc_heard = 0;
+    _bc_ncand = 0;
+    if (ble_store_util_bonded_peers(_bc_scan_bonded, &_bc_scan_nbonded, 8) != 0)
+        _bc_scan_nbonded = 0;
+    struct ble_gap_disc_params p = {};
+    p.itvl              = BLE_GAP_SCAN_ITVL_MS(100);
+    p.window            = BLE_GAP_SCAN_WIN_MS(80);
+    p.filter_policy     = BLE_HCI_SCAN_FILT_NO_WL;
+    p.limited           = 0;
+    p.passive           = 0;
+    p.filter_duplicates = 1;
+    uint32_t t = millis();
+    _bc_scan_start_ms = t ? t : 1;
+    _bc_scanning      = true;     // before the start: the end must find it set
+    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, (int32_t)BC_SCAN_MS, &p, bc_disc_event, nullptr);
+    if (rc) {
+        _bc_scanning = false;
+        Serial.printf("[CAM] scan did not start, rc=%d\n", rc);
+        return false;
+    }
+    return true;
+}
+
+// Stops a scan in progress and says it is over, as BLEScan::stop() did: a
+// cancelled discovery sends no DISC_COMPLETE, so without the bc_scan_done()
+// the mount would think it was still scanning.  Returns whether one was.
+static bool bc_scan_stop() {
+    if (ble_gap_disc_cancel() != 0) return false;   // none running, or refused
+    bc_scan_done();
+    return true;
+}
 
 class BcSecCb : public BLESecurityCallbacks {
     // Never reached: pairing runs through bc_gap_event()'s PASSKEY_ACTION, not
@@ -827,33 +983,15 @@ static void ble_cam_setup() {
     BLESecurity::setCapability(ESP_IO_CAP_IN);
     BLESecurity::setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
-    BLEScan *scan = BLEDevice::getScan();
-    scan->clearResults();
-    scan->setAdvertisedDeviceCallbacks(new BcScanCb());
-    scan->setActiveScan(true);
-    scan->setInterval(100);
-    scan->setWindow(80);
+    // The scan's own settings live with it, in bc_scan_start(): it is NimBLE's
+    // discovery now, not BLEScan, so there is nothing to configure here but the
+    // service it looks for.
+    _bc_svc_ok = bc_svc_parse();
+    if (!_bc_svc_ok) Serial.println("[CAM] CAM_SERVICE is not a 128-bit UUID — "
+                                    "the scan will match cameras by name only");
 }
 
 // Print what was found and pick.  Returns true once a choice is held.
-
-static volatile bool _bc_scanning   = false;
-static volatile bool _bc_scan_ready = false;
-// When the last scan ended, completed or cancelled — so its results can be
-// freed as soon as it is safe to (see BC_SCAN_FREE_GAP_MS), not at the next
-// retry, which could be five seconds later.
-static volatile uint32_t _bc_scan_end_ms = 0;
-
-// Runs on the BLE task, so it does no work beyond saying the scan is over.
-// Choosing can wait fifteen seconds for a keystroke, which has no business
-// happening on that task.
-static void bc_scan_done(BLEScanResults) {
-    uint32_t t = millis();
-    _bc_scan_end_ms = t ? t : 1;   // before _bc_scan_ready, which is what is read
-    _bc_scanning    = false;
-    _bc_scan_ready  = true;
-}
-
 static bool bc_choose() {
     if (!_bc_ncand) { Serial.println("[CAM] scan found nothing at all"); return false; }
 
@@ -943,7 +1081,6 @@ static bool bc_choose() {
         pick = v - 1;
     }
 
-    if (_bc_found) { delete _bc_found; _bc_found = nullptr; }
     snprintf(_bc_pick_text, sizeof(_bc_pick_text), "%s", _bc_cand[pick].addr);
     _bc_best_rssi  = _bc_cand[pick].rssi;
     _bc_chosen     = true;
@@ -979,52 +1116,6 @@ static uint8_t ble_cam_activity_bits() {
          | (_bc_have_bond         ? MOUNT_NOMEM_BLE_BONDED     : 0);
 }
 
-// ── Scan results: freed once read ──────────────────────────────────────────
-//
-// BLEScan keeps a heap object for EVERY advertiser a scan hears — address
-// string, parsed payload, map node — until the next scan starts.  Nothing here
-// reads them: BcScanCb copies what it needs into _bc_cand, by value, as each
-// device is reported.  So once the camera connects there is no next scan, and
-// the last one's haul stays for the whole boot, in INTERNAL RAM: every piece is
-// under the 4 KB line (SPIRAM_MALLOC_ALWAYSINTERNAL) that sends small
-// allocations there first, and the WiFi driver draws on the same RAM with none
-// reserved for it.
-//
-// cam5 on 2026-09-23 sat at 9.8 KB of internal RAM free — ~64 KB below its own
-// figure on the 20th-22nd — in a room with forty students and their phones,
-// and its first NO_MEM snapshot was taken mid-scan.
-//
-// Safe only once the scan has ENDED: completed, or cancelled long enough ago
-// that a report the BLE task was already handling has finished.  After either,
-// NimBLE delivers no more reports for it.
-static uint16_t _bc_scan_devices  = 0;   // what the last scan freed had held
-static uint16_t _bc_scan_freed_kb = 0;   // internal RAM freeing it gave back
-// When the last free happened.  Read by the mount's NO_MEM ladder, so a free
-// that lands during a run is on that run's record whoever made it.
-static volatile uint32_t _bc_scan_freed_at_ms = 0;
-// How long after a scan ENDS before its results may be freed.  After a
-// completed scan NimBLE reports nothing more; after a CANCEL a report the BLE
-// task was already handling may still be walking the results, and deleting
-// them under it would corrupt the heap.  One number for every path that frees.
-#define BC_SCAN_FREE_GAP_MS 200UL
-
-static uint32_t ble_cam_free_scan() {
-    BLEScan *sc = BLEDevice::getScan();
-    uint32_t n  = sc->getResults()->getCount();
-    if (!n) return 0;                    // nothing held; keep the last figures
-    uint32_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    sc->clearResults();
-    uint32_t after  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    uint32_t freed  = after > before ? after - before : 0;
-    uint32_t t      = millis();
-    _bc_scan_freed_at_ms = t ? t : 1;
-    _bc_scan_devices  = n > 0xFFFF ? 0xFFFF : (uint16_t)n;
-    _bc_scan_freed_kb = (uint16_t)((freed + 512) / 1024);
-    Serial.printf("[CAM] scan results freed: %lu devices, %lu bytes internal\n",
-                  (unsigned long)n, (unsigned long)freed);
-    return freed;
-}
-
 // ── NO_MEM: take BLE off the radio ─────────────────────────────────────────
 //
 // The mount's refused-send ladder calls this at the first NO_MEM.  The first
@@ -1041,7 +1132,7 @@ static uint32_t _bc_hold_until_ms = 0;
 static uint8_t ble_cam_nomem_pause(uint32_t hold_ms) {
     uint8_t stopped = 0;
     if (ble_gap_disc_active()) {
-        BLEDevice::getScan()->stop();    // cancels, and runs bc_scan_done
+        bc_scan_stop();                  // cancels, and runs bc_scan_done
         stopped |= MOUNT_NOMEM_BLE_SCANNING;
     }
     if (ble_gap_conn_active()) {
@@ -1089,15 +1180,14 @@ static void ble_cam_poll() {
     // connection attempt until the hold runs out.  The rest of this carries on.
     bool held = _bc_hold_until_ms && (int32_t)(now - _bc_hold_until_ms) < 0;
     if (_bc_hold_until_ms && !held) _bc_hold_until_ms = 0;
-    // A finished scan's results are freed as soon as it is safe, not at the
-    // next retry.  They used to wait for the consume below, up to five seconds
-    // after the scan ended, with BLE idle and nothing for the NO_MEM ladder to
-    // stop — two of the eight foyer runs on 2026-09-23 began in that window
-    // and waited a second for the reserve.  _bc_cand already holds everything
-    // the choice needs, copied out as each device was reported.
-    if (_bc_scan_ready && !ble_gap_disc_active() &&
-            (uint32_t)(now - _bc_scan_end_ms) >= BC_SCAN_FREE_GAP_MS)
-        ble_cam_free_scan();
+    // A scan whose end never came — the NimBLE host reset under it, say —
+    // would leave _bc_scanning set for good, and a mount that believes it is
+    // scanning never looks for its camera again.  Nothing else would end it,
+    // so a scan still marked running two seconds past its five, with NimBLE no
+    // longer discovering, is over; what it heard is chosen from as usual.
+    if (_bc_scanning && !ble_gap_disc_active() &&
+            (uint32_t)(now - _bc_scan_start_ms) > BC_SCAN_MS + 2000UL)
+        bc_scan_done();
     // No bond and not pairing: do not go looking.  See _bc_have_bond — an
     // unbonded mount that hunts for cameras takes the link away from whichever
     // mount owns the one it finds.
@@ -1111,17 +1201,12 @@ static void ble_cam_poll() {
                 // Harmless on a bench; on a rig a camera that is switched off
                 // would mean five seconds of no motion control every ten, which
                 // is worse than having no camera control at all.
-                _bc_ncand    = 0;
-                _bc_scanning = true;
-                BLEDevice::getScan()->start(5, bc_scan_done, false);
+                bc_scan_start();
                 return;
             }
             _bc_scan_ready = false;
             // The scan is over, and everything that matters from it is in
-            // _bc_cand.  Free the library's copy of every advertiser it heard
-            // (see ble_cam_free_scan) — left alone, the last scan before the
-            // camera connected sat in internal RAM for the rest of the boot.
-            ble_cam_free_scan();
+            // _bc_cand.  There is nothing else to free: it kept nothing else.
             if (!bc_choose()) {
                 // Tell the pairing screen, rather than leaving it saying
                 // "searching" at somebody who is standing there with a camera
@@ -1133,7 +1218,7 @@ static void ble_cam_poll() {
                 _bc_pair_state = BCP_SEARCHING;
         }
         // NimBLE will not start a connection while discovery is running.
-        BLEDevice::getScan()->stop();
+        bc_scan_stop();
         delay(50);
         Serial.printf("[CAM] connecting to %s (%d dBm)\n",
                       _bc_pick_text, _bc_best_rssi);
