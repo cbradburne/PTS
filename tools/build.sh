@@ -236,8 +236,15 @@ compile_one() {
     # prevent — you create the password header, flash, and the binary still
     # carries the published placeholder, silently.  Cheap to rule out: if the
     # header is newer than what we built, build it again from nothing.
+    #
+    # arduino-cli names the binary after the .ino — esp_mount_amoled175.ino.bin,
+    # and .hex for the Teensy.  Looking for esp_mount_amoled175.bin, which never
+    # exists, made every build on a machine with the header a clean one: the
+    # whole core and every library recompiled each time, about ten times the
+    # work, with every warning printed again.
     _sec="$REPO/firmware/shared/ap_secret.h"
-    _bin="$(out_for "$t")/$(basename "$sk").bin"
+    _bin="$(out_for "$t")/$(basename "$sk").ino.bin"
+    [ -f "$_bin" ] || _bin="$(out_for "$t")/$(basename "$sk").ino.hex"
     if [ -f "$_sec" ] && [ ! -f "$_bin" -o "$_sec" -nt "$_bin" ]; then
         if [ -d "$(out_for "$t")" ]; then
             printf '   note   ap_secret.h is newer than the last build — rebuilding clean\n'
