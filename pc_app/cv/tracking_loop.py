@@ -5,16 +5,27 @@ Architecture
 ------------
 Two background workers run in parallel via separate ThreadPoolExecutors:
 
-  Detector  (slow, ~150-300 ms per frame):
-    YOLOv8-nano runs every DETECT_EVERY_N ticks (~3×/s at 30 Hz), finding
-    all people in the frame.  Results update the detection overlay shown in
-    the CV window and periodically re-anchor the correlation tracker to
-    prevent drift.
+  Detector  (slow, ~50 ms per frame on the concert PC at 320 px):
+    YOLOv8-nano — the pose model where it loads — runs at most every
+    DETECT_MIN_GAP_S, finding all people in the frame and, with the pose
+    model, where each one's head is.  Results update the detection overlay
+    shown in the CV window and re-anchor the correlation tracker to prevent
+    drift — and drive the mount themselves, so a tracker that cannot hold
+    the person leaves it following at YOLO's rate rather than halting.
 
-  Tracker  (fast, ~5-30 ms per frame):
-    OpenCV CSRT follows the selected person on every tick for smooth,
-    low-latency motion.  Briefly loses track on full 180° turns; YOLO
-    re-anchors it automatically on the next detection cycle.
+  Tracker  (fast, a few ms per frame):
+    A correlation tracker (MOSSE by default) follows the selected person on
+    every tick for smooth, low-latency motion.  When it loses them the mount
+    is sent nothing — never driven on the last position — and stopped if
+    YOLO has not found them again within LOST_STOP_S.  A tracker that has
+    wandered onto the background instead (it reports success there for as
+    long as it likes) is caught by YOLO seeing the person somewhere else —
+    see UNCONFIRMED_ROUNDS.
+
+The aim point is the HEAD: where the pose model put it, carried along with
+the tracked box between detections.  Not a point down the box — the box grows
+to the floor when a lectern stops hiding the legs, and up to the hands when
+they are raised.  Without the pose model, 15% down the box as before.
 
 Operator workflow
 -----------------
@@ -25,8 +36,8 @@ Operator workflow
 
 Target point
 ------------
-  target_cx / target_cy define where in the frame the tracked person's bbox
-  centre should sit (offset from frame centre, in full-resolution pixels).
+  target_cx / target_cy define where in the frame the tracked person's aim
+  point should sit (offset from frame centre, in full-resolution pixels).
   Default: upper-third  (cy = -frame_h / 6, cx = 0 = horizontally centred).
   Operator can drag the ⊕ crosshair in the CV window to reposition it.
 
@@ -50,21 +61,54 @@ import cv2
 import numpy as np
 
 from .capture import CaptureSource
-from .tracker import Tracker, TrackResult, PersonDetector, TrackerKind
+from .tracker import Tracker, TrackResult, PersonDetector, TrackerKind, Person
 from comms.mount_manager import MountManager
 
 log = logging.getLogger(__name__)
 
 TRACK_RATE_HZ   = 30
 TRACK_INTERVAL  = 1000 // TRACK_RATE_HZ   # ms between ticks
-DETECT_EVERY_N  = 10    # run YOLO every N ticks  (~3×/s at 30 Hz)
+# YOLO again as soon as this long after the last one started.  It was every
+# 10th tick: at the concert PC's 21 ticks/s, one result every 0.47 s for a
+# ~50 ms job, with three cores idle.  Five a second re-anchors the tracker two
+# and a half times as often, for about half a core more.
+DETECT_MIN_GAP_S = 0.2
 TRACK_SCALE     = 0.5   # downscale factor for CSRT (4× faster, small accuracy hit)
-MAX_CSRT_MISSES = 15    # consecutive CSRT failures before tracking_lost (~0.5 s)
+# A moment's loss is not a reason to stop.  The correlation tracker drops the
+# person a few times every ten seconds (the concert PC's own counts), and YOLO
+# finds them again within one DETECT_MIN_GAP_S.  So for LOST_STOP_S the mount is
+# sent nothing and carries on as it was going — the Teensy's jog watchdog
+# (JOG_WATCHDOG_MS, 500 ms) would stop it anyway — and only then is it told to
+# stop.  Stopping at once turned every loss into a stop-start.  Nothing is
+# ever computed from the old position: the old code went on DRIVING toward it,
+# for as long as the loss lasted.
+LOST_STOP_S     = 0.35
+# How long the person may stay lost, the mount stopped and YOLO looking for
+# them near where they were, before tracking is given up (tracking_lost).
+MAX_LOST_S      = 2.0
 IOU_REANCHOR    = 0.30  # minimum IoU to accept a YOLO detection as the same person
+# The tracker has to keep being confirmed by YOLO.  A correlation tracker can
+# settle on the background — the speaker's box, run to the floor beside the
+# lectern, takes in a door frame and the lectern's edges — and go on
+# reporting success there while the speaker walks away: in the replay of the
+# operator's recording, 11 s on the wall, with YOLO seeing them every 0.2 s a
+# little further off.  (The old loop did the same, at the same moment.)
+#
+# So when UNCONFIRMED_ROUNDS detections in a row see people but none where
+# the tracker is, the person is looked for near where YOLO last saw them —
+# within REACQUIRE_WIDTHS of their width, head to head — and re-anchored on;
+# failing that, the tracker is dropped and the lost path takes over.  A
+# detection that sees NOBODY counts for nothing either way: YOLO at 320 px
+# missed the speaker 16 times running in the same replay with the tracker
+# squarely on them.  The risk taken: someone else within that distance, seen
+# twice while the tracked person was not, is taken for them.
+UNCONFIRMED_ROUNDS = 2
+REACQUIRE_WIDTHS   = 1.5
 
-# Head tracking: fraction of bbox height from the top used as the aim point.
-# 0.12 ≈ top of head, 0.20 ≈ eye-line (good for "head and shoulders" framing).
-# CSRT still tracks the whole-body bbox for stability; only the aim point shifts.
+# The aim point without the pose model: this fraction of the box's height
+# from its top.  0.12 ≈ top of head, 0.20 ≈ eye-line.  A fraction of the
+# HEIGHT slides down the body as the box grows — face behind a lectern, chin
+# beside it — which is why the pose model's head is used whenever there is one.
 HEAD_TRACK_FRACTION = 0.15
 
 # One line in comms.log every CV_TIMING_REPORT_S while the feed runs: where
@@ -115,6 +159,8 @@ class _CvStats:
         self.stale_drives   = 0      # ...and the mount was driven anyway, on
                                      # the last position the tracker gave
         self.reanchors      = 0
+        self.found_near     = 0      # ...of which near where YOLO last saw them
+        self.dropped        = 0      # trackers dropped: people seen, none there
         self.stops          = 0      # stop commands sent for a lost track
         self.gave_up        = 0      # tracks abandoned (tracking_lost)
 
@@ -145,6 +191,15 @@ def _iou(a: tuple, b: tuple) -> float:
     inter = iw * ih
     union = aw * ah + bw * bh - inter
     return inter / union if union > 0 else 0.0
+
+
+def _head_or_top(p: Person) -> tuple[float, float]:
+    """Where a detected person's head is: the pose model's, or the top centre
+    of their box — which a lectern does not move."""
+    if p.head is not None:
+        return p.head
+    x, y, w, h = p.bbox
+    return (x + w / 2, y)
 
 
 class TrackingLoop(QObject):
@@ -188,10 +243,31 @@ class TrackingLoop(QObject):
 
         # ── State ──────────────────────────────────────────────────────────
         self._detections:    list[tuple] = []    # latest YOLO person bboxes
+        self._people:        list[Person] = []   # ...the same, with their heads
         self._selected_bbox: tuple | None = None  # current CSRT-tracked bbox
         self._tracking    = False
         self._tick_count  = 0
-        self._csrt_misses = 0
+        # Where the head sits in the box, in pixels: across from its centre,
+        # down from its top.  Measured on the last detection that placed it,
+        # and carried with the box between detections.  From the TOP because
+        # a box grows down when legs come out from behind a lectern, and the
+        # top stays at the head.  None: aim down the box instead.
+        self._head_off: tuple[float, float] | None = None
+        # Half the height of the box the tracker was last started on.  The
+        # tracker's own box is not that box: MOSSE rounds it up to a size its
+        # FFT likes, keeping the centre (a 514 px box came back 540 tall, its
+        # top 13 px higher).  So the top is rebuilt from the tracker's centre
+        # and this, not read off the tracker's box.
+        self._anchor_half_h: float | None = None
+        self._aim_px:   tuple[int, int] | None = None   # drawn on the frame
+        self._lost_since   = 0.0      # when the person was lost; 0 = not lost
+        self._lost_stopped = False    # the stop for this loss has been sent
+        self._track_gen    = 0        # bumped on every tracker (re)start
+        # The detection YOLO last confirmed the tracked person with, and how
+        # many since have seen people but none where the tracker is — see
+        # UNCONFIRMED_ROUNDS.
+        self._last_seen: Person | None = None
+        self._unconfirmed  = 0
 
         # Target point — offset from frame centre (full-res pixels).
         # Upper-third default is applied when the operator first selects a
@@ -217,7 +293,19 @@ class TrackingLoop(QObject):
 
         self._detect_pending: concurrent.futures.Future | None = None
         self._track_pending:  concurrent.futures.Future | None = None
+        self._track_pending_gen = 0   # the tracker start that update belongs to
         self._last_track:     TrackResult | None = None
+        self._last_detect_submit = 0.0
+        # The tracker's box when the running detection started (None if it
+        # was not tracking).  A detection describes that frame, not the one
+        # it is applied to — see _catch_up().
+        self._detect_ref_box: tuple | None = None
+        # The pose-aware call where the detector has one; a detector with only
+        # detect() (the plain model's shape, and the tests' fakes) gives boxes
+        # without heads, and the loop aims down the box.
+        self._detect_fn = (self._detector.detect_people
+                           if hasattr(self._detector, "detect_people")
+                           else lambda f: [Person(tuple(b)) for b in self._detector.detect(f)])
 
         # CV TIMING — see CV_TIMING_REPORT_S.
         self._stats            = _CvStats()
@@ -298,11 +386,20 @@ class TrackingLoop(QObject):
 
         was_tracking = self._tracking
         ok = self._tracker.init(small, scaled, self._tracker_kind)
+        self._track_gen += 1
         if ok:
             self._selected_bbox = bbox
             self._tracking      = True
-            self._csrt_misses   = 0
+            self._lost_since    = 0.0
+            self._lost_stopped  = False
             self._last_track    = None
+            # A new person: their head, not the last one's.
+            self._head_off      = None
+            self._anchor_half_h = h / 2
+            clicked = self._person_for(bbox)
+            self._take_head(clicked)
+            self._last_seen     = clicked if clicked is not None else Person(tuple(bbox))
+            self._unconfirmed   = 0
             if not was_tracking:
                 self.tracking_active.emit(True)
         else:
@@ -320,8 +417,10 @@ class TrackingLoop(QObject):
         """Stop following the selected person.  Detection continues."""
         self._tracking      = False
         self._selected_bbox = None
-        self._csrt_misses   = 0
+        self._lost_since    = 0.0
+        self._aim_px        = None
         self._tracker.stop()
+        self._track_gen    += 1
         pt_preset = self._mm.state(self._mount_id).active_pt_preset
         self._mm.send_jog(self._mount_id, 0, 0, 0, 0, pt_preset=pt_preset)
         self.tracking_active.emit(False)
@@ -358,49 +457,78 @@ class TrackingLoop(QObject):
         if not self._context_logged:
             self._log_context()
 
-        # ── YOLO detection (every DETECT_EVERY_N ticks) ───────────────────
-        if (self._tick_count % DETECT_EVERY_N == 0
-                and self._detect_pending is None
-                and self._detector.available):
+        # ── YOLO detection (at most every DETECT_MIN_GAP_S) ───────────────
+        now = time.monotonic()
+        if (self._detect_pending is None and self._detector.available
+                and now - self._last_detect_submit >= DETECT_MIN_GAP_S):
+            self._last_detect_submit = now
+            self._detect_ref_box = (self._selected_bbox
+                                    if self._tracking and self._tracker.active else None)
             self._detect_pending = self._detect_exec.submit(
-                _timed, self._detector.detect, frame.copy(), st, "detect_ms")
+                _timed, self._detect_fn, frame.copy(), st, "detect_ms")
 
         if self._detect_pending is not None and self._detect_pending.done():
-            now = time.monotonic()
             st.detect_results += 1
             if self._last_detect_t:
                 st.detect_gaps.append(now - self._last_detect_t)
             self._last_detect_t = now
             try:
-                dets = self._detect_pending.result()
+                people = self._detect_pending.result()
+                self._people = people
+                dets = [p.bbox for p in people]
                 self._detections = dets
                 self.detections_updated.emit(list(dets))
 
-                # Re-anchor CSRT when a fresh YOLO detection overlaps the
-                # currently tracked bbox — prevents long-term drift.
+                # Re-anchor the tracker on a fresh detection of the tracked
+                # person — it prevents drift, it brings back a person the
+                # tracker lost, and it re-measures where their head is.
+                # Caught up first: the detection is of an older frame.
                 if self._tracking and self._selected_bbox is not None:
-                    match = self._best_match(self._selected_bbox, dets)
+                    people = self._catch_up()
+                    match = self._person_for(self._selected_bbox, people)
+                    if match is None and people:
+                        # People, but none where the tracker is — see
+                        # UNCONFIRMED_ROUNDS.
+                        self._unconfirmed += 1
+                        if self._unconfirmed >= UNCONFIRMED_ROUNDS:
+                            match = self._near_last_seen(people)
+                            if match is not None:
+                                st.found_near += 1
+                            elif self._tracker.active:
+                                st.dropped += 1
+                                self._tracker.stop()
+                                self._track_gen += 1
                     if match is not None:
                         self._reinit_tracker(match, frame)
+                        # A detection is a fresh position in its own right:
+                        # drive on it.  Fed only by the tracker, the mount
+                        # halted whenever a restarted tracker could not hold
+                        # the person — in the replay, a quarter of restarts
+                        # failed on the very frame they started on, MOSSE
+                        # finding too little to lock onto in a dim, soft
+                        # picture — though YOLO had them every 0.2 s.
+                        self._drive_on(match.bbox)
             except Exception as exc:
                 log.debug(f"Detection future: {exc}")
             self._detect_pending = None
 
-        # ── CSRT tracking (every tick) ────────────────────────────────────
-        if self._tracking and self._tracker.active:
-            if self._track_pending is None:
-                if TRACK_SCALE < 1.0:
-                    tw = int(self._frame_w * TRACK_SCALE)
-                    th = int(self._frame_h * TRACK_SCALE)
-                    small = cv2.resize(frame, (tw, th))
-                else:
-                    small = frame.copy()
-                self._track_pending = self._track_exec.submit(
-                    _timed, self._tracker.update, small, st, "track_ms")
-
-            if self._track_pending is not None and self._track_pending.done():
-                try:
-                    raw = self._track_pending.result()
+        # ── Tracker: collect the last update, then start the next ─────────
+        # Collected whether or not the tracker is still active.  A tracker
+        # that loses the person switches itself off with that very update, and
+        # its failure is the one result that must be read: left unread, the
+        # last SUCCESS stayed in force and the mount was driven on it — 84% of
+        # one ten-second window on the concert PC, 2026-09-28.
+        #
+        # Collected BEFORE the next update starts, so there is one update per
+        # tick.  Started only on the tick after a collect, it ran every other
+        # tick at best: 1-10 updates a second against 21 ticks.
+        fresh: TrackResult | None = None
+        if self._track_pending is not None and self._track_pending.done():
+            try:
+                raw = self._track_pending.result()
+                if self._track_pending_gen != self._track_gen:
+                    raw = None       # for a box the tracker has since left
+                if raw is not None:
                     if raw.success:
                         st.track_ok += 1
                     else:
@@ -417,56 +545,65 @@ class TrackingLoop(QObject):
                                   max(1, int(bw * inv)), max(1, int(bh * inv))),
                         )
                     self._last_track = raw
-                except Exception as exc:
-                    log.debug(f"Tracker future: {exc}")
-                self._track_pending = None
+                    fresh = raw
+            except Exception as exc:
+                log.debug(f"Tracker future: {exc}")
+            self._track_pending = None
+
+        if self._tracking and self._tracker.active and self._track_pending is None:
+            if TRACK_SCALE < 1.0:
+                tw = int(self._frame_w * TRACK_SCALE)
+                th = int(self._frame_h * TRACK_SCALE)
+                small = cv2.resize(frame, (tw, th))
+            else:
+                small = frame.copy()
+            self._track_pending_gen = self._track_gen
+            self._track_pending = self._track_exec.submit(
+                _timed, self._tracker.update, small, st, "track_ms")
 
         # ── Control law ───────────────────────────────────────────────────
         if self._tracking:
             st.tracking_ticks += 1
             if not self._tracker.active:
                 st.lost_ticks += 1
-            result = self._last_track
-            if result is not None and result.success:
+            if fresh is not None and fresh.success and fresh.bbox is not None:
                 if not self._tracker.active:
-                    st.stale_drives += 1
-                self._csrt_misses   = 0
-                self._selected_bbox = result.bbox
-                # Derive head position from the top of the tracked bbox rather
-                # than its centre.  CSRT tracks the whole body for stability;
-                # HEAD_TRACK_FRACTION brings the aim point up to eye/head level.
-                if result.bbox is not None:
-                    bx, by, bw, bh = result.bbox
-                    head_cx = (bx + bw / 2) - self._frame_w / 2
-                    head_cy = (by + bh * HEAD_TRACK_FRACTION) - self._frame_h / 2
-                else:
-                    head_cx, head_cy = result.cx, result.cy
-                self._drive(head_cx, head_cy)
-            elif result is not None and not result.success:
-                # Stop the mount immediately so it doesn't drift blindly.
-                self._csrt_misses += 1
-                st.stops += 1
-                pt_preset = self._mm.state(self._mount_id).active_pt_preset
-                self._mm.send_jog(self._mount_id, 0, 0, 0, 0, pt_preset=pt_preset)
-                if self._csrt_misses >= MAX_CSRT_MISSES:
-                    # YOLO had enough time to re-anchor and couldn't — give up.
+                    st.stale_drives += 1     # cannot happen now; kept as the check
+                self._selected_bbox = fresh.bbox
+                self._drive_on(fresh.bbox)
+            elif (fresh is not None and not fresh.success) or not self._tracker.active:
+                # Lost the person.  Nothing is sent from the last position; YOLO
+                # looks for them near where they were.  After LOST_STOP_S the
+                # mount is stopped, once; after MAX_LOST_S tracking is given up.
+                if not self._lost_since:
+                    self._lost_since = now
+                if not self._lost_stopped and now - self._lost_since >= LOST_STOP_S:
+                    self._lost_stopped = True
+                    st.stops += 1
+                    pt_preset = self._mm.state(self._mount_id).active_pt_preset
+                    self._mm.send_jog(self._mount_id, 0, 0, 0, 0, pt_preset=pt_preset)
+                if now - self._lost_since >= MAX_LOST_S:
                     self._tracking      = False
                     self._selected_bbox = None
+                    self._aim_px        = None
+                    self._lost_since    = 0.0
                     st.gave_up += 1
                     self.tracking_lost.emit()
 
         # ── Annotate frame — selected person green bbox ───────────────────
         # Detection box overlay (blue, numbered) is drawn by VideoLabel using Qt,
         # so it stays crisp at any display scale.  The selected (CSRT) bbox is
-        # drawn here with OpenCV because it updates every frame.
+        # drawn here with OpenCV because it updates every frame — and with it
+        # the point the camera is actually aimed at, the head, rather than the
+        # middle of the box.
         display = frame
         if self._tracking and self._selected_bbox is not None:
             x, y, w, h = self._selected_bbox
             cv2.rectangle(display, (x, y), (x + w, y + h), (80, 210, 80), 2)
-            cx_px = x + w // 2
-            cy_px = y + h // 2
-            cv2.line(display, (cx_px - 10, cy_px), (cx_px + 10, cy_px), (80, 210, 80), 1)
-            cv2.line(display, (cx_px, cy_px - 10), (cx_px, cy_px + 10), (80, 210, 80), 1)
+            if self._aim_px is not None:
+                ax, ay = self._aim_px
+                cv2.line(display, (ax - 10, ay), (ax + 10, ay), (80, 210, 80), 2)
+                cv2.line(display, (ax, ay - 10), (ax, ay + 10), (80, 210, 80), 2)
 
         # The display slot is connected directly on this thread, so the
         # emit IS the display: scaling, overlay and paint.
@@ -480,10 +617,12 @@ class TrackingLoop(QObject):
         torch = sys.modules.get("torch")
         threads = torch.get_num_threads() if torch is not None else "not loaded"
         log.info("CV TIMING context: frame %dx%d, tracker %s requested, "
-                 "YOLO %s at %s px, torch threads %s, %s CPU cores",
+                 "YOLO %s at %s px (%s), torch threads %s, %s CPU cores",
                  self._frame_w, self._frame_h, self._tracker_kind.value,
                  "available" if self._detector.available else "unavailable",
-                 getattr(self._detector, "_imgsz", "?"), threads, os.cpu_count())
+                 getattr(self._detector, "_imgsz", "?"),
+                 getattr(self._detector, "model_name", "?") or "?",
+                 threads, os.cpu_count())
 
     def _report_timing(self) -> None:
         """The CV TIMING line — see CV_TIMING_REPORT_S."""
@@ -521,7 +660,9 @@ class TrackingLoop(QObject):
             parts.append(f"lost {100.0 * st.lost_ticks / st.tracking_ticks:.0f}% "
                          f"of tracking time, driving on a stale position for "
                          f"{100.0 * st.stale_drives / st.tracking_ticks:.0f}%, "
-                         f"{st.reanchors} re-anchors, {st.stops} stop commands, "
+                         f"{st.reanchors} re-anchors ({st.found_near} near where "
+                         f"YOLO last saw them), {st.dropped} trackers dropped as "
+                         f"off the person, {st.stops} stop commands, "
                          f"{st.gave_up} tracks given up")
         else:
             parts.append("not tracking")
@@ -533,6 +674,16 @@ class TrackingLoop(QObject):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _drive_on(self, bbox: tuple) -> None:
+        """Drive the mount at the head in bbox — a fresh position of the
+        tracked person, from the tracker or from a detection — ending any
+        loss."""
+        self._lost_since   = 0.0
+        self._lost_stopped = False
+        ax, ay = self._aim(bbox)
+        self._aim_px = (int(ax), int(ay))
+        self._drive(ax - self._frame_w / 2, ay - self._frame_h / 2)
 
     def _drive(self, bbox_cx: float, bbox_cy: float) -> None:
         """Power-curve P-controller: drive mount to keep subject at target."""
@@ -556,19 +707,87 @@ class TrackingLoop(QObject):
         self._mm.send_jog(self._mount_id, pan_jog, -tilt_jog, 0, 0,
                           pt_preset=pt_preset, axis_mask=0x03)
 
-    def _best_match(self, ref: tuple,
-                    detections: list[tuple]) -> tuple | None:
-        """Return the detection with highest IoU overlap with ref, or None."""
+    def _person_for(self, ref: tuple, people: list[Person] | None = None) -> Person | None:
+        """The detection (of the latest, or of `people`) that is the person
+        in ref — the highest IoU, and at least IOU_REANCHOR — or None."""
         best_iou, best = IOU_REANCHOR, None
-        for det in detections:
-            score = _iou(ref, det)
+        for p in (self._people if people is None else people):
+            score = _iou(ref, p.bbox)
             if score > best_iou:
-                best_iou, best = score, det
+                best_iou, best = score, p
         return best
 
-    def _reinit_tracker(self, bbox: tuple, frame: np.ndarray) -> None:
-        """Re-anchor CSRT on a fresh YOLO detection bbox to correct drift."""
+    def _near_last_seen(self, people: list[Person]) -> Person | None:
+        """Of `people`, the one nearest where YOLO last saw the tracked
+        person — head to head, or the box's top centre where there is no
+        head — if within REACQUIRE_WIDTHS of that person's width; else None."""
+        seen = self._last_seen
+        if seen is None:
+            return None
+        sx, sy = _head_or_top(seen)
+        best, best_d = None, REACQUIRE_WIDTHS * seen.bbox[2]
+        for p in people:
+            px, py = _head_or_top(p)
+            d = math.hypot(px - sx, py - sy)
+            if d <= best_d:
+                best, best_d = p, d
+        return best
+
+    def _catch_up(self) -> list[Person]:
+        """The latest detections, moved on by how far the tracked person has
+        moved since the detection's frame.
+
+        YOLO runs on a frame that is 50-250 ms old by the time its answer is
+        used, and the tracker is re-anchored on the CURRENT frame.  Moving —
+        the camera following them, if nothing else — the person is no longer
+        where the detection says: in the operator's recording, 35 px, and the
+        tracker, started on the wrong spot, stayed on it until the next
+        detection.  The tracker saw the frames in between, so its own motion
+        since the detection started is the correction.  Nothing to go on when
+        it was not tracking then, or is not now: the detections as they are."""
+        ref, cur = self._detect_ref_box, self._selected_bbox
+        if ref is None or cur is None or not self._tracker.active:
+            return self._people
+        dx = (cur[0] + cur[2] / 2) - (ref[0] + ref[2] / 2)
+        dy = (cur[1] + cur[3] / 2) - (ref[1] + ref[3] / 2)
+        if not dx and not dy:
+            return self._people
+        moved = []
+        for p in self._people:
+            x, y, w, h = p.bbox
+            head = (p.head[0] + dx, p.head[1] + dy) if p.head is not None else None
+            moved.append(Person((int(round(x + dx)), int(round(y + dy)), w, h), head, p.head_from))
+        return moved
+
+    def _take_head(self, person: Person | None) -> None:
+        """Measure where the head sits in the box, from a detection that
+        placed it.  One that did not — the plain model, or neither face nor
+        shoulders seen — leaves the last measurement in place."""
+        if person is None or person.head is None:
+            return
+        x, y, w, h = person.bbox
+        hx, hy = person.head
+        self._head_off = (hx - (x + w / 2), hy - y)
+
+    def _aim(self, bbox: tuple) -> tuple[float, float]:
+        """Where to aim, in frame pixels: the head, carried with the box — or,
+        with no head measured, HEAD_TRACK_FRACTION down the box.
+
+        bbox is the tracker's box.  Its centre moves with the person; its top
+        is rebuilt from that centre and the height of the box it was started
+        on (see _anchor_half_h), because the tracker resizes its own."""
         x, y, w, h = bbox
+        half = self._anchor_half_h if self._anchor_half_h is not None else h / 2
+        cx, top = x + w / 2, y + h / 2 - half
+        if self._head_off is not None:
+            dx, dy = self._head_off
+            return (cx + dx, top + dy)
+        return (cx, top + 2 * half * HEAD_TRACK_FRACTION)
+
+    def _reinit_tracker(self, person: Person, frame: np.ndarray) -> None:
+        """Re-anchor the tracker on a fresh detection of the tracked person,
+        and take where their head is from it."""
+        x, y, w, h = person.bbox
         if TRACK_SCALE < 1.0:
             tw = int(self._frame_w * TRACK_SCALE)
             th = int(self._frame_h * TRACK_SCALE)
@@ -576,8 +795,13 @@ class TrackingLoop(QObject):
             scaled = (int(x * TRACK_SCALE), int(y * TRACK_SCALE),
                       max(1, int(w * TRACK_SCALE)), max(1, int(h * TRACK_SCALE)))
         else:
-            small, scaled = frame, bbox
+            small, scaled = frame, person.bbox
         self._tracker.init(small, scaled, self._tracker_kind)
-        self._selected_bbox = bbox
+        self._track_gen += 1
+        self._selected_bbox = person.bbox
+        self._anchor_half_h = h / 2
+        self._take_head(person)
+        self._last_seen   = person
+        self._unconfirmed = 0
         self._stats.reanchors += 1
-        log.debug(f"tracker re-anchored to YOLO detection {bbox}")
+        log.debug(f"tracker re-anchored to YOLO detection {person.bbox}")

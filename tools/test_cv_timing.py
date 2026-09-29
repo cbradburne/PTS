@@ -16,8 +16,12 @@ WHAT THIS TEST IS PROTECTING.
                              fakes were set up to do
   the counts are true        stop commands and tracks given up equal what the
                              mount was actually sent and what the loop signalled
-  stale driving is seen      a tick that drives the mount while the tracker has
-                             lost the person is counted as such
+  a lost person stops it     the mount is stopped once and never driven on the
+                             last position; the stale-drive count stays at 0,
+                             kept as the check (it read up to 84% on the concert
+                             PC, 2026-09-28, before the fix)
+  the tracker every tick     it was started only on the tick after a collect:
+                             1-10 updates a second against 21 ticks
   once, then every window    the context line once per feed, a report per window
   the camera rate is real    the capture thread counts frames the device gave,
                              not reads that failed
@@ -191,6 +195,12 @@ assert DETECT_S * 1000 * 0.8 <= yolo_ms <= DETECT_S * 1000 + 60, \
 assert "a result every" in line
 assert re.search(r"tracker fake-mosse [\d.]+/s, .* \d+ ok / 0 lost the person", line), line
 assert "lost 0% of tracking time, driving on a stale position for 0%" in line, line
+assert "(0 near where YOLO last saw them), 0 trackers dropped as off the person" in line, \
+    f"YOLO and the tracker agreed throughout, yet the line says otherwise:\n  {line}"
+track_rate = num(r"tracker fake-mosse ([\d.]+)/s", line)
+assert track_rate >= 0.7 * ticks, \
+    f"the tracker ran {track_rate}/s against {ticks} ticks/s — every other tick at best, " \
+    "the way it was when it started only on the tick after a collect"
 print("   rates and times match what the fakes were set to do   OK")
 
 # ---- 3. the counts are true ------------------------------------------------------
@@ -202,7 +212,7 @@ loop.tracking_lost.connect(lambda: lost.append(1))
 loop._tracker.fail = True
 loop._tracker.off_on_fail = False            # keep reporting the failures
 loop._detector.detect = lambda frame: []     # nothing to re-anchor on
-run(1.3)
+run(tl.MAX_LOST_S + 0.8)
 tl.CV_TIMING_REPORT_S = 0.0                  # flush the window now
 loop._tick()
 text = BUF.getvalue()
@@ -215,21 +225,35 @@ assert given_up == len(lost) == 1, \
     f"the line counted {given_up} tracks given up; the loop signalled {len(lost)}"
 print(f"   {stops} stop commands and {given_up} track given up, as sent   OK")
 
-# ---- 4. driving on a stale position is counted -------------------------------
-print("\n4. stale driving:")
+# ---- 4. a lost person stops the mount — never driven on the old position ----
+# The move-stop-move: a tracker that lost the person switched itself off, its
+# failure was never collected, and the last SUCCESS kept driving the mount —
+# 84% of one window on the concert PC.  Now: stopped once, then held.
+print("\n4. lost, with a good position still to hand:")
 tl.CV_TIMING_REPORT_S = 1000.0
 loop._stats.reset()
+mm.jogs.clear()
 loop._tracking = True
+loop._lost_since, loop._lost_stopped = 0.0, False
 loop._tracker.active = False                 # lost the person...
 loop._last_track = TrackResult(True, 5.0, 5.0, (250, 100, 60, 150))  # ...last good
-loop._tick()
-assert loop._stats.lost_ticks == 1 and loop._stats.stale_drives == 1, \
-    "a tick that drove the mount on the last good position after the tracker " \
-    "lost the person was not counted as stale"
-loop._tracker.active = True
-loop._tick()
-assert loop._stats.stale_drives == 1, "a tick with a live tracker was counted as stale"
-print("   counted when the tracker is lost, not when it is live   OK")
+for _ in range(3):
+    loop._tick()
+assert loop._stats.lost_ticks == 3 and loop._stats.stale_drives == 0 and \
+       not [j for j in mm.jogs if j != (0, 0)], \
+    "the mount was driven on the last good position after the tracker lost the " \
+    f"person — the move-stop-move: {mm.jogs}"
+assert not mm.jogs, \
+    f"the mount was stopped the moment the tracker lost the person, not after " \
+    f"{tl.LOST_STOP_S} s — every brief loss a stop-start: {mm.jogs}"
+# ...and LOST_STOP_S on, still lost: one stop, and nothing after it.
+loop._lost_since -= tl.LOST_STOP_S
+for _ in range(3):
+    loop._tick()
+assert mm.jogs == [(0, 0)] and loop._stats.stops == 1, \
+    f"lost for {tl.LOST_STOP_S} s, the mount was not stopped exactly once: {mm.jogs}"
+print(f"   nothing sent for {tl.LOST_STOP_S} s, then one stop — never driven on the "
+      "old position   OK")
 
 # ---- 5. what it says when there is nothing to say ------------------------
 print("\n5. idle and without YOLO:")

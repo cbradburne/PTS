@@ -1,9 +1,12 @@
 """
 CV tracker — person detection + correlation tracking.
 
-PersonDetector  wraps YOLOv8-nano for real-time person detection.
+PersonDetector  wraps YOLOv8-nano for real-time person detection — the POSE
+                model where it can load it, which also says where each
+                person's head is (head_from_keypoints), and the plain one
+                where it cannot.
                 Requires: pip install ultralytics
-                Downloads the nano model (~6 MB) on first use.
+                Downloads the nano model (~7 MB) on first use.
                 Degrades gracefully if ultralytics is not installed.
 
 Tracker         wraps OpenCV CSRT for smooth between-detection tracking
@@ -56,6 +59,47 @@ class TrackResult:
     bbox: tuple[int, int, int, int] | None   # (x, y, w, h) in frame coords
 
 
+@dataclass
+class Person:
+    """One person YOLO found: the box, and where the head is if it could tell."""
+    bbox: tuple[int, int, int, int]           # (x, y, w, h) in frame coords
+    head: tuple[float, float] | None = None   # frame coords
+    head_from: str = ""                       # "face" | "shoulders" | ""
+
+
+# COCO keypoints, as YOLOv8-pose numbers them.
+KP_FACE       = (0, 1, 2, 3, 4)      # nose, eyes, ears
+KP_SHOULDERS  = (5, 6)
+KP_MIN_CONF   = 0.5
+# Eye level above the shoulder line, as a fraction of the shoulder width: about
+# 25 cm above for 40 cm across on an adult.  Only used when the face is not
+# seen — the speaker has turned to the screen, or away.
+EYES_ABOVE_SHOULDERS = 0.55
+
+
+def head_from_keypoints(xy, conf) -> tuple[tuple[float, float] | None, str]:
+    """Where a person's head is, from their 17 keypoints.
+
+    The face points that were seen, averaged; failing those, a point above the
+    middle of the shoulders; failing those, nothing.  Never the box: the box
+    stretches to the floor when a lectern stops hiding the legs, and up to the
+    hands when they are raised, and the head does neither.  (2026-09-29: the
+    old aim point, 15% down the box, sat on the face behind the lectern and on
+    the chin beside it.)
+    """
+    def seen(k):
+        return (conf is None or conf[k] >= KP_MIN_CONF) and (xy[k][0] or xy[k][1])
+    face = [xy[k] for k in KP_FACE if seen(k)]
+    if face:
+        return ((sum(p[0] for p in face) / len(face),
+                 sum(p[1] for p in face) / len(face)), "face")
+    if all(seen(k) for k in KP_SHOULDERS):
+        (lx, ly), (rx, ry) = xy[KP_SHOULDERS[0]], xy[KP_SHOULDERS[1]]
+        width = abs(lx - rx)
+        return (((lx + rx) / 2, (ly + ry) / 2 - EYES_ABOVE_SHOULDERS * width), "shoulders")
+    return None, ""
+
+
 # ---------------------------------------------------------------------------
 # PersonDetector — YOLOv8-nano wrapper
 # ---------------------------------------------------------------------------
@@ -64,10 +108,17 @@ class PersonDetector:
     """
     Detects all people in a frame using YOLOv8-nano.
     Thread-safe: detect() can be called from a background executor.
+
+    The pose model first: the same network with a head that also places 17
+    keypoints per person, at about the same cost — so the loop can aim at the
+    head rather than at a point down the box.  If it cannot be had (no
+    internet for the first download, say), the plain model, and the loop
+    aims down the box as it always has.
     """
 
     CONF_THRESHOLD = 0.45
     PERSON_CLASS   = 0          # COCO class 0 = person
+    POSE_MODEL     = "yolov8n-pose.pt"
     MODEL_NAME     = "yolov8n.pt"
     DEFAULT_IMGSZ  = 416
 
@@ -78,6 +129,8 @@ class PersonDetector:
         self._imgsz     = int(imgsz)
         self._model     = None
         self._available = False
+        self.model_name = ""        # which one loaded, for the CV TIMING line
+        self.has_pose   = False
         self._try_load()
 
     def _try_load(self) -> None:
@@ -102,7 +155,20 @@ class PersonDetector:
 
             try:
                 from ultralytics import YOLO  # type: ignore
-                self._model = YOLO(self.MODEL_NAME)
+                for name in (self.POSE_MODEL, self.MODEL_NAME):
+                    try:
+                        self._model = YOLO(name)
+                        self.model_name = name
+                        break
+                    except ImportError:
+                        raise
+                    except Exception as exc:
+                        log.warning("Could not load %s (%s)%s", name, exc,
+                                    " — trying the plain detector"
+                                    if name == self.POSE_MODEL else "")
+                if self._model is None:
+                    raise RuntimeError("no YOLO model could be loaded")
+                self.has_pose = self.model_name == self.POSE_MODEL
             finally:
                 os.chdir(prev_cwd)
                 ssl._create_default_https_context = orig_ctx
@@ -112,7 +178,9 @@ class PersonDetector:
             self._model(dummy, verbose=False, imgsz=self._imgsz,
                         classes=[self.PERSON_CLASS])
             self._available = True
-            log.info("YOLOv8-nano person detector ready (imgsz=%d)", self._imgsz)
+            log.info("YOLOv8-nano person detector ready: %s (imgsz=%d)%s",
+                     self.model_name, self._imgsz,
+                     "" if self.has_pose else " — no pose model, aiming down the box")
         except ImportError:
             log.warning(
                 "ultralytics not installed — auto-detection unavailable.  "
@@ -130,6 +198,11 @@ class PersonDetector:
         Detect all people in frame.
         Returns list of (x, y, w, h) bboxes in frame pixel coordinates.
         """
+        return [p.bbox for p in self.detect_people(frame)]
+
+    def detect_people(self, frame: np.ndarray) -> list[Person]:
+        """Every person in frame: the box, and the head where the pose model
+        could place it (None with the plain model)."""
         if not self._available or self._model is None:
             return []
         try:
@@ -139,12 +212,20 @@ class PersonDetector:
                 classes=[self.PERSON_CLASS],
                 conf=self.CONF_THRESHOLD,
             )
-            bboxes = []
+            people = []
             for r in results:
-                for box in r.boxes:
+                kps = getattr(r, "keypoints", None) if self.has_pose else None
+                xy = kps.xy.cpu().numpy() if kps is not None else None
+                cf = (kps.conf.cpu().numpy()
+                      if kps is not None and kps.conf is not None else None)
+                for i, box in enumerate(r.boxes):
                     x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
-                    bboxes.append((x1, y1, x2 - x1, y2 - y1))
-            return bboxes
+                    head, src = (None, "")
+                    if xy is not None and i < len(xy):
+                        head, src = head_from_keypoints(
+                            xy[i], cf[i] if cf is not None else None)
+                    people.append(Person((x1, y1, x2 - x1, y2 - y1), head, src))
+            return people
         except Exception as exc:
             log.warning(f"Detection error: {exc}")
             return []
