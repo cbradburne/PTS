@@ -133,6 +133,8 @@ class PoseDetector:
 
 tl.TRACK_SCALE = 1.0                  # boxes in the tests' own pixels
 tl.DETECT_MIN_GAP_S = 1e9             # detections only when the test says
+tl.JOG_INTERVAL_S = 0.0               # every drive jogs: where, not how often
+                                      # (test_cv_timing checks the rate)
 
 
 def new_loop(detector):
@@ -399,8 +401,9 @@ for k in (1, 2, 3):
     assert loop6._lost_since, "the tracker's failure was not taken as a loss"
     loop6._lost_since -= 0.3                 # 0.3 s since it lost them
     moved = Person((600 + 10 * k, 200, 80, 300), head=(640 + 10 * k, 222), head_from="face")
+    sent = len(loop6._mm.jogs)
     yolo_round(loop6, [moved])
-    assert loop6._aim_px == (640 + 10 * k, 222) and loop6._mm.jogs, \
+    assert loop6._aim_px == (640 + 10 * k, 222) and len(loop6._mm.jogs) > sent, \
         f"YOLO found them at ({640 + 10 * k}, 222) and the mount was not driven there: " \
         f"aim {loop6._aim_px}, jogs {loop6._mm.jogs}"
 assert (0, 0) not in loop6._mm.jogs and not loop6._tracker.active, \

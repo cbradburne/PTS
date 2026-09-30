@@ -55,7 +55,7 @@ import os
 import sys
 import time
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 
 import cv2
 import numpy as np
@@ -68,6 +68,13 @@ log = logging.getLogger(__name__)
 
 TRACK_RATE_HZ   = 30
 TRACK_INTERVAL  = 1000 // TRACK_RATE_HZ   # ms between ticks
+# The mount is jogged at most this often — the joystick's rate (JOG_RATE_HZ in
+# motion/command_dispatcher.py, "responsiveness vs radio congestion"), and
+# about what the concert PC's loop actually sent at its 21 ticks/s.  The
+# tracker runs every tick; each jog carries the freshest aim.  Faster jogs buy
+# little: the Teensy ramps every speed change at its acceleration anyway.
+JOG_RATE_HZ     = 20
+JOG_INTERVAL_S  = 1.0 / JOG_RATE_HZ
 # YOLO again as soon as this long after the last one started.  It was every
 # 10th tick: at the concert PC's 21 ticks/s, one result every 0.47 s for a
 # ~50 ms job, with three cores idle.  Five a second re-anchors the tracker two
@@ -161,6 +168,7 @@ class _CvStats:
         self.reanchors      = 0
         self.found_near     = 0      # ...of which near where YOLO last saw them
         self.dropped        = 0      # trackers dropped: people seen, none there
+        self.jogs           = 0      # jogs sent to the mount (see JOG_RATE_HZ)
         self.stops          = 0      # stop commands sent for a lost track
         self.gave_up        = 0      # tracks abandoned (tracking_lost)
 
@@ -313,10 +321,18 @@ class TrackingLoop(QObject):
         self._last_detect_t    = 0.0
         self._frames_at_report = getattr(capture, "frames_grabbed", None)
 
+        # PRECISE, or Windows runs it at 21 ticks/s, not 30.  Qt hands a coarse
+        # timer of 20 ms-20 s to the Windows message timer, which fires only on
+        # the system clock's 15.6 ms ticks: 33 ms becomes 47 — the concert PC's
+        # CV TIMING read 21.0-21.3 ticks/s, every session.  A precise one goes
+        # to the 1 ms multimedia timer (qeventdispatcher_win.cpp, Qt 6.8 and
+        # dev alike).  Elsewhere coarse timers already keep time.
         self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(TRACK_INTERVAL)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+        self._jog_due = 0.0           # when the next jog may go — see JOG_RATE_HZ
 
         self.detector_ready.emit(self._detector.available)
 
@@ -664,6 +680,7 @@ class TrackingLoop(QObject):
                          f"YOLO last saw them), {st.dropped} trackers dropped as "
                          f"off the person, {st.stops} stop commands, "
                          f"{st.gave_up} tracks given up")
+            parts.append(f"mount jogged {st.jogs / secs:.1f}/s")
         else:
             parts.append("not tracking")
 
@@ -687,6 +704,18 @@ class TrackingLoop(QObject):
 
     def _drive(self, bbox_cx: float, bbox_cy: float) -> None:
         """Power-curve P-controller: drive mount to keep subject at target."""
+        # At most JOG_RATE_HZ.  The schedule moves on one interval per jog, so
+        # at 30 ticks/s the jogs land on alternate ticks and on consecutive
+        # ones by turns — 20 a second on average.  After a pause (a loss, or
+        # the first jog) it restarts from now rather than catching up.
+        now = time.monotonic()
+        if now < self._jog_due:
+            return
+        self._jog_due += JOG_INTERVAL_S
+        if self._jog_due < now:
+            self._jog_due = now + JOG_INTERVAL_S
+        self._stats.jogs += 1
+
         err_x = bbox_cx - self._target_cx
         err_y = bbox_cy - self._target_cy
 

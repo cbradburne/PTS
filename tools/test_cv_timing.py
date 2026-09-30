@@ -22,6 +22,8 @@ WHAT THIS TEST IS PROTECTING.
                              PC, 2026-09-28, before the fix)
   the tracker every tick     it was started only on the tick after a collect:
                              1-10 updates a second against 21 ticks
+  30 ticks, 20 jogs          a precise timer (a coarse one ticks every 47 ms on
+                             Windows); the mount jogged at the joystick's rate
   once, then every window    the context line once per feed, a report per window
   the camera rate is real    the capture thread counts frames the device gave,
                              not reads that failed
@@ -201,6 +203,17 @@ track_rate = num(r"tracker fake-mosse ([\d.]+)/s", line)
 assert track_rate >= 0.7 * ticks, \
     f"the tracker ran {track_rate}/s against {ticks} ticks/s — every other tick at best, " \
     "the way it was when it started only on the tick after a collect"
+# The timer has to be PRECISE: Qt gives a coarse 33 ms timer to the Windows
+# message timer, which fires on the system clock's 15.6 ms ticks — every 47 ms,
+# the concert PC's 21 ticks/s in every CV TIMING line.  macOS keeps time either
+# way, so the rate above cannot show it here; the type can.
+assert loop._timer.timerType() == tl.Qt.TimerType.PreciseTimer, \
+    "the loop's timer is not precise — on Windows it would tick every 47 ms, not 33"
+# ...and the mount is jogged at the joystick's rate, not on every tick.
+jog_rate = num(r"mount jogged ([\d.]+)/s", line)
+assert 0.6 * tl.JOG_RATE_HZ <= jog_rate <= 1.1 * tl.JOG_RATE_HZ + 1, \
+    f"the mount was jogged {jog_rate}/s with the tracker at {track_rate}/s — " \
+    f"the jog rate should hold at about {tl.JOG_RATE_HZ}/s whatever the tick rate"
 print("   rates and times match what the fakes were set to do   OK")
 
 # ---- 3. the counts are true ------------------------------------------------------
