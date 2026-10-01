@@ -2899,11 +2899,17 @@ class Joystick {
     _R()  { return this.cv.width * 0.42; }
     _cxy(){ return [this.cv.width/2, this.cv.height/2]; }
 
+    // Where a touch is, from the stick's centre.
+    _off(e) {
+        const r = this.cv.getBoundingClientRect(), [cx, cy] = this._cxy();
+        return [e.clientX - r.left - cx, e.clientY - r.top - cy];
+    }
+    // On the stick: inside its ring, the ring's 2 px line included.
+    _inRing(e) { const [dx, dy] = this._off(e); return Math.hypot(dx, dy) <= this._R() + 1; }
+
     _norm(e) {
-        const r  = this.cv.getBoundingClientRect();
-        const [cx,cy] = this._cxy(), R = this._R();
-        let dx = e.clientX - r.left - cx;
-        let dy = e.clientY - r.top  - cy;
+        const R = this._R();
+        let [dx, dy] = this._off(e);
         const d = Math.sqrt(dx*dx + dy*dy);
         if (d > R) { dx = dx/d*R; dy = dy/d*R; }
         // Circular → square mapping: scale so the largest component reaches ±1.0
@@ -2917,7 +2923,13 @@ class Joystick {
     }
 
     _dn(e) {
-        if (this.pid !== null) return;
+        // A touch must START inside the ring (the operator, 2026-10-01).  The
+        // square's corners are empty, and what sits beside them must be safe
+        // to miss: E-STOP and EDIT in the portrait stick's corners, the Move
+        // popup's focus button.  A touch in a corner reads as full deflection,
+        // so a tap that missed one of those could start a full-speed jog.
+        // Once started, a drag may go anywhere, held at the ring as before.
+        if (this.pid !== null || !this._inRing(e)) return;
         this.pid = e.pointerId;
         this.cv.setPointerCapture(e.pointerId);
         [this.x, this.y] = this._norm(e);
