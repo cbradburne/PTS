@@ -32,6 +32,7 @@ Run directly, or via tools/run_tests.sh with the rest.
 """
 import io
 import logging
+import math
 import os
 import pathlib
 import re
@@ -197,8 +198,14 @@ assert DETECT_S * 1000 * 0.8 <= yolo_ms <= DETECT_S * 1000 + 60, \
 assert "a result every" in line
 assert re.search(r"tracker fake-mosse [\d.]+/s, .* \d+ ok / 0 lost the person", line), line
 assert "lost 0% of tracking time, driving on a stale position for 0%" in line, line
-assert "(0 near where YOLO last saw them), 0 trackers dropped as off the person" in line, \
+assert "(0 near where YOLO last saw them), 0 trackers dropped as off the person, " \
+       "0 as out of sight" in line, \
     f"YOLO and the tracker agreed throughout, yet the line says otherwise:\n  {line}"
+# The fakes hold the aim 15% down a fixed box, (560, 245); the target is the
+# upper third's default, (640, 240): 80 px off, every time, never crossing.
+off = num(r"aim off target: median ([\d.]+) px", line)
+assert abs(off - math.hypot(80, 5)) < 1.5 and "crossed it 0 times" in line, \
+    f"the aim sat {math.hypot(80, 5):.0f} px off the target throughout; the line says:\n  {line}"
 track_rate = num(r"tracker fake-mosse ([\d.]+)/s", line)
 assert track_rate >= 0.7 * ticks, \
     f"the tracker ran {track_rate}/s against {ticks} ticks/s — every other tick at best, " \

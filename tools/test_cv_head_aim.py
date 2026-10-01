@@ -26,13 +26,16 @@ WHAT THIS TEST IS PROTECTING.
   off the person, caught     a tracker settled on the background, still reporting
                              success, while YOLO sees the person elsewhere:
                              re-anchored on them if they are near where last seen,
-                             dropped if not; YOLO seeing nobody counts for nothing
+                             dropped if not; a few results seeing nobody do not count
+  out of sight, let go       nobody confirmed for UNSEEN_DROP_S (they left by a
+                             door): dropped, stopped, given up
 
 Run directly, or via tools/run_tests.sh with the rest.
 """
 import os
 import pathlib
 import sys
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -329,7 +332,11 @@ def yolo_round(lp, people):
 loop5 = new_loop(PoseDetector())
 p5 = Person((600, 200, 80, 300), head=(640, 222), head_from="face")
 detect(loop5, [p5])
+t_pick = time.monotonic()
 loop5.select_person(p5.bbox)
+assert loop5._confirmed_at >= t_pick, \
+    "picking a person did not start the out-of-sight clock — the first detection to " \
+    "see nobody would find it long run out"
 tick(loop5, 2)
 assert loop5._aim_px == (640, 222), loop5._aim_px
 # YOLO misses them for a while — it did, 16 times running, in the replay.
@@ -411,7 +418,46 @@ assert (0, 0) not in loop6._mm.jogs and not loop6._tracker.active, \
     f"{loop6._mm.jogs}"
 print("   driven on each detection, and never stopped while YOLO keeps finding them   OK")
 
-for lp in (loop, loop2, loop3, loop4, loop5, loop6):
+# ---- 6c. out of sight: they walked out of the door ------------------------------
+# 2026-10-01 at the hall: the operator walked out through a door and the
+# tracker stayed on a sliver of it.  With the frame empty, YOLO saw nobody
+# elsewhere either, and nothing ever challenged the tracker.
+print("\n6c. out of sight:")
+loop7 = new_loop(PoseDetector())
+gone_signal = []
+loop7.tracking_lost.connect(lambda: gone_signal.append(1))
+p7 = Person((600, 200, 80, 300), head=(640, 222), head_from="face")
+detect(loop7, [p7])
+loop7.select_person(p7.bbox)
+tick(loop7, 2)
+t0 = time.monotonic()
+yolo_round(loop7, [p7])                      # YOLO sees them where the tracker is...
+assert loop7._confirmed_at >= t0, \
+    "a re-anchor did not count as YOLO confirming the tracker — the out-of-sight clock " \
+    "would run on from the pick"
+loop7._confirmed_at -= tl.UNSEEN_DROP_S - 0.5
+yolo_round(loop7, [])                        # ...then nobody, not yet for long
+assert loop7._tracker.active, \
+    f"dropped after {tl.UNSEEN_DROP_S - 0.5} s without YOLO seeing them — a few missed " \
+    "detections are not a person gone"
+loop7._confirmed_at -= 1.0
+yolo_round(loop7, [])                        # nobody, for UNSEEN_DROP_S
+assert not loop7._tracker.active, \
+    f"nobody seen for {tl.UNSEEN_DROP_S} s and the tracker was kept — on the door they left by"
+assert loop7._stats.dropped_unseen == 1, \
+    f"the tracker was let go out of sight and the CV TIMING line will say " \
+    f"{loop7._stats.dropped_unseen} times"
+loop7._mm.jogs.clear()
+tick(loop7, 3)
+assert not loop7._mm.jogs, f"the mount was driven after they went out of sight: {loop7._mm.jogs}"
+loop7._lost_since -= tl.MAX_LOST_S
+tick(loop7, 2)
+assert loop7._mm.jogs == [(0, 0)] and gone_signal == [1] and not loop7.is_tracking, \
+    f"out of sight for good: jogs {loop7._mm.jogs}, given up {gone_signal}"
+print(f"   kept through {tl.UNSEEN_DROP_S - 0.5} s unseen; dropped at {tl.UNSEEN_DROP_S} s; "
+      "one stop, then given up   OK")
+
+for lp in (loop, loop2, loop3, loop4, loop5, loop6, loop7):
     lp.shutdown()
 
 # ---- 7. the detector: the pose model first, the plain one if it cannot -----------

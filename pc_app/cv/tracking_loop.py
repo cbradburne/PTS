@@ -106,12 +106,22 @@ IOU_REANCHOR    = 0.30  # minimum IoU to accept a YOLO detection as the same per
 # the tracker is, the person is looked for near where YOLO last saw them —
 # within REACQUIRE_WIDTHS of their width, head to head — and re-anchored on;
 # failing that, the tracker is dropped and the lost path takes over.  A
-# detection that sees NOBODY counts for nothing either way: YOLO at 320 px
+# detection that sees NOBODY does not count toward that: YOLO at 320 px
 # missed the speaker 16 times running in the same replay with the tracker
 # squarely on them.  The risk taken: someone else within that distance, seen
 # twice while the tracked person was not, is taken for them.
 UNCONFIRMED_ROUNDS = 2
 REACQUIRE_WIDTHS   = 1.5
+# ...but nobody, for long enough, does.  2026-10-01 at the hall: the operator
+# walked out through a door and the tracker stayed on a sliver of it — with
+# the frame empty there was no one to see elsewhere, so nothing ever
+# challenged it, and the mount held on the door until the operator stopped
+# it.  Live, YOLO confirms the tracked person on all but a handful of its
+# ~47 results every ten seconds while they are in view, so this long without
+# one means they have gone: the tracker is dropped — the mount stops, YOLO
+# looks for them near where it last saw them for MAX_LOST_S, then tracking
+# is given up.
+UNSEEN_DROP_S      = 3.0
 
 # The aim point without the pose model: this fraction of the box's height
 # from its top.  0.12 ≈ top of head, 0.20 ≈ eye-line.  A fraction of the
@@ -169,6 +179,11 @@ class _CvStats:
         self.reanchors      = 0
         self.found_near     = 0      # ...of which near where YOLO last saw them
         self.dropped        = 0      # trackers dropped: people seen, none there
+        self.dropped_unseen = 0      # ...and: nobody confirmed for UNSEEN_DROP_S
+        self.aim_err: list  = []     # px from the aim point to the target, per
+                                     # fresh position
+        self.crossings      = 0      # times the aim crossed the target (an
+                                     # overshoot, or the person turning back)
         self.jogs           = 0      # jogs sent to the mount (see JOG_RATE_HZ)
         self.stops          = 0      # stop commands sent for a lost track
         self.gave_up        = 0      # tracks abandoned (tracking_lost)
@@ -369,6 +384,8 @@ class TrackingLoop(QObject):
         # UNCONFIRMED_ROUNDS.
         self._last_seen: Person | None = None
         self._unconfirmed  = 0
+        self._confirmed_at = 0.0      # when YOLO last confirmed it — UNSEEN_DROP_S
+        self._aim_side = (0, 0)       # which side of the target, by axis — crossings
 
         # Target point — offset from frame centre (full-res pixels).
         # Upper-third default is applied when the operator first selects a
@@ -515,6 +532,8 @@ class TrackingLoop(QObject):
             self._take_head(clicked)
             self._last_seen     = clicked if clicked is not None else Person(tuple(bbox))
             self._unconfirmed   = 0
+            self._confirmed_at  = time.monotonic()
+            self._aim_side      = (0, 0)
             if not was_tracking:
                 self.tracking_active.emit(True)
         else:
@@ -613,6 +632,12 @@ class TrackingLoop(QObject):
                                 st.dropped += 1
                                 self._tracker.stop()
                                 self._track_gen += 1
+                    if (match is None and self._tracker.active
+                            and now - self._confirmed_at >= UNSEEN_DROP_S):
+                        # Not confirmed for UNSEEN_DROP_S, whatever YOLO saw.
+                        st.dropped_unseen += 1
+                        self._tracker.stop()
+                        self._track_gen += 1
                     if match is not None:
                         self._reinit_tracker(match, frame)
                         # A detection is a fresh position in its own right:
@@ -777,9 +802,15 @@ class TrackingLoop(QObject):
                          f"{100.0 * st.stale_drives / st.tracking_ticks:.0f}%, "
                          f"{st.reanchors} re-anchors ({st.found_near} near where "
                          f"YOLO last saw them), {st.dropped} trackers dropped as "
-                         f"off the person, {st.stops} stop commands, "
+                         f"off the person, {st.dropped_unseen} as out of sight, "
+                         f"{st.stops} stop commands, "
                          f"{st.gave_up} tracks given up")
             parts.append(f"mount jogged {st.jogs / secs:.1f}/s")
+            if st.aim_err:
+                e = sorted(st.aim_err)
+                parts.append(f"aim off target: median {e[len(e) // 2]:.0f} px, 90% within "
+                             f"{e[min(len(e) - 1, int(0.9 * len(e)))]:.0f} px, crossed it "
+                             f"{st.crossings} times")
         else:
             parts.append("not tracking")
 
@@ -799,7 +830,24 @@ class TrackingLoop(QObject):
         self._lost_stopped = False
         ax, ay = self._aim(bbox)
         self._aim_px = (int(ax), int(ay))
+        self._note_aim(ax - self._frame_w / 2 - self._target_cx,
+                       ay - self._frame_h / 2 - self._target_cy)
         self._drive(ax - self._frame_w / 2, ay - self._frame_h / 2)
+
+    def _note_aim(self, ex: float, ey: float) -> None:
+        """For the CV TIMING line: how far the aim point is from the target,
+        and each time it crosses to the other side — on either axis, clear of
+        twice the deadband so pose jitter does not count.  The line can show
+        how the mount closes on a person, where neither the jogs nor the
+        mount's position are logged."""
+        st = self._stats
+        st.aim_err.append(math.hypot(ex, ey))
+        clear = 2.0 * DEADBAND_FRACTION * self._frame_w
+        side = tuple(0 if abs(e) <= clear else (1 if e > 0 else -1) for e in (ex, ey))
+        for was, now in zip(self._aim_side, side):
+            if was and now and was != now:
+                st.crossings += 1
+        self._aim_side = tuple(n or w for w, n in zip(self._aim_side, side))
 
     def _drive(self, bbox_cx: float, bbox_cy: float) -> None:
         """Drive the mount to bring the aim point onto the target: each axis
@@ -926,5 +974,6 @@ class TrackingLoop(QObject):
         self._take_head(person)
         self._last_seen   = person
         self._unconfirmed = 0
+        self._confirmed_at = time.monotonic()
         self._stats.reanchors += 1
         log.debug(f"tracker re-anchored to YOLO detection {person.bbox}")

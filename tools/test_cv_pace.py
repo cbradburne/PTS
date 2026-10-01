@@ -24,6 +24,9 @@ WHAT THIS TEST IS PROTECTING.
                          cap, 75-150 px)
   the CV window          hands over the mount's configured presets; its gain
                          sliders reach the loop while tracking
+  the approach, logged   the CV TIMING line's distance from the target is to the
+                         target the operator set; crossing it counts overshoots,
+                         not pose jitter
   joystick untouched     only CV's jogs are reshaped — the joystick's dispatcher
                          still sends its stick as it always did
 
@@ -224,6 +227,35 @@ assert lp._gain_tilt == 1.5, f"moving the tilt slider while tracking left the lo
 win._stop_feed()
 win.close()
 print("   the configured preset (12 deg/s, 7 deg/s^2) handed to the loop; sliders live   OK")
+
+# ---- 4b. what the CV TIMING line counts as crossing the target --------------------
+# Neither jogs nor the mount's position are logged, so the line is the only
+# record of how the mount closes on a person: an overshoot shows as the aim
+# crossing the target.  Pose jitter about it must not.
+print("\n4b. crossing the target:")
+lp2 = tl.TrackingLoop(FakeMM(), Cap(), detector=NoYolo())
+lp2._timer.stop()
+lp2._frame_w, lp2._frame_h = FRAME_W, 720
+for ex in (40, 25, 8, -6, 7, -8):            # closing in, then jitter at the target
+    lp2._note_aim(ex, 0.0)
+assert lp2._stats.crossings == 0, \
+    f"a few pixels of jitter about the target counted as {lp2._stats.crossings} crossings"
+for ex in (-30, -40, 20):                    # past it, and back
+    lp2._note_aim(ex, 0.0)
+assert lp2._stats.crossings == 2, \
+    f"past the target and back again counted {lp2._stats.crossings} crossings, not 2"
+lp2._note_aim(20.0, -30.0)
+lp2._note_aim(20.0, 30.0)                    # tilt crosses too
+assert lp2._stats.crossings == 3, "a crossing in tilt was not counted"
+lp2.set_target(100.0, -50.0)                 # the operator dragged the target
+lp2._anchor_half_h, lp2._head_off = 150.0, None
+lp2._drive_on((600, 200, 80, 300))           # aims 15% down the box: (640, 245)
+want = math.hypot(640 - (640 + 100), 245 - (360 - 50))
+assert abs(lp2._stats.aim_err[-1] - want) < 0.5, \
+    f"the aim was {want:.0f} px from the target the operator set; the line would say " \
+    f"{lp2._stats.aim_err[-1]:.0f}"
+lp2.shutdown()
+print("   jitter at the target: none; past it and back: two; tilt counts too   OK")
 
 # ---- 5. the joystick is not reshaped ------------------------------------------------
 print("\n5. the joystick:")
