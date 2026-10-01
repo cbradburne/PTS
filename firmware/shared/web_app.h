@@ -486,12 +486,12 @@ canvas.hsl-c{display:block;touch-action:none;}
   gap:12px;padding:10px 14px;}
 .move-faders{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;
   align-items:center;gap:14px;}
-.move-joy{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;}
+.move-joy{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;position:relative;}
 /* Taller than wide (a phone held upright): the faders above the stick, as on
    the portrait screen.  Set by sizeMoveControls, which sizes them to match. */
 .move-body.tall{flex-direction:column;justify-content:center;}
 .move-body.tall .move-faders,.move-body.tall .move-joy{flex:0 0 auto;width:100%;}
-#mv-focus{width:56px;height:56px;}    /* MV_FOCUS in sizeMoveControls */
+#mv-focus{width:56px;height:56px;position:absolute;}  /* placed by sizeMoveControls */
 /* Upright, the card can be taller: the stick gets what the faders and the
    focus button leave. */
 @media (orientation:portrait){ .move-card{height:min(100%,680px);} }
@@ -819,10 +819,12 @@ canvas.hsl-c{display:block;touch-action:none;}
           <canvas class="hsl-c" id="mv-hsl-slider"></canvas>
         </div>
       </div>
-      <!-- Between the faders and the stick, as between the dials on the phone
-           screens; shown by the same switch as every other focus button. -->
-      <button class="focus-btn" id="mv-focus" data-cam="sel"></button>
       <div class="move-joy">
+        <!-- Up and to the right of the stick, where the operator put it
+             (2026-10-01): placed by sizeMoveControls, out of the flow so the
+             stick keeps its line with the faders.  Shown by the same switch
+             as every other focus button. -->
+        <button class="focus-btn" id="mv-focus" data-cam="sel"></button>
         <canvas class="jc" id="mv-joy"></canvas>
       </div>
     </div>
@@ -4062,8 +4064,8 @@ function toggleRun(i) {
 // The GC screen leaves out the faders and the stick, because a pad does their
 // job.  This puts them back for the moment the pad is not to hand, on the
 // selected camera, through the same jog path as the landscape screen, with that
-// camera's focus button between them.  Closing it lets go of anything held,
-// which stops the mount.
+// camera's focus button up and to the right of the stick.  Closing it lets go
+// of anything held, which stops the mount.
 let _moveOpen = false;
 let mvHslZoom = null, mvHslSlider = null, mvJoy = null;
 const MV_FOCUS = 56 + 12;       // #mv-focus and one gap, when focus buttons show
@@ -4091,17 +4093,43 @@ function sizeMoveControls() {
     const h    = body.clientHeight - 20;
     const tall = h > w;
     body.classList.toggle('tall', tall);
-    // Side by side, each half of what the focus button leaves; stacked, the
-    // full width, and the stick has what the two faders, their labels and the
-    // focus button leave of the height.
+    // Side by side, each half; stacked, the full width, and the stick has what
+    // the two faders, their labels and the focus button leave of the height.
+    // The focus button sits above the stick either way.
     const fb   = focusBtnsOn ? MV_FOCUS : 0;
-    const colW = tall ? w : (w - fb) / 2 - 12;
+    const colW = tall ? w : w / 2 - 12;
     const slW  = Math.max(120, Math.min(colW, 380));
     const slH  = tall ? 56 : Math.max(40, Math.min(70, Math.floor((h - 60) / 2)));
-    const joy  = tall ? Math.min(w, h - 2 * slH - 80 - fb, 320) : Math.min(colW, h, 320);
+    const joy  = Math.max(100, tall ? Math.min(w, h - 2 * slH - 80 - fb, 320)
+                                    : Math.min(colW, h - fb, 320));
     if (mvHslZoom)   mvHslZoom.resize(slW, slH);
     if (mvHslSlider) mvHslSlider.resize(slW, slH);
-    if (mvJoy)       mvJoy.resize(Math.max(100, joy));
+    if (mvJoy)       mvJoy.resize(joy);
+    // Its room: stacked, a margin between the faders and the stick.  Side by
+    // side the stick is centred, level with the faders — and only where that
+    // leaves too little above it is its column padded at the top, so a short
+    // screen gives up as little of the stick as it can.
+    const col = document.getElementById('mv-joy').parentElement;
+    col.style.marginTop  = tall && fb ? fb + 'px' : '';
+    col.style.paddingTop = !tall && fb ? Math.max(0, 2 * fb - (h - joy)) + 'px' : '';
+    if (fb && mvJoy) placeMoveFocus(body, tall);
+}
+
+// The focus button, up and to the right of the stick — where the operator put
+// it, 2026-10-01, phone and iPad alike: its right edge on the right edge of the
+// stick's square, its middle halfway down the clear space above the stick's
+// ring (from the top of the panel's body side by side; from the slider
+// stacked).  Out of the flow, so it moves nothing else.
+function placeMoveFocus(body, tall) {
+    const btn = document.getElementById('mv-focus');
+    const col = btn.parentElement;
+    const cv   = document.getElementById('mv-joy').getBoundingClientRect();
+    const box  = col.getBoundingClientRect();
+    const ring = cv.top + cv.height / 2 - mvJoy._R();
+    const room = tall ? document.querySelector('#move-body .move-faders').getBoundingClientRect().bottom
+                      : body.getBoundingClientRect().top + parseFloat(getComputedStyle(body).paddingTop);
+    btn.style.right = (box.right - cv.right) + 'px';
+    btn.style.top   = ((room + ring) / 2 - btn.offsetHeight / 2 - box.top) + 'px';
 }
 
 // ============================================================
