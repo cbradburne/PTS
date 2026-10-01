@@ -18,6 +18,8 @@ WHAT THIS TEST IS PROTECTING.
                          third of the way down), follows a Set Target click and
                          stays there; a new loop (the feed restarted) is given
                          the operator's target, not its own default
+  opens in the middle    centred across the main window the first time it is
+                         shown; after that, wherever the operator moved it
 
 Run directly, or via tools/run_tests.sh with the rest.
 """
@@ -164,5 +166,34 @@ assert (lp._target_cx, lp._target_cy, lp._target_set) == (50.0, 30.0, True), \
 win._stop_feed()
 win.close()
 print("   given the operator's target, not its own default   OK")
+
+# ---- 4. opens centred across the main window -----------------------------------
+# 2026-10-01, the operator: left to itself, Windows opened it off to one side.
+print("\n4. where it opens:")
+from PyQt6.QtWidgets import QWidget                             # noqa: E402
+
+main = QWidget()
+main.setGeometry(100, 50, 1600, 900)
+main.show()
+win2 = CVWindow(1, FakeMM(), AppConfig(), main)
+win2.move(main.x(), main.y() + 40)            # the platform's choice: hard left, say
+win2.show()
+app.processEvents()
+mid_main = main.frameGeometry().center().x()
+mid_win = win2.frameGeometry().center().x()
+assert abs(mid_win - mid_main) <= 2, \
+    f"the CV window opened with its middle at x={mid_win}; the main window's is at {mid_main}"
+assert win2.y() == main.y() + 40, f"the window's height on screen changed, to y={win2.y()}"
+parked = main.x() + 10
+assert abs(parked - win2.x()) > 100, "the operator's spot is too near the middle to prove anything"
+win2.move(parked, win2.y())                   # the operator moves it...
+win2.hide()
+win2.show()                                   # ...and it is shown again
+app.processEvents()
+assert win2.x() == parked, \
+    f"shown again, the window jumped from where the operator put it (x={parked}) to x={win2.x()}"
+win2.close()
+main.close()
+print("   centred across the main window; after that, where the operator puts it   OK")
 
 print("\nALL CHECKS PASSED")

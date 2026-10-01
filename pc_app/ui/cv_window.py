@@ -470,6 +470,7 @@ class CVWindow(QWidget):
 
         self.setWindowTitle("CV Tracking")
         self.resize(960, 640)
+        self._placed = False          # centred across the main window yet (showEvent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("CVWindow { background: #121212; }")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -942,8 +943,23 @@ class CVWindow(QWidget):
             self._tracking_loop.stop_tracking()
 
     # ------------------------------------------------------------------
-    # Close
+    # Open / close
     # ------------------------------------------------------------------
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Open centred across the main window — left to itself, Windows put
+        # it off to one side (the operator, 2026-10-01).  Across only: the
+        # height it opens at is fine.  Once, on the first showing; after that
+        # it stays wherever the operator puts it.
+        if self._placed:
+            return
+        self._placed = True
+        main = self.parentWidget()
+        if main is not None:
+            mg = main.frameGeometry()
+            x = mg.x() + (mg.width() - self.frameGeometry().width()) // 2
+            self.move(max(mg.x(), x), self.y())
 
     def closeEvent(self, event) -> None:
         self._stop_feed()
