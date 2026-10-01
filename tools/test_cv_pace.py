@@ -24,6 +24,11 @@ WHAT THIS TEST IS PROTECTING.
                          cap, 75-150 px)
   the CV window          hands over the mount's configured presets; its gain
                          sliders reach the loop while tracking
+  the hold box          a subject moving about inside the box around the target
+                         does not move the mount; leaving it does, and the mount
+                         brings them back to the middle, each axis for itself; a
+                         still subject with pose jitter: no moves (without the
+                         box, a stream of them); a new pick is centred at once
   the approach, logged   the CV TIMING line's distance from the target is to the
                          target the operator set; crossing it counts overshoots,
                          not pose jitter
@@ -122,6 +127,7 @@ loop = tl.TrackingLoop(FakeMM(), Cap(), detector=NoYolo())
 loop._timer.stop()
 loop._frame_w, loop._frame_h = FRAME_W, 720
 loop._target_cx = loop._target_cy = 0.0
+loop.set_hold(0.0)                            # the speed law alone: the box is section 5's
 loop._drive(50.0, 50.0)                      # 50 px right of the target, 50 px below
 pan, tilt = loop._mm.jogs[-1]
 assert pan > 0 and pan == -tilt, \
@@ -213,6 +219,10 @@ cv.capture.CaptureSource.list_devices = staticmethod(lambda max_test=5: [])
 cfg = AppConfig()
 cfg.mount(1).pan_tilt_presets.set(3, SpeedPreset(12, 7))
 win = CVWindow(1, FakeMM(), cfg)
+assert abs(win._video._hold - tl.HOLD_FRACTION) < 1e-9, \
+    f"the hold box is drawn at {win._video._hold} before anything is touched, not " \
+    f"{tl.HOLD_FRACTION}"
+win._hold_box.setValue(8)                     # set before the feed is opened...
 win._starting = True
 win._on_feed_opened(True, NoYolo())          # the feed's open, as its worker reports it
 lp = win._tracking_loop
@@ -224,9 +234,20 @@ win._pan_gain.setValue(35)
 assert lp._gain_pan == 3.5, f"moving the pan slider while tracking left the loop at {lp._gain_pan}"
 win._tilt_gain.setValue(15)
 assert lp._gain_tilt == 1.5, f"moving the tilt slider while tracking left the loop at {lp._gain_tilt}"
+# The hold box: drawn from the start, the loop given it, both following the slider.
+assert abs(lp._hold - 0.08) < 1e-9, \
+    f"the Hold slider read 8% when the feed opened and the loop got {lp._hold}"
+win._hold_box.setValue(10)
+assert abs(lp._hold - 0.10) < 1e-9 and abs(win._video._hold - 0.10) < 1e-9, \
+    f"moving the Hold slider left the loop at {lp._hold} and the box drawn at {win._video._hold}"
+from PyQt6.QtGui import QPixmap                                 # noqa: E402
+pm = QPixmap(640, 360)
+win._video.set_detection_mode(True)
+win._video._draw_detection_overlay(pm, 640, 360)    # draws, box and all, without error
 win._stop_feed()
 win.close()
-print("   the configured preset (12 deg/s, 7 deg/s^2) handed to the loop; sliders live   OK")
+print("   the configured preset (12 deg/s, 7 deg/s^2) handed to the loop; gain and Hold\n"
+      "   sliders live; the hold box drawn   OK")
 
 # ---- 4b. what the CV TIMING line counts as crossing the target --------------------
 # Neither jogs nor the mount's position are logged, so the line is the only
@@ -257,8 +278,110 @@ assert abs(lp2._stats.aim_err[-1] - want) < 0.5, \
 lp2.shutdown()
 print("   jitter at the target: none; past it and back: two; tilt counts too   OK")
 
-# ---- 5. the joystick is not reshaped ------------------------------------------------
-print("\n5. the joystick:")
+# ---- 5. hold still in the box, then bring them back to the middle -----------------
+# 2026-10-01, the operator: "quite jittery" — the aim a median 7-11 px off the
+# target, crossing it 4-12 times every ten seconds.  Their idea: small movements
+# don't move the mount; leaving "an area" does, and the mount puts the subject
+# back in the centre of it.
+print("\n5. the hold box:")
+import numpy as np                                              # noqa: E402
+
+
+class FrameCap:
+    def get_frame(self):
+        return np.zeros((720, 1280, 3), np.uint8)
+
+
+tl.JOG_INTERVAL_S, saved_jog = 0.0, tl.JOG_INTERVAL_S          # every call may jog
+hb = tl.TrackingLoop(FakeMM(), FrameCap(), detector=NoYolo())
+hb._timer.stop()
+hb._frame_w, hb._frame_h = FRAME_W, 720
+hb._target_cx = hb._target_cy = 0.0
+hx, hy = tl.HOLD_FRACTION * FRAME_W, tl.HOLD_FRACTION * 720     # the box: +-77, +-43 px
+jogs = hb._mm.jogs
+
+
+def drive(ex, ey):
+    n = len(jogs)
+    hb._drive(ex, ey)
+    return jogs[n:]
+
+
+assert drive(100, 0)[0][0] > 0, "100 px out of the box and the mount was not driven back"
+assert drive(15, 0) == [(0, 0)], "back at the target, and not stopped"
+quiet = [drive(30, 20), drive(-40, -30), drive(hx - 5, hy - 5), drive(-(hx - 5), 0)]
+assert quiet == [[], [], [], []], \
+    f"moving about inside the box, the drive sent {quiet} — it should hold still and " \
+    "say nothing: every move there is the jitter the operator saw"
+sent = drive(hx + 10, 20)
+assert sent and sent[0][0] > 0 and sent[0][1] == 0, \
+    f"out of the box sideways: pan should move and tilt hold, sent {sent}"
+again = drive(50, 0)
+assert again and again[0][0] > 0, \
+    "back inside the box but not yet in the middle, and the mount stopped — it should " \
+    "bring them back to the centre, not just over the line"
+assert drive(10, 0) == [(0, 0)] and drive(-30, 10) == [], "in the middle: stop, then hold"
+up = drive(30, hy + 10)
+assert up and up[0][0] == 0 and up[0][1] != 0, \
+    f"out of the box upward: tilt should move and pan hold, sent {up}"
+assert hb._stats.held > 0 and hb._stats.drive_calls > hb._stats.held, \
+    f"held {hb._stats.held} of {hb._stats.drive_calls} — the CV TIMING line will say wrong"
+hb.select_person((600, 200, 80, 300))         # a new pick is centred at once
+assert hb._moving == [True, True], "a new pick waited for the box instead of being centred"
+hb.set_hold(0.0)                              # no box: every movement followed
+hb._moving = [False, False]
+assert drive(15, 0) and jogs[-1][0] > 0 and drive(15, 0) and jogs[-1][0] > 0, \
+    "with the box off, 15 px off the target did not keep moving it — it should follow " \
+    "every movement past the deadband, as before the box"
+hb.shutdown()
+
+# A simulated mount through the real drive: the person stands still 30 px off
+# the target, the aim jittering by the pose model's few pixels.  The box should
+# leave the mount still; without it, the mount keeps answering the jitter.
+import random                                                   # noqa: E402
+
+
+def still_person(hold):
+    lp3 = tl.TrackingLoop(FakeMM(), Cap(), detector=NoYolo())
+    lp3._timer.stop()
+    lp3._frame_w, lp3._frame_h = FRAME_W, 720
+    lp3._target_cx = lp3._target_cy = 0.0
+    lp3.set_hold(hold)
+    rnd, pxd, vmax, accel = random.Random(7), 70.0, 5.0, 5.0
+    th, v, t, dt, jog, moves = 0.0, 0.0, 0.0, 0.001, 0, 0
+    target = 30.0 / pxd                          # where they stand, in degrees
+    seen, pending, next_jog = [], [], 0.0
+    while t < 12.0:
+        seen.append((target - th) * pxd)
+        if t >= next_jog:                        # 20 Hz, 0.15 s from picture to motor
+            next_jog += 0.05
+            e = seen[max(0, len(seen) - 1 - 120)] + rnd.gauss(0, 4.0)
+            n = len(lp3._mm.jogs)
+            lp3._drive(e, 0.0)
+            if len(lp3._mm.jogs) > n:
+                pending.append((t + 0.03, lp3._mm.jogs[-1][0]))
+                if t > 4.0 and lp3._mm.jogs[-1][0]:
+                    moves += 1
+        while pending and pending[0][0] <= t:
+            jog = pending.pop(0)[1]
+        want = speed(jog, vmax) if jog else 0.0
+        v += max(-accel * dt, min(accel * dt, want - v))
+        th += v * dt
+        t += dt
+    lp3.shutdown()
+    return moves
+
+
+with_box, without = still_person(tl.HOLD_FRACTION), still_person(0.0)
+assert with_box == 0, \
+    f"standing still, jitter only: the mount was sent {with_box} moves in 8 s with the box"
+assert without > 0, "without the box the jitter moved nothing either, so this proves nothing"
+tl.JOG_INTERVAL_S = saved_jog
+print(f"   still inside the box: no moves (without it, {without} in 8 s); out of it: back to\n"
+      "   the middle, each axis for itself; a new pick centred at once   OK")
+
+# ---- 6. the joystick is not reshaped ------------------------------------------------
+print("\n6. the joystick:")
 disp = (REPO / "pc_app/motion/command_dispatcher.py").read_text()
 assert "jog_for_speed" not in disp and "axis_jog" not in disp and "tracking_loop" not in disp, \
     "the joystick's dispatcher now goes through CV's drive law"

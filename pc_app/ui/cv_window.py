@@ -37,7 +37,7 @@ import cv2
 
 from cv.capture import CaptureSource
 from cv.tracker import TrackerKind, PersonDetector
-from cv.tracking_loop import TrackingLoop
+from cv.tracking_loop import TrackingLoop, HOLD_FRACTION
 from comms.mount_manager import MountManager
 from config.mount_config import AppConfig
 
@@ -86,6 +86,9 @@ class VideoLabel(QLabel):
         # Initialised to upper-third once frame_h is known.
         self._target_cx: float = 0.0
         self._target_cy: float = 0.0
+        # The hold box around it — a fraction of the frame's width and height
+        # either side (TrackingLoop.set_hold); 0 draws none.
+        self._hold: float = 0.0
 
         # Frame dimensions
         self._frame_w = 1280
@@ -124,6 +127,11 @@ class VideoLabel(QLabel):
         """Set the target crosshair position (offset from frame centre, frame px)."""
         self._target_cx = cx
         self._target_cy = cy
+
+    def set_hold(self, fraction: float) -> None:
+        """Draw the hold box around the target: while the subject stays in
+        it the mount holds still; once they leave it, it brings them back."""
+        self._hold = max(0.0, float(fraction))
 
     def set_move_target_mode(self, enabled: bool) -> None:
         """Toggle the 'click to reposition target' mode."""
@@ -276,6 +284,15 @@ class VideoLabel(QLabel):
         font2.setPixelSize(10)
         painter.setFont(font2)
         painter.drawText(tx + r + 4, ty + 4, "target")
+
+        # The hold box: inside it the mount holds still (dashed, the target's
+        # orange, so it reads as the target's own).
+        if self._hold > 0:
+            hw = int(self._hold * self._frame_w * sx)
+            hh = int(self._hold * self._frame_h * sy)
+            painter.setPen(QPen(QColor("#FF9800"), 1, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(tx - hw, ty - hh, 2 * hw, 2 * hh)
 
         painter.end()
         return pix
@@ -515,6 +532,22 @@ class CVWindow(QWidget):
         self._pan_gain.valueChanged.connect(self._apply_gains)
         self._tilt_gain.valueChanged.connect(self._apply_gains)
 
+        # The hold box: % of the frame either side of the target.  Inside it
+        # the mount holds still; leaving it, the subject is brought back to
+        # the middle.  0 follows every movement (see HOLD_FRACTION).
+        ctrl.addWidget(QLabel("Hold:"))
+        self._hold_box = QSlider(Qt.Orientation.Horizontal)
+        self._hold_box.setRange(0, 20)
+        self._hold_box.setValue(round(HOLD_FRACTION * 100))
+        self._hold_box.setFixedWidth(70)
+        self._hold_box.setToolTip(
+            "Hold box, % of the frame either side of the target: the mount holds "
+            "still while the subject stays inside it, and brings them back to the "
+            "middle once they leave it.  0 follows every movement.")
+        ctrl.addWidget(self._hold_box)
+        self._hold_box.valueChanged.connect(self._apply_hold)
+        self._apply_hold()
+
         ctrl.addWidget(self._sep())
 
         # Set Target toggle (detection mode only — hidden in manual mode)
@@ -685,6 +718,7 @@ class CVWindow(QWidget):
                             detector=detector)
         loop.set_mount(self._mount_id)
         loop.set_pt_preset_speeds(self._pt_preset_speed)
+        loop.set_hold(self._hold_box.value() / 100.0)
         loop.frame_ready.connect(self._on_frame)
         loop.tracking_lost.connect(self._on_tracking_lost)
         loop.tracking_active.connect(self._on_tracking_active)
@@ -743,6 +777,12 @@ class CVWindow(QWidget):
     # ------------------------------------------------------------------
     # Tracking
     # ------------------------------------------------------------------
+
+    def _apply_hold(self) -> None:
+        f = self._hold_box.value() / 100.0
+        self._video.set_hold(f)
+        if self._tracking_loop is not None:
+            self._tracking_loop.set_hold(f)
 
     def _apply_gains(self) -> None:
         if self._tracking_loop is not None:

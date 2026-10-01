@@ -138,6 +138,7 @@ tl.TRACK_SCALE = 1.0                  # boxes in the tests' own pixels
 tl.DETECT_MIN_GAP_S = 1e9             # detections only when the test says
 tl.JOG_INTERVAL_S = 0.0               # every drive jogs: where, not how often
                                       # (test_cv_timing checks the rate)
+tl.HOLD_FRACTION = 0.0                # ...and no hold box: test_cv_pace has it
 
 
 def new_loop(detector):

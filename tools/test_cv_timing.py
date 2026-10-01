@@ -206,6 +206,10 @@ assert "(0 near where YOLO last saw them), 0 trackers dropped as off the person,
 off = num(r"aim off target: median ([\d.]+) px", line)
 assert abs(off - math.hypot(80, 5)) < 1.5 and "crossed it 0 times" in line, \
     f"the aim sat {math.hypot(80, 5):.0f} px off the target throughout; the line says:\n  {line}"
+# ...outside the hold box (80 px against 77) and never back in the middle: moving
+# throughout, never held.
+assert f"held still 0% (hold box {100 * tl.HOLD_FRACTION:.0f}%)" in line, \
+    f"the aim never came inside the hold box, yet the line says otherwise:\n  {line}"
 track_rate = num(r"tracker fake-mosse ([\d.]+)/s", line)
 assert track_rate >= 0.7 * ticks, \
     f"the tracker ran {track_rate}/s against {ticks} ticks/s — every other tick at best, " \

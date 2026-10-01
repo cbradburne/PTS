@@ -184,6 +184,8 @@ class _CvStats:
                                      # fresh position
         self.crossings      = 0      # times the aim crossed the target (an
                                      # overshoot, or the person turning back)
+        self.drive_calls    = 0      # fresh positions the drive saw...
+        self.held           = 0      # ...with both axes holding (HOLD_FRACTION)
         self.jogs           = 0      # jogs sent to the mount (see JOG_RATE_HZ)
         self.stops          = 0      # stop commands sent for a lost track
         self.gave_up        = 0      # tracks abandoned (tracking_lost)
@@ -235,6 +237,22 @@ DEADBAND_FRACTION = 0.004
 # costs a large swing a little time and stops it sailing past.
 BRAKE_PX_PER_DEG  = 250.0
 BRAKE_DELAY_S     = 0.2
+# A still subject holds the shot still.  The mount moves only when the aim
+# point leaves a box around the target — HOLD_FRACTION of the frame's width
+# and of its height either side, each axis deciding for itself — and then
+# brings it back to the target, the middle of the box, until within
+# ARRIVE_FRACTION, where it stops and holds again.
+#
+# 2026-10-01, the operator, on the proportional drive: "quite jittery".  The
+# CV TIMING line had the aim a median 7-11 px from the target, but crossing it
+# 4-12 times every ten seconds: the mount answering every few pixels of pose
+# jitter, sway and tracker wobble.  Their idea: "a point where any small
+# movements don't move the mount, but when a subject leaves 'an area', the
+# mount starts to move and puts the subject back to the centre".  The CV
+# window draws the box and sets its size (its Hold slider); 0 follows every
+# movement, as before.
+HOLD_FRACTION     = 0.06
+ARRIVE_FRACTION   = 0.015
 # The Teensy's joystick curve (MountMotion.cpp JOG_EXPO_STRENGTH), undone
 # here so that the mount makes the speed asked for.  tools/test_cv_pace.py
 # reads the firmware's value and fails if the two part.
@@ -356,6 +374,11 @@ class TrackingLoop(QObject):
         # (mount, preset) -> (top speed deg/s, acceleration deg/s^2): what a
         # jog at that preset can do — see set_pt_preset_speeds().
         self._pt_preset_speed = _default_pt_preset
+        # The hold box (HOLD_FRACTION), and whether each axis — pan, tilt — is
+        # on its way back to the target rather than holding.
+        self._hold      = HOLD_FRACTION
+        self._moving    = [True, True]
+        self._sent_zero = False       # the stop for this hold has been sent
 
         # ── State ──────────────────────────────────────────────────────────
         self._detections:    list[tuple] = []    # latest YOLO person bboxes
@@ -470,6 +493,11 @@ class TrackingLoop(QObject):
         self._gain_pan  = pan
         self._gain_tilt = tilt
 
+    def set_hold(self, fraction: float) -> None:
+        """The hold box's half-size, a fraction of the frame's width and
+        height — see HOLD_FRACTION.  0 follows every movement."""
+        self._hold = max(0.0, float(fraction))
+
     def set_pt_preset_speeds(self, fn) -> None:
         """fn(mount_id, preset) -> (top speed deg/s, acceleration deg/s^2):
         the mount's configured pan/tilt presets.  The drive asks for SPEEDS,
@@ -534,6 +562,9 @@ class TrackingLoop(QObject):
             self._unconfirmed   = 0
             self._confirmed_at  = time.monotonic()
             self._aim_side      = (0, 0)
+            # A new pick is centred straight away, box or no box.
+            self._moving        = [True, True]
+            self._sent_zero     = False
             if not was_tracking:
                 self.tracking_active.emit(True)
         else:
@@ -811,6 +842,9 @@ class TrackingLoop(QObject):
                 parts.append(f"aim off target: median {e[len(e) // 2]:.0f} px, 90% within "
                              f"{e[min(len(e) - 1, int(0.9 * len(e)))]:.0f} px, crossed it "
                              f"{st.crossings} times")
+            if st.drive_calls:
+                parts.append(f"held still {100.0 * st.held / st.drive_calls:.0f}% "
+                             f"(hold box {100.0 * self._hold:.0f}%)")
         else:
             parts.append("not tracking")
 
@@ -852,8 +886,36 @@ class TrackingLoop(QObject):
     def _drive(self, bbox_cx: float, bbox_cy: float) -> None:
         """Drive the mount to bring the aim point onto the target: each axis
         at a speed proportional to its error (see TRACK_SPEED_DPS), within
-        what the active preset can do and stop from.  CV's jogs only — the
-        joystick's go their own way, curve and all."""
+        what the active preset can do and stop from — or holding still while
+        the aim stays in the hold box (see HOLD_FRACTION).  CV's jogs only —
+        the joystick's go their own way, curve and all."""
+        ex, ey = bbox_cx - self._target_cx, bbox_cy - self._target_cy
+        # Hold or move, each axis for itself, decided on every fresh position
+        # (sent below at the jog rate).  A box no bigger than the arrival
+        # margin is no box: follow every movement.
+        st = self._stats
+        for i, (e, size) in enumerate(((ex, self._frame_w), (ey, self._frame_h))):
+            if self._hold <= ARRIVE_FRACTION:
+                self._moving[i] = True
+            elif not self._moving[i] and abs(e) > self._hold * size:
+                self._moving[i] = True
+            elif self._moving[i] and abs(e) <= ARRIVE_FRACTION * size:
+                self._moving[i] = False
+        st.drive_calls += 1
+        if not any(self._moving):
+            st.held += 1
+
+        pt_preset = self._mm.state(self._mount_id).active_pt_preset
+        vmax, accel = self._pt_preset_speed(self._mount_id, pt_preset)
+        pan_jog  = axis_jog(ex, self._gain_pan, self._frame_w, vmax, accel) \
+            if self._moving[0] else 0
+        tilt_jog = axis_jog(ey, self._gain_tilt, self._frame_w, vmax, accel) \
+            if self._moving[1] else 0
+        # Holding: one stop, then nothing — the radio carries no stream of
+        # zeros while the shot is still.
+        if not pan_jog and not tilt_jog and self._sent_zero:
+            return
+
         # At most JOG_RATE_HZ.  The schedule moves on one interval per jog, so
         # at 30 ticks/s the jogs land on alternate ticks and on consecutive
         # ones by turns — 20 a second on average.  After a pause (a loss, or
@@ -864,14 +926,8 @@ class TrackingLoop(QObject):
         self._jog_due += JOG_INTERVAL_S
         if self._jog_due < now:
             self._jog_due = now + JOG_INTERVAL_S
-        self._stats.jogs += 1
-
-        pt_preset = self._mm.state(self._mount_id).active_pt_preset
-        vmax, accel = self._pt_preset_speed(self._mount_id, pt_preset)
-        pan_jog  = axis_jog(bbox_cx - self._target_cx, self._gain_pan,
-                            self._frame_w, vmax, accel)
-        tilt_jog = axis_jog(bbox_cy - self._target_cy, self._gain_tilt,
-                            self._frame_w, vmax, accel)
+        st.jogs += 1
+        self._sent_zero = not pan_jog and not tilt_jog
 
         # axis_mask=0x03: pan + tilt only — never interrupts a slider move.
         # Positive err_y means subject is below target → tilt down = negative jog.
