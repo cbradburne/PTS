@@ -63,6 +63,7 @@ import numpy as np
 from .capture import CaptureSource
 from .tracker import Tracker, TrackResult, PersonDetector, TrackerKind, Person
 from comms.mount_manager import MountManager
+from config.mount_config import AxisGroupPresets
 
 log = logging.getLogger(__name__)
 
@@ -183,10 +184,99 @@ def _avg_max(v: list) -> str:
     return f"{_ms(sum(v) / len(v))} ms avg / {_ms(max(v))} max"
 
 
-DEFAULT_GAIN_PAN  = 2.0
+DEFAULT_GAIN_PAN  = 2.0      # the CV window's sliders, 20 = 2.0
 DEFAULT_GAIN_TILT = 2.0
 MAX_JOG_VALUE     = 1000
-CURVE_EXP         = 1.5
+
+# How hard the mount is driven toward the target: a SPEED in deg/s, for an
+# error of half the frame's width, per unit of gain — at the default 2.0, 10
+# deg/s at half a frame and 0.55 deg/s at 40 px.  Proportional to the error,
+# so the last few pixels close the way the first did.
+#
+# It was error^1.5, as a share of the preset's top speed — and the Teensy then
+# puts every jog through the joystick's own curve, 0.3x + 0.7x^3
+# (MountMotion.cpp jogExpo), soft in the middle for a thumb.  Together, a speed
+# that died away near the target.  The operator, 2026-10-01: the mount kept up
+# with them walking, but "the last bit" took seconds.  Simulated, it never
+# arrived: a 40 px error was still more than 8 px out after 30 s, at
+# 0.09 deg/s.  This does it in about 2 s at the operator's framing.
+#
+# Faster is not free.  The loop sees the person 0.15-0.25 s late (capture,
+# YOLO, radio), and the right speed for an error in PIXELS depends on the zoom,
+# which the PC cannot see: simulated with a 0.25 s delay, this rate holds
+# steady up to about 150 px per degree — a picture 8.5 deg wide: full length
+# from about 25 m, head and shoulders from about 7 — and overshoots on
+# tighter ones.  The
+# sliders are the operator's trim: up for wide shots, down if a tight one
+# swings past.
+TRACK_SPEED_DPS   = 5.0
+# Nothing is sent for an error this small (a fraction of the frame's width,
+# 5 px at 1280): a few pixels of pose jitter are not a move.
+DEADBAND_FRACTION = 0.004
+# Never ask for a speed the mount could not stop from within the error left,
+# at the preset's acceleration, allowing BRAKE_DELAY_S of loop delay.  Without
+# the zoom, the distance left is reckoned as if the shot were tight
+# (BRAKE_PX_PER_DEG at 1280 px wide): on wider ones it slows early, which
+# costs a large swing a little time and stops it sailing past.
+BRAKE_PX_PER_DEG  = 250.0
+BRAKE_DELAY_S     = 0.2
+# The Teensy's joystick curve (MountMotion.cpp JOG_EXPO_STRENGTH), undone
+# here so that the mount makes the speed asked for.  tools/test_cv_pace.py
+# reads the firmware's value and fails if the two part.
+JOG_EXPO_STRENGTH = 0.7
+
+
+def _cbrt(v: float) -> float:
+    return math.copysign(abs(v) ** (1.0 / 3.0), v)
+
+
+def jog_expo(x: float) -> float:
+    """The Teensy's joystick curve: a jog's share of full stick (0-1) to the
+    share of the preset's top speed it runs at."""
+    return (1.0 - JOG_EXPO_STRENGTH) * x + JOG_EXPO_STRENGTH * x ** 3
+
+
+def jog_for_speed(s: float) -> float:
+    """The share of full stick the Teensy turns into speed share s (0-1)."""
+    if s <= 0.0:
+        return 0.0
+    if s >= 1.0:
+        return 1.0
+    a, b = JOG_EXPO_STRENGTH, 1.0 - JOG_EXPO_STRENGTH
+    if a <= 0.0:
+        return s
+    # a x^3 + b x = s has one real root (the curve only rises): Cardano.
+    p, q = b / a, -s / a
+    r = math.sqrt((q / 2.0) ** 2 + (p / 3.0) ** 3)
+    return _cbrt(-q / 2.0 + r) + _cbrt(-q / 2.0 - r)
+
+
+def axis_jog(err_px: float, gain: float, frame_w: int,
+             vmax: float, accel: float) -> int:
+    """One axis's jog for an error of err_px: the speed TRACK_SPEED_DPS sets,
+    no more than the mount can stop from (BRAKE_*) or the preset can do
+    (vmax deg/s, accel deg/s^2), as the stick share that makes it.
+
+    Both axes are measured against the frame's WIDTH: pixels are square, so a
+    pixel of tilt is as many degrees as a pixel of pan.  Tilt was measured
+    against the height, 1.8x as hard for the same error."""
+    d_px = abs(err_px) - DEADBAND_FRACTION * frame_w
+    if d_px <= 0.0 or vmax <= 0.0:
+        return 0
+    v = gain * TRACK_SPEED_DPS * d_px / (frame_w / 2.0)
+    if accel > 0.0:
+        d_deg = d_px / (BRAKE_PX_PER_DEG * frame_w / 1280.0)
+        ad = accel * BRAKE_DELAY_S
+        v = min(v, math.sqrt(2.0 * accel * d_deg + ad * ad) - ad)
+    s = min(1.0, v / vmax)
+    return int(math.copysign(round(MAX_JOG_VALUE * jog_for_speed(s)), err_px))
+
+
+def _default_pt_preset(mount_id: int, preset: int) -> tuple[float, float]:
+    """The pan/tilt presets the firmware ships (deg/s, deg/s^2), until the CV
+    window hands over the mount's configured ones."""
+    sp = AxisGroupPresets().get(preset if preset in (1, 2, 3, 4) else 2)
+    return float(sp.max_speed), float(sp.accel)
 
 
 def _iou(a: tuple, b: tuple) -> float:
@@ -248,6 +338,9 @@ class TrackingLoop(QObject):
             self._tracker_kind = TrackerKind.MOSSE
         self._gain_pan  = DEFAULT_GAIN_PAN
         self._gain_tilt = DEFAULT_GAIN_TILT
+        # (mount, preset) -> (top speed deg/s, acceleration deg/s^2): what a
+        # jog at that preset can do — see set_pt_preset_speeds().
+        self._pt_preset_speed = _default_pt_preset
 
         # ── State ──────────────────────────────────────────────────────────
         self._detections:    list[tuple] = []    # latest YOLO person bboxes
@@ -359,6 +452,12 @@ class TrackingLoop(QObject):
     def set_gains(self, pan: float, tilt: float) -> None:
         self._gain_pan  = pan
         self._gain_tilt = tilt
+
+    def set_pt_preset_speeds(self, fn) -> None:
+        """fn(mount_id, preset) -> (top speed deg/s, acceleration deg/s^2):
+        the mount's configured pan/tilt presets.  The drive asks for SPEEDS,
+        so it has to know what the preset in each jog will run at."""
+        self._pt_preset_speed = fn
 
     def set_tracker_kind(self, kind: TrackerKind) -> None:
         """Change the correlation tracker; takes effect on the next re-anchor."""
@@ -703,7 +802,10 @@ class TrackingLoop(QObject):
         self._drive(ax - self._frame_w / 2, ay - self._frame_h / 2)
 
     def _drive(self, bbox_cx: float, bbox_cy: float) -> None:
-        """Power-curve P-controller: drive mount to keep subject at target."""
+        """Drive the mount to bring the aim point onto the target: each axis
+        at a speed proportional to its error (see TRACK_SPEED_DPS), within
+        what the active preset can do and stop from.  CV's jogs only — the
+        joystick's go their own way, curve and all."""
         # At most JOG_RATE_HZ.  The schedule moves on one interval per jog, so
         # at 30 ticks/s the jogs land on alternate ticks and on consecutive
         # ones by turns — 20 a second on average.  After a pause (a loss, or
@@ -716,21 +818,13 @@ class TrackingLoop(QObject):
             self._jog_due = now + JOG_INTERVAL_S
         self._stats.jogs += 1
 
-        err_x = bbox_cx - self._target_cx
-        err_y = bbox_cy - self._target_cy
-
-        norm_x = max(-1.0, min(1.0, err_x / (self._frame_w / 2)))
-        norm_y = max(-1.0, min(1.0, err_y / (self._frame_h / 2)))
-
-        curved_x = math.copysign(abs(norm_x) ** CURVE_EXP, norm_x)
-        curved_y = math.copysign(abs(norm_y) ** CURVE_EXP, norm_y)
-
-        pan_jog  = int(max(-MAX_JOG_VALUE, min(MAX_JOG_VALUE,
-                           curved_x * MAX_JOG_VALUE * self._gain_pan)))
-        tilt_jog = int(max(-MAX_JOG_VALUE, min(MAX_JOG_VALUE,
-                           curved_y * MAX_JOG_VALUE * self._gain_tilt)))
-
         pt_preset = self._mm.state(self._mount_id).active_pt_preset
+        vmax, accel = self._pt_preset_speed(self._mount_id, pt_preset)
+        pan_jog  = axis_jog(bbox_cx - self._target_cx, self._gain_pan,
+                            self._frame_w, vmax, accel)
+        tilt_jog = axis_jog(bbox_cy - self._target_cy, self._gain_tilt,
+                            self._frame_w, vmax, accel)
+
         # axis_mask=0x03: pan + tilt only — never interrupts a slider move.
         # Positive err_y means subject is below target → tilt down = negative jog.
         self._mm.send_jog(self._mount_id, pan_jog, -tilt_jog, 0, 0,

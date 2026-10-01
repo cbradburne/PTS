@@ -509,6 +509,11 @@ class CVWindow(QWidget):
         self._tilt_gain.setFixedWidth(70)
         self._tilt_gain.setToolTip("Tilt tracking gain")
         ctrl.addWidget(self._tilt_gain)
+        # Live, so the operator can trim while tracking — up for a wide shot,
+        # down if a tight one swings past (see TRACK_SPEED_DPS).  They used to
+        # take effect only when a person was next clicked.
+        self._pan_gain.valueChanged.connect(self._apply_gains)
+        self._tilt_gain.valueChanged.connect(self._apply_gains)
 
         ctrl.addWidget(self._sep())
 
@@ -679,6 +684,7 @@ class CVWindow(QWidget):
                             detect_size=self._config.cv_detect_size,
                             detector=detector)
         loop.set_mount(self._mount_id)
+        loop.set_pt_preset_speeds(self._pt_preset_speed)
         loop.frame_ready.connect(self._on_frame)
         loop.tracking_lost.connect(self._on_tracking_lost)
         loop.tracking_active.connect(self._on_tracking_active)
@@ -737,6 +743,17 @@ class CVWindow(QWidget):
     # ------------------------------------------------------------------
     # Tracking
     # ------------------------------------------------------------------
+
+    def _apply_gains(self) -> None:
+        if self._tracking_loop is not None:
+            self._tracking_loop.set_gains(self._pan_gain.value() / 10.0,
+                                          self._tilt_gain.value() / 10.0)
+
+    def _pt_preset_speed(self, mount_id: int, preset: int) -> tuple[float, float]:
+        """A mount's configured pan/tilt preset: (top speed deg/s, accel deg/s²)."""
+        sp = self._config.mount(mount_id).pan_tilt_presets.get(
+            preset if preset in (1, 2, 3, 4) else 2)
+        return float(sp.max_speed), float(sp.accel)
 
     @pyqtSlot(tuple)
     def _on_person_clicked(self, bbox: tuple) -> None:
