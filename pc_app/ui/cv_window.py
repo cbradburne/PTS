@@ -82,17 +82,21 @@ class VideoLabel(QLabel):
         # Detection overlay state
         self._detections: list[tuple] = []    # (x, y, w, h) per person
 
-        # Target crosshair — offset from frame centre in frame pixels.
-        # Initialised to upper-third once frame_h is known.
-        self._target_cx: float = 0.0
-        self._target_cy: float = 0.0
-        # The hold box around it — a fraction of the frame's width and height
-        # either side (TrackingLoop.set_hold); 0 draws none.
-        self._hold: float = 0.0
-
         # Frame dimensions
         self._frame_w = 1280
         self._frame_h = 720
+
+        # Target crosshair — offset from frame centre in frame pixels.  Until
+        # the operator moves it, the loop's own default (TrackingLoop
+        # .select_person): centred across, a third of the way down, kept up to
+        # date with the frame's size.  It was left at the middle while the
+        # loop aimed at the upper third, a sixth of the height apart.
+        self._target_cx: float = 0.0
+        self._target_cy: float = -self._frame_h / 6.0
+        self._target_user_set = False
+        # The hold box around it — a fraction of the frame's width and height
+        # either side (TrackingLoop.set_hold); 0 draws none.
+        self._hold: float = 0.0
 
         # Manual-mode draw state
         self._drawing     = False
@@ -127,6 +131,11 @@ class VideoLabel(QLabel):
         """Set the target crosshair position (offset from frame centre, frame px)."""
         self._target_cx = cx
         self._target_cy = cy
+        self._target_user_set = True
+
+    def user_target(self) -> tuple[float, float] | None:
+        """The target the operator set, or None while it is the default."""
+        return (self._target_cx, self._target_cy) if self._target_user_set else None
 
     def set_hold(self, fraction: float) -> None:
         """Draw the hold box around the target: while the subject stays in
@@ -209,6 +218,8 @@ class VideoLabel(QLabel):
 
     def set_frame(self, frame: np.ndarray) -> None:
         self._frame_h, self._frame_w = frame.shape[:2]
+        if not self._target_user_set:               # the loop's default, as above
+            self._target_cx, self._target_cy = 0.0, -self._frame_h / 6.0
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         img = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
@@ -234,8 +245,13 @@ class VideoLabel(QLabel):
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        off_x = (self.width()  - disp_w) // 2
-        off_y = (self.height() - disp_h) // 2
+        # Painted onto the picture itself, whose corner is the origin — the
+        # label centres it, and clicks take that margin off (_screen_to_frame).
+        # Adding the margin here too drew every box, the target and the hold
+        # box shifted by it: 2026-10-01 on the remote desktop's wide window,
+        # 56 px right of the people they were drawn round, the crosshair as
+        # far right of where the mount was aiming.
+        off_x = off_y = 0
         sx = disp_w / self._frame_w
         sy = disp_h / self._frame_h
 
@@ -333,6 +349,7 @@ class VideoLabel(QLabel):
                 cy = fy - self._frame_h / 2
                 self._target_cx = cx
                 self._target_cy = cy
+                self._target_user_set = True
                 self.target_moved.emit(cx, cy)
             else:
                 # Click-to-select a person
@@ -719,6 +736,10 @@ class CVWindow(QWidget):
         loop.set_mount(self._mount_id)
         loop.set_pt_preset_speeds(self._pt_preset_speed)
         loop.set_hold(self._hold_box.value() / 100.0)
+        # A target the operator set carries over to the new loop; a fresh loop
+        # would otherwise aim at its default while the crosshair stayed put.
+        if self._video.user_target() is not None:
+            loop.set_target(*self._video.user_target())
         loop.frame_ready.connect(self._on_frame)
         loop.tracking_lost.connect(self._on_tracking_lost)
         loop.tracking_active.connect(self._on_tracking_active)
