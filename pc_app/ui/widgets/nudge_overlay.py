@@ -18,7 +18,8 @@ Layout:
 The focus crosshair is the grid's (widgets/focus_button.py), shown by the same
 Config option: this panel covers the grid, and with it the crosshair of the
 camera being framed.  It sits under the zoom column, with the other lens
-control, in a corner that was empty.
+control, in a corner that was empty — centred under the column and level with
+the middle of the slider's rail (see _place_focus()).
 
 Pan and tilt are a dial of four separated arc groups, with a legend in the hub
 naming which way each axis lies; the slider is a track of four tap zones.
@@ -55,7 +56,7 @@ from PyQt6.QtWidgets import (
     QFrame, QPushButton, QLabel, QSizePolicy, QWidget,
     QHBoxLayout, QVBoxLayout
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 
 from comms.mount_manager import MountManager
@@ -281,9 +282,6 @@ class NudgeOverlay(QFrame):
         self._track.setMinimumHeight(f(_TRACK_H_F))
         self._zoom.set_metrics(f(_ZOOM_W_F), f(_ZOOM_H_F))
         self._zoom_gutter.setFixedWidth(f(_ZOOM_W_F))
-        # None: the style's default would make the gutter taller than the track
-        # whenever the crosshair shows, and the dial above would shrink for it.
-        self._gutter.setContentsMargins(0, 0, 0, 0)
         self._focus_btn.setFixedSize(f(_FOCUS_F), f(_FOCUS_F))
 
         # The track is measured off the dial, so the dial has to have its new
@@ -328,17 +326,43 @@ class NudgeOverlay(QFrame):
         self._bottom.addWidget(self._track)
         self._bottom.addStretch(1)
         # The zoom column's width, so the track stays centred under the dial —
-        # and the focus crosshair's place, when Config shows it.
+        # and where the focus crosshair goes, when Config shows it.
         self._zoom_gutter = QWidget()
-        self._gutter = QHBoxLayout(self._zoom_gutter)
-        self._focus_btn = FocusButton()
+        self._bottom.addWidget(self._zoom_gutter)
+        self._root.addLayout(self._bottom)
+        # The crosshair is the panel's own child, placed over the gutter by
+        # _place_focus() rather than laid out in it — see there — whenever the
+        # gutter or the track moves or changes size: a rescale, the first
+        # showing, anything that lays the row out again.
+        self._focus_btn = FocusButton(self)
         self._focus_btn.setEnabled(False)       # until a camera says it is linked
         self._focus_btn.hide()                  # until Config says to show it
         self._focus_btn.clicked.connect(
             lambda _=False: self.focus_requested.emit(self._mount_id))
-        self._gutter.addWidget(self._focus_btn, 0, Qt.AlignmentFlag.AlignCenter)
-        self._bottom.addWidget(self._zoom_gutter)
-        self._root.addLayout(self._bottom)
+        for w in (self._zoom_gutter, self._track):
+            w.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.Move, QEvent.Type.Resize):
+            self._place_focus()
+        return super().eventFilter(obj, event)
+
+    def _place_focus(self) -> None:
+        """The focus crosshair: centred across the gutter under the zoom
+        column, and level with the middle of the slider's rail — not the
+        middle of the row, whose bottom fifth is the rail's SLIDER caption.
+        2026-10-01, the operator: it sat a few pixels low of the rail.
+
+        Placed by hand because, in the gutter's layout, lifting it that far
+        would make the gutter taller than the track, and the dial above
+        would shrink for it.  Over the gutter it overhangs the row's top by
+        a pixel or two of its own clear margin, which a layout would clip."""
+        g, t, b = self._zoom_gutter, self._track, self._focus_btn
+        gx = g.mapTo(self, QPoint(0, 0)).x()
+        ty = t.mapTo(self, QPoint(0, 0)).y()
+        b.move(gx + (g.width() - b.width()) // 2,
+               ty + round(t.bar_centre()) - b.height() // 2)
+        b.raise_()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -322,12 +322,24 @@ class SliderTrack(QWidget):
             return SL_LIT, SL_LINE
         return (SL_FILL if i in (1, 4) else "#2C0A40"), SL_LINE
 
+    def _body(self) -> QRectF:
+        """The rail itself: inset a tenth of the height all round, with the
+        bottom fifth left for the SLIDER caption."""
+        w, h = self.width(), self.height()
+        pad = h * 0.10
+        return QRectF(pad, pad, w - pad * 2, h - pad * 2 - h * 0.20)
+
+    def bar_centre(self) -> float:
+        """How far down the middle of the rail is: above the widget's own
+        middle, the caption being below the rail.  The Move panel lines its
+        focus crosshair up on it."""
+        return self._body().center().y()
+
     def paintEvent(self, _event):
         w, h = self.width(), self.height()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pad = h * 0.10
-        body = QRectF(pad, pad, w - pad * 2, h - pad * 2 - h * 0.20)
+        body = self._body()
         rad = body.height() / 2.0
 
         # The well, then each zone clipped to the stadium so the end zones

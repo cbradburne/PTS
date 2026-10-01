@@ -32,6 +32,9 @@ so it has one of its own — for the camera it moves, under the zoom column.
                               camera with the panel open switches the button
                               to that camera's link
   nothing moves for it        the track stays under the dial, shown or not
+  in line with its neighbours centred under the zoom column, and level with
+                              the middle of the slider's rail (not of its row,
+                              whose bottom fifth is the caption) at any panel size
 
 Run directly, or via tools/run_tests.sh with the rest.
 """
@@ -342,6 +345,35 @@ assert abs((fx + fw / 2) - (zx + zw / 2)) <= 1, \
     f"the crosshair is not under the zoom column: {shown}"
 assert fy < ty + th and ty < fy + fh, f"the crosshair is not on the track's row: {shown}"
 assert fw == fh and fw <= zw, f"the crosshair is {fw}x{fh} in a {zw}px column"
+# Level with the slider's rail.  2026-10-01, the operator, red lines on a
+# screenshot: it sat a few pixels low — centred on the row, whose bottom fifth
+# is the rail's SLIDER caption.  At two panel sizes, so it follows a rescale.
+# The rail is found in what the track DRAWS — asking the track where it is
+# would agree with a crosshair placed by the same wrong answer.
+
+
+def drawn_rail_centre(track):
+    img = track.grab().toImage()
+    x = img.width() // 5                         # inside a zone, clear of the caption
+    bg = img.pixelColor(x, 0)
+    rows = [y for y in range(int(img.height() * 0.8)) if img.pixelColor(x, y) != bg]
+    assert rows, "nothing drawn down the track's left zone — no rail to line up with"
+    return (rows[0] + rows[-1]) / 2
+
+
+for side in (None, 640):
+    if side is not None:
+        ov._apply_scale(side)
+    g = panel_geometry()
+    fx, fy, fw, fh = g["focus"]
+    zx, zw = g["zoom"]
+    tx, ty, tw, th = g["track"]
+    rail = ty + drawn_rail_centre(ov._track)
+    assert abs((fy + fh / 2) - rail) <= 1.5, \
+        f"panel {ov.width()}px: the crosshair's middle is at y={fy + fh / 2:.1f}, the " \
+        f"slider rail's at {rail:.1f} — level with the row, not the rail"
+    assert abs((fx + fw / 2) - (zx + zw / 2)) <= 1, \
+        f"panel {ov.width()}px: the crosshair is not under the zoom column: {g}"
 
 asked = []
 ov.focus_requested.connect(asked.append)
