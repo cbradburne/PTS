@@ -248,6 +248,61 @@ static_assert(MOUNT_EVENT_NOMEM_PAYLOAD_LEN ==
 #define MOUNT_NOMEM_BLE_CONNECTING      0x02
 #define MOUNT_NOMEM_BLE_LINKED          0x04
 #define MOUNT_NOMEM_BLE_BONDED          0x08
+// A run of sends that went out and got no answer — every send-complete callback
+// a failure — ended by a send getting through, with no reboot.  Measured
+// 2026-10-02: every mount has these 2-4 times a day, about 7 s and 45 sends
+// long, ending after exactly one ESP-NOW restart.  The hub's sends to it fail in
+// the same seconds and the PC greys the mount.  The PC sees only the silence,
+// and nothing at the rig reads the mount's serial port, so this is the mount's
+// own account, sent as soon as it can be.  Built to tell apart:
+//   kept hearing the hub, its own sends unanswered   -> the way back to the hub
+//   heard nothing either                             -> its own radio, or the air
+//   send results kept coming, each a failure         -> frames went out unanswered
+//   send results stopped coming                      -> the transmit path stalled
+//   the channel moved, or the camera's BLE link
+//   dropped or was busy                              -> the shared radio
+// Only runs of MOUNT_LINK_RUN_MIN_FAILS or more: a lone failure is routine.
+// See shared/link_run.h, which measures it.
+//
+// The payload is the common 14 bytes, then MOUNT_EVENT_LINK_RUN_LEN bytes.
+// Times are ms from the first failure: u16, 0xFFFE meaning "65.5 s or later",
+// 0xFFFF (MOUNT_LINK_T_NEVER) meaning it did not happen in the run.
+//   [14..17] uptime_s at the first failure                              u32
+//   [18..21] the run: first failure to the first success, ms            u32
+//   [22..23] sends that failed in the run                               u16 sat
+//   [24..25] sends the stack refused outright in the run                u16 sat
+//   [26..27] ms from the last good send to the first failure            u16 sat
+//   [28..29] ms from the last frame heard to the first failure          u16 sat
+//   [30..31] frames heard during the run                                u16 sat
+//   [32..33] when the first of those was heard                          u16 time
+//   [34..35] longest wait between two send results in the run, ms       u16 sat
+//   [36..37] sends in flight just after the first failure               u16 sat
+//   [38..39] first hub-peer refresh                                     u16 time
+//   [40..41] first ESP-NOW restart                                      u16 time
+//   [42..43] first WiFi-level restart                                   u16 time
+//   [44..45] first scan for a base                                      u16 time
+//   [46]     hub-peer refreshes in the run                              u8 sat
+//   [47]     ESP-NOW restarts in the run                                u8 sat
+//   [48]     WiFi channel just after the first failure (0 = not read)   u8
+//   [49]     WiFi channel at the end (0 = not read)                     u8
+//   [50]     the channel the hub peer is configured on                  u8
+//   [51]     BLE just after the first failure, MOUNT_NOMEM_BLE_* bits   u8
+//   [52]     BLE at the end                                             u8
+//   [53]     times the camera's BLE link dropped in the run             u8 sat
+//   [54..55] camera notifications received in the run                   u16 sat
+//   [56]     rssi of the last frame heard before the run, dBm           i8
+//   [57]     its noise floor, dBm                                       i8
+//   [58]     rssi of the first frame heard in the run (if [32] is a time) i8
+//   [59]     its noise floor                                            i8
+//   [60..63] internal RAM free just after the first failure             u32
+#define MOUNT_EVENT_LINK_RUN            6
+#define MOUNT_EVENT_LINK_RUN_LEN        50
+#define MOUNT_EVENT_LINK_PAYLOAD_LEN    64
+static_assert(MOUNT_EVENT_LINK_PAYLOAD_LEN ==
+              MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_LINK_RUN_LEN,
+              "the link-run event is the common 14 bytes and the run");
+#define MOUNT_LINK_RUN_MIN_FAILS        8
+#define MOUNT_LINK_T_NEVER              0xFFFF
 // rssi min/mean/max (3 × int8) + noise floor min/mean/max (3 × int8)
 // + frames the window was measured over (2) + frames the receive queue refused
 // (2).  Signed dBm throughout; a report with frames == 0 means nothing was heard
@@ -1068,6 +1123,39 @@ typedef struct {
     uint32_t iram_after_reserve;
 } MountNomemLadder;
 
+// A run of unanswered sends — see MOUNT_EVENT_LINK_RUN.  Measured by
+// shared/link_run.h; times are ms from the first failure.
+typedef struct {
+    uint32_t uptime_s;
+    uint32_t dur_ms;
+    uint16_t fails;
+    uint16_t refused;
+    uint16_t since_ok_ms;
+    uint16_t since_rx_ms;
+    uint16_t rx_during;
+    uint16_t t_first_rx;
+    uint16_t max_cb_gap_ms;
+    uint16_t in_flight;
+    uint16_t t_refresh;
+    uint16_t t_reinit;
+    uint16_t t_wifi;
+    uint16_t t_scan;
+    uint8_t  n_refresh;
+    uint8_t  n_reinit;
+    uint8_t  chan_start;
+    uint8_t  chan_end;
+    uint8_t  chan_hub;
+    uint8_t  ble_start;
+    uint8_t  ble_end;
+    uint8_t  ble_drops;
+    uint16_t cam_notifies;
+    int8_t   rssi_before;
+    int8_t   noise_before;
+    int8_t   rssi_first;
+    int8_t   noise_first;
+    uint32_t iram_free;
+} MountLinkRun;
+
 // CMD_POSITION payload (17 bytes) — live axis positions in physical units.
 typedef struct __attribute__((packed)) {
     uint8_t pan_deg[4];       // BE float — degrees
@@ -1376,6 +1464,39 @@ static inline void encode_mount_nomem_snapshot(uint8_t p[MOUNT_EVENT_NOMEM_SNAP_
     write_be16(p + 37, s->cb_during);
     write_be16(p + 39, s->rx_during);
     write_be16(p + 41, s->refused_during);
+}
+
+// The link run, written straight after the common 14 event bytes.
+static inline void encode_mount_link_run(uint8_t p[MOUNT_EVENT_LINK_RUN_LEN],
+                                         const MountLinkRun *r) {
+    write_be32(p + 0,  r->uptime_s);
+    write_be32(p + 4,  r->dur_ms);
+    write_be16(p + 8,  r->fails);
+    write_be16(p + 10, r->refused);
+    write_be16(p + 12, r->since_ok_ms);
+    write_be16(p + 14, r->since_rx_ms);
+    write_be16(p + 16, r->rx_during);
+    write_be16(p + 18, r->t_first_rx);
+    write_be16(p + 20, r->max_cb_gap_ms);
+    write_be16(p + 22, r->in_flight);
+    write_be16(p + 24, r->t_refresh);
+    write_be16(p + 26, r->t_reinit);
+    write_be16(p + 28, r->t_wifi);
+    write_be16(p + 30, r->t_scan);
+    p[32] = r->n_refresh;
+    p[33] = r->n_reinit;
+    p[34] = r->chan_start;
+    p[35] = r->chan_end;
+    p[36] = r->chan_hub;
+    p[37] = r->ble_start;
+    p[38] = r->ble_end;
+    p[39] = r->ble_drops;
+    write_be16(p + 40, r->cam_notifies);
+    p[42] = (uint8_t)r->rssi_before;
+    p[43] = (uint8_t)r->noise_before;
+    p[44] = (uint8_t)r->rssi_first;
+    p[45] = (uint8_t)r->noise_first;
+    write_be32(p + 46, r->iram_free);
 }
 
 // Build a CMD_POSITION packet (17-byte payload, physical units).

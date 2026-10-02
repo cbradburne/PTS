@@ -146,6 +146,11 @@ SCALAR_MAP = {
     "MOUNT_NOMEM_BLE_CONNECTING":    ("MOUNT_NOMEM_BLE_CONNECTING", True),
     "MOUNT_NOMEM_BLE_LINKED":        ("MOUNT_NOMEM_BLE_LINKED", True),
     "MOUNT_NOMEM_BLE_BONDED":        ("MOUNT_NOMEM_BLE_BONDED", True),
+    "MOUNT_EVENT_LINK_RUN":          ("MOUNT_EVENT_LINK_RUN", True),
+    "MOUNT_EVENT_LINK_RUN_LEN":      ("MOUNT_EVENT_LINK_RUN_LEN", True),
+    "MOUNT_EVENT_LINK_PAYLOAD_LEN":  ("MOUNT_EVENT_LINK_PAYLOAD_LEN", True),
+    "MOUNT_LINK_RUN_MIN_FAILS":      ("MOUNT_LINK_RUN_MIN_FAILS", True),
+    "MOUNT_LINK_T_NEVER":            ("MOUNT_LINK_T_NEVER", True),
     "HEALTH_BRIDGE_TAIL_LEN":        ("HEALTH_BRIDGE_TAIL_LEN", True),
     # Names, held by the hub: the limits size a wire record at both ends, and
     # the sentinel addresses every name packet.
@@ -305,6 +310,21 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
                                             pyproto.MOUNT_NOMEM_BLE_SCANNING,
                                             0, 204, 1000, 0x0BBC, 12288,
                                             0x0001B8A0, 0x0001E8C0)),
+        "mount_event_link_run": (2, 0x0C0D, Cmd.MOUNT_EVENT,
+                                 bytes([pyproto.MOUNT_EVENT_LINK_RUN, 0x00, 0x2F, 0x00,
+                                        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                        0x00, 0x00])
+                                 + struct.pack(">IIHHHHHHHHHHHHBBBBBBBBHbbbbI",
+                                               0x00010203, 0x00012345, 45, 0x0102, 100,
+                                               0xFFFF, 1, 6650, 300, 2, 450, 1650,
+                                               pyproto.MOUNT_LINK_T_NEVER, 0xFFFE,
+                                               2, 1, 6, 11, 6,
+                                               pyproto.MOUNT_NOMEM_BLE_LINKED
+                                               | pyproto.MOUNT_NOMEM_BLE_BONDED,
+                                               pyproto.MOUNT_NOMEM_BLE_SCANNING
+                                               | pyproto.MOUNT_NOMEM_BLE_BONDED,
+                                               1, 0xABCD, -46, -92, -45, -128,
+                                               0x0000EE48)),
     }
 
 
@@ -452,6 +472,22 @@ def check_golden(pyproto):
                 != (0x07, 0x01, 0, 204, 1000, 0x0BBC, 12288, 0x0001B8A0, 0x0001E8C0)):
             fail("decode_mount_nomem_ladder() misread the C-built ladder")
         ok("bridge health tail, NO_MEM snapshot and ladder verified on C bytes")
+        ev = c_pkts["mount_event_link_run"][7:-2]
+        if (len(ev) != pyproto.MOUNT_EVENT_LINK_PAYLOAD_LEN
+                or ev[0] != pyproto.MOUNT_EVENT_LINK_RUN):
+            fail("the C-built link-run event is not the length or kind Python expects")
+        lr = pyproto.decode_mount_link_run(ev[pyproto.MOUNT_EVENT_PAYLOAD_LEN:])
+        if ((lr.uptime_s, lr.dur_ms, lr.fails, lr.refused, lr.since_ok_ms, lr.since_rx_ms,
+             lr.rx_during, lr.t_first_rx, lr.max_cb_gap_ms, lr.in_flight, lr.t_refresh,
+             lr.t_reinit, lr.t_wifi, lr.t_scan, lr.n_refresh, lr.n_reinit, lr.chan_start,
+             lr.chan_end, lr.chan_hub, lr.ble_start, lr.ble_end, lr.ble_drops,
+             lr.cam_notifies, lr.rssi_before, lr.noise_before, lr.rssi_first,
+             lr.noise_first, lr.iram_free)
+                != (0x00010203, 0x00012345, 45, 0x0102, 100, 0xFFFF, 1, 6650, 300, 2,
+                    450, 1650, 0xFFFF, 0xFFFE, 2, 1, 6, 11, 6, 0x0C, 0x09, 1, 0xABCD,
+                    -46, -92, -45, -128, 0x0000EE48)):
+            fail("decode_mount_link_run() misread the C-built link run")
+        ok("link-run event verified on C bytes")
 
         # ── parse: Python builds / mangles packets, C must agree ────────────
         AxisGroup = pyproto.AxisGroup

@@ -190,6 +190,48 @@ static int do_emit() {
         emit_pkt("mount_event_nomem", buf, n);
     }
 
+    // l: the link-run event — the common 14 bytes, then the run through the
+    //    real encoder.  Negative dBm in all four int8s (one at -128), a
+    //    saturated u16, a "never" and a capped time, a run longer than a u16
+    //    of ms holds, and distinct bytes in every multi-byte field.
+    {
+        uint8_t ep[MOUNT_EVENT_LINK_PAYLOAD_LEN] = {
+            MOUNT_EVENT_LINK_RUN, 0x00, 0x2F, 0x00, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        MountLinkRun r;
+        r.uptime_s      = 0x00010203;
+        r.dur_ms        = 0x00012345;
+        r.fails         = 45;
+        r.refused       = 0x0102;
+        r.since_ok_ms   = 100;
+        r.since_rx_ms   = 0xFFFF;
+        r.rx_during     = 1;
+        r.t_first_rx    = 6650;
+        r.max_cb_gap_ms = 300;
+        r.in_flight     = 2;
+        r.t_refresh     = 450;
+        r.t_reinit      = 1650;
+        r.t_wifi        = MOUNT_LINK_T_NEVER;
+        r.t_scan        = 0xFFFE;
+        r.n_refresh     = 2;
+        r.n_reinit      = 1;
+        r.chan_start    = 6;
+        r.chan_end      = 11;
+        r.chan_hub      = 6;
+        r.ble_start     = MOUNT_NOMEM_BLE_LINKED | MOUNT_NOMEM_BLE_BONDED;
+        r.ble_end       = MOUNT_NOMEM_BLE_SCANNING | MOUNT_NOMEM_BLE_BONDED;
+        r.ble_drops     = 1;
+        r.cam_notifies  = 0xABCD;
+        r.rssi_before   = -46;
+        r.noise_before  = -92;
+        r.rssi_first    = -45;
+        r.noise_first   = -128;
+        r.iram_free     = 0x0000EE48;
+        encode_mount_link_run(ep + MOUNT_EVENT_PAYLOAD_LEN, &r);
+        n = build_packet(buf, 2, 0x0C0D, CMD_MOUNT_EVENT, ep, sizeof(ep));
+        emit_pkt("mount_event_link_run", buf, n);
+    }
+
     return 0;
 }
 

@@ -64,6 +64,8 @@ from .protocol import (
     RF_REPORT_PAYLOAD_LEN,
     decode_pair_conflict, PairConflictPayload,
     decode_health, bridge_reinits, ParseError,
+    MOUNT_EVENT_LINK_RUN, MOUNT_EVENT_LINK_PAYLOAD_LEN, MOUNT_LINK_T_NEVER,
+    decode_mount_link_run,
 )
 
 
@@ -163,6 +165,100 @@ def _ble_activity(bits: int) -> str:
     else:
         parts.append("no camera")
     return ", ".join(parts)
+
+
+def _link_run_text(r) -> list[str]:
+    """A mount's account of a run of unanswered sends, as log lines.
+
+    In order: what happened; the radio just before; during; what the mount
+    tried and when; and a reading — which way each of the tests the report
+    was built for points (see MOUNT_EVENT_LINK_RUN in shared/protocol.h).
+    The reading states observations, not a verdict: the point of the report
+    is to collect them until the cause is plain.
+    """
+    def at(t):
+        if t == MOUNT_LINK_T_NEVER:
+            return None
+        return "65 s or later" if t >= 0xFFFE else f"{t / 1000:.1f} s"
+
+    def ago(ms):
+        return "over 65 s" if ms >= 0xFFFF else f"{ms} ms"
+
+    def ch(c):
+        return str(c) if c else "?"
+
+    def n(k, what):
+        return f"{k} {what}{'' if k == 1 else 's'}"
+
+    sampled = r.chan_start != 0          # loop() read the radio just after the start
+    head = (f"LINK RUN: {r.fails} sends went out unanswered over "
+            f"{_human_s(r.dur_ms / 1000)}, then one got through — no reboot")
+    if r.refused:
+        head += f"; the stack refused {r.refused} more outright"
+
+    # Up-time first: a run at power-up, before the mount has found its base,
+    # is reported like any other and must read as what it is.
+    before = (f"before (up {_human_s(r.uptime_s)}): last send through "
+              f"{ago(r.since_ok_ms)} before the first failure, last frame heard "
+              f"{ago(r.since_rx_ms)} before")
+    if r.since_rx_ms < 0xFFFF:
+        before += f" ({r.rssi_before} dBm, noise {r.noise_before})"
+    if sampled:
+        before += f"; {r.in_flight} in flight, {r.iram_free // 1024} KB internal RAM free"
+
+    heard = (f"heard {n(r.rx_during, 'frame')}, the first at {at(r.t_first_rx)} "
+             f"({r.rssi_first} dBm, noise {r.noise_first})" if r.rx_during
+             else "heard nothing")
+    during = f"during: {heard}; longest wait for a send result {r.max_cb_gap_ms} ms"
+
+    radio = (f"radio: channel {ch(r.chan_start)} -> {ch(r.chan_end)} (hub on "
+             f"{ch(r.chan_hub)}); BLE {_ble_activity(r.ble_start) if sampled else '?'}"
+             f" -> {_ble_activity(r.ble_end)}")
+    if sampled:
+        radio += (f"; the camera link dropped {n(r.ble_drops, 'time')}, "
+                  f"{n(r.cam_notifies, 'camera notification')}")
+    else:
+        radio += " (the run ended before the mount read its radio)"
+
+    steps = []
+    for t, k, what in ((r.t_refresh, r.n_refresh, "hub-peer refresh"),
+                       (r.t_reinit, r.n_reinit, "ESP-NOW restart"),
+                       (r.t_wifi, 1, "WiFi restart"), (r.t_scan, 1, "scan for a base")):
+        if at(t):
+            steps.append(f"{what} at {at(t)}" + (f" ({k} times)" if k > 1 else ""))
+    tried = "it tried: " + ("; ".join(steps) if steps
+                            else "nothing — it ended before the first step")
+
+    reading = []
+    # On this rig a mount whose receiver works hears something every few
+    # hundred ms (PINGs, heartbeats, probes), so a second of nothing is deafness.
+    if not r.rx_during:
+        reading.append("deaf and mute together: it heard nothing in the run")
+    elif r.t_first_rx >= 1000:
+        reading.append(f"deaf and mute together for {at(r.t_first_rx)}: its receiver "
+                       f"came back {_human_s((r.dur_ms - r.t_first_rx) / 1000)} "
+                       "before its sends did")
+    else:
+        reading.append(f"it kept hearing ({n(r.rx_during, 'frame')}, the first "
+                       f"{at(r.t_first_rx)} in) while its sends went unanswered, so "
+                       "its receiver worked and the failure was on the way to the hub")
+    if r.max_cb_gap_ms >= 1000:
+        reading.append(f"send results stopped for {r.max_cb_gap_ms / 1000:.1f} s, "
+                       "so its transmit path stalled")
+    else:
+        reading.append("send results kept coming, each a failure, so the frames "
+                       "went out and nothing answered")
+    if r.chan_hub and ((r.chan_start and r.chan_start != r.chan_hub)
+                       or (r.chan_end and r.chan_end != r.chan_hub)):
+        reading.append("its channel was not the hub's")
+    if r.ble_drops:
+        reading.append("its camera link dropped too")
+    elif r.ble_start & (MOUNT_NOMEM_BLE_SCANNING | MOUNT_NOMEM_BLE_CONNECTING):
+        reading.append("BLE was looking for the camera when it started")
+    if at(r.t_reinit) and r.t_reinit < 0xFFFE:
+        reading.append(f"back {_human_s((r.dur_ms - r.t_reinit) / 1000)} after its "
+                       "ESP-NOW restart")
+    return [head, before, during, radio, tried, "reading: " + "; ".join(reading)]
 
 
 def _nomem_ladder_text(l, kind: int) -> tuple[str, Optional[tuple[int, str]]]:
@@ -1273,6 +1369,18 @@ class MountManager(QObject):
             ref  = (b[9] << 8) | b[10]
             err  = (b[11] << 8) | b[12]
             wifi = b[13]
+            if kind == MOUNT_EVENT_LINK_RUN:
+                # Not a restart: a run of unanswered sends the mount came out of
+                # by itself, told the moment a send got through again.
+                if len(b) < MOUNT_EVENT_LINK_PAYLOAD_LEN:
+                    log.warning("MOUNT EVENT cam%d link-run report too short "
+                                "(%d bytes)", mid, len(b))
+                    return
+                lines = _link_run_text(decode_mount_link_run(b[MOUNT_EVENT_PAYLOAD_LEN:]))
+                log.warning("MOUNT EVENT cam%d %s", mid, lines[0])
+                for more in lines[1:]:
+                    log.warning("MOUNT EVENT cam%d   %s", mid, more)
+                return
             if kind in (MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_CURED):
                 lines = _nomem_event_text(kind, b, txf, rei, ref, err)
                 log.warning("MOUNT EVENT cam%d %s", mid, lines[0])

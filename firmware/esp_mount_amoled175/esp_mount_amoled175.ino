@@ -41,6 +41,7 @@
 #include <esp_task_wdt.h>
 #include <Wire.h>
 #include "../shared/protocol.h"
+#include "../shared/link_run.h"     // a run of unanswered sends, for MOUNT_EVENT_LINK_RUN
 #include "../shared/pos_run.h"      // cycling stored positions — the mount's own run
 #include "../shared/crash_report.h"
 #include "ble_camera.h"   // Blackmagic camera control over BLE
@@ -1336,6 +1337,91 @@ static inline uint16_t nomem_sat16(uint32_t v) {
     return v > 0xFFFF ? 0xFFFF : (uint16_t)v;
 }
 
+// ── Runs of unanswered sends (MOUNT_EVENT_LINK_RUN) ───────────────────────────
+// 2026-10-02: every mount loses its link both ways for about 7 s, 2-4 times a
+// day, and recovers by itself after one ESP-NOW restart.  The PC sees only the
+// silence.  This records what the radio was doing, in shared/link_run.h, and
+// reports it the moment a send gets through again.  The callbacks only stamp
+// times and counts under the lock; loop() does every read that calls into the
+// WiFi driver, BLE or the heap.
+static LinkRunTracker _link;
+static portMUX_TYPE   _link_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void link_result(bool ok) {
+    portENTER_CRITICAL(&_link_mux);
+    _link.on_result(millis(), ok);
+    portEXIT_CRITICAL(&_link_mux);
+}
+static void link_heard(int8_t rssi, int8_t noise) {
+    portENTER_CRITICAL(&_link_mux);
+    _link.on_rx(millis(), rssi, noise);
+    portEXIT_CRITICAL(&_link_mux);
+}
+static void link_refused() {
+    portENTER_CRITICAL(&_link_mux);
+    _link.on_refused(millis());
+    portEXIT_CRITICAL(&_link_mux);
+}
+static void link_note(LinkAction a) {
+    portENTER_CRITICAL(&_link_mux);
+    _link.on_action(millis(), a);
+    portEXIT_CRITICAL(&_link_mux);
+}
+
+static LinkSample link_sample() {
+    LinkSample s = {};
+    uint8_t prim = 0;
+    wifi_second_chan_t sec;
+    if (esp_wifi_get_channel(&prim, &sec) != ESP_OK) prim = 0;
+    s.chan         = prim;
+    s.ble          = ble_cam_activity_bits();
+    s.cam_notifies = _bc_notifies;
+    s.ble_drops    = _bc_drops;
+    s.iram_free    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    s.in_flight    = espnow_in_flight();
+    return s;
+}
+
+static void send_to_hub(CmdType cmd, const uint8_t *payload, uint8_t plen);
+
+// From loop(): the start sample when a run has just begun, and the report when
+// one has just ended.
+static void link_run_poll() {
+    bool want_start, want_done;
+    portENTER_CRITICAL(&_link_mux);
+    want_start = _link.need_start;
+    want_done  = _link.due;
+    portEXIT_CRITICAL(&_link_mux);
+    if (!want_start && !want_done) return;
+    LinkSample s = link_sample();            // outside the lock: driver, BLE, heap
+    MountLinkRun r;
+    bool got = false;
+    portENTER_CRITICAL(&_link_mux);
+    if (want_start) _link.start_sample(s, _hub_channel);
+    if (want_done)  got = _link.take(s, _hub_channel, &r);
+    portEXIT_CRITICAL(&_link_mux);
+    if (!got) return;
+    uint32_t now = millis();
+    uint16_t txs = (uint16_t)((now - _last_espnow_tx_ok_ms) / 1000UL);
+    uint16_t rxs = (uint16_t)((now - _last_hub_rx_ms) / 1000UL);
+    uint16_t txf = (uint16_t)_espnow_fail_total, rei = (uint16_t)_reinit_count;
+    uint16_t ref = (uint16_t)_espnow_tx_refused, err = _espnow_last_tx_err;
+    uint8_t p[MOUNT_EVENT_LINK_PAYLOAD_LEN] = {
+        MOUNT_EVENT_LINK_RUN,
+        (uint8_t)(txf >> 8), (uint8_t)txf, (uint8_t)(rei >> 8), (uint8_t)rei,
+        (uint8_t)(rxs >> 8), (uint8_t)rxs, (uint8_t)(txs >> 8), (uint8_t)txs,
+        (uint8_t)(ref >> 8), (uint8_t)ref, (uint8_t)(err >> 8), (uint8_t)err,
+        (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
+    encode_mount_link_run(p + MOUNT_EVENT_PAYLOAD_LEN, &r);
+    send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
+    Serial.printf("[LINK] run: %u sends failed over %lu ms, heard %u frames, "
+                  "longest wait %u ms | refresh %u, reinit %u | chan %u->%u (hub %u) "
+                  "| BLE 0x%02X->0x%02X, %u drops, %u notifications\n",
+                  r.fails, (unsigned long)r.dur_ms, r.rx_during, r.max_cb_gap_ms,
+                  r.n_refresh, r.n_reinit, r.chan_start, r.chan_end, r.chan_hub,
+                  r.ble_start, r.ble_end, r.ble_drops, r.cam_notifies);
+}
+
 // Everything that could say WHY, read at the first refusal.  The candidates it
 // is built to separate, next time a mount wedges:
 //   send-completions stopped well before the first refusal -> the driver stopped
@@ -1593,6 +1679,7 @@ static void espnow_tx(const uint8_t *buf, uint16_t n) {
         // NB: ++ on a volatile is deprecated in C++20, so read-modify-write.
         _espnow_tx_refused  = _espnow_tx_refused + 1;
         _espnow_last_tx_err = (uint16_t)e;
+        link_refused();
         // Stamped here, in the send path, and not sampled from the ladder: a
         // run that ends between two ladder passes must still count as ended.
         if (e == ESP_ERR_ESPNOW_NO_MEM) nomem_note(n > 6 ? buf[6] : 0);
@@ -1881,6 +1968,10 @@ static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
     _last_hub_rx_ms = millis();
     _espnow_rx_total = _espnow_rx_total + 1;   // only this task writes it
     _watchdog_fired = false;
+    if (recv_info && recv_info->rx_ctrl)
+        link_heard((int8_t)recv_info->rx_ctrl->rssi, (int8_t)recv_info->rx_ctrl->noise_floor);
+    else
+        link_heard(0, 0);
     if (recv_info && recv_info->rx_ctrl) {
         _last_rssi = (int8_t)recv_info->rx_ctrl->rssi;
         // The noise floor arrives with every frame, beside the rssi, and has
@@ -1905,6 +1996,7 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
     // from. Success or failure both return the buffer; not firing is the fault.
     _espnow_cb_total = _espnow_cb_total + 1;
     _espnow_cb_last_ms = millis();   // either status: a completion is a completion
+    link_result(s == ESP_NOW_SEND_SUCCESS);
     if (s == ESP_NOW_SEND_SUCCESS) {
         _espnow_consec_fails  = 0;
         _espnow_refresh_count = 0;
@@ -1947,6 +2039,7 @@ static void on_espnow_sent(const wifi_tx_info_t *, esp_now_send_status_t s) {
 // Called from loop()/setup() only — never from a WiFi-task callback.
 static void espnow_peer_refresh() {
     if (!_cfg_valid) return;
+    link_note(LINK_ACT_REFRESH);
     esp_now_del_peer(_hub_mac);
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, _hub_mac, 6);
@@ -1960,6 +2053,7 @@ static void espnow_peer_refresh() {
 
 static void espnow_full_reinit() {
     if (!_cfg_valid) return;   // nothing to rebuild toward while unpaired
+    link_note(LINK_ACT_REINIT);
     Serial.println("[ESP-NOW] Full stack reinit start");
     esp_now_deinit();
     espnow_reconcile_after_rebuild();
@@ -2005,6 +2099,7 @@ static void espnow_full_reinit() {
 // particular is documented as only taking effect after esp_wifi_start().
 static bool espnow_wifi_restart() {
     if (!_cfg_valid) return false;
+    link_note(LINK_ACT_WIFI);
     Serial.println("[ESP-NOW] WiFi teardown start");
     esp_now_deinit();
     espnow_reconcile_after_rebuild();
@@ -3027,6 +3122,7 @@ static void hub_reacquire_poll() {
             _reacq_scanning = true;
             Serial.println(boot_pick ? "[REACQ] Boot — choosing the strongest base"
                                      : "[REACQ] Base silent — scanning for known bases");
+            link_note(LINK_ACT_SCAN);
             WiFi.scanDelete();
             WiFi.scanNetworks(true /*async*/, false);
         }
@@ -4315,6 +4411,8 @@ void loop() {
     }
     // A run the ladder ended without a reboot.
     nomem_send_cured();
+    // A run of unanswered sends: its start sample, or its report once it ended.
+    link_run_poll();
 
     // A one-way TX wedge that the WiFi-level restart cleared.  Gated on TX
     // actually working again, not on hub_ok: hub_ok is an RX test, and RX was

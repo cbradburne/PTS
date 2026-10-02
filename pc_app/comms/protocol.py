@@ -1919,6 +1919,15 @@ MOUNT_NOMEM_STEP_BLE_PAUSED   = 0x01   # a scan or connect attempt was stopped
 MOUNT_NOMEM_STEP_SCAN_FREED   = 0x02   # ...and what the scan held was freed
 MOUNT_NOMEM_STEP_RESERVE      = 0x04   # the internal-RAM reserve was released
 MOUNT_NOMEM_STEP_NO_RESERVE   = 0x08   # its turn came and none was held
+# A run of a mount's sends that went out and got no answer, ended by one getting
+# through, with no reboot: the ~7 s blackouts every mount has a few times a day
+# (2026-10-02).  The common 14 bytes and MOUNT_EVENT_LINK_RUN_LEN more; layout
+# and reasoning in shared/protocol.h, measured by shared/link_run.h.
+MOUNT_EVENT_LINK_RUN          = 6
+MOUNT_EVENT_LINK_RUN_LEN      = 50
+MOUNT_EVENT_LINK_PAYLOAD_LEN  = MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_LINK_RUN_LEN
+MOUNT_LINK_RUN_MIN_FAILS      = 8
+MOUNT_LINK_T_NEVER            = 0xFFFF
 # A bridge's CMD_HEALTH carries this many bytes after the uniform 24: internal
 # RAM free / lowest / largest block and NO_MEM runs that ended by themselves
 # (the first 16, since 466477d), then the reserve held, runs the ladder ended,
@@ -1999,6 +2008,54 @@ def decode_mount_nomem_ladder(lad: bytes) -> MountNomemLadder:
         raise ParseError(f"NO_MEM ladder too short: {len(lad)}")
     return MountNomemLadder(
         *struct.unpack(_NOMEM_LADDER_FMT, lad[:MOUNT_EVENT_NOMEM_LADDER_LEN]))
+
+
+@dataclass
+class MountLinkRun:
+    """A run of a mount's sends that went out unanswered, from the first failure
+    to the first send that got through.  Times are ms from the first failure;
+    MOUNT_LINK_T_NEVER is something that did not happen in the run, 0xFFFE
+    something that happened 65.5 s in or later.  A channel of 0 was not read.
+    """
+    uptime_s:      int
+    dur_ms:        int    # first failure to first success
+    fails:         int    # sends that went out and failed
+    refused:       int    # sends the stack would not take at all
+    since_ok_ms:   int    # last send through -> first failure
+    since_rx_ms:   int    # last frame heard -> first failure
+    rx_during:     int    # frames heard in the run
+    t_first_rx:    int
+    max_cb_gap_ms: int    # longest wait between two send results
+    in_flight:     int
+    t_refresh:     int    # first hub-peer refresh
+    t_reinit:      int    # first ESP-NOW restart
+    t_wifi:        int    # first WiFi-level restart
+    t_scan:        int    # first scan for a base
+    n_refresh:     int
+    n_reinit:      int
+    chan_start:    int
+    chan_end:      int
+    chan_hub:      int
+    ble_start:     int    # MOUNT_NOMEM_BLE_* bits
+    ble_end:       int
+    ble_drops:     int    # the camera's BLE link dropped
+    cam_notifies:  int    # camera notifications in the run
+    rssi_before:   int
+    noise_before:  int
+    rssi_first:    int    # of the first frame heard in the run
+    noise_first:   int
+    iram_free:     int
+
+
+_LINK_RUN_FMT = ">II" + "H" * 12 + "B" * 8 + "H" + "b" * 4 + "I"
+assert struct.calcsize(_LINK_RUN_FMT) == MOUNT_EVENT_LINK_RUN_LEN
+
+
+def decode_mount_link_run(run: bytes) -> MountLinkRun:
+    """Decode the MOUNT_EVENT_LINK_RUN_LEN bytes after the common 14."""
+    if len(run) < MOUNT_EVENT_LINK_RUN_LEN:
+        raise ParseError(f"link run too short: {len(run)}")
+    return MountLinkRun(*struct.unpack(_LINK_RUN_FMT, run[:MOUNT_EVENT_LINK_RUN_LEN]))
 
 
 def pkt_get_mount_table() -> bytes:

@@ -164,6 +164,7 @@ static bool _bc_chosen = false;
 
 static volatile bool         _bc_connected = false;
 static volatile uint32_t     _bc_notifies  = 0;
+static volatile uint32_t     _bc_drops     = 0;   // the camera link dropped, since boot
 static uint32_t              _bc_report_ms = 0;
 static uint32_t              _bc_retry_ms  = 0;
 static uint32_t              _bc_since_ms  = 0;
@@ -553,6 +554,7 @@ static int bc_gap_event(struct ble_gap_event *ev, void *) {
 
     case BLE_GAP_EVENT_DISCONNECT:
         Serial.printf("[CAM] disconnected (reason %d)\n", ev->disconnect.reason);
+        _bc_drops       = _bc_drops + 1;   // for a link run's report
         _bc_conn        = BLE_HS_CONN_HANDLE_NONE;
         _bc_connected   = false;
         _bc_ctrl_handle   = 0;    // handles do not survive a connection
