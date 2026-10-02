@@ -882,6 +882,16 @@ class HealthPayload:
         return HEALTH_NODE_NAMES.get(self.node_type, f"type{self.node_type}")
 
 
+def bridge_reinits(node_u32: int) -> int:
+    """A mount bridge's ESP-NOW restart count, from its HEALTH node_u32.
+
+    Bits 7-4 of the low byte; it saturates at 15 in the firmware.  One place
+    for the layout, because the NODE HEALTH line and the presence log both
+    read it.
+    """
+    return (node_u32 >> 4) & 0x0F
+
+
 def decode_health(payload: bytes) -> HealthPayload:
     """Decode CMD_HEALTH (24-byte payload)."""
     if len(payload) < 24:

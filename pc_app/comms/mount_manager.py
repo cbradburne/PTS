@@ -63,6 +63,7 @@ from .protocol import (
     decode_mount_nomem_snapshot, decode_mount_nomem_ladder,
     RF_REPORT_PAYLOAD_LEN,
     decode_pair_conflict, PairConflictPayload,
+    decode_health, bridge_reinits, ParseError,
 )
 
 
@@ -130,6 +131,23 @@ def _ms(v: int) -> str:
     if v >= 0xFFFF:
         return ">=65 s"
     return f"{v} ms" if v < 10000 else f"{v / 1000:.1f} s"
+
+
+def _human_s(s: float) -> str:
+    """A duration for the PRESENCE line: 4.6 s, 12 min 03 s, 2 h 05 min."""
+    if s < 60:
+        return f"{s:.1f} s"
+    if s < 3600:
+        return f"{int(s // 60)} min {int(s % 60):02d} s"
+    return f"{int(s // 3600)} h {int(s % 3600 // 60):02d} min"
+
+
+def _cmd_name(cmd) -> str:
+    """A packet's command by name, or its number when this app has no name."""
+    try:
+        return Cmd(cmd).name
+    except ValueError:
+        return f"0x{int(cmd):02X}"
 
 
 def _ble_activity(bits: int) -> str:
@@ -284,6 +302,17 @@ class MountState_:
     # find out about mid-shot.
     unacked:      int = 0
     unresponsive: bool = False
+    # For the PRESENCE log line (see _set_mount_online): when the operator's
+    # view last changed, and what the mount last sent, so a grey-out can say
+    # what the silence followed.
+    presence_since: Optional[float] = None    # time.monotonic(); None until the first change
+    last_heard_cmd: Optional[int] = None
+    # The bridge's own counters from its latest HEALTH, (uptime s, sends that
+    # failed, ESP-NOW restarts), and a copy taken when the mount greyed out:
+    # its first report after coming back says what its radio went through.
+    radio_now:    Optional[tuple] = None
+    radio_before: Optional[tuple] = None
+    greyed_s:     float = 0.0                 # the grey-out(s) that account covers
 
     # Motion
     state:       MountState = MountState.IDLE
@@ -661,7 +690,8 @@ class MountManager(QObject):
 
     def _set_mount_online(self, mount_id: int, *,
                           connected: bool | None = None,
-                          unresponsive: bool | None = None) -> bool:
+                          unresponsive: bool | None = None,
+                          why: str) -> bool:
         """Update presence, emitting only when the EFFECTIVE state changes.
 
         A mount is online to the operator when it is both heard (connected) and
@@ -679,6 +709,12 @@ class MountManager(QObject):
         polling a heard-but-unresponsive mount, because an ACK is the only thing
         that clears unresponsive.
 
+        Every change is logged as one PRESENCE line: what the operator now sees,
+        how long the last state lasted, and `why`, which the caller says.  On
+        2026-10-02 the operator watched cam2 grey out mid-concert and the log
+        held nothing about it: it had to be dug out of which mounts the idle
+        probe skipped.  Greying out is WARNING, coming back is INFO.
+
         Returns True if the effective state changed.
         """
         st = self._states.get(mount_id)
@@ -692,8 +728,90 @@ class MountManager(QObject):
         after = st.connected and not st.unresponsive
         if after == before:
             return False
+        now = time.monotonic()
+        lasted = ""
+        if st.presence_since is not None:
+            lasted = " after %s %s" % (_human_s(now - st.presence_since),
+                                       "active" if before else "greyed")
+            if after and st.radio_before is not None:
+                st.greyed_s += now - st.presence_since
+        st.presence_since = now
+        if after:
+            log.info("PRESENCE cam%d ACTIVE%s — %s", mount_id, lasted, why)
+        else:
+            # Kept from the FIRST grey-out until the mount's next HEALTH, so
+            # flapping twice before it reports is one account of both.
+            if st.radio_before is None:
+                st.radio_before = st.radio_now
+                st.greyed_s = 0.0
+            log.warning("PRESENCE cam%d GREYED%s — %s", mount_id, lasted, why)
         (self.mount_connected if after else self.mount_disconnected).emit(mount_id)
         return True
+
+    def _why_silent(self, mid: int, now_ms: float) -> str:
+        """Why a mount that stopped answering greyed out, as far as the PC can
+        tell at that moment: how long it has been silent, what it last sent,
+        and whether the others are still answering.  That last part is the
+        one that places the fault — this mount's own link, or the hub and
+        the PC's way to it."""
+        st = self._states[mid]
+        last = (" — the last thing it sent was %s" % _cmd_name(st.last_heard_cmd)
+                if st.last_heard_cmd is not None else "")
+        what = ("nothing heard from it for %.1f s (the limit is %.1f s%s)"
+                % ((now_ms - st.last_pong_ms) / 1000, HEARTBEAT_TIMEOUT_MS / 1000, last))
+        others = [m for m, o in self._states.items() if m != mid and o.connected]
+        answering = [m for m in others
+                     if (now_ms - self._states[m].last_pong_ms) <= HEARTBEAT_TIMEOUT_MS]
+        if answering:
+            names = ", ".join("cam%d" % m for m in answering)
+            return ("%s.  %s still answering, so the PC and the hub are fine: "
+                    "this is cam%d's own link." % (what, names, mid))
+        if others:
+            return ("%s.  No other mount is answering either, so this is the hub "
+                    "or the PC's link to it, not cam%d." % (what, mid))
+        return "%s.  No other mount is on to compare with." % what
+
+    def _note_radio_health(self, mid: int, pkt: Packet) -> None:
+        """Keep the mount bridge's own counters, and after a grey-out, log what
+        they say its radio went through in the gap.
+
+        The PC sees only silence; the mount knows whether its sends were
+        failing, whether it restarted ESP-NOW, whether it rebooted.  Its first
+        HEALTH after coming back carries all three, so the presence log gets
+        the mount's side as well as the PC's.
+        """
+        try:
+            h = decode_health(pkt.payload)
+        except ParseError:
+            return                     # bridge.py logs the undecodable report
+        if h.node_name != "bridge":
+            return
+        st = self._states[mid]
+        now = (h.uptime_s, h.tx_fail, bridge_reinits(h.node_u32))
+        st.radio_now = now
+        was = st.radio_before
+        if was is None or not (st.connected and not st.unresponsive):
+            return                     # no account owed, or still greyed
+        st.radio_before = None
+        gap = _human_s(st.greyed_s)
+        if now[0] < was[0]:
+            log.info("PRESENCE cam%d — its own account of the %s greyed: it "
+                     "rebooted in the gap (up %d s now)", mid, gap, now[0])
+            return
+        failed = (now[1] - was[1]) % 0x10000      # tx_fail is 16 bits
+        restarts = now[2] - was[2]
+        if now[2] == 15 and restarts == 0:
+            restarted = "ESP-NOW restarts unknown (its count is at the 15 cap)"
+        elif restarts:
+            restarted = ("ESP-NOW restarted once" if restarts == 1
+                         else "ESP-NOW restarted %d times" % restarts)
+        else:
+            restarted = "no ESP-NOW restart"
+        tail = ("" if failed or restarts else
+                ": its radio saw nothing wrong, so the silence was on the way to it")
+        log.info("PRESENCE cam%d — its own account of the %s greyed: %d send%s "
+                 "failed, %s, no reboot%s", mid, gap, failed,
+                 "" if failed == 1 else "s", restarted, tail)
 
     def resync_presence(self) -> None:
         """Re-announce every mount's presence as it currently stands.
@@ -720,11 +838,12 @@ class MountManager(QObject):
             return
         st.unacked += 1
         if st.unacked >= self.UNACKED_LIMIT and not st.unresponsive:
-            log.warning("Mount %d is HEARD BUT NOT RESPONDING — %d commands "
-                        "unacknowledged. It will keep reporting health, so it "
-                        "looks connected; it is not accepting commands.",
-                        mount_id, st.unacked)
-            self._set_mount_online(mount_id, unresponsive=True)
+            self._set_mount_online(
+                mount_id, unresponsive=True,
+                why=("still heard, but its last %d commands went unacknowledged: "
+                     "it is not acting on what it is told.  It will keep sending "
+                     "health, which alone would make it look connected"
+                     % st.unacked))
 
     def send_get_config(self, mount_id: int) -> None:
         """Request speed presets and orientation from a mount."""
@@ -1129,9 +1248,15 @@ class MountManager(QObject):
         # walk it straight back to looking connected — which is exactly how 79%
         # command loss displayed as a perfectly healthy mount 4.
         if not st.connected:
-            self._set_mount_online(mid, connected=True)
+            self._set_mount_online(
+                mid, connected=True,
+                why=("first heard since the app started (%s)" if st.presence_since is None
+                     else "heard from again (%s)") % _cmd_name(pkt.cmd))
             self._send(pkt_get_state(mid))     # as the STATUS path does
         st.last_pong_ms = time.monotonic() * 1000
+        st.last_heard_cmd = pkt.cmd
+        if pkt.cmd == Cmd.HEALTH:
+            self._note_radio_health(mid, pkt)
 
         if pkt.cmd == Cmd.MOUNT_EVENT and len(pkt.payload) >= MOUNT_EVENT_PAYLOAD_LEN:
             # A mount explaining, after the fact, why it restarted itself.  It
@@ -1250,7 +1375,7 @@ class MountManager(QObject):
             try:
                 s = decode_status(pkt.payload)
                 was_online = st.connected and not st.unresponsive
-                self._set_mount_online(mid, connected=True)
+                self._set_mount_online(mid, connected=True, why="heard from (STATUS)")
                 st.last_pong_ms = time.monotonic() * 1000
                 st.state       = s.state
                 st.flags       = s.flags
@@ -1479,11 +1604,11 @@ class MountManager(QObject):
             # Proof the mount is not just audible but ACTING on what it is told.
             st.unacked = 0
             if st.unresponsive:
-                log.warning("Mount %d is responding again", mid)
-                self._set_mount_online(mid, unresponsive=False)
+                self._set_mount_online(mid, unresponsive=False,
+                                       why="acknowledged a command again")
 
         elif pkt.cmd == Cmd.PONG:
-            self._set_mount_online(mid, connected=True)
+            self._set_mount_online(mid, connected=True, why="answered the heartbeat (PONG)")
             st.last_pong_ms = time.monotonic() * 1000
             # No GET_STATUS here.  This turned one heartbeat into two downlink
             # frames per mount — ping out, pong back, status request out — and
@@ -1549,14 +1674,19 @@ class MountManager(QObject):
                     self.send_get_config(mid)
 
         now_ms = time.monotonic() * 1000
-        for mid, st in self._states.items():
-            if st.connected and (now_ms - st.last_pong_ms) > HEARTBEAT_TIMEOUT_MS:
-                # unresponsive is cleared too: it describes a mount that is
-                # heard and not acting.  Leaving it set on one that has gone
-                # silent means the next packet re-enters as "heard but still
-                # unresponsive" and cannot come back online until an ACK, which
-                # is exactly how a live mount used to stay greyed.
-                self._set_mount_online(mid, connected=False, unresponsive=False)
+        silent = [mid for mid, st in self._states.items()
+                  if st.connected and (now_ms - st.last_pong_ms) > HEARTBEAT_TIMEOUT_MS]
+        # Every reason first, against the states as they stood: when the hub
+        # goes, all five time out in this one pass, and judged one by one the
+        # last would find no mount left "on" to compare with.
+        whys = {mid: self._why_silent(mid, now_ms) for mid in silent}
+        for mid in silent:
+            # unresponsive is cleared too: it describes a mount that is
+            # heard and not acting.  Leaving it set on one that has gone
+            # silent means the next packet re-enters as "heard but still
+            # unresponsive" and cannot come back online until an ACK, which
+            # is exactly how a live mount used to stay greyed.
+            self._set_mount_online(mid, connected=False, unresponsive=False, why=whys[mid])
 
     # ------------------------------------------------------------------
     # Internal

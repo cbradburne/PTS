@@ -30,7 +30,7 @@ from typing import Callable, Optional
 import serial
 import serial.tools.list_ports
 
-from .protocol import (PacketReader, Packet, Cmd, decode_health, ParseError,
+from .protocol import (PacketReader, Packet, Cmd, decode_health, bridge_reinits, ParseError,
                        build_packet, HEALTH_FLAG_BLE_BUILD, HEALTH_FLAG_BLE_LINK,
                        HEALTH_FLAG_CAM_WR_ERR,
                        HEALTH_FLAG_CAM_SUBSCR,
@@ -1181,7 +1181,7 @@ class Bridge:
             # in eight bits until 2026-09-20; nothing else in node_u32 had room.
             # Four bits saturate at 15 — reachable, since cam4 reached 7 in 27 h
             # on 2026-09-22 — and "(at cap)" below says so rather than wrapping.
-            reinit = (n32 >> 4) & 0x0F
+            reinit = bridge_reinits(n32)
             sect   = n32 & 0x0F
             n32txt = "n32 %d%s" % (reinit, "+ (at cap)" if reinit == 15 else "")
             # Which part of the loop owned the worst pass. Only worth printing
