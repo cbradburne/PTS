@@ -1928,6 +1928,25 @@ MOUNT_EVENT_LINK_RUN_LEN      = 50
 MOUNT_EVENT_LINK_PAYLOAD_LEN  = MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_LINK_RUN_LEN
 MOUNT_LINK_RUN_MIN_FAILS      = 8
 MOUNT_LINK_T_NEVER            = 0xFFFF
+# ...and since 2026-10-05 a tail: the radio around the run (scans the mount's
+# code started and why, the radio leaving its base channel, the WiFi driver's
+# events).  A 64-byte event is the first version, and still reads.
+MOUNT_EVENT_LINK_TAIL_LEN       = 60
+MOUNT_EVENT_LINK_PAYLOAD_LEN_V2 = MOUNT_EVENT_LINK_PAYLOAD_LEN + MOUNT_EVENT_LINK_TAIL_LEN
+MOUNT_LINK_WEV_SLOTS            = 5
+MOUNT_SCAN_BOOT                 = 1   # the one choice of base at power-on
+MOUNT_SCAN_SILENT               = 2   # the base went quiet
+MOUNT_SCAN_RESCAN               = 3   # the hub asked: a satellite came back
+MOUNT_SCAN_SETUP                = 4   # the SETUP screen opened
+MOUNT_SCAN_BUTTON               = 5   # SCAN pressed on the SETUP screen
+MOUNT_WEV_OTHER                 = 0
+MOUNT_WEV_SCAN_DONE             = 1
+MOUNT_WEV_STA_START             = 2
+MOUNT_WEV_STA_STOP              = 3
+MOUNT_WEV_STA_CONNECTED         = 4
+MOUNT_WEV_STA_DISCONNECTED      = 5
+MOUNT_WEV_WIFI_READY            = 6
+MOUNT_WEV_WIFI_OFF              = 7
 # A bridge's CMD_HEALTH carries this many bytes after the uniform 24: internal
 # RAM free / lowest / largest block and NO_MEM runs that ended by themselves
 # (the first 16, since 466477d), then the reserve held, runs the ladder ended,
@@ -2056,6 +2075,40 @@ def decode_mount_link_run(run: bytes) -> MountLinkRun:
     if len(run) < MOUNT_EVENT_LINK_RUN_LEN:
         raise ParseError(f"link run too short: {len(run)}")
     return MountLinkRun(*struct.unpack(_LINK_RUN_FMT, run[:MOUNT_EVENT_LINK_RUN_LEN]))
+
+
+@dataclass
+class MountLinkRadio:
+    """What the radio was doing around a link run: the v2 tail.  Times are the
+    mount's uptime in ms, 0 for never; first_fail_ms is the run's first failure,
+    what the others are measured against.  `events` is the driver's last few,
+    oldest first, as (MOUNT_WEV_* code, the core's own event id, uptime ms)."""
+    first_fail_ms:   int
+    scan_ms:         int    # the last scan the mount's own code started
+    scan_why:        int    # MOUNT_SCAN_*, 0 = none since boot
+    scan_silence_ms: int    # the base silence that decision saw — SIGNED
+    off_ms:          int    # the radio last left its base channel
+    off_chan:        int    # ...for this channel
+    back_ms:         int    # ...and was back (0 = not since)
+    scans:           int    # started by the mount's code since boot
+    scans_done:      int    # finished, as the driver reports them, since boot
+    offs:            int    # departures from the base channel since boot
+    scan_aps:        int    # networks the last finished scan saw
+    events:          list
+
+
+_LINK_RADIO_FMT = ">IIBiIBIHHHBB"
+assert struct.calcsize(_LINK_RADIO_FMT) + 6 * MOUNT_LINK_WEV_SLOTS == MOUNT_EVENT_LINK_TAIL_LEN
+
+
+def decode_mount_link_radio(tail: bytes) -> MountLinkRadio:
+    """Decode the MOUNT_EVENT_LINK_TAIL_LEN bytes after the 64-byte event."""
+    if len(tail) < MOUNT_EVENT_LINK_TAIL_LEN:
+        raise ParseError(f"link-run radio tail too short: {len(tail)}")
+    head = struct.unpack(_LINK_RADIO_FMT, tail[:30])
+    n = min(head[-1], MOUNT_LINK_WEV_SLOTS)
+    events = [struct.unpack(">BBI", tail[30 + 6 * i:36 + 6 * i]) for i in range(n)]
+    return MountLinkRadio(*head[:-1], events=events)
 
 
 def pkt_get_mount_table() -> bytes:

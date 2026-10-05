@@ -63,6 +63,7 @@ struct LinkRunTracker {
     bool         due = false;
     bool         done_sampled = false;
     uint32_t     done_notifies0 = 0, done_drops0 = 0;
+    uint32_t     done_start_ms = 0;   // its first failure, for the radio tail
     MountLinkRun done = {};
     uint32_t     lost = 0;   // finished while another was still waiting
 
@@ -94,6 +95,7 @@ struct LinkRunTracker {
         done_sampled   = sampled;
         done_notifies0 = notifies0;
         done_drops0    = drops0;
+        done_start_ms  = start_ms;
         due            = true;
     }
 
@@ -152,9 +154,12 @@ struct LinkRunTracker {
     }
 
     // A finished run, completed with what the radio says now.  False if none.
-    bool take(const LinkSample &s, uint8_t chan_hub, MountLinkRun *out) {
+    // `start_ms`, if given, gets the run's first failure in uptime ms.
+    bool take(const LinkSample &s, uint8_t chan_hub, MountLinkRun *out,
+              uint32_t *start_ms = nullptr) {
         if (!due) return false;
         due = false;
+        if (start_ms) *start_ms = done_start_ms;
         done.chan_end = s.chan;
         done.ble_end  = s.ble;
         if (!done_sampled) done.chan_hub = chan_hub;
@@ -180,5 +185,94 @@ private:
         r.rssi_before  = last_rssi;
         r.noise_before = last_noise;
         r.t_first_rx = r.t_refresh = r.t_reinit = r.t_wifi = r.t_scan = MOUNT_LINK_T_NEVER;
+    }
+};
+
+// The radio's recent history, for the v2 tail of the run's report.  Kept all
+// the time, not only while a run is open: a scan that causes a run starts
+// before it.  Fed by the mount from three places, under the same lock:
+//   scan_started()   each scan the mount's own code starts, and why  (loop)
+//   channel_seen()   the radio's channel, every few tens of ms       (loop)
+//   wifi_event()     each event the WiFi driver raises       (the event task)
+// Times are uptime ms; 0 means "never", so a time of 0 is stored as 1.
+struct RadioLog {
+    uint32_t scan_ms = 0;          // the last scan the mount's code started
+    uint8_t  scan_why = 0;         // MOUNT_SCAN_*
+    int32_t  scan_silence = 0;     // the base silence its decision saw, signed
+    uint32_t scans = 0;            // started by the mount's code, since boot
+    uint32_t scans_done = 0;       // finished, as the driver reports them
+    uint8_t  scan_aps = 0;         // networks the last finished one saw
+    bool     off = false;          // the radio is off its base channel now
+    uint32_t off_ms = 0;           // when it last left
+    uint8_t  off_chan = 0;         // the channel it was seen on then
+    uint32_t back_ms = 0;          // when it last came back (0: not since)
+    uint32_t offs = 0;             // departures since boot
+    uint8_t  n = 0, next = 0;      // the event ring: how many, where the next goes
+    uint8_t  ev_code[MOUNT_LINK_WEV_SLOTS] = {};
+    uint8_t  ev_raw[MOUNT_LINK_WEV_SLOTS]  = {};
+    uint32_t ev_ms[MOUNT_LINK_WEV_SLOTS]   = {};
+
+    static uint32_t stamp(uint32_t now) { return now ? now : 1; }
+
+    void scan_started(uint32_t now, uint8_t why, int32_t silence) {
+        scan_ms      = stamp(now);
+        scan_why     = why;
+        scan_silence = silence;
+        scans++;
+    }
+
+    // `base` 0 means there is no base to be off (unpaired), and `chan` 0 a
+    // reading that failed: neither says anything.
+    void channel_seen(uint32_t now, uint8_t chan, uint8_t base) {
+        if (!chan || !base) return;
+        if (chan != base) {
+            if (off) return;
+            off      = true;
+            off_ms   = stamp(now);
+            off_chan = chan;
+            back_ms  = 0;
+            offs++;
+        } else if (off) {
+            off     = false;
+            back_ms = stamp(now);
+        }
+    }
+
+    // `aps` is the networks a finished scan saw, or below zero for any other
+    // event.
+    void wifi_event(uint32_t now, uint8_t code, uint8_t raw, int aps) {
+        ev_code[next] = code;
+        ev_raw[next]  = raw;
+        ev_ms[next]   = stamp(now);
+        next = (uint8_t)((next + 1) % MOUNT_LINK_WEV_SLOTS);
+        if (n < MOUNT_LINK_WEV_SLOTS) n++;
+        if (code == MOUNT_WEV_SCAN_DONE) {
+            scans_done++;
+            if (aps >= 0) scan_aps = link_sat8((uint32_t)aps);
+        }
+    }
+
+    // The tail for a run whose first failure was at `first_fail_ms`.
+    void fill(MountLinkRadio *t, uint32_t first_fail_ms) const {
+        *t = MountLinkRadio{};
+        t->first_fail_ms   = first_fail_ms;
+        t->scan_ms         = scan_ms;
+        t->scan_why        = scan_why;
+        t->scan_silence_ms = scan_silence;
+        t->off_ms          = off_ms;
+        t->off_chan        = off_chan;
+        t->back_ms         = back_ms;
+        t->scans           = link_sat16(scans);
+        t->scans_done      = link_sat16(scans_done);
+        t->offs            = link_sat16(offs);
+        t->scan_aps        = scan_aps;
+        t->n_wev           = n;
+        uint8_t first = (uint8_t)((next + MOUNT_LINK_WEV_SLOTS - n) % MOUNT_LINK_WEV_SLOTS);
+        for (uint8_t i = 0; i < n; i++) {
+            uint8_t k = (uint8_t)((first + i) % MOUNT_LINK_WEV_SLOTS);
+            t->wev_code[i] = ev_code[k];
+            t->wev_raw[i]  = ev_raw[k];
+            t->wev_ms[i]   = ev_ms[k];
+        }
     }
 };

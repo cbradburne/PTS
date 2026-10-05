@@ -66,6 +66,11 @@ from .protocol import (
     decode_health, bridge_reinits, ParseError,
     MOUNT_EVENT_LINK_RUN, MOUNT_EVENT_LINK_PAYLOAD_LEN, MOUNT_LINK_T_NEVER,
     decode_mount_link_run,
+    MOUNT_EVENT_LINK_PAYLOAD_LEN_V2, decode_mount_link_radio,
+    MOUNT_SCAN_BOOT, MOUNT_SCAN_SILENT, MOUNT_SCAN_RESCAN, MOUNT_SCAN_SETUP,
+    MOUNT_SCAN_BUTTON, MOUNT_WEV_SCAN_DONE, MOUNT_WEV_STA_START, MOUNT_WEV_STA_STOP,
+    MOUNT_WEV_STA_CONNECTED, MOUNT_WEV_STA_DISCONNECTED, MOUNT_WEV_WIFI_READY,
+    MOUNT_WEV_WIFI_OFF,
 )
 
 
@@ -259,6 +264,79 @@ def _link_run_text(r) -> list[str]:
         reading.append(f"back {_human_s((r.dur_ms - r.t_reinit) / 1000)} after its "
                        "ESP-NOW restart")
     return [head, before, during, radio, tried, "reading: " + "; ".join(reading)]
+
+
+_SCAN_WHY = {MOUNT_SCAN_BOOT: "at power-on, choosing its base",
+             MOUNT_SCAN_SILENT: "because its base seemed silent",
+             MOUNT_SCAN_RESCAN: "because the hub asked (a satellite came back)",
+             MOUNT_SCAN_SETUP: "because the SETUP screen opened",
+             MOUNT_SCAN_BUTTON: "because SCAN was pressed on the SETUP screen"}
+_WEV_NAME = {MOUNT_WEV_SCAN_DONE: "scan finished", MOUNT_WEV_STA_START: "station started",
+             MOUNT_WEV_STA_STOP: "station stopped", MOUNT_WEV_STA_CONNECTED: "connected",
+             MOUNT_WEV_STA_DISCONNECTED: "disconnected", MOUNT_WEV_WIFI_READY: "WiFi ready",
+             MOUNT_WEV_WIFI_OFF: "WiFi off"}
+
+
+def _link_radio_text(t) -> list[str]:
+    """The v2 tail of a link run: what the radio was doing around it, and
+    which way that points — a scan this mount's own code started (and why),
+    a scan nothing in its code started, or no scan at all."""
+    def rel(ms):
+        """ms relative to the first failure, across the 32-bit wrap."""
+        return ((ms - t.first_fail_ms + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+
+    def when(ms):
+        d = rel(ms)
+        if abs(d) < 1000:
+            return f"{abs(d)} ms {'before' if d < 0 else 'after'} the first failure"
+        return f"{abs(d) / 1000:.1f} s {'before' if d < 0 else 'after'} the first failure"
+
+    why = _SCAN_WHY.get(t.scan_why, f"for reason {t.scan_why}")
+    if t.scan_why == MOUNT_SCAN_SILENT:
+        why += f" (the silence it saw: {t.scan_silence_ms} ms)"
+    scans = (f"scans: its own code last started one {when(t.scan_ms)}, {why}"
+             if t.scan_ms else "scans: its own code has started none since boot")
+    scans += (f"; {t.scans} started by its code and {t.scans_done} finished by the "
+              f"WiFi driver since boot, the last seeing {t.scan_aps} networks")
+
+    if t.off_ms:
+        chan = (f"channel: the radio last left its base channel {when(t.off_ms)}, "
+                f"for channel {t.off_chan}, and "
+                + (f"was back {when(t.back_ms)}" if t.back_ms else "had not come back")
+                + f"; {t.offs} departure{'' if t.offs == 1 else 's'} since boot")
+    else:
+        chan = "channel: the radio has never left its base channel since boot"
+
+    evs = "; ".join(f"{_WEV_NAME.get(c, f'event {raw}')} {when(ms)}"
+                    for c, raw, ms in t.events)
+    events = "WiFi events: " + (evs if evs else "none since boot")
+
+    # Which way it points.  A departure within 15 s before the first failure,
+    # or just after it (the channel is looked at every 25 ms), is this run's.
+    reading = []
+    near = t.off_ms and -15000 <= rel(t.off_ms) <= 1000
+    if not near:
+        reading.append("the radio stayed on its base channel around this run, so it "
+                       "was not a scan")
+    else:
+        started = t.scan_ms and -2000 <= rel(t.scan_ms) - rel(t.off_ms) <= 100
+        if started:
+            reading.append(f"its own code started the scan that took it off the channel, "
+                           f"{_SCAN_WHY.get(t.scan_why, f'for reason {t.scan_why}')}")
+            if t.scan_why == MOUNT_SCAN_SILENT and t.scan_silence_ms < 0:
+                reading.append(f"and the silence it acted on was {t.scan_silence_ms} ms, "
+                               "below zero: a frame stamped after the clock was read, "
+                               "the race 3d92492 fixed elsewhere")
+        else:
+            done = [ms for c, _, ms in t.events
+                    if c == MOUNT_WEV_SCAN_DONE and rel(ms) >= rel(t.off_ms)]
+            reading.append("nothing in its own code started a scan before it left the "
+                           "channel")
+            reading.append(f"yet the WiFi driver finished one {when(done[0])}, so the "
+                           "driver scanned by itself" if done else
+                           "and no scan was reported finished, so something moved the "
+                           "channel without a scan")
+    return [scans, chan, events, "reading (radio): " + "; ".join(reading)]
 
 
 def _nomem_ladder_text(l, kind: int) -> tuple[str, Optional[tuple[int, str]]]:
@@ -1377,6 +1455,9 @@ class MountManager(QObject):
                                 "(%d bytes)", mid, len(b))
                     return
                 lines = _link_run_text(decode_mount_link_run(b[MOUNT_EVENT_PAYLOAD_LEN:]))
+                if len(b) >= MOUNT_EVENT_LINK_PAYLOAD_LEN_V2:
+                    lines += _link_radio_text(
+                        decode_mount_link_radio(b[MOUNT_EVENT_LINK_PAYLOAD_LEN:]))
                 log.warning("MOUNT EVENT cam%d %s", mid, lines[0])
                 for more in lines[1:]:
                     log.warning("MOUNT EVENT cam%d   %s", mid, more)

@@ -1346,6 +1346,57 @@ static inline uint16_t nomem_sat16(uint32_t v) {
 // WiFi driver, BLE or the heap.
 static LinkRunTracker _link;
 static portMUX_TYPE   _link_mux = portMUX_INITIALIZER_UNLOCKED;
+// What the radio was doing around a run: the last scan this code started and
+// why, the last time the radio left its base channel, the WiFi driver's last
+// events.  Kept all the time, under the same lock: a scan that causes a run
+// starts before it.  2026-10-05: cam5's reports showed every blackout was its
+// radio scanning channels, while none of this code's reasons to scan applied.
+static RadioLog       _radio;
+
+static void radio_scan(uint8_t why, int32_t silence) {
+    portENTER_CRITICAL(&_link_mux);
+    _radio.scan_started(millis(), why, silence);
+    portEXIT_CRITICAL(&_link_mux);
+}
+
+// Every 25 ms from loop(): a scan visits each channel for 100 ms or more, so
+// none can come and go unseen.  Whoever moves the radio, this sees it.
+static void radio_watch_channel() {
+    static uint32_t last = 0;
+    uint32_t now = millis();
+    if (last && (now - last) < 25) return;
+    last = now ? now : 1;
+    uint8_t prim = 0;
+    wifi_second_chan_t sec;
+    if (esp_wifi_get_channel(&prim, &sec) != ESP_OK) prim = 0;
+    uint8_t base = _cfg_valid ? _hub_channel : 0;
+    portENTER_CRITICAL(&_link_mux);
+    _radio.channel_seen(now, prim, base);
+    portEXIT_CRITICAL(&_link_mux);
+}
+
+// Every event the WiFi driver raises (Arduino's event task).  A scan this code
+// did not start still ends in SCAN_DONE.
+static void radio_wifi_event(arduino_event_id_t ev, arduino_event_info_t info) {
+    uint8_t code = MOUNT_WEV_OTHER;
+    int aps = -1;
+    switch (ev) {
+    case ARDUINO_EVENT_WIFI_SCAN_DONE:
+        code = MOUNT_WEV_SCAN_DONE;
+        aps  = info.wifi_scan_done.number;
+        break;
+    case ARDUINO_EVENT_WIFI_STA_START:        code = MOUNT_WEV_STA_START;        break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:         code = MOUNT_WEV_STA_STOP;         break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:    code = MOUNT_WEV_STA_CONNECTED;    break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: code = MOUNT_WEV_STA_DISCONNECTED; break;
+    case ARDUINO_EVENT_WIFI_READY:            code = MOUNT_WEV_WIFI_READY;       break;
+    case ARDUINO_EVENT_WIFI_OFF:              code = MOUNT_WEV_WIFI_OFF;         break;
+    default: break;
+    }
+    portENTER_CRITICAL(&_link_mux);
+    _radio.wifi_event(millis(), code, (uint8_t)ev, aps);
+    portEXIT_CRITICAL(&_link_mux);
+}
 
 static void link_result(bool ok) {
     portENTER_CRITICAL(&_link_mux);
@@ -1394,11 +1445,14 @@ static void link_run_poll() {
     portEXIT_CRITICAL(&_link_mux);
     if (!want_start && !want_done) return;
     LinkSample s = link_sample();            // outside the lock: driver, BLE, heap
-    MountLinkRun r;
+    MountLinkRun   r;
+    MountLinkRadio t;
+    uint32_t first_ms = 0;
     bool got = false;
     portENTER_CRITICAL(&_link_mux);
     if (want_start) _link.start_sample(s, _hub_channel);
-    if (want_done)  got = _link.take(s, _hub_channel, &r);
+    if (want_done)  got = _link.take(s, _hub_channel, &r, &first_ms);
+    if (got)        _radio.fill(&t, first_ms);
     portEXIT_CRITICAL(&_link_mux);
     if (!got) return;
     uint32_t now = millis();
@@ -1406,13 +1460,14 @@ static void link_run_poll() {
     uint16_t rxs = (uint16_t)((now - _last_hub_rx_ms) / 1000UL);
     uint16_t txf = (uint16_t)_espnow_fail_total, rei = (uint16_t)_reinit_count;
     uint16_t ref = (uint16_t)_espnow_tx_refused, err = _espnow_last_tx_err;
-    uint8_t p[MOUNT_EVENT_LINK_PAYLOAD_LEN] = {
+    uint8_t p[MOUNT_EVENT_LINK_PAYLOAD_LEN_V2] = {
         MOUNT_EVENT_LINK_RUN,
         (uint8_t)(txf >> 8), (uint8_t)txf, (uint8_t)(rei >> 8), (uint8_t)rei,
         (uint8_t)(rxs >> 8), (uint8_t)rxs, (uint8_t)(txs >> 8), (uint8_t)txs,
         (uint8_t)(ref >> 8), (uint8_t)ref, (uint8_t)(err >> 8), (uint8_t)err,
         (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
     encode_mount_link_run(p + MOUNT_EVENT_PAYLOAD_LEN, &r);
+    encode_mount_link_radio(p + MOUNT_EVENT_LINK_PAYLOAD_LEN, &t);
     send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
     Serial.printf("[LINK] run: %u sends failed over %lu ms, heard %u frames, "
                   "longest wait %u ms | refresh %u, reinit %u | chan %u->%u (hub %u) "
@@ -1420,6 +1475,12 @@ static void link_run_poll() {
                   r.fails, (unsigned long)r.dur_ms, r.rx_during, r.max_cb_gap_ms,
                   r.n_refresh, r.n_reinit, r.chan_start, r.chan_end, r.chan_hub,
                   r.ble_start, r.ble_end, r.ble_drops, r.cam_notifies);
+    Serial.printf("[LINK]   radio: last scan by this code %ld ms before the first "
+                  "failure (why %u, silence %ld ms) | left the base channel %ld ms "
+                  "before it, for %u | %u scans started, %u finished, %u departures\n",
+                  t.scan_ms ? (long)(first_ms - t.scan_ms) : -1L, t.scan_why,
+                  (long)t.scan_silence_ms, t.off_ms ? (long)(first_ms - t.off_ms) : -1L,
+                  t.off_chan, t.scans, t.scans_done, t.offs);
 }
 
 // Everything that could say WHY, read at the first refusal.  The candidates it
@@ -2774,8 +2835,10 @@ static void setup_show_status(const char *txt) {
 
 static bool _reacq_scanning = false;   // background known-hub scan (see loop)
 
-static void setup_start_scan() {
+// `why`: MOUNT_SCAN_SETUP when the screen opens, MOUNT_SCAN_BUTTON for SCAN.
+static void setup_start_scan(uint8_t why) {
     if (_scan_running) return;
+    radio_scan(why, 0);
     _reacq_scanning = false;   // setup takes over the scan hardware
     _scan_running  = true;
     _scan_n        = 0;
@@ -2910,7 +2973,7 @@ static void setup_enter() {
     lv_scr_load(_setup_scr);
     setup_show_status(cur);
     setup_refresh_widgets();
-    setup_start_scan();                  // user came here to pair — scan now
+    setup_start_scan(MOUNT_SCAN_SETUP);  // user came here to pair — scan now
 }
 
 static void setup_exit() {
@@ -3057,6 +3120,7 @@ static void hub_forget(const uint8_t *mac) {
 
 static uint32_t _reacq_last_ms = 0;
 static bool     _reacq_boot_done   = false;  // the one-time boot pick has run
+static bool     _reacq_by_rescan   = false;  // ...and it was re-armed by the hub
 
 // Confirm or undo a provisional adoption.  Runs on every poll, not only around
 // a scan: the verdict is about whether traffic arrived, which has nothing to do
@@ -3090,7 +3154,13 @@ static void hub_reacquire_poll() {
     uint32_t nowm = millis();
     adopt_trial_poll(nowm);
     if (!_reacq_scanning) {
-        bool silent = (nowm - _last_hub_rx_ms) > REACQ_SILENT_MS;
+        // Read once, so the check and the record of it (radio_scan, below) see
+        // the same value.  Still read AFTER nowm, as it always was: if a frame
+        // stamped after the clock was read is what sets these scans off, the
+        // signed silence the record keeps will be below zero and say so
+        // (2026-10-05).  Measured first, changed after.
+        uint32_t heard  = _last_hub_rx_ms;
+        bool     silent = (nowm - heard) > REACQ_SILENT_MS;
         // A scan takes the radio off-channel for a second or two.  When the base
         // has already gone quiet that costs nothing — we are not hearing it
         // anyway — but a scan must never happen mid-move: on a camera rig those
@@ -3115,6 +3185,7 @@ static void hub_reacquire_poll() {
             _reacq_requested = false;
             _reacq_boot_done = false;
             _reacq_last_ms   = 0;
+            _reacq_by_rescan = true;    // the pick it re-arms is the hub's doing
         }
         bool due = boot_pick || (silent && (nowm - _reacq_last_ms) > REACQ_PERIOD_MS);
         if (safe_to_scan && due) {
@@ -3123,6 +3194,10 @@ static void hub_reacquire_poll() {
             Serial.println(boot_pick ? "[REACQ] Boot — choosing the strongest base"
                                      : "[REACQ] Base silent — scanning for known bases");
             link_note(LINK_ACT_SCAN);
+            radio_scan(!boot_pick ? MOUNT_SCAN_SILENT
+                       : _reacq_by_rescan ? MOUNT_SCAN_RESCAN : MOUNT_SCAN_BOOT,
+                       (int32_t)(nowm - heard));
+            _reacq_by_rescan = false;
             WiFi.scanDelete();
             WiFi.scanNetworks(true /*async*/, false);
         }
@@ -3603,7 +3678,7 @@ static void setup_build() {
         return b;
     };
     lv_obj_t *scan_btn = make_btn(83, 104, "SCAN", [](lv_event_t *) {
-        setup_start_scan();
+        setup_start_scan(MOUNT_SCAN_BUTTON);
     });
     _setup_scan_lbl = lv_obj_get_child(scan_btn, 0);
     _setup_save_btn = make_btn(195, 104, "SAVE", [](lv_event_t *) {
@@ -4017,6 +4092,8 @@ void setup() {
     ui_update();
 
     // ── WiFi / ESP-NOW ───────────────────────────────────────────────────
+    // Before the driver starts, so its very first events are in the log too.
+    WiFi.onEvent(radio_wifi_event);
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -4413,6 +4490,9 @@ void loop() {
     nomem_send_cured();
     // A run of unanswered sends: its start sample, or its report once it ended.
     link_run_poll();
+    // Where the radio is: a scan, whoever started it, takes it off the base
+    // channel, and that is the departure the next report times.
+    radio_watch_channel();
 
     // A one-way TX wedge that the WiFi-level restart cleared.  Gated on TX
     // actually working again, not on hub_ok: hub_ok is an RX test, and RX was

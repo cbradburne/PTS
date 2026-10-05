@@ -303,6 +303,48 @@ static_assert(MOUNT_EVENT_LINK_PAYLOAD_LEN ==
               "the link-run event is the common 14 bytes and the run");
 #define MOUNT_LINK_RUN_MIN_FAILS        8
 #define MOUNT_LINK_T_NEVER              0xFFFF
+// ...and since 2026-10-05, a tail: what the radio was doing around the run.
+// cam5's first reports showed every blackout was its own radio scanning
+// channels (1 -> 10 against a base on 11) while none of the mount's reasons to
+// scan applied.  So the mount now keeps, all the time, the last scan its own
+// code started and why, the last time its radio left the base channel for any
+// reason, and the WiFi driver's last few events, and hands them to the next
+// report.  A cause comes before its run, so none of this waits for one to
+// open.  A reader that knows only the 64-byte form still reads that part.
+//   [64..67]  the run's first failure, uptime ms: the times below are against it  u32
+//   [68..71]  the last scan the mount's code started, uptime ms (0 = none)    u32
+//   [72]      what started it, MOUNT_SCAN_* (0 = none since boot)             u8
+//   [73..76]  the base silence that scan's decision saw, ms.  SIGNED: below  i32
+//             zero is a frame stamped after the clock was read
+//   [77..80]  the radio last left its base channel, uptime ms (0 = never)     u32
+//   [81]      the channel it was on then                                     u8
+//   [82..85]  back on the base channel, uptime ms (0 = not since)             u32
+//   [86..87]  scans the mount's code started since boot                      u16 sat
+//   [88..89]  scans the WiFi driver finished since boot                      u16 sat
+//   [90..91]  times the radio left its base channel since boot               u16 sat
+//   [92]      networks the last finished scan saw                            u8 sat
+//   [93]      WiFi events in the list below, 0-MOUNT_LINK_WEV_SLOTS          u8
+//   [94..123] the last WiFi events, oldest first, 6 bytes each:
+//             MOUNT_WEV_* u8, the core's own event id u8, uptime ms u32
+#define MOUNT_EVENT_LINK_TAIL_LEN       60
+#define MOUNT_EVENT_LINK_PAYLOAD_LEN_V2 124
+static_assert(MOUNT_EVENT_LINK_PAYLOAD_LEN_V2 ==
+              MOUNT_EVENT_LINK_PAYLOAD_LEN + MOUNT_EVENT_LINK_TAIL_LEN,
+              "the link-run event v2 is the v1 event and the radio tail");
+#define MOUNT_LINK_WEV_SLOTS            5
+#define MOUNT_SCAN_BOOT                 1   // the one choice of base at power-on
+#define MOUNT_SCAN_SILENT               2   // the base went quiet (BASE_SILENT_MS)
+#define MOUNT_SCAN_RESCAN               3   // the hub asked: a satellite came back
+#define MOUNT_SCAN_SETUP                4   // the SETUP screen opened
+#define MOUNT_SCAN_BUTTON               5   // SCAN pressed on the SETUP screen
+#define MOUNT_WEV_OTHER                 0
+#define MOUNT_WEV_SCAN_DONE             1
+#define MOUNT_WEV_STA_START             2
+#define MOUNT_WEV_STA_STOP              3
+#define MOUNT_WEV_STA_CONNECTED         4
+#define MOUNT_WEV_STA_DISCONNECTED      5
+#define MOUNT_WEV_WIFI_READY            6
+#define MOUNT_WEV_WIFI_OFF              7
 // rssi min/mean/max (3 × int8) + noise floor min/mean/max (3 × int8)
 // + frames the window was measured over (2) + frames the receive queue refused
 // (2).  Signed dBm throughout; a report with frames == 0 means nothing was heard
@@ -1156,6 +1198,26 @@ typedef struct {
     uint32_t iram_free;
 } MountLinkRun;
 
+// The radio around a link run — the v2 tail of MOUNT_EVENT_LINK_RUN.  Times
+// are uptime ms; first_fail_ms is what a reader measures them against.
+typedef struct {
+    uint32_t first_fail_ms;
+    uint32_t scan_ms;
+    uint8_t  scan_why;
+    int32_t  scan_silence_ms;
+    uint32_t off_ms;
+    uint8_t  off_chan;
+    uint32_t back_ms;
+    uint16_t scans;
+    uint16_t scans_done;
+    uint16_t offs;
+    uint8_t  scan_aps;
+    uint8_t  n_wev;
+    uint8_t  wev_code[MOUNT_LINK_WEV_SLOTS];
+    uint8_t  wev_raw[MOUNT_LINK_WEV_SLOTS];
+    uint32_t wev_ms[MOUNT_LINK_WEV_SLOTS];
+} MountLinkRadio;
+
 // CMD_POSITION payload (17 bytes) — live axis positions in physical units.
 typedef struct __attribute__((packed)) {
     uint8_t pan_deg[4];       // BE float — degrees
@@ -1497,6 +1559,28 @@ static inline void encode_mount_link_run(uint8_t p[MOUNT_EVENT_LINK_RUN_LEN],
     p[44] = (uint8_t)r->rssi_first;
     p[45] = (uint8_t)r->noise_first;
     write_be32(p + 46, r->iram_free);
+}
+
+// The radio tail, written straight after the 64-byte link-run event.
+static inline void encode_mount_link_radio(uint8_t p[MOUNT_EVENT_LINK_TAIL_LEN],
+                                           const MountLinkRadio *t) {
+    write_be32(p + 0,  t->first_fail_ms);
+    write_be32(p + 4,  t->scan_ms);
+    p[8] = t->scan_why;
+    write_be32(p + 9,  (uint32_t)t->scan_silence_ms);
+    write_be32(p + 13, t->off_ms);
+    p[17] = t->off_chan;
+    write_be32(p + 18, t->back_ms);
+    write_be16(p + 22, t->scans);
+    write_be16(p + 24, t->scans_done);
+    write_be16(p + 26, t->offs);
+    p[28] = t->scan_aps;
+    p[29] = t->n_wev;
+    for (int i = 0; i < MOUNT_LINK_WEV_SLOTS; i++) {
+        p[30 + 6 * i] = t->wev_code[i];
+        p[31 + 6 * i] = t->wev_raw[i];
+        write_be32(p + 32 + 6 * i, t->wev_ms[i]);
+    }
 }
 
 // Build a CMD_POSITION packet (17-byte payload, physical units).

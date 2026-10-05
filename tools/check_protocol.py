@@ -151,6 +151,22 @@ SCALAR_MAP = {
     "MOUNT_EVENT_LINK_PAYLOAD_LEN":  ("MOUNT_EVENT_LINK_PAYLOAD_LEN", True),
     "MOUNT_LINK_RUN_MIN_FAILS":      ("MOUNT_LINK_RUN_MIN_FAILS", True),
     "MOUNT_LINK_T_NEVER":            ("MOUNT_LINK_T_NEVER", True),
+    "MOUNT_EVENT_LINK_TAIL_LEN":     ("MOUNT_EVENT_LINK_TAIL_LEN", True),
+    "MOUNT_EVENT_LINK_PAYLOAD_LEN_V2": ("MOUNT_EVENT_LINK_PAYLOAD_LEN_V2", True),
+    "MOUNT_LINK_WEV_SLOTS":          ("MOUNT_LINK_WEV_SLOTS", True),
+    "MOUNT_SCAN_BOOT":               ("MOUNT_SCAN_BOOT", True),
+    "MOUNT_SCAN_SILENT":             ("MOUNT_SCAN_SILENT", True),
+    "MOUNT_SCAN_RESCAN":             ("MOUNT_SCAN_RESCAN", True),
+    "MOUNT_SCAN_SETUP":              ("MOUNT_SCAN_SETUP", True),
+    "MOUNT_SCAN_BUTTON":             ("MOUNT_SCAN_BUTTON", True),
+    "MOUNT_WEV_OTHER":               ("MOUNT_WEV_OTHER", True),
+    "MOUNT_WEV_SCAN_DONE":           ("MOUNT_WEV_SCAN_DONE", True),
+    "MOUNT_WEV_STA_START":           ("MOUNT_WEV_STA_START", True),
+    "MOUNT_WEV_STA_STOP":            ("MOUNT_WEV_STA_STOP", True),
+    "MOUNT_WEV_STA_CONNECTED":       ("MOUNT_WEV_STA_CONNECTED", True),
+    "MOUNT_WEV_STA_DISCONNECTED":    ("MOUNT_WEV_STA_DISCONNECTED", True),
+    "MOUNT_WEV_WIFI_READY":          ("MOUNT_WEV_WIFI_READY", True),
+    "MOUNT_WEV_WIFI_OFF":            ("MOUNT_WEV_WIFI_OFF", True),
     "HEALTH_BRIDGE_TAIL_LEN":        ("HEALTH_BRIDGE_TAIL_LEN", True),
     # Names, held by the hub: the limits size a wire record at both ends, and
     # the sentinel addresses every name packet.
@@ -325,6 +341,20 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
                                                | pyproto.MOUNT_NOMEM_BLE_BONDED,
                                                1, 0xABCD, -46, -92, -45, -128,
                                                0x0000EE48)),
+        "mount_event_link_v2": (5, 0x0E0F, Cmd.MOUNT_EVENT,
+                                bytes([pyproto.MOUNT_EVENT_LINK_RUN] + [0] * 13)
+                                + struct.pack(">IIHHHHHHHHHHHHBBBBBBBBHbbbbI",
+                                              7, 5700, 36, *([0] * 25))
+                                + struct.pack(">IIBiIBIHHHBB", 0x00061A80, 0x00061A10,
+                                              pyproto.MOUNT_SCAN_SILENT, -3, 0x00061A20, 1,
+                                              0, 0x0102, 0x0304, 0x0506, 9,
+                                              pyproto.MOUNT_LINK_WEV_SLOTS)
+                                + b"".join(struct.pack(">BBI", c, r, m) for c, r, m in (
+                                    (pyproto.MOUNT_WEV_SCAN_DONE, 102, 0x00061000),
+                                    (pyproto.MOUNT_WEV_STA_START, 110, 0x00061100),
+                                    (pyproto.MOUNT_WEV_STA_DISCONNECTED, 113, 0x00061200),
+                                    (pyproto.MOUNT_WEV_OTHER, 140, 0x00061300),
+                                    (pyproto.MOUNT_WEV_SCAN_DONE, 102, 0x00062000)))),
     }
 
 
@@ -488,6 +518,19 @@ def check_golden(pyproto):
                     -46, -92, -45, -128, 0x0000EE48)):
             fail("decode_mount_link_run() misread the C-built link run")
         ok("link-run event verified on C bytes")
+        ev = c_pkts["mount_event_link_v2"][7:-2]
+        if len(ev) != pyproto.MOUNT_EVENT_LINK_PAYLOAD_LEN_V2:
+            fail("the C-built link-run v2 event is not the length Python expects")
+        rd = pyproto.decode_mount_link_radio(ev[pyproto.MOUNT_EVENT_LINK_PAYLOAD_LEN:])
+        if ((rd.first_fail_ms, rd.scan_ms, rd.scan_why, rd.scan_silence_ms, rd.off_ms,
+             rd.off_chan, rd.back_ms, rd.scans, rd.scans_done, rd.offs, rd.scan_aps,
+             rd.events)
+                != (0x00061A80, 0x00061A10, 2, -3, 0x00061A20, 1, 0, 0x0102, 0x0304,
+                    0x0506, 9, [(1, 102, 0x00061000), (2, 110, 0x00061100),
+                                (5, 113, 0x00061200), (0, 140, 0x00061300),
+                                (1, 102, 0x00062000)])):
+            fail("decode_mount_link_radio() misread the C-built radio tail")
+        ok("link-run radio tail verified on C bytes")
 
         # ── parse: Python builds / mangles packets, C must agree ────────────
         AxisGroup = pyproto.AxisGroup

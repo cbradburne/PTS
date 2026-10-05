@@ -35,10 +35,14 @@ TMP = pathlib.Path(tempfile.mkdtemp(prefix="linkrun-"))
 #include <cstring>
 #include "link_run.h"
 static LinkRunTracker T;
+static RadioLog R;
 int main() {
     char cmd[16];
     while (scanf("%15s", cmd) == 1) {
         unsigned t, a, b, c, d, e, f, g; int ri, ni;
+        if (!strcmp(cmd, "scan")) { scanf("%u %u %d", &t, &a, &ri); R.scan_started(t, (uint8_t)a, ri); }
+        if (!strcmp(cmd, "chan")) { scanf("%u %u %u", &t, &a, &b); R.channel_seen(t, (uint8_t)a, (uint8_t)b); }
+        if (!strcmp(cmd, "wev"))  { scanf("%u %u %u %d", &t, &a, &b, &ri); R.wifi_event(t, (uint8_t)a, (uint8_t)b, ri); }
         if (!strcmp(cmd, "ok"))   { scanf("%u", &t); T.on_result(t, true); }
         if (!strcmp(cmd, "fail")) { scanf("%u", &t); T.on_result(t, false); }
         if (!strcmp(cmd, "rx"))   { scanf("%u %d %d", &t, &ri, &ni); T.on_rx(t, (int8_t)ri, (int8_t)ni); }
@@ -53,11 +57,18 @@ int main() {
             scanf("%u %u %u %u %u", &a, &b, &c, &d, &g);
             LinkSample s = {(uint8_t)a, (uint8_t)b, c, d, 0, 0};
             MountLinkRun r;
-            if (T.take(s, (uint8_t)g, &r)) {
+            uint32_t first = 0;
+            if (T.take(s, (uint8_t)g, &r, &first)) {
                 uint8_t p[MOUNT_EVENT_LINK_RUN_LEN];
                 encode_mount_link_run(p, &r);
                 printf("RUN ");
                 for (int i = 0; i < MOUNT_EVENT_LINK_RUN_LEN; i++) printf("%02x", p[i]);
+                MountLinkRadio rt;
+                R.fill(&rt, first);
+                uint8_t q[MOUNT_EVENT_LINK_TAIL_LEN];
+                encode_mount_link_radio(q, &rt);
+                printf("\nRADIO ");
+                for (int i = 0; i < MOUNT_EVENT_LINK_TAIL_LEN; i++) printf("%02x", q[i]);
                 printf("\n");
             } else printf("NONE\n");
         }
@@ -73,11 +84,14 @@ assert r.returncode == 0, "link_run.h does not compile cleanly on the host:\n" +
 LINKED_BONDED = P.MOUNT_NOMEM_BLE_LINKED | P.MOUNT_NOMEM_BLE_BONDED
 
 
-def mount(lines):
+def mount(lines, radio=False):
     out = subprocess.run([str(TMP / "h")], input="\n".join(lines) + "\n",
                          capture_output=True, text=True, check=True).stdout.split("\n")
     runs = [P.decode_mount_link_run(bytes.fromhex(l[4:])) for l in out if l.startswith("RUN ")]
     state = [tuple(int(x) for x in l.split()[1:]) for l in out if l.startswith("STATE")]
+    if radio:
+        tails = [bytes.fromhex(l[6:]) for l in out if l.startswith("RADIO ")]
+        return runs, [P.decode_mount_link_radio(t) for t in tails], tails
     return runs, state
 
 
@@ -191,6 +205,75 @@ assert (runs[0].rx_during, runs[0].t_first_rx, runs[0].rssi_first,
         runs[0].noise_first) == (2, 250, -70, -85), runs[0]
 print("   frames heard in the run: counted, and the FIRST one's time kept   OK")
 
+# ---- 2b. the radio around the run (v2) --------------------------------------
+print("\n2b. what the radio was doing around it:")
+BASE = 11
+
+
+def scan_run(*radio):
+    """A 45-send run from 10 050 ms, the base on channel 11, with `radio`
+    events — (time, line) — played in time order around it."""
+    return in_order(
+        healthy(0, 10000), [(0, f"chan 0 {BASE} {BASE}")],
+        [(10050 + 150 * k, f"fail {10050 + 150 * k}") for k in range(45)],
+        [(10050, f"start 1 {LINKED_BONDED} 1000 0 61000 1 {BASE}")],
+        list(radio), [(18000, "ok 18000"), (18000, f"take {BASE} {LINKED_BONDED} 1002 0 {BASE}")])
+
+
+SILENT, SCAN_DONE = P.MOUNT_SCAN_SILENT, P.MOUNT_WEV_SCAN_DONE
+runs, radios, tails = mount(scan_run(
+    (9990, f"scan 9990 {SILENT} -2"), (10010, f"chan 10010 1 {BASE}"),
+    (10600, f"chan 10600 5 {BASE}"), (17900, f"wev 17900 {SCAN_DONE} 102 7"),
+    (17950, f"chan 17950 {BASE} {BASE}")), radio=True)
+race = radios[0]
+assert (race.first_fail_ms, race.scan_ms, race.scan_why, race.scan_silence_ms,
+        race.off_ms, race.off_chan, race.back_ms, race.scans, race.scans_done,
+        race.offs, race.scan_aps, race.events) == (
+    10050, 9990, SILENT, -2, 10010, 1, 17950, 1, 1, 1, 7,
+    [(SCAN_DONE, 102, 17900)]), race
+race_tail = tails[0]
+print("   the scan its own code started (why, and the silence it saw), the")
+print("   radio leaving for channel 1 and back, the driver's scan-done   OK")
+
+runs, radios, tails = mount(scan_run(
+    (500, f"scan 500 {P.MOUNT_SCAN_BOOT} 0"), (10010, f"chan 10010 1 {BASE}"),
+    (17900, f"wev 17900 {SCAN_DONE} 102 7"), (17950, f"chan 17950 {BASE} {BASE}")),
+    radio=True)
+driver = radios[0]
+driver_tail = tails[0]
+assert (driver.scan_ms, driver.scan_why, driver.off_ms) == (500, P.MOUNT_SCAN_BOOT, 10010), driver
+_, radios, tails = mount(scan_run(), radio=True)
+stayed_tail = tails[0]
+assert (radios[0].off_ms, radios[0].offs, radios[0].events) == (0, 0, []), radios[0]
+_, radios, tails = mount(scan_run(
+    (10010, f"chan 10010 1 {BASE}"),
+    (12000, f"wev 12000 {P.MOUNT_WEV_STA_DISCONNECTED} 113 -1"),
+    (17950, f"chan 17950 {BASE} {BASE}")), radio=True)
+moved_tail = tails[0]
+print("   the boot scan long before is kept as such; a run with no")
+print("   departure and one with no scan finished are told apart         OK")
+
+# The departure bookkeeping, and readings that say nothing.
+_, radios, _ = mount(in_order(
+    [(0, "ok 0")], [(10 + k, f"fail {10 + k}") for k in range(8)],
+    [(5, "chan 5 1 11"), (6, "chan 6 2 11"), (7, "chan 7 11 11"), (7, "chan 7 0 11"),
+     (7, "chan 7 4 0"), (8, "chan 8 3 11")],
+    [(30, "ok 30"), (30, "take 11 12 0 0 11")]), radio=True)
+assert (radios[0].offs, radios[0].off_ms, radios[0].off_chan, radios[0].back_ms) == \
+       (2, 8, 3, 0), radios[0]
+print("   a departure is counted once however long it lasts; coming back")
+print("   is stamped and a new one clears it; failed reads and no base")
+print("   say nothing                                                    OK")
+
+# The driver's last events: five kept, oldest first.
+_, radios, _ = mount(["ok 0"] + [f"wev {100 + k} {k % 3} {200 + k} -1" for k in range(7)]
+                     + [f"fail {200 + k}" for k in range(8)] + ["ok 300", "take 11 12 0 0 11"],
+                     radio=True)
+assert radios[0].events == [(k % 3, 200 + k, 100 + k) for k in range(2, 7)], radios[0].events
+assert (radios[0].scans_done, radios[0].scan_aps) == (2, 0), radios[0]
+print("   the driver's events: the last five, oldest first, and every scan")
+print("   finished counted                                               OK")
+
 # ---- 3. what the operator reads ---------------------------------------------------
 print("\n3. the log lines:")
 try:
@@ -279,6 +362,40 @@ unsampled = P.MountLinkRun(**{**want.__dict__, "chan_start": 0, "ble_start": 0})
 assert told(encode(unsampled))[3].endswith("(the run ended before the mount read its radio)")
 print("   kept hearing / heard nothing / results stopped / channel moved /")
 print("   camera link dropped / radio not read: each says so               OK")
+
+print("\n   the radio, told:")
+v1 = encode(want)
+lines_race = told(v1 + race_tail)
+assert lines_race[:6] == expect, "the v2 report changed the v1 lines"
+radio_expect = [
+    "MOUNT EVENT cam2   scans: its own code last started one 60 ms before the first "
+    "failure, because its base seemed silent (the silence it saw: -2 ms); 1 started by "
+    "its code and 1 finished by the WiFi driver since boot, the last seeing 7 networks",
+    "MOUNT EVENT cam2   channel: the radio last left its base channel 40 ms before the "
+    "first failure, for channel 1, and was back 7.9 s after the first failure; 1 "
+    "departure since boot",
+    "MOUNT EVENT cam2   WiFi events: scan finished 7.8 s after the first failure",
+    "MOUNT EVENT cam2   reading (radio): its own code started the scan that took it off "
+    "the channel, because its base seemed silent; and the silence it acted on was -2 ms, "
+    "below zero: a frame stamped after the clock was read, the race 3d92492 fixed "
+    "elsewhere",
+]
+assert lines_race[6:] == radio_expect, "\n".join(lines_race[6:])
+for line in lines_race[6:]:
+    print("     " + line.replace("MOUNT EVENT cam2 ", ""))
+assert told(v1 + driver_tail)[-1] == (
+    "MOUNT EVENT cam2   reading (radio): nothing in its own code started a scan before "
+    "it left the channel; yet the WiFi driver finished one 7.8 s after the first failure, "
+    "so the driver scanned by itself")
+assert told(v1 + stayed_tail)[-1] == (
+    "MOUNT EVENT cam2   reading (radio): the radio stayed on its base channel around "
+    "this run, so it was not a scan")
+assert told(v1 + moved_tail)[-1] == (
+    "MOUNT EVENT cam2   reading (radio): nothing in its own code started a scan before "
+    "it left the channel; and no scan was reported finished, so something moved the "
+    "channel without a scan")
+print("   its own scan (and the race) / the driver's / no scan finished /")
+print("   no departure: each reading says so; a v1 report reads as before  OK")
 
 short_pl = told(b"")
 assert short_pl == ["MOUNT EVENT cam2 link-run report too short (14 bytes)"], short_pl

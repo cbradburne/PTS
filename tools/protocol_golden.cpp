@@ -232,6 +232,42 @@ static int do_emit() {
         emit_pkt("mount_event_link_run", buf, n);
     }
 
+    // m: the link-run event v2 — the 64-byte event, then the radio tail through
+    //    the real encoder: a silence below zero (the signed field), "never" as 0,
+    //    a full list of events, and distinct bytes in every multi-byte field.
+    {
+        uint8_t ep[MOUNT_EVENT_LINK_PAYLOAD_LEN_V2] = { MOUNT_EVENT_LINK_RUN };
+        MountLinkRun r = {};
+        r.uptime_s = 7;
+        r.dur_ms   = 5700;
+        r.fails    = 36;
+        encode_mount_link_run(ep + MOUNT_EVENT_PAYLOAD_LEN, &r);
+        MountLinkRadio t = {};
+        t.first_fail_ms   = 0x00061A80;
+        t.scan_ms         = 0x00061A10;
+        t.scan_why        = MOUNT_SCAN_SILENT;
+        t.scan_silence_ms = -3;
+        t.off_ms          = 0x00061A20;
+        t.off_chan        = 1;
+        t.back_ms         = 0;
+        t.scans           = 0x0102;
+        t.scans_done      = 0x0304;
+        t.offs            = 0x0506;
+        t.scan_aps        = 9;
+        t.n_wev           = MOUNT_LINK_WEV_SLOTS;
+        const uint8_t  code[] = { MOUNT_WEV_SCAN_DONE, MOUNT_WEV_STA_START,
+                                  MOUNT_WEV_STA_DISCONNECTED, MOUNT_WEV_OTHER,
+                                  MOUNT_WEV_SCAN_DONE };
+        const uint8_t  raw[]  = { 102, 110, 113, 140, 102 };
+        const uint32_t ms[]   = { 0x00061000, 0x00061100, 0x00061200, 0x00061300, 0x00062000 };
+        for (int i = 0; i < MOUNT_LINK_WEV_SLOTS; i++) {
+            t.wev_code[i] = code[i]; t.wev_raw[i] = raw[i]; t.wev_ms[i] = ms[i];
+        }
+        encode_mount_link_radio(ep + MOUNT_EVENT_LINK_PAYLOAD_LEN, &t);
+        n = build_packet(buf, 5, 0x0E0F, CMD_MOUNT_EVENT, ep, sizeof(ep));
+        emit_pkt("mount_event_link_v2", buf, n);
+    }
+
     return 0;
 }
 
