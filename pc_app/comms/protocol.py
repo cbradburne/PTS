@@ -1933,6 +1933,9 @@ MOUNT_LINK_T_NEVER            = 0xFFFF
 # events).  A 64-byte event is the first version, and still reads.
 MOUNT_EVENT_LINK_TAIL_LEN       = 60
 MOUNT_EVENT_LINK_PAYLOAD_LEN_V2 = MOUNT_EVENT_LINK_PAYLOAD_LEN + MOUNT_EVENT_LINK_TAIL_LEN
+# The stall events (kinds 4 and 5) carry the same radio tail after their ladder
+# since 2026-10-07, timed against the stall's first refusal.
+MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2 = MOUNT_EVENT_NOMEM_PAYLOAD_LEN + MOUNT_EVENT_LINK_TAIL_LEN
 MOUNT_LINK_WEV_SLOTS            = 5
 MOUNT_SCAN_BOOT                 = 1   # the one choice of base at power-on
 MOUNT_SCAN_SILENT               = 2   # the base went quiet

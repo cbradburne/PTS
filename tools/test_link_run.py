@@ -397,6 +397,52 @@ assert told(v1 + moved_tail)[-1] == (
 print("   its own scan (and the race) / the driver's / no scan finished /")
 print("   no departure: each reading says so; a v1 report reads as before  OK")
 
+print("\n   a stall, with the radio's history carried across its reboot:")
+import struct
+
+
+def told_payload(payload):
+    lines.got = []
+    link.cb(Packet(mount_id=1, seq=0, cmd=Cmd.MOUNT_EVENT, payload=payload))
+    return [m for _, m in lines.got]
+
+
+stall_v1 = (bytes([P.MOUNT_EVENT_NOMEM_REBOOT, 0, 97, 0, 2, 0, 0, 0, 3, 0, 32, 0x30, 0x67, 0])
+            + struct.pack(P._NOMEM_SNAP_FMT, 106000, 4178260, 3008, 0, 4, 32, 0, 58000, 58000,
+                          30000, 1, 1, 10, 1, P.MOUNT_NOMEM_BLE_LINKED, int(Cmd.CAM_STATUS),
+                          0, 5, 31)
+            + struct.pack(P._NOMEM_LADDER_FMT, P.MOUNT_NOMEM_STEP_RESERVE, 0, 0xFFFF, 0xFFFF,
+                          1000, 3000, 12288, 0, 71000))
+assert len(stall_v1) == P.MOUNT_EVENT_NOMEM_PAYLOAD_LEN
+plain = told_payload(stall_v1)
+radio_scan_first = (struct.pack(">IIBiIBIHHHBB", 100000, 98700, P.MOUNT_SCAN_SILENT, -1,
+                                99340, 2, 0, 2, 1, 2, 26, 1)
+                    + struct.pack(">BBI", P.MOUNT_WEV_SCAN_DONE, 102, 50000)
+                    + bytes(6 * (P.MOUNT_LINK_WEV_SLOTS - 1)))
+got = told_payload(stall_v1 + radio_scan_first)
+assert got[:len(plain)] == plain, "the radio history changed the stall's own lines"
+assert got[len(plain):] == [
+    "MOUNT EVENT cam1   scans: its own code last started one 1.3 s before the first "
+    "refusal, because its base seemed silent (the silence it saw: -1 ms); 2 started by "
+    "its code and 1 finished by the WiFi driver since boot, the last seeing 26 networks",
+    "MOUNT EVENT cam1   channel: the radio last left its base channel 660 ms before the "
+    "first refusal, for channel 2, and had not come back; 2 departures since boot",
+    "MOUNT EVENT cam1   WiFi events: scan finished 50.0 s before the first refusal",
+    "MOUNT EVENT cam1   reading (radio): its own code started the scan that took it off "
+    "the channel, because its base seemed silent; and the silence it acted on was -1 ms, "
+    "below zero: a frame stamped after the clock was read, the race 3d92492 fixed "
+    "elsewhere"], "\n".join(got[len(plain):])
+for line in got[len(plain):]:
+    print("     " + line.replace("MOUNT EVENT cam1 ", ""))
+radio_quiet = (struct.pack(">IIBiIBIHHHBB", 100000, 500, P.MOUNT_SCAN_BOOT, 0, 0, 0, 0,
+                           1, 1, 0, 9, 0) + bytes(6 * P.MOUNT_LINK_WEV_SLOTS))
+assert told_payload(stall_v1 + radio_quiet)[-1] == (
+    "MOUNT EVENT cam1   reading (radio): the radio stayed on its base channel around this "
+    "stall, so it was not a scan")
+print("   a scan before the stall is named, with what started it; a stall on")
+print("   the base channel says it was not a scan; the 77-byte form reads as")
+print("   before                                                         OK")
+
 short_pl = told(b"")
 assert short_pl == ["MOUNT EVENT cam2 link-run report too short (14 bytes)"], short_pl
 print("   a short report is called short, not \"RESTARTED ITSELF\"         OK")

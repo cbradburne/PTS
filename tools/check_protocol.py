@@ -153,6 +153,7 @@ SCALAR_MAP = {
     "MOUNT_LINK_T_NEVER":            ("MOUNT_LINK_T_NEVER", True),
     "MOUNT_EVENT_LINK_TAIL_LEN":     ("MOUNT_EVENT_LINK_TAIL_LEN", True),
     "MOUNT_EVENT_LINK_PAYLOAD_LEN_V2": ("MOUNT_EVENT_LINK_PAYLOAD_LEN_V2", True),
+    "MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2": ("MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2", True),
     "MOUNT_LINK_WEV_SLOTS":          ("MOUNT_LINK_WEV_SLOTS", True),
     "MOUNT_SCAN_BOOT":               ("MOUNT_SCAN_BOOT", True),
     "MOUNT_SCAN_SILENT":             ("MOUNT_SCAN_SILENT", True),
@@ -341,6 +342,16 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
                                                | pyproto.MOUNT_NOMEM_BLE_BONDED,
                                                1, 0xABCD, -46, -92, -45, -128,
                                                0x0000EE48)),
+        "mount_event_nomem_v2": (3, 0x1011, Cmd.MOUNT_EVENT,
+                                 bytes([pyproto.MOUNT_EVENT_NOMEM_REBOOT] + [0] * 13)
+                                 + bytes(pyproto.MOUNT_EVENT_NOMEM_SNAP_LEN
+                                         + pyproto.MOUNT_EVENT_NOMEM_LADDER_LEN)
+                                 + struct.pack(">IIBiIBIHHHBB", 0x00A1B2C3, 0x00A1B000,
+                                               pyproto.MOUNT_SCAN_SILENT, -1, 0x00A1B100, 1,
+                                               0x00A1D000, 0x0007, 0x0009, 0x000B, 26, 1)
+                                 + struct.pack(">BBI", pyproto.MOUNT_WEV_SCAN_DONE, 102,
+                                               0x00A1D100)
+                                 + bytes(6 * (pyproto.MOUNT_LINK_WEV_SLOTS - 1))),
         "mount_event_link_v2": (5, 0x0E0F, Cmd.MOUNT_EVENT,
                                 bytes([pyproto.MOUNT_EVENT_LINK_RUN] + [0] * 13)
                                 + struct.pack(">IIHHHHHHHHHHHHBBBBBBBBHbbbbI",
@@ -531,6 +542,17 @@ def check_golden(pyproto):
                                 (1, 102, 0x00062000)])):
             fail("decode_mount_link_radio() misread the C-built radio tail")
         ok("link-run radio tail verified on C bytes")
+        ev = c_pkts["mount_event_nomem_v2"][7:-2]
+        if len(ev) != pyproto.MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2:
+            fail("the C-built stall event v2 is not the length Python expects")
+        sr = pyproto.decode_mount_link_radio(ev[pyproto.MOUNT_EVENT_NOMEM_PAYLOAD_LEN:])
+        if ((sr.first_fail_ms, sr.scan_ms, sr.scan_why, sr.scan_silence_ms, sr.off_ms,
+             sr.off_chan, sr.back_ms, sr.scans, sr.scans_done, sr.offs, sr.scan_aps,
+             sr.events)
+                != (0x00A1B2C3, 0x00A1B000, 2, -1, 0x00A1B100, 1, 0x00A1D000, 7, 9, 11,
+                    26, [(1, 102, 0x00A1D100)])):
+            fail("the radio tail after a C-built stall event was misread")
+        ok("stall event v2 radio tail verified on C bytes")
 
         # ── parse: Python builds / mangles packets, C must agree ────────────
         AxisGroup = pyproto.AxisGroup

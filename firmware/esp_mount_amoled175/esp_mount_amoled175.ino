@@ -42,6 +42,7 @@
 #include <Wire.h>
 #include "../shared/protocol.h"
 #include "../shared/link_run.h"     // a run of unanswered sends, for MOUNT_EVENT_LINK_RUN
+#include "../shared/clock_age.h"    // ages against stamps another task writes
 #include "../shared/pos_run.h"      // cycling stored positions — the mount's own run
 #include "../shared/crash_report.h"
 #include "ble_camera.h"   // Blackmagic camera control over BLE
@@ -1332,6 +1333,13 @@ static uint32_t _nomem_snap_cb = 0, _nomem_snap_rx = 0, _nomem_snap_ref = 0;
 // _evt_* fields, under _evt_magic.
 RTC_NOINIT_ATTR static uint8_t _evt_snap[MOUNT_EVENT_NOMEM_SNAP_LEN +
                                          MOUNT_EVENT_NOMEM_LADDER_LEN];
+// ...and the radio's history at the stall (the link run's tail: a scan, the
+// radio leaving its channel, the driver's events), under its own magic, so a
+// report after some other kind of restart never picks up a stale one.
+RTC_NOINIT_ATTR static uint8_t  _evt_radio[MOUNT_EVENT_LINK_TAIL_LEN];
+RTC_NOINIT_ATTR static uint32_t _evt_radio_magic;
+// The first refusal of a run the ladder cured, for that report's radio tail.
+static uint32_t _nomem_cured_since = 0;
 
 static inline uint16_t nomem_sat16(uint32_t v) {
     return v > 0xFFFF ? 0xFFFF : (uint16_t)v;
@@ -1456,8 +1464,8 @@ static void link_run_poll() {
     portEXIT_CRITICAL(&_link_mux);
     if (!got) return;
     uint32_t now = millis();
-    uint16_t txs = (uint16_t)((now - _last_espnow_tx_ok_ms) / 1000UL);
-    uint16_t rxs = (uint16_t)((now - _last_hub_rx_ms) / 1000UL);
+    uint16_t txs = (uint16_t)(clock_age_ms(now, _last_espnow_tx_ok_ms) / 1000UL);
+    uint16_t rxs = (uint16_t)(clock_age_ms(now, _last_hub_rx_ms) / 1000UL);
     uint16_t txf = (uint16_t)_espnow_fail_total, rei = (uint16_t)_reinit_count;
     uint16_t ref = (uint16_t)_espnow_tx_refused, err = _espnow_last_tx_err;
     uint8_t p[MOUNT_EVENT_LINK_PAYLOAD_LEN_V2] = {
@@ -1496,9 +1504,9 @@ static void nomem_snapshot_take(uint32_t now, uint8_t cmd) {
     s.accepted     = _espnow_issued;
     // Before the first callback of the boot these read as time since boot and
     // saturate, which is the truth: there has been none for that long.
-    s.since_cb_ms  = nomem_sat16(now - _espnow_cb_last_ms);
-    s.since_ok_ms  = nomem_sat16(now - _espnow_ok_last_ms);
-    s.since_rx_ms  = nomem_sat16(now - _last_hub_rx_ms);
+    s.since_cb_ms  = nomem_sat16(clock_age_ms(now, _espnow_cb_last_ms));
+    s.since_ok_ms  = nomem_sat16(clock_age_ms(now, _espnow_ok_last_ms));
+    s.since_rx_ms  = nomem_sat16(clock_age_ms(now, _last_hub_rx_ms));
     s.in_flight    = nomem_sat16(espnow_in_flight());
     s.leak_floor   = nomem_sat16(_espnow_leak_floor);
     s.iram_free    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -1559,7 +1567,7 @@ static void nomem_heal() {
     since = _nomem_since_ms;
     if (since) {
         uint32_t now = millis();
-        d = (int32_t)(now - since) > 0 ? now - since : 0;
+        d = clock_age_ms(now, since);
         _nomem_since_ms = 0;
         cured = since == _nomem_ladder_run &&
                 (_nomem_lad.steps & (MOUNT_NOMEM_STEP_BLE_PAUSED |
@@ -1571,6 +1579,7 @@ static void nomem_heal() {
             _nomem_cured_snap.refused_during = nomem_sat16(_espnow_tx_refused - _nomem_snap_ref);
             _nomem_cured_lad          = _nomem_lad;
             _nomem_cured_lad.t_end_ms = nomem_sat16(d);
+            _nomem_cured_since        = since;
             _nomem_cured_due          = true;
             if (_nomem_cured < 0xFFFF) _nomem_cured = _nomem_cured + 1;
         } else {
@@ -1589,10 +1598,20 @@ static void nomem_stash_event(uint32_t span_ms) {
     uint32_t now = millis();
     MountNomemSnapshot s;
     MountNomemLadder   l;
+    uint32_t first;
     portENTER_CRITICAL(&_nomem_mux);
     s = _nomem_snap;
     l = _nomem_lad;
+    first = _nomem_since_ms;
     portEXIT_CRITICAL(&_nomem_mux);
+    // The radio's last moments, which the restart is about to wipe: carried
+    // across it beside the snapshot, and timed against the first refusal.
+    MountLinkRadio t;
+    portENTER_CRITICAL(&_link_mux);
+    _radio.fill(&t, first);
+    portEXIT_CRITICAL(&_link_mux);
+    encode_mount_link_radio(_evt_radio, &t);
+    _evt_radio_magic = MOUNT_EVT_MAGIC;
     s.cb_during      = nomem_sat16(_espnow_cb_total  - _nomem_snap_cb);
     s.rx_during      = nomem_sat16(_espnow_rx_total  - _nomem_snap_rx);
     s.refused_during = nomem_sat16(_espnow_tx_refused - _nomem_snap_ref);
@@ -1603,8 +1622,8 @@ static void nomem_stash_event(uint32_t span_ms) {
     _evt_kind    = MOUNT_EVENT_NOMEM_REBOOT;
     _evt_txfail  = (uint16_t)_espnow_fail_total;   // ON AIR, since boot
     _evt_reinits = (uint16_t)_reinit_count;
-    _evt_rx_s    = (uint16_t)((now - _last_hub_rx_ms) / 1000UL);
-    _evt_tx_s    = (uint16_t)((now - _last_espnow_tx_ok_ms) / 1000UL);
+    _evt_rx_s    = (uint16_t)(clock_age_ms(now, _last_hub_rx_ms) / 1000UL);
+    _evt_tx_s    = (uint16_t)(clock_age_ms(now, _last_espnow_tx_ok_ms) / 1000UL);
     _evt_refused = (uint16_t)_espnow_tx_refused;
     _evt_txerr   = _espnow_last_tx_err;
     Serial.printf("[ESP-NOW] NO_MEM for %lu ms: %u refused, %u callbacks, %u frames "
@@ -1630,7 +1649,7 @@ static void nomem_reserve_release_into(MountNomemLadder &l, uint32_t age) {
 // reserve all take the heap's own lock or NimBLE's — and only the record of
 // what they did is written under it.
 static void nomem_ladder_step(uint32_t since, uint32_t now) {
-    uint32_t age = now - since;
+    uint32_t age = clock_age_ms(now, since);
     MountNomemLadder l;
     portENTER_CRITICAL(&_nomem_mux);
     if (since != _nomem_ladder_run) {           // a new run: start at the bottom
@@ -1698,17 +1717,23 @@ static void nomem_send_cured() {
     if (!_nomem_cured_due) return;
     MountNomemSnapshot s;
     MountNomemLadder   l;
+    uint32_t first;
     portENTER_CRITICAL(&_nomem_mux);
     s = _nomem_cured_snap;
     l = _nomem_cured_lad;
+    first = _nomem_cured_since;
     _nomem_cured_due = false;
     portEXIT_CRITICAL(&_nomem_mux);
+    MountLinkRadio t;
+    portENTER_CRITICAL(&_link_mux);
+    _radio.fill(&t, first);
+    portEXIT_CRITICAL(&_link_mux);
     uint32_t now = millis();
-    uint16_t txs = (uint16_t)((now - _last_espnow_tx_ok_ms) / 1000UL);
-    uint16_t rxs = (uint16_t)((now - _last_hub_rx_ms) / 1000UL);
+    uint16_t txs = (uint16_t)(clock_age_ms(now, _last_espnow_tx_ok_ms) / 1000UL);
+    uint16_t rxs = (uint16_t)(clock_age_ms(now, _last_hub_rx_ms) / 1000UL);
     uint16_t txf = (uint16_t)_espnow_fail_total, rei = (uint16_t)_reinit_count;
     uint16_t ref = (uint16_t)_espnow_tx_refused, err = _espnow_last_tx_err;
-    uint8_t p[MOUNT_EVENT_NOMEM_PAYLOAD_LEN] = {
+    uint8_t p[MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2] = {
         MOUNT_EVENT_NOMEM_CURED,
         (uint8_t)(txf >> 8), (uint8_t)txf, (uint8_t)(rei >> 8), (uint8_t)rei,
         (uint8_t)(rxs >> 8), (uint8_t)rxs, (uint8_t)(txs >> 8), (uint8_t)txs,
@@ -1716,6 +1741,7 @@ static void nomem_send_cured() {
         (uint8_t)(_wifi_restarts > 255 ? 255 : _wifi_restarts) };
     encode_mount_nomem_snapshot(p + MOUNT_EVENT_PAYLOAD_LEN, &s);
     encode_mount_nomem_ladder(p + MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN, &l);
+    encode_mount_link_radio(p + MOUNT_EVENT_NOMEM_PAYLOAD_LEN, &t);
     send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
 }
 
@@ -3155,12 +3181,13 @@ static void hub_reacquire_poll() {
     adopt_trial_poll(nowm);
     if (!_reacq_scanning) {
         // Read once, so the check and the record of it (radio_scan, below) see
-        // the same value.  Still read AFTER nowm, as it always was: if a frame
-        // stamped after the clock was read is what sets these scans off, the
-        // signed silence the record keeps will be below zero and say so
-        // (2026-10-05).  Measured first, changed after.
+        // the same value.  It is read AFTER nowm, and the WiFi task can stamp
+        // it in between: cam1 reported a scan on 2026-10-07 whose silence was
+        // -1 ms, which unsigned is 49 days.  That was every blackout.  So the
+        // age is taken with clock_silent(); the record keeps the raw, signed
+        // difference, which shows if anything like it is ever seen again.
         uint32_t heard  = _last_hub_rx_ms;
-        bool     silent = (nowm - heard) > REACQ_SILENT_MS;
+        bool     silent = clock_silent(nowm, heard, REACQ_SILENT_MS);
         // A scan takes the radio off-channel for a second or two.  When the base
         // has already gone quiet that costs nothing — we are not hearing it
         // anyway — but a scan must never happen mid-move: on a camera rig those
@@ -3302,7 +3329,7 @@ static void hub_reacquire_poll() {
     // to a room served only by a satellite it has never met should come up on
     // it, not sit dark for a minute first.
     bool isolated    = (best < 0) &&
-                       (was_boot_pick || (nowm - _last_hub_rx_ms) > REACQ_ADOPT_MS);
+                       (was_boot_pick || clock_silent(nowm, _last_hub_rx_ms, REACQ_ADOPT_MS));
     bool outclassed  = (known_db > -32768) && (adopt_db > known_db + adopt_margin);
     bool adopt_ok    = adopt_seen && !_adopt_start_ms && (isolated || outclassed);
 
@@ -3312,7 +3339,7 @@ static void hub_reacquire_poll() {
                       (int)adopt.channel, (int)adopt_db);
     else if (adopt_ok && isolated)
         Serial.printf("[REACQ] Isolated %lus — trying \"%s\" %02X:%02X on ch %d (%d dB)\n",
-                      (unsigned long)((nowm - _last_hub_rx_ms) / 1000UL),
+                      (unsigned long)(clock_age_ms(nowm, _last_hub_rx_ms) / 1000UL),
                       adopt.ssid, adopt.mac[4], adopt.mac[5],
                       (int)adopt.channel, (int)adopt_db);
     else if (adopt_ok)
@@ -4360,7 +4387,7 @@ void loop() {
         // conditions this was written for, and it saw fifteen failures and did
         // nothing. Both ran on to a two-minute isolation and a full reboot.
         uint32_t fails = _espnow_fail_total + _espnow_tx_refused;
-        bool rx_alive  = (nw - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
+        bool rx_alive  = !clock_silent(nw, _last_hub_rx_ms, HUB_TIMEOUT_MS - 1);
 
         // Track when the failure counter last MOVED.  This is the only honest
         // measure of "recovered" available: nothing a remedy does can fake it.
@@ -4456,7 +4483,7 @@ void loop() {
 
     MARK(MSEC_WEDGE);
     // ── Hub connection state ─────────────────────────────────────────────
-    bool hub_ok = (millis() - _last_hub_rx_ms) < HUB_TIMEOUT_MS;
+    bool hub_ok = !clock_silent(millis(), _last_hub_rx_ms, HUB_TIMEOUT_MS - 1);
     // Contact restored — hand back the full quota, so a mount that recovers
     // and is later isolated again gets to retry rather than staying passive
     // because of an outage hours ago.
@@ -4468,7 +4495,7 @@ void loop() {
     // event in the first place.
     if (_evt_pending && hub_ok) {
         _evt_pending = false;
-        uint8_t p[MOUNT_EVENT_NOMEM_PAYLOAD_LEN] = {
+        uint8_t p[MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2] = {
             _evt_kind,
             (uint8_t)(_evt_txfail  >> 8), (uint8_t)_evt_txfail,
             (uint8_t)(_evt_reinits >> 8), (uint8_t)_evt_reinits,
@@ -4483,7 +4510,13 @@ void loop() {
         if (_evt_kind == MOUNT_EVENT_NOMEM_REBOOT) {
             memcpy(p + MOUNT_EVENT_PAYLOAD_LEN, _evt_snap, sizeof(_evt_snap));
             n = MOUNT_EVENT_NOMEM_PAYLOAD_LEN;
+            // ...and the radio's history up to the stall, if it was kept.
+            if (_evt_radio_magic == MOUNT_EVT_MAGIC) {
+                memcpy(p + MOUNT_EVENT_NOMEM_PAYLOAD_LEN, _evt_radio, sizeof(_evt_radio));
+                n = MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2;
+            }
         }
+        _evt_radio_magic = 0;          // reported, or not this kind: never reused
         send_to_hub(CMD_MOUNT_EVENT, p, n);
     }
     // A run the ladder ended without a reboot.
@@ -4498,7 +4531,7 @@ void loop() {
     // actually working again, not on hub_ok: hub_ok is an RX test, and RX was
     // never the problem — sending this the instant the restart returned would
     // fire it straight back into the wedge it is reporting.
-    if (_txw_report_due && (millis() - _last_espnow_tx_ok_ms) < 2000) {
+    if (_txw_report_due && clock_age_ms(millis(), _last_espnow_tx_ok_ms) < 2000) {
         _txw_report_due = false;
         uint8_t p[MOUNT_EVENT_PAYLOAD_LEN] = {
             MOUNT_EVENT_TX_WEDGE,
@@ -4524,8 +4557,8 @@ void loop() {
     // not fix (confirmed 2026-06-16 — a fresh-booted mount still couldn't
     // receive).  Restarting then only reboot-loops and blinks the camera, so we
     // hold off and let the hub be recovered from the PC (CMD_HUB_RESTART).
-    uint32_t rx_age = millis() - _last_hub_rx_ms;
-    uint32_t tx_age = millis() - _last_espnow_tx_ok_ms;
+    uint32_t rx_age = clock_age_ms(millis(), _last_hub_rx_ms);
+    uint32_t tx_age = clock_age_ms(millis(), _last_espnow_tx_ok_ms);
 
     // Mark when the silence began, and what the recovery ladder's counters read
     // at that moment.  See ESPNOW_RESTART_STALLED_MS: if neither has moved since,
@@ -4579,8 +4612,8 @@ void loop() {
             // restart fires the moment the LATER of the two crosses it, and RX
             // is the later one whenever TX died first.  So it is the gap between
             // the two that carries the information, not either on its own.
-            _evt_rx_s    = (uint16_t)((millis() - _last_hub_rx_ms) / 1000UL);
-            _evt_tx_s    = (uint16_t)((millis() - _last_espnow_tx_ok_ms) / 1000UL);
+            _evt_rx_s    = (uint16_t)(clock_age_ms(millis(), _last_hub_rx_ms) / 1000UL);
+            _evt_tx_s    = (uint16_t)(clock_age_ms(millis(), _last_espnow_tx_ok_ms) / 1000UL);
             _evt_refused = (uint16_t)_espnow_tx_refused;
             _evt_txerr   = _espnow_last_tx_err;
             wedge_count_bump();     // persists across the restart AND a power cycle
@@ -4609,14 +4642,14 @@ void loop() {
     // Stops repeating rather than halting: the current leg finishes under its
     // own deceleration, and WATCHDOG_MS below still hard-stops everything two
     // seconds later if contact does not come back.
-    if (_run_active && (millis() - _last_hub_rx_ms) > RUN_DEADMAN_MS)
+    if (_run_active && clock_silent(millis(), _last_hub_rx_ms, RUN_DEADMAN_MS))
         run_stop("no contact with any base");
     // The same for a position run: one leg at a time, so it ends where the
     // current leg ends — the goto already under way is not undone.
-    if (_prun.active && (millis() - _last_hub_rx_ms) > RUN_DEADMAN_MS)
+    if (_prun.active && clock_silent(millis(), _last_hub_rx_ms, RUN_DEADMAN_MS))
         prun_stop("no contact with any base");
 
-    if (!_watchdog_fired && (millis() - _last_hub_rx_ms > WATCHDOG_MS)) {
+    if (!_watchdog_fired && clock_silent(millis(), _last_hub_rx_ms, WATCHDOG_MS)) {
         _watchdog_fired = true;
         send_estop_to_teensy();
     }

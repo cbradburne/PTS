@@ -331,6 +331,16 @@ static_assert(MOUNT_EVENT_LINK_PAYLOAD_LEN ==
 static_assert(MOUNT_EVENT_LINK_PAYLOAD_LEN_V2 ==
               MOUNT_EVENT_LINK_PAYLOAD_LEN + MOUNT_EVENT_LINK_TAIL_LEN,
               "the link-run event v2 is the v1 event and the radio tail");
+// The stall events (MOUNT_EVENT_NOMEM_REBOOT and _CURED) carry the same radio
+// tail after their ladder, since 2026-10-07, anchored at the stall's FIRST
+// REFUSAL: did a scan start, did the radio leave its channel, what did the
+// WiFi driver do, just before the radio stopped finishing sends?  A stall
+// reboots the mount, which would wipe all of it, so for that kind it rides
+// across the restart in RTC memory.  A 77-byte stall event is the old form.
+#define MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2 137
+static_assert(MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2 ==
+              MOUNT_EVENT_NOMEM_PAYLOAD_LEN + MOUNT_EVENT_LINK_TAIL_LEN,
+              "the stall event v2 is the v1 event and the radio tail");
 #define MOUNT_LINK_WEV_SLOTS            5
 #define MOUNT_SCAN_BOOT                 1   // the one choice of base at power-on
 #define MOUNT_SCAN_SILENT               2   // the base went quiet (BASE_SILENT_MS)

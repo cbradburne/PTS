@@ -268,6 +268,32 @@ static int do_emit() {
         emit_pkt("mount_event_link_v2", buf, n);
     }
 
+    // n: the stall event v2 — a NO_MEM reboot whose snapshot and ladder are zero
+    //    here (case k covers them), then the radio tail through the real
+    //    encoder at the offset the mount puts it: after the ladder.
+    {
+        uint8_t ep[MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2] = { MOUNT_EVENT_NOMEM_REBOOT };
+        MountLinkRadio t = {};
+        t.first_fail_ms   = 0x00A1B2C3;
+        t.scan_ms         = 0x00A1B000;
+        t.scan_why        = MOUNT_SCAN_SILENT;
+        t.scan_silence_ms = -1;
+        t.off_ms          = 0x00A1B100;
+        t.off_chan        = 1;
+        t.back_ms         = 0x00A1D000;
+        t.scans           = 7;
+        t.scans_done      = 9;
+        t.offs            = 11;
+        t.scan_aps        = 26;
+        t.n_wev           = 1;
+        t.wev_code[0]     = MOUNT_WEV_SCAN_DONE;
+        t.wev_raw[0]      = 102;
+        t.wev_ms[0]       = 0x00A1D100;
+        encode_mount_link_radio(ep + MOUNT_EVENT_NOMEM_PAYLOAD_LEN, &t);
+        n = build_packet(buf, 3, 0x1011, CMD_MOUNT_EVENT, ep, sizeof(ep));
+        emit_pkt("mount_event_nomem_v2", buf, n);
+    }
+
     return 0;
 }
 

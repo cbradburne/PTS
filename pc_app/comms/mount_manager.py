@@ -67,6 +67,7 @@ from .protocol import (
     MOUNT_EVENT_LINK_RUN, MOUNT_EVENT_LINK_PAYLOAD_LEN, MOUNT_LINK_T_NEVER,
     decode_mount_link_run,
     MOUNT_EVENT_LINK_PAYLOAD_LEN_V2, decode_mount_link_radio,
+    MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2,
     MOUNT_SCAN_BOOT, MOUNT_SCAN_SILENT, MOUNT_SCAN_RESCAN, MOUNT_SCAN_SETUP,
     MOUNT_SCAN_BUTTON, MOUNT_WEV_SCAN_DONE, MOUNT_WEV_STA_START, MOUNT_WEV_STA_STOP,
     MOUNT_WEV_STA_CONNECTED, MOUNT_WEV_STA_DISCONNECTED, MOUNT_WEV_WIFI_READY,
@@ -277,10 +278,11 @@ _WEV_NAME = {MOUNT_WEV_SCAN_DONE: "scan finished", MOUNT_WEV_STA_START: "station
              MOUNT_WEV_WIFI_OFF: "WiFi off"}
 
 
-def _link_radio_text(t) -> list[str]:
-    """The v2 tail of a link run: what the radio was doing around it, and
-    which way that points — a scan this mount's own code started (and why),
-    a scan nothing in its code started, or no scan at all."""
+def _link_radio_text(t, anchor: str = "the first failure", what: str = "run") -> list[str]:
+    """The radio tail of a link run or a stall: what the radio was doing
+    around it, and which way that points — a scan this mount's own code
+    started (and why), a scan nothing in its code started, or no scan at all.
+    `anchor` names the moment the times are against, `what` the event."""
     def rel(ms):
         """ms relative to the first failure, across the 32-bit wrap."""
         return ((ms - t.first_fail_ms + 0x80000000) & 0xFFFFFFFF) - 0x80000000
@@ -288,8 +290,8 @@ def _link_radio_text(t) -> list[str]:
     def when(ms):
         d = rel(ms)
         if abs(d) < 1000:
-            return f"{abs(d)} ms {'before' if d < 0 else 'after'} the first failure"
-        return f"{abs(d) / 1000:.1f} s {'before' if d < 0 else 'after'} the first failure"
+            return f"{abs(d)} ms {'before' if d < 0 else 'after'} {anchor}"
+        return f"{abs(d) / 1000:.1f} s {'before' if d < 0 else 'after'} {anchor}"
 
     why = _SCAN_WHY.get(t.scan_why, f"for reason {t.scan_why}")
     if t.scan_why == MOUNT_SCAN_SILENT:
@@ -316,8 +318,8 @@ def _link_radio_text(t) -> list[str]:
     reading = []
     near = t.off_ms and -15000 <= rel(t.off_ms) <= 1000
     if not near:
-        reading.append("the radio stayed on its base channel around this run, so it "
-                       "was not a scan")
+        reading.append(f"the radio stayed on its base channel around this {what}, so "
+                       "it was not a scan")
     else:
         started = t.scan_ms and -2000 <= rel(t.scan_ms) - rel(t.off_ms) <= 100
         if started:
@@ -1464,6 +1466,12 @@ class MountManager(QObject):
                 return
             if kind in (MOUNT_EVENT_NOMEM_REBOOT, MOUNT_EVENT_NOMEM_CURED):
                 lines = _nomem_event_text(kind, b, txf, rei, ref, err)
+                # The radio up to the stall (since 2026-10-07): carried across
+                # the reboot, and timed against the first refusal.
+                if len(b) >= MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2:
+                    lines += _link_radio_text(
+                        decode_mount_link_radio(b[MOUNT_EVENT_NOMEM_PAYLOAD_LEN:]),
+                        anchor="the first refusal", what="stall")
                 log.warning("MOUNT EVENT cam%d %s", mid, lines[0])
                 for more in lines[1:]:
                     log.warning("MOUNT EVENT cam%d   %s", mid, more)

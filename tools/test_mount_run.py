@@ -281,7 +281,9 @@ hb = body_of(MOUNT, "static void send_status_heartbeat()")
 assert "uint8_t p[11];" in hb and "p[STATUS_RUN_BYTE] = run_flags();" in hb and \
        "send_to_hub(CMD_STATUS, p, sizeof(p));" in hb, \
     "the bridge's own STATUS does not carry the run byte — it would come and go"
-assert re.search(r"if \(_prun\.active && \(millis\(\) - _last_hub_rx_ms\) > RUN_DEADMAN_MS\)\s*"
+# Aged with clock_silent(): a raw `millis() - _last_hub_rx_ms` wraps to 49 days
+# when a frame lands between the two reads (test_clock_age.py).
+assert re.search(r"if \(_prun\.active && clock_silent\(millis\(\), _last_hub_rx_ms, RUN_DEADMAN_MS\)\)\s*"
                  r"\n\s*prun_stop\(", MOUNT), \
     "no deadman: a mount that lost every base would cycle on unwatched"
 for fn in ("static void prun_stop(", "static void run_stop("):
