@@ -25,6 +25,7 @@ import threading
 import queue
 import time
 import logging
+from datetime import datetime
 from typing import Callable, Optional
 
 import serial
@@ -42,6 +43,8 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, bridge_reinits,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
                        decode_mount_outage, EspnowRejectCode)
+from .reboot_check import NodeReport, rebooted
+from .startup_quiet import StartupQuiet, start_up_reason, START_UP_S
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +276,16 @@ class Bridge:
     # Set to 0 to disable.  Lower it (e.g. 5) when actively reproducing a stall.
     HEALTH_LOG_INTERVAL = 30.0   # seconds
 
+    @property
+    def startup(self) -> StartupQuiet:
+        """Which mounts are starting up (powered up or flashed), so their
+        grey-outs and reboots go into one START-UP line.  Made on first use,
+        so a Bridge built without __init__, as the tests build it, has one."""
+        s = self.__dict__.get("_startup")
+        if s is None:
+            s = self.__dict__["_startup"] = StartupQuiet()
+        return s
+
     def __init__(self):
         self._transport: Optional[_SerialTransport | _TcpTransport] = None
         self._send_queue: queue.Queue[bytes] = queue.Queue()
@@ -347,8 +360,9 @@ class Bridge:
         self._last_forced_reconnect: float = 0.0
         self._last_hub_reinit_t: float = 0.0    # paces CMD_HUB_REINIT_ESPNOW sends
         self._last_hub_restart_t: float = 0.0   # paces CMD_HUB_RESTART escalation
-        # last uptime seen per node name — a decrease means it restarted
-        self._node_uptime: dict[str, int] = {}
+        # last report seen per node name (uptime, failed sends, reset reason,
+        # when it arrived): reboot_check.rebooted() reads a restart from it
+        self._node_uptime: dict[str, NodeReport] = {}
         # mount_id -> BLE camera link state, from CMD_HEALTH; absent = no camera build
         self._cam_ble: dict[int, bool] = {}
         # Satellite slot → name, so a satellite's health line can be headed
@@ -1089,6 +1103,7 @@ class Bridge:
             log.warning("NODE HEALTH undecodable from mount_id=%d: %s",
                         pkt.mount_id, e)
             return
+        mount = 0                      # a mount's node, or 0: hub, display, satellite
         if pkt.mount_id == 0xFE:
             who = "hub"
         elif pkt.mount_id == 0xFD:
@@ -1101,6 +1116,7 @@ class Bridge:
             who  = self._sat_names.get(slot) or f"SAT {slot}"
         else:
             who = f"cam{pkt.mount_id}/{h.node_name}"
+            mount = pkt.mount_id
         # BLE camera state, on builds that have it.  A mount on a rig has no
         # readable serial port, so this is the only place its BLE link is
         # visible — and it sits next to txfail, which is exactly what it has to
@@ -1342,12 +1358,32 @@ class Bridge:
         # against the last one we saw.
         rname = self._RESET_REASON_NAMES.get(h.reset_reason, f"code {h.reset_reason}")
 
-        # Within this session an exact comparison is enough.
+        # Within this session: uptime going DOWN was the only test, and it
+        # misses a node that boots twice inside one report interval — a flash
+        # then a power cycle, where the second boot reports about the uptime
+        # the first one did (2026-10-07).  See reboot_check for the others.
+        cur  = NodeReport(h.uptime_s, h.tx_fail, h.reset_reason, time.monotonic())
         prev = self._node_uptime.get(who)
-        if prev is not None and h.uptime_s < prev:
-            log.warning("NODE REBOOTED — %s uptime %.2fh -> %.2fh | reset reason: %s",
-                        who, prev / 3600.0, h.uptime_s / 3600.0, rname)
-        elif prev is None:
+        why  = (rebooted(prev, cur, self._RESET_REASON_NAMES)
+                if prev is not None else None)
+        # A mount powered up or flashed is starting up, not failing: its boots
+        # go into one START-UP line when it is done (startup_quiet).  A boot
+        # this session has not seen counts too — the app opened mid-flash, or
+        # the mount switched on while it ran — if it is recent.
+        start = start_up_reason(h.node_name, h.reset_reason) if mount else None
+        if start and (why or prev is None) and h.uptime_s < START_UP_S:
+            self.startup.boot(mount, cur.at, h.uptime_s, start,
+                              datetime.fromtimestamp(time.time() - h.uptime_s)
+                              .strftime("%H:%M:%S"))
+            why = None
+        elif mount and why:
+            ended = self.startup.end(mount)      # a fault cuts a start-up short
+            if ended:
+                log.info(ended)
+        if why:
+            log.warning("NODE REBOOTED — %s uptime %.2fh -> %.2fh | reset reason: %s | %s",
+                        who, prev.uptime_s / 3600.0, h.uptime_s / 3600.0, rname, why)
+        elif prev is None and not start:
             # First report this session.  Compare against what was persisted,
             # allowing for the wall-clock time since: a node up X seconds then,
             # and still running, must be up at least X + elapsed now.
@@ -1366,10 +1402,12 @@ class Bridge:
                     log.warning("NODE REBOOTED (while we were not watching) — %s "
                                 "uptime %.2fh, expected ~%.2fh | reset reason: %s",
                                 who, h.uptime_s / 3600.0, expected / 3600.0, rname)
-        self._node_uptime[who] = h.uptime_s
+        self._node_uptime[who] = cur
         self._node_state_save(who, h.uptime_s, h.reset_reason)
 
-        if h.anomaly:
+        # A mount's first reports after a boot are flagged, as are its boot's
+        # slow passes: while it is starting up that is every boot, not news.
+        if h.anomaly and not (mount and self.startup.quiet(mount, cur.at)):
             log.warning("%s [ANOMALY]", line)
         else:
             log.info(line)
@@ -1556,7 +1594,8 @@ class Bridge:
             # wedge and a pulled plug alike.  From the operator's chair those
             # are the same event: the mount did not answer.
             secs = (pkt.payload[3] << 8) | pkt.payload[4]
-            log.warning("MOUNT OUTAGE: cam%d was uncontrollable for %ds", mount, secs)
+            if not self.startup.quiet(mount, time.monotonic()):   # not a start-up
+                log.warning("MOUNT OUTAGE: cam%d was uncontrollable for %ds", mount, secs)
         elif kind == 13:
             # An OSC camera command, by name.
             #
@@ -1725,7 +1764,10 @@ class Bridge:
         with self._diag_lock:
             for seq in [q for q, (t, _m) in self._cmd_ledger.items()
                         if now - t > self.CMD_DEADLINE_S]:
-                _t, mnt = self._cmd_ledger.pop(seq)
+                t, mnt = self._cmd_ledger.pop(seq)
+                if self.startup.quiet(mnt, t):
+                    self.startup.fold(mnt, "lost")   # sent while it started up
+                    continue
                 self._cmd_stat.setdefault(mnt, self._new_cmd_stat())["lost"] += 1
             if now - self._cmd_report_t < self.CMD_REPORT_S:
                 return
@@ -1790,6 +1832,8 @@ class Bridge:
         # below, which is what hid late answers from the record.
         with self._diag_lock:
             rec = self._cmd_ledger.pop(acked_seq, None)
+            if rec is not None and self.startup.quiet(rec[1], rec[0]):
+                rec = None                 # sent while it started up: not in the figures
             if rec is not None:
                 sent_t, mnt = rec
                 st = self._cmd_stat.setdefault(mnt, self._new_cmd_stat())
@@ -1872,6 +1916,10 @@ class Bridge:
                 if now - self._mount_last_rx.get(mt, 0.0) > self.MOUNT_SILENT_S:
                     continue                      # not talking at all — it is
                                                   # switched off, not wedged
+                if self.startup.quiet(mt, now):
+                    continue                      # being powered up or flashed:
+                                                  # on 2026-10-07 cam1's flash
+                                                  # forced a reconnect of the hub
                 age = now - t
                 if age > oldest:
                     oldest = age

@@ -76,6 +76,7 @@ from .protocol import (
 
 
 from .bridge import Bridge, _kb
+from .reboot_check import NodeReport, rebooted
 
 log = logging.getLogger(__name__)
 
@@ -483,12 +484,14 @@ class MountState_:
     # what the silence followed.
     presence_since: Optional[float] = None    # time.monotonic(); None until the first change
     last_heard_cmd: Optional[int] = None
-    # The bridge's own counters from its latest HEALTH, (uptime s, sends that
-    # failed, ESP-NOW restarts), and a copy taken when the mount greyed out:
-    # its first report after coming back says what its radio went through.
+    # The bridge's own counters from its latest HEALTH, (its NodeReport:
+    # uptime, sends that failed, reset reason, when it arrived; then its
+    # ESP-NOW restarts), and a copy taken when the mount greyed out: its first
+    # report after coming back says what its radio went through.
     radio_now:    Optional[tuple] = None
     radio_before: Optional[tuple] = None
     greyed_s:     float = 0.0                 # the grey-out(s) that account covers
+    grey_untold:  bool = False                # greyed while starting up, so not logged
 
     # Motion
     state:       MountState = MountState.IDLE
@@ -906,23 +909,39 @@ class MountManager(QObject):
             return False
         now = time.monotonic()
         lasted = ""
+        held = 0.0
         if st.presence_since is not None:
-            lasted = " after %s %s" % (_human_s(now - st.presence_since),
-                                       "active" if before else "greyed")
+            held = now - st.presence_since
+            lasted = " after %s %s" % (_human_s(held), "active" if before else "greyed")
             if after and st.radio_before is not None:
-                st.greyed_s += now - st.presence_since
+                st.greyed_s += held
         st.presence_since = now
+        # A mount being powered up or flashed greys and comes back as it boots:
+        # counted for its START-UP line, not logged.  Its first appearance is.
+        quiet = bool(lasted) and self._starting_up(mount_id, now)
+        st.grey_untold = quiet and not after
         if after:
-            log.info("PRESENCE cam%d ACTIVE%s — %s", mount_id, lasted, why)
+            if quiet:
+                self._bridge.startup.fold(mount_id, "back", held)
+            else:
+                log.info("PRESENCE cam%d ACTIVE%s — %s", mount_id, lasted, why)
         else:
             # Kept from the FIRST grey-out until the mount's next HEALTH, so
             # flapping twice before it reports is one account of both.
             if st.radio_before is None:
                 st.radio_before = st.radio_now
                 st.greyed_s = 0.0
-            log.warning("PRESENCE cam%d GREYED%s — %s", mount_id, lasted, why)
+            if not quiet:              # quiet: counted when it ends (grey_untold)
+                log.warning("PRESENCE cam%d GREYED%s — %s", mount_id, lasted, why)
         (self.mount_connected if after else self.mount_disconnected).emit(mount_id)
         return True
+
+    def _starting_up(self, mid: int, at: float) -> bool:
+        """Was this mount being powered up or flashed at `at`?  What it does
+        then goes into one START-UP line (startup_quiet), not the log.  False
+        on a link that does not keep track, as the tests' stand-in hub."""
+        s = getattr(self._bridge, "startup", None)
+        return bool(s and s.quiet(mid, at))
 
     def _why_silent(self, mid: int, now_ms: float) -> str:
         """Why a mount that stopped answering greyed out, as far as the PC can
@@ -963,20 +982,25 @@ class MountManager(QObject):
         if h.node_name != "bridge":
             return
         st = self._states[mid]
-        now = (h.uptime_s, h.tx_fail, bridge_reinits(h.node_u32))
+        rep = NodeReport(h.uptime_s, h.tx_fail, h.reset_reason, time.monotonic())
+        now = (rep, bridge_reinits(h.node_u32))
         st.radio_now = now
         was = st.radio_before
         if was is None or not (st.connected and not st.unresponsive):
             return                     # no account owed, or still greyed
         st.radio_before = None
+        if self._starting_up(mid, rep.at):
+            return                     # a grey-out of its start-up: not told
         gap = _human_s(st.greyed_s)
-        if now[0] < was[0]:
+        # Not just "uptime went down": a flash then a power cycle boots twice
+        # inside one report, and was told as "no reboot" (2026-10-07).
+        if rebooted(was[0], rep):
             log.info("PRESENCE cam%d — its own account of the %s greyed: it "
-                     "rebooted in the gap (up %d s now)", mid, gap, now[0])
+                     "rebooted in the gap (up %d s now)", mid, gap, rep.uptime_s)
             return
-        failed = (now[1] - was[1]) % 0x10000      # tx_fail is 16 bits
-        restarts = now[2] - was[2]
-        if now[2] == 15 and restarts == 0:
+        failed = (rep.tx_fail - was[0].tx_fail) % 0x10000      # tx_fail is 16 bits
+        restarts = now[1] - was[1]
+        if now[1] == 15 and restarts == 0:
             restarted = "ESP-NOW restarts unknown (its count is at the 15 cap)"
         elif restarts:
             restarted = ("ESP-NOW restarted once" if restarts == 1
@@ -1456,6 +1480,8 @@ class MountManager(QObject):
                     log.warning("MOUNT EVENT cam%d link-run report too short "
                                 "(%d bytes)", mid, len(b))
                     return
+                if self._starting_up(mid, time.monotonic()):
+                    return             # sends lost while it booted: not news
                 lines = _link_run_text(decode_mount_link_run(b[MOUNT_EVENT_PAYLOAD_LEN:]))
                 if len(b) >= MOUNT_EVENT_LINK_PAYLOAD_LEN_V2:
                     lines += _link_radio_text(
@@ -1522,17 +1548,20 @@ class MountManager(QObject):
             drop = (b[8] << 8) | b[9]  if len(b) >= 10 else 0
             txa  = (b[10] << 8) | b[11] if len(b) >= 14 else 0
             txf  = (b[12] << 8) | b[13] if len(b) >= 14 else 0
+            # Every line stays, but a mount powered up or flashed lately is
+            # booting, so what would be a warning is not.
+            warn = log.info if self._starting_up(mid, time.monotonic()) else log.warning
             if drop:
                 # Heard, MAC-acknowledged, then thrown away because the
                 # application queue was full.  The sender sees a successful send
                 # and the command never happens — both ends reporting success
                 # for something that did not occur.
-                log.warning("RF cam%d: receive queue FULL — %d frames dropped "
-                            "after being received (a dropped command is never "
-                            "acknowledged, so it reads as a mount ignoring it)",
-                            mid, drop)
+                warn("RF cam%d: receive queue FULL — %d frames dropped "
+                     "after being received (a dropped command is never "
+                     "acknowledged, so it reads as a mount ignoring it)",
+                     mid, drop)
             if not n:
-                log.warning("RF cam%d: heard NOTHING in the last window", mid)
+                warn("RF cam%d: heard NOTHING in the last window", mid)
                 return
             # SNR is the number that decides it.  A link fails on signal-to-
             # noise, not signal: -59 dBm on a -95 dBm floor has 36 dB of margin
@@ -1553,7 +1582,7 @@ class MountManager(QObject):
             # mount 4 sat at 18-19 dB for an hour, warning on every line, while
             # failing 4 sends in 160 s.  802.11b at 1 Mbps needs roughly 4-10 dB,
             # so below 10 is genuinely thin and above it is not worth a colour.
-            fn = log.warning if worst < 10 else log.info
+            fn = warn if worst < 10 else log.info
             # TX as a RATE.  Only failures were counted before, which cannot be
             # read on a mount that transmits more than its neighbours — and the
             # one with a camera does, by roughly three times.  A percentage
@@ -1884,6 +1913,18 @@ class MountManager(QObject):
             # unresponsive" and cannot come back online until an ACK, which
             # is exactly how a live mount used to stay greyed.
             self._set_mount_online(mid, connected=False, unresponsive=False, why=whys[mid])
+
+        # Each start-up that is over, in one line; then, since a start-up's
+        # grey-outs are not logged, one still going when it ends is said now:
+        # switched off again, or it never came up properly.
+        startup = getattr(self._bridge, "startup", None)
+        for line in (startup.poll(now_ms / 1000) if startup else []):
+            log.info(line)
+        for mid, st in self._states.items():
+            if st.grey_untold and not self._starting_up(mid, now_ms / 1000):
+                st.grey_untold = False
+                log.warning("PRESENCE cam%d GREYED at the end of its start-up — %s",
+                            mid, self._why_silent(mid, now_ms))
 
     # ------------------------------------------------------------------
     # Internal
