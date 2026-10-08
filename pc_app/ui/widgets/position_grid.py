@@ -11,6 +11,12 @@ Slot occupancy and AT_POSITION state come from the mount (slot_occupied_mask /
 slot_at_mask in STATUS packets / STATE_REPORT).  Coordinates are never held
 locally — they live in the mount's volatile RAM.
 
+Each button's text is its slot's name, always: stored position or not, mount
+on or off.  The border says whether a position is there; the name says where
+a point stored there is meant to go.  It was hidden behind the slot number
+until a position was stored, so storing to a named slot made a name appear
+the operator had not seen (2026-10-08).
+
 Right side of each row: a FocusButton — one autofocus on that mount's camera —
 then two RotaryDial widgets (Slide speed, Pan/Tilt speed).
 
@@ -336,19 +342,15 @@ class PositionGrid(QWidget):
         if not btn:
             return
         self._apply_border(btn, mount_id, slot)
-        # Label depends on look-at mode — must not overwrite ◄/► with "9"/"10".
-        if self._look_at_mode[mount_id]:
-            if slot == 8:
-                btn.setText("◀")
-            elif slot == 9:
-                btn.setText("▶")
-            else:
-                lbl = self._store.get_label(mount_id, slot)
-                btn.setText(lbl or str(slot + 1))
-        else:
-            occupied = bool(self._slot_occupied[mount_id] & (1 << slot))
-            lbl      = self._store.get_label(mount_id, slot)
-            btn.setText((lbl or str(slot + 1)) if occupied else str(slot + 1))
+        btn.setText(self._label_text(mount_id, slot))
+
+    def _label_text(self, mount_id: int, slot: int) -> str:
+        """What a button says: the slot's name, whether or not a position is
+        stored there and whether or not the mount is on — or, in look-at mode,
+        the ◀/▶ arrows on slots 9 and 10, which must not become "9"/"10"."""
+        if self._look_at_mode[mount_id] and slot >= 8:
+            return "◀" if slot == 8 else "▶"
+        return self._store.get_label(mount_id, slot) or str(slot + 1)
 
     def set_la_arrow_state(self, mount_id: int,
                            state: "str | None") -> None:
@@ -811,20 +813,8 @@ class PositionGrid(QWidget):
     def _refresh_row_labels(self, mount_id: int) -> None:
         for slot in range(10):
             btn = self._buttons.get((mount_id, slot))
-            if not btn:
-                continue
-            if self._look_at_mode[mount_id]:
-                if slot == 8:
-                    btn.setText("◀")
-                elif slot == 9:
-                    btn.setText("▶")
-                else:
-                    lbl = self._store.get_label(mount_id, slot)
-                    btn.setText(lbl or str(slot + 1))
-            else:
-                occupied = bool(self._slot_occupied[mount_id] & (1 << slot))
-                lbl      = self._store.get_label(mount_id, slot)
-                btn.setText((lbl or str(slot + 1)) if occupied else str(slot + 1))
+            if btn:
+                btn.setText(self._label_text(mount_id, slot))
 
     def refresh_row_labels(self, mount_id: int) -> None:
         """Public entry point — re-apply button labels for one row (look-at aware)."""
@@ -906,6 +896,8 @@ class PositionGrid(QWidget):
         return handler
 
     def _edit_label(self, mount_id: int, slot: int, occupied: bool) -> None:
+        # The name the button shows, stored position or not.  It comes up
+        # selected, so typing replaces it.
         cur = self._store.get_label(mount_id, slot)
         # Touchscreen-only PC: get_text() shows the on-screen keyboard for the
         # dialog and closes it as soon as it commits (OK / Enter / Return).
@@ -913,7 +905,7 @@ class PositionGrid(QWidget):
             self, "Edit Label",
             f"Label for Camera {mount_id}, Position {slot + 1}:\n"
             f"(Clear to delete slot)",
-            cur if occupied else "")
+            cur)
         if not ok:
             return
         if text.strip() == "" and occupied:
