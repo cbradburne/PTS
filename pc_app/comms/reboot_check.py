@@ -66,3 +66,24 @@ def rebooted(was: NodeReport, now: NodeReport, reset_names: Optional[dict] = Non
             return ("its failed sends went down from %d to %d, and they count from boot"
                     % (was.tx_fail, now.tx_fail))
     return None
+
+
+def held_up(was: NodeReport, now: NodeReport, back_at: float,
+            slack_s: float = REBOOT_SLACK_S) -> bool:
+    """Was `now` built before `back_at`, when the node was heard again after a
+    silence, and only delivered after it?
+
+    A satellite's backlog does that.  2026-10-08: the Foyer's link to the hub
+    stalled for six minutes, and when it came back cam5's report from 08:49
+    arrived at 08:56 with the rest of the queue.  It was taken for cam5's
+    account of the six minutes — "0 sends failed, no reboot" — when its next
+    report, two seconds later, had 1,811.
+
+    Timed by uptime from `was`, which holds only if the node has not rebooted
+    since: so it is asked only of a node that had been up longer than the
+    silence, which a reboot in it would have sent below `was`'s uptime.  A
+    node younger than that cannot be told from one that rebooted, and is
+    never called held up.
+    """
+    gap = back_at - was.at
+    return was.uptime_s >= gap and now.uptime_s - was.uptime_s + slack_s < gap

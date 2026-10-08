@@ -76,7 +76,7 @@ from .protocol import (
 
 
 from .bridge import Bridge, _kb
-from .reboot_check import NodeReport, rebooted
+from .reboot_check import NodeReport, rebooted, held_up
 
 log = logging.getLogger(__name__)
 
@@ -994,7 +994,14 @@ class MountManager(QObject):
         gap = _human_s(st.greyed_s)
         # Not just "uptime went down": a flash then a power cycle boots twice
         # inside one report, and was told as "no reboot" (2026-10-07).
-        if rebooted(was[0], rep):
+        why = rebooted(was[0], rep)
+        if not why and held_up(was[0], rep, st.presence_since):
+            # Built before it came back, and delivered late with a satellite's
+            # backlog (2026-10-08): it cannot say what happened after it was
+            # built.  The next report can.
+            st.radio_before = was
+            return
+        if why:
             log.info("PRESENCE cam%d — its own account of the %s greyed: it "
                      "rebooted in the gap (up %d s now)", mid, gap, rep.uptime_s)
             return

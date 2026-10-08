@@ -168,6 +168,36 @@ assert got[-1] == ("INFO", "PRESENCE cam5 — its own account of the 5.0 s greye
                            "failed, ESP-NOW restarted 2 times, no reboot"), got
 print("   two grey-outs before it reports: one account covering both    OK")
 
+# A report held up on the way.  2026-10-08 the Foyer's link to the hub stalled
+# for six minutes, and cam5's report from 08:49 arrived at 08:56 with the rest
+# of the queue.  It was taken for the account — "0 sends failed ... so the
+# silence was on the way to it" — when the next, two seconds later, had 1,811.
+mm, link, on, off = fresh()
+at(0);      hear(link, 5, Cmd.HEALTH, health(BRIDGE, 56628, txfail=9))   # 08:49:43.9
+at(8);      hear(link, 5)
+at(11.2);   mm._heartbeat()                                             # 08:49:55: greyed
+at(390.25); hear(link, 5)                                               # 08:56:14: back
+at(390.69); hear(link, 5, Cmd.HEALTH, health(BRIDGE, 56638, txfail=9))   # built 08:49:53
+assert [g for g in lines.take() if "its own account" in g[1]] == [], \
+    "a report from before it came back was taken for its account"
+at(392.76); hear(link, 5, Cmd.HEALTH, health(BRIDGE, 57021, txfail=1820, reinits=6))
+got = lines.take()
+assert got == [("INFO", "PRESENCE cam5 — its own account of the 6 min 19 s greyed: 1811 "
+                        "sends failed, ESP-NOW restarted 6 times, no reboot")], got
+print("   a report from before it came back, delivered late, is passed")
+print("   over; the next one gives the account                          OK")
+
+# One built after it came back is its account even if it arrives late.
+mm, link, on, off = fresh()
+at(0);  hear(link, 5, Cmd.HEALTH, health(BRIDGE, 5000, txfail=9))
+at(4);  mm._heartbeat()
+at(10); hear(link, 5)                                                   # back
+at(15); hear(link, 5, Cmd.HEALTH, health(BRIDGE, 5011, txfail=12))      # built at 11
+got = lines.take()
+assert got[-1] == ("INFO", "PRESENCE cam5 — its own account of the 6.0 s greyed: 3 sends "
+                           "failed, no ESP-NOW restart, no reboot"), got
+print("   one built after it came back is used, late or not             OK")
+
 # The counters' edges: tx_fail is 16 bits, the restart count stops at 15.
 mm, link, on, off = fresh()
 at(0); hear(link, 1, Cmd.HEALTH, health(BRIDGE, 100, txfail=65530, reinits=2))

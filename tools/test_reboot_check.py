@@ -76,6 +76,26 @@ for was, now, want, why in cases:
         print(f"   {why:52} {'reboot' if want else 'not a reboot':12} OK")
 assert not bad, "\n".join(bad)          # every case that failed, not just the first
 
+# held_up(): a report built before the node was heard again, delivered late.
+from comms.reboot_check import held_up
+for was, now, back, want, why in [
+    (R(56628, 9, 1, 0.0), R(56638, 9, 1, 390.7), 390.25, True,
+     "cam5's 08:49 report, delivered at 08:56"),
+    (R(56628, 9, 1, 0.0), R(57021, 1820, 1, 392.8), 390.25, False,
+     "its next, built after it came back"),
+    (R(5000, 9, 1, 0.0), R(5016, 9, 1, 16.0), 13.5, False,
+     "an ordinary report after a grey-out"),
+    (R(1000, 0, 1, 0.0), R(1008, 0, 1, 12.0), 10.0, False,
+     "8 s on, back at 10 s: within the slack"),
+    (R(1000, 0, 1, 0.0), R(1007, 0, 1, 12.0), 10.0, True,
+     "7 s on, back at 10 s: built before"),
+    (R(3, 0, 3, 0.0), R(3, 0, 3, 15.0), 13.0, False,
+     "younger than the silence: could have rebooted"),
+]:
+    got = held_up(was, now, back)
+    assert got == want, f"{why}: got {got}, want {want}"
+    print(f"   {why:52} {'held up' if want else 'not held up':12} OK")
+
 # ---- 2. the real bridge -------------------------------------------------------------
 print("\n2. a mount crashing twice, through the real Bridge:")
 from comms import bridge as B
