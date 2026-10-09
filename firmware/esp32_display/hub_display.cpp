@@ -3316,22 +3316,34 @@ void hub_display_init(hub_send_fn_t send_cb) {
     Serial.println("[DISP] hub_display_init complete");
 }
 
+// How long a tile the hub has stopped updating stays lit.  The hub is the one
+// that decides a mount has gone — after MOUNT_PRESENCE_TIMEOUT_MS of silence —
+// and says so with SET_DISCONNECTED, then repeats it every 5 s for every mount
+// it considers offline (the reconciliation sweep in esp32_hub_eth.ino).  So
+// this is only for a hub that has stopped talking to the display, and it waits
+// out the hub's verdict and one repeat of it.
+//
+// It was 5000 ms, from when mounts streamed STATUS many times a second.  An idle
+// mount now sends one every MOUNT_STATUS_REFRESH_MS — also 5 s — so a single
+// late or lost STATUS, or an update dropped while LVGL held its mutex, blanked a
+// working mount's tile for a second while the hub and the PC saw nothing wrong
+// (the 2026-10-09 concert).  The third timeout that the 5 s refresh broke.
+#define CAM_STALE_MS  (MOUNT_PRESENCE_TIMEOUT_MS + 5000UL)
+
 void hub_ui_tick() {
     // lv_timer_handler() is driven by lvgl_task_fn — no LVGL work here.
     //
-    // Staleness sweep: a cam tile is only ever cleared by SET_DISCONNECTED from
-    // the hub, but that message is sent once and can be lost (this side drops it
-    // if the LVGL mutex is busy >100 ms; the hub forgets its state on reboot).
-    // A lost clear used to latch a phantom "connected" tile forever — the ghost
-    // cam3 0 dBm/JOGGING bug.  Self-heal instead: mounts stream STATUS →
-    // UPDATE_CAM many times per second while genuinely connected, so any tile
-    // not refreshed within 5 s is stale and gets cleared locally.
+    // Staleness sweep: a cam tile is cleared by SET_DISCONNECTED from the hub,
+    // which can be lost (this side drops it if the LVGL mutex is busy >100 ms)
+    // or never come (a hub that has stopped).  A lost clear used to latch a
+    // phantom "connected" tile forever — the ghost cam3 0 dBm/JOGGING bug — so
+    // a tile not refreshed for CAM_STALE_MS is cleared here as well.
     static uint32_t _last_stale_check_ms = 0;
     uint32_t now = millis();
     if (now - _last_stale_check_ms < 1000) return;
     _last_stale_check_ms = now;
     for (int i = 0; i < 5; i++) {
-        if (_cam[i].connected && now - _cam[i].last_seen_ms > 5000)
+        if (_cam[i].connected && now - _cam[i].last_seen_ms > CAM_STALE_MS)
             hub_ui_set_disconnected(i + 1);
     }
 }
