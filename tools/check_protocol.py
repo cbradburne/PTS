@@ -169,6 +169,8 @@ SCALAR_MAP = {
     "MOUNT_WEV_WIFI_READY":          ("MOUNT_WEV_WIFI_READY", True),
     "MOUNT_WEV_WIFI_OFF":            ("MOUNT_WEV_WIFI_OFF", True),
     "HEALTH_BRIDGE_TAIL_LEN":        ("HEALTH_BRIDGE_TAIL_LEN", True),
+    "HEALTH_PACE_OFF":               ("HEALTH_PACE_OFF", True),
+    "MOUNT_TX_HELD":                 ("MOUNT_TX_HELD", True),
     # Names, held by the hub: the limits size a wire record at both ends, and
     # the sentinel addresses every name packet.
     "HUB_SENTINEL":                  ("HUB_SENTINEL", True),
@@ -306,9 +308,9 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
         "health_bridge_tail": (2, 0x0203, Cmd.HEALTH,
                                struct.pack(">BBIIIHHbBI", 1, 1, 36000, 8400000,
                                            8390000, 10, 3, -33, 0x02, 0x07010010)
-                               + struct.pack(">IIIHHHHHHHHHH", 142000, 118000, 0xF00D,
+                               + struct.pack(">IIIHHHHHHHHHHHH", 142000, 118000, 0xF00D,
                                              2, 0x04D2, 12288, 3, 87, 0x0102,
-                                             0x0B0C, 41, 0xFFFF, 0x0D0E)),
+                                             0x0B0C, 41, 0xFFFF, 0x0D0E, 0x0E0F, 5)),
         "mount_event_nomem": (1, 0x0A0B, Cmd.MOUNT_EVENT,
                               bytes([pyproto.MOUNT_EVENT_NOMEM_REBOOT, 0x00, 0x03,
                                      0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00,
@@ -484,6 +486,13 @@ def check_golden(pyproto):
         if ((ht.hb_sent, ht.hb_stale, ht.hb_stale_busy, ht.probe_stale)
                 != (0x0B0C, 41, 0xFFFF, 0x0D0E)):
             fail("decode_health() misread the heartbeat counts in the C-built tail")
+        if (ht.pace_waited, ht.pace_deepest) != (0x0E0F, 5):
+            fail("decode_health() misread the pacing counts in the C-built tail")
+        # The heartbeats' firmware (32 bytes), every mount until pacing ships,
+        # keeps its fields and gains no pacing.
+        h32 = pyproto.decode_health(c_pkts["health_bridge_tail"][7:-2][:24 + 32])
+        if h32.probe_stale != 0x0D0E or h32.pace_deepest is not None:
+            fail("decode_health() mishandles the 32-byte tail of the heartbeats' firmware")
         # A tail from 466477d (16 bytes) must still read its fields, and none
         # of the ladder's.
         h16 = pyproto.decode_health(c_pkts["health_bridge_tail"][7:-2][:24 + 16])

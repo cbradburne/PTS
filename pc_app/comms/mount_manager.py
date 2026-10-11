@@ -71,7 +71,7 @@ from .protocol import (
     MOUNT_SCAN_BOOT, MOUNT_SCAN_SILENT, MOUNT_SCAN_RESCAN, MOUNT_SCAN_SETUP,
     MOUNT_SCAN_BUTTON, MOUNT_WEV_SCAN_DONE, MOUNT_WEV_STA_START, MOUNT_WEV_STA_STOP,
     MOUNT_WEV_STA_CONNECTED, MOUNT_WEV_STA_DISCONNECTED, MOUNT_WEV_WIFI_READY,
-    MOUNT_WEV_WIFI_OFF,
+    MOUNT_WEV_WIFI_OFF, MOUNT_TX_HELD,
 )
 
 
@@ -131,6 +131,11 @@ def _espnow_err_text(refused: int, err: int) -> str:
     """
     if not refused:
         return "the stack accepted every send (0 refused) — TX stopped below that"
+    if err == MOUNT_TX_HELD:
+        # Not the stack: the mount's own pacing held them, behind a send the
+        # radio never finished (shared/tx_pacer.h).
+        return (f"{refused} sends HELD by the mount's pacing — the one in flight "
+                f"never finished")
     name = _ESPNOW_ERRS.get(err, f"unknown error 0x{err:04X}")
     return f"{refused} sends REFUSED by the stack, last: {name}"
 
@@ -395,8 +400,18 @@ def _nomem_event_text(kind: int, b: bytes, txf: int, rei: int, ref: int,
     snap_end = MOUNT_EVENT_PAYLOAD_LEN + MOUNT_EVENT_NOMEM_SNAP_LEN
     lad = (decode_mount_nomem_ladder(b[snap_end:])
            if len(b) >= MOUNT_EVENT_NOMEM_PAYLOAD_LEN else None)
+    # On a paced mount (shared/tx_pacer.h) the stack is never asked for a second
+    # send while one is out, so it does not refuse: the mount HOLDS the sends
+    # behind one the radio never finished, and says so with MOUNT_TX_HELD.  The
+    # run, the ladder and the reboot are the same; the words must not be.
+    held = err == MOUNT_TX_HELD
+    first_ev = "the first held send" if held else "the first refusal"
     if kind == MOUNT_EVENT_NOMEM_CURED:
-        head = "NO_MEM ENDED WITHOUT A REBOOT"
+        head = ("A STALLED RADIO RECOVERED WITHOUT A REBOOT" if held
+                else "NO_MEM ENDED WITHOUT A REBOOT")
+    elif lad is not None and held:
+        head = ("REBOOTED ON A STALLED RADIO — a send went out and never finished, "
+                "every send after it was held for 3 s, and the ladder did not end it")
     elif lad is not None:
         head = ("REBOOTED ON REFUSED SENDS — every send refused for lack of memory "
                 "(NO_MEM) for 3 s, and the ladder did not end it")
@@ -430,7 +445,7 @@ def _nomem_event_text(kind: int, b: bytes, txf: int, rei: int, ref: int,
                    f"~{due:.0f} at this boot's average rate — the radio had "
                    f"nearly stopped finishing sends")
     elif s.cb_during:
-        verdict = (f"sends were still COMPLETING after the first refusal "
+        verdict = (f"sends were still COMPLETING after {first_ev} "
                    f"({s.cb_during} in {span}, ~{due:.0f} at this boot's "
                    f"average rate) — the queue was moving")
     elif s.in_flight:
@@ -449,15 +464,16 @@ def _nomem_event_text(kind: int, b: bytes, txf: int, rei: int, ref: int,
     sect = Bridge._MOUNT_SECTION_NAMES.get(s.loop_section, str(s.loop_section))
     until = "the reboot" if kind != MOUNT_EVENT_NOMEM_CURED else "the end"
     detail = (
-        f"at the first refusal: up {s.uptime_s / 3600:.2f}h, {s.accepted} sends "
+        f"at {first_ev}: up {s.uptime_s / 3600:.2f}h, {s.accepted} sends "
         f"accepted | last completion {_ms(s.since_cb_ms)} before, last accepted "
         f"send {_ms(s.since_ok_ms)} before, last frame heard {_ms(s.since_rx_ms)} "
         f"before | in flight {s.in_flight}, leak floor {s.leak_floor} | iram "
         f"{_kb(s.iram_free)} free (lowest {_kb(s.iram_min)}), largest block "
         f"{_kb(s.iram_largest)} | WiFi channel {s.chan_now} (hub {s.chan_hub}) | "
         f"worst loop {s.loop_max_ms} ms in '{sect}' | BLE: {_ble_activity(s.ble)} "
-        f"| refused first: {first} || until {until}: {s.refused_during} "
-        f"refused, {s.cb_during} completions, {s.rx_during} frames heard || "
+        f"| {'held' if held else 'refused'} first: {first} || until {until}: "
+        f"{s.refused_during} {'held' if held else 'refused'}, {s.cb_during} "
+        f"completions, {s.rx_during} frames heard || "
         f"{since_boot}")
     return [line for line in (head, lines_ladder, detail) if line]
 

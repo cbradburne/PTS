@@ -872,6 +872,10 @@ class HealthPayload:
     hb_stale:            Optional[int] = None   # ...sent only because `now` was stale
     hb_stale_busy:       Optional[int] = None   # ...with a send already in flight
     probe_stale:         Optional[int] = None   # Teensy probes, same stale `now`
+    # The send pacing (shared/tx_pacer.h), this window: sends that waited for the
+    # one in flight, and the most waiting at once (HEALTH_PACE_OFF: not paced).
+    pace_waited:         Optional[int] = None
+    pace_deepest:        Optional[int] = None
 
     @property
     def anomaly(self) -> bool:
@@ -910,10 +914,13 @@ def decode_health(payload: bytes) -> HealthPayload:
         (tail["reserve_held"], tail["nomem_cured"], tail["scan_devices"],
          tail["scan_freed_kb"]) = struct.unpack(
             ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V1:24 + _HEALTH_BRIDGE_TAIL_V2])
-    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+    if len(payload) >= 24 + _HEALTH_BRIDGE_TAIL_V3:
         (tail["hb_sent"], tail["hb_stale"], tail["hb_stale_busy"],
          tail["probe_stale"]) = struct.unpack(
-            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V2:24 + HEALTH_BRIDGE_TAIL_LEN])
+            ">HHHH", payload[24 + _HEALTH_BRIDGE_TAIL_V2:24 + _HEALTH_BRIDGE_TAIL_V3])
+    if len(payload) >= 24 + HEALTH_BRIDGE_TAIL_LEN:
+        tail["pace_waited"], tail["pace_deepest"] = struct.unpack(
+            ">HH", payload[24 + _HEALTH_BRIDGE_TAIL_V3:24 + HEALTH_BRIDGE_TAIL_LEN])
     return HealthPayload(
         node_type=node_type, reset_reason=reset_reason, uptime_s=uptime_s,
         free_heap=free_heap, min_free_heap=min_free, loop_max_ms=loop_max_ms,
@@ -1956,9 +1963,17 @@ MOUNT_WEV_WIFI_OFF              = 7
 # and what the last camera scan held and gave back (to 24, since the ladder),
 # then the heartbeats and probes sent since the last report and how many went
 # on a stale clock (to 32, since 2026-09-27).
-HEALTH_BRIDGE_TAIL_LEN        = 32
+HEALTH_BRIDGE_TAIL_LEN        = 36
 _HEALTH_BRIDGE_TAIL_V1        = 16
 _HEALTH_BRIDGE_TAIL_V2        = 24
+_HEALTH_BRIDGE_TAIL_V3        = 32
+# ...then, since 2026-10-11, what the send pacing held this window (to 36):
+# sends that waited, and the most waiting at once — HEALTH_PACE_OFF from a build
+# that does not pace.
+HEALTH_PACE_OFF               = 0xFFFF
+# Not an esp_err_t: the mount's own pacing held a send behind one that never
+# finished (shared/tx_pacer.h).  ESP-NOW's own codes are 0x3065-0x306D.
+MOUNT_TX_HELD                 = 0xF0F0
 CAM_CONTROL_MAX_LEN     = 40   # longest BMD command we relay
 
 

@@ -42,7 +42,7 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, bridge_reinits,
                        ESPNOW_TX_QUEUE_CEILING,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
-                       decode_mount_outage, EspnowRejectCode)
+                       decode_mount_outage, EspnowRejectCode, HEALTH_PACE_OFF)
 from .reboot_check import NodeReport, rebooted
 from .startup_quiet import StartupQuiet, start_up_reason, START_UP_S
 
@@ -1273,6 +1273,14 @@ class Bridge:
                     n32txt += (" (%d on a stale clock, %d with a send in flight)"
                                " | stale Teensy probes %d") % (
                         h.hb_stale, h.hb_stale_busy, h.probe_stale)
+            # Send pacing (shared/tx_pacer.h), on firmware that has it: says the
+            # mount is on the paced build, and how often a send had to wait for
+            # the one in flight this window.  Nothing on a build without it.
+            if h.pace_deepest is not None and h.pace_deepest != HEALTH_PACE_OFF:
+                n32txt += (" | paced: %d%s waited (queue up to %d)" % (
+                               h.pace_waited, "+" if h.pace_waited == 0xFFFF else "",
+                               h.pace_deepest)
+                           if h.pace_waited else " | paced, none waited")
         elif h.node_type == HEALTH_NODE_SATELLITE:
             # Same packing, different pair: refusals high, self-restart streak
             # low.  The streak is spelled out rather than left as a number

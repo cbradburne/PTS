@@ -1121,7 +1121,13 @@ typedef struct __attribute__((packed)) {
 //   [52..53] ...of those, sent with a send already in        u16 sat
 //            flight — through the cap the guard enforces
 //   [54..55] Teensy probes sent for the same stale `now`     u16 sat
-#define HEALTH_BRIDGE_TAIL_LEN  32
+// ...added 2026-10-11 with send pacing (shared/tx_pacer.h), since the previous
+// report like the four above:
+//   [56..57] sends that waited for the one in flight         u16 sat
+//   [58..59] the most waiting at once; 0xFFFF from a build    u16
+//            that does not pace (ESPNOW_TX_PACED 0)
+#define HEALTH_BRIDGE_TAIL_LEN  36
+#define HEALTH_PACE_OFF         0xFFFF
 typedef struct {
     uint32_t iram_free;
     uint32_t iram_min;
@@ -1136,7 +1142,15 @@ typedef struct {
     uint16_t hb_stale;
     uint16_t hb_stale_busy;
     uint16_t probe_stale;
+    uint16_t pace_waited;
+    uint16_t pace_deepest;
 } HealthBridgeTail;
+
+// Not an esp_err_t: the mount's own pacing held a send because the one before it
+// never finished (see shared/tx_pacer.h).  Reported where esp_now_send()'s error
+// goes — the last refusal — so a stall under pacing reads as what it is, and not
+// as the stack running out of memory.  ESP-NOW's own codes are 0x3065-0x306D.
+#define MOUNT_TX_HELD           0xF0F0
 
 // The moment of a mount's first NO_MEM refusal — see MOUNT_EVENT_NOMEM_REBOOT
 // for what each field is for.  The last three are filled in at the reboot.
@@ -1498,6 +1512,8 @@ static inline void encode_health_bridge_tail(uint8_t p[HEALTH_BRIDGE_TAIL_LEN],
     write_be16(p + 26, t->hb_stale);
     write_be16(p + 28, t->hb_stale_busy);
     write_be16(p + 30, t->probe_stale);
+    write_be16(p + 32, t->pace_waited);
+    write_be16(p + 34, t->pace_deepest);
 }
 
 // The ladder, written straight after the snapshot.

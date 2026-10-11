@@ -43,6 +43,8 @@
 #include "../shared/protocol.h"
 #include "../shared/link_run.h"     // a run of unanswered sends, for MOUNT_EVENT_LINK_RUN
 #include "../shared/clock_age.h"    // ages against stamps another task writes
+#include "../shared/tx_pacer.h"     // one ESP-NOW send in flight at a time
+#include <new>                      // placement new: the pacer lives in PSRAM
 #include "../shared/pos_run.h"      // cycling stored positions — the mount's own run
 #include "../shared/crash_report.h"
 #include "ble_camera.h"   // Blackmagic camera control over BLE
@@ -1745,11 +1747,34 @@ static void nomem_send_cured() {
     send_to_hub(CMD_MOUNT_EVENT, p, sizeof(p));
 }
 
-// Every ESP-NOW send to the hub goes through here, so a refusal is counted
-// exactly once and in one place.  Returning void keeps the call sites unchanged:
-// none of them can do anything useful about a refusal in the moment — the point
-// is that the refusal is now visible afterwards instead of invisible always.
-static void espnow_tx(const uint8_t *buf, uint16_t n) {
+// ── Send pacing ─────────────────────────────────────────────────────────────
+// Every send waits for the one in flight — shared/tx_pacer.h has why.  The cap
+// above held back command replies and the routine reports; the camera's status
+// forward (the NimBLE task, core 0) and the Teensy's forwarded frames still went
+// out at once, from two cores, and both stalls the radio history caught were
+// first refused on a CAM_STATUS.
+//
+// Set to 0 to send as before: the switch for the trial on cam5 (2026-10-11).  It
+// paces against ESPNOW_TX_INFLIGHT_CAP, so that must stay 1.
+#ifndef ESPNOW_TX_PACED
+#define ESPNOW_TX_PACED 1
+#endif
+// Room for the few seconds a stall takes to be caught, not a working queue: the
+// radio sends one every few ms, faster than a camera's burst of notifications.
+#define PACE_DEPTH    16
+// Sends waiting, and nothing finished or gone out for this long: the radio has
+// stopped finishing sends.  The longest wait for a send result the rig has
+// shown, mid-scan, is 306 ms; while a link is merely bad, results keep coming.
+#define PACE_STUCK_MS 1000UL
+typedef TxPacer<PACE_DEPTH, ESPNOW_MAX_LEN> Pacer;
+static Pacer            *_pacer   = nullptr;   // made in setup(); null sends unpaced
+static SemaphoreHandle_t _tx_lock = nullptr;   // the send path runs on both cores
+
+// The one place a frame goes to the radio, so a refusal is counted exactly once
+// and in one place.  Returning void keeps the call sites unchanged: none of them
+// can do anything useful about a refusal in the moment — the point is that the
+// refusal is visible afterwards instead of invisible always.
+static void espnow_send_now(const uint8_t *buf, uint16_t n) {
     if (_rf_tx_attempts < 0xFFFF) _rf_tx_attempts = _rf_tx_attempts + 1;
     esp_err_t e = esp_now_send(_hub_mac, buf, n);
     if (e == ESP_OK) {
@@ -1771,6 +1796,72 @@ static void espnow_tx(const uint8_t *buf, uint16_t n) {
         // run that ends between two ladder passes must still count as ended.
         if (e == ESP_ERR_ESPNOW_NO_MEM) nomem_note(n > 6 ? buf[6] : 0);
     }
+}
+
+#if ESPNOW_TX_PACED
+// Sends are waiting, and nothing has finished or gone out for PACE_STUCK_MS.
+// Both stamps are written from other tasks, so they are aged with clock_age_ms.
+static bool pace_stuck() {
+    uint32_t now = millis();
+    return tx_pacer_stuck(_pacer->count != 0,
+                          clock_age_ms(now, _espnow_cb_last_ms),
+                          clock_age_ms(now, _espnow_ok_last_ms), PACE_STUCK_MS);
+}
+
+// A send the pacing could not let go — dropped for want of room, or waiting
+// behind one the radio never finished.  Counted as a refusal, under
+// MOUNT_TX_HELD, so the NO_MEM ladder (snapshot at the first, reboot at 3 s)
+// treats a stalled radio as it did when the stack's own queue filled and
+// refused, and the report says which it was.
+static void pace_held(uint8_t cmd, bool dropped) {
+    _espnow_tx_refused  = _espnow_tx_refused + 1;
+    _espnow_last_tx_err = MOUNT_TX_HELD;
+    if (dropped && _rf_tx_failed < 0xFFFF) _rf_tx_failed = _rf_tx_failed + 1;
+    link_refused();
+    nomem_note(cmd);
+}
+
+// With the lock held: whatever's turn it is, once nothing is out.
+static void pace_pump_locked() {
+    uint8_t  f[ESPNOW_MAX_LEN];
+    uint16_t fn;
+    while (_pacer->next(espnow_tx_saturated(), f, &fn)) espnow_send_now(f, fn);
+}
+#endif
+
+// Every send, from either core.
+static void espnow_tx(const uint8_t *buf, uint16_t n) {
+#if ESPNOW_TX_PACED
+    if (_pacer && _tx_lock) {
+        xSemaphoreTake(_tx_lock, portMAX_DELAY);
+        uint8_t cmd = n > 6 ? buf[6] : 0;
+        switch (_pacer->offer(buf, n, espnow_tx_saturated())) {
+        case Pacer::SEND_NOW: espnow_send_now(buf, n);            break;
+        case Pacer::DROPPED:  pace_held(cmd, true);               break;
+        case Pacer::WAITING:  if (pace_stuck()) pace_held(cmd, false); break;
+        }
+        pace_pump_locked();
+        xSemaphoreGive(_tx_lock);
+        return;
+    }
+#endif
+    espnow_send_now(buf, n);
+}
+
+// From loop(), every pass: send whatever's turn it is, and while a stall lasts
+// keep it on the ladder's clock, so the reboot comes 3 s after it began even if
+// nothing new is offered meanwhile.
+static void espnow_tx_pump() {
+#if ESPNOW_TX_PACED
+    if (!_pacer || !_tx_lock) return;
+    xSemaphoreTake(_tx_lock, portMAX_DELAY);
+    pace_pump_locked();
+    if (pace_stuck()) {
+        _espnow_last_tx_err = MOUNT_TX_HELD;
+        nomem_note(_pacer->front_byte(6));
+    }
+    xSemaphoreGive(_tx_lock);
+#endif
 }
 
 static void send_to_hub(CmdType cmd, const uint8_t *payload, uint8_t plen) {
@@ -1962,6 +2053,18 @@ static void send_health(bool anomaly) {
     t.hb_stale            = _hb_stale;
     t.hb_stale_busy       = _hb_stale_busy;
     t.probe_stale         = _probe_stale;
+    // What the pacing held, this window — or HEALTH_PACE_OFF, so the log can
+    // tell a mount on the trial build from one that is not.
+    t.pace_waited         = 0;
+    t.pace_deepest        = HEALTH_PACE_OFF;
+#if ESPNOW_TX_PACED
+    if (_pacer && _tx_lock) {
+        uint16_t dropped;   // reported as refusals, in the stall's own report
+        xSemaphoreTake(_tx_lock, portMAX_DELAY);
+        _pacer->take_stats(&t.pace_waited, &t.pace_deepest, &dropped);
+        xSemaphoreGive(_tx_lock);
+    }
+#endif
     encode_health_bridge_tail(p + 24, &t);
     send_to_hub(CMD_HEALTH, p, sizeof(p));   // no-op while unpaired (send_to_hub guards)
     _health_last_ms     = millis();
@@ -4131,6 +4234,17 @@ void setup() {
 
     _espnow_rx_q = xQueueCreate(ESPNOW_RX_DEPTH, sizeof(EspNowMsg));
 
+#if ESPNOW_TX_PACED
+    // Before the first send.  The queue goes in PSRAM: internal RAM is what the
+    // WiFi driver allocates from.  If either cannot be made the mount sends
+    // unpaced, exactly as before, rather than not at all.
+    _tx_lock = xSemaphoreCreateMutex();
+    if (void *mem = heap_caps_malloc(sizeof(Pacer), MALLOC_CAP_SPIRAM))
+        _pacer = new (mem) Pacer();
+    Serial.printf("[ESP-NOW] send pacing %s\n",
+                  (_pacer && _tx_lock) ? "on" : "OFF — could not allocate it");
+#endif
+
     if (esp_now_init() != ESP_OK) {
         Serial.println("ESP-NOW init failed");
         while (true) delay(1000);
@@ -4220,6 +4334,7 @@ void loop() {
                            if (d_ > _msec_max[sec]) _msec_max[sec] = d_; _mark = n_; } while (0)
     esp_task_wdt_reset();
     ble_cam_poll();
+    espnow_tx_pump();       // whatever send is waiting for its turn
 
     // Health telemetry: worst gap between loop iterations ≈ worst iteration.
     {

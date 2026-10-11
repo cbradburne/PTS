@@ -62,7 +62,9 @@ def body(src: str, head: str) -> str:
 
 # ---- 1. what arms the clock, and what ends it --------------------------------
 print("1. the clock:")
-tx = body(INO, "static void espnow_tx(")
+# The radio call itself: since send pacing (2026-10-11) espnow_tx() only hands
+# a send to the queue, and espnow_send_now() is the one place that sends.
+tx = body(INO, "static void espnow_send_now(")
 assert "if (e == ESP_ERR_ESPNOW_NO_MEM) nomem_note(" in tx, \
     "the clock is not started under an ESP_ERR_ESPNOW_NO_MEM guard in the send\n" \
     "    path. Armed by any refusal, the mount's own reinit (NOT_INIT) or a peer\n" \

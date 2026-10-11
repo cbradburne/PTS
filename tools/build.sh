@@ -202,6 +202,11 @@ props_for() {
     # same rig rather than argued about.
     #   TEENSY_FWD_FILTER=0 tools/build.sh flash amoled
     [ -n "${TEENSY_FWD_FILTER:-}" ] && _f="$_f -DTEENSY_FWD_FILTER=${TEENSY_FWD_FILTER}"
+    # ESPNOW_TX_PACED=0 sends as before, without the queue that holds every send
+    # until the one in flight has finished (shared/tx_pacer.h).  Default 1.  The
+    # health line says which a mount is running: "paced ..." or nothing.
+    #   ESPNOW_TX_PACED=0 tools/build.sh flash amoled
+    [ -n "${ESPNOW_TX_PACED:-}" ] && _f="$_f -DESPNOW_TX_PACED=${ESPNOW_TX_PACED}"
 
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""

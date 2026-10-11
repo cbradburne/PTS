@@ -32,7 +32,9 @@ INO = (REPO / "firmware/esp_mount_amoled175/esp_mount_amoled175.ino").read_text(
 
 # ---- 1. both halves of the subtraction are counted -------------------------
 print("1. what the bridge counts:")
-send = INO[INO.index("static void espnow_tx("):]
+# The radio call itself: since send pacing (2026-10-11) espnow_tx() only hands
+# a send to the queue, and espnow_send_now() is the one place that sends.
+send = INO[INO.index("static void espnow_send_now("):]
 send = send[:send.index("\n}")]
 assert "_espnow_issued = _espnow_issued + 1;" in send, \
     "sends handed to the stack are not counted, so there is nothing to subtract\n" \
