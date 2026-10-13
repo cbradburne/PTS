@@ -128,8 +128,11 @@
 //#define ETH_SUBNET     "255.255.255.0"
 //#define ETH_GATEWAY    "192.169.1.1"
 
+#include "../shared/net_rx_count.h"   // what arrives over the wire, for CMD_HUB_NET
 #if HUB_WIRED
 #include "../shared/board_eth.h"   // W5500 pins and bring-up — the wired board only
+#include <esp_netif_net_stack.h>   // esp_netif_get_netif_impl(): the lwIP interface under ETH
+#include <lwip/netif.h>
 #endif
 #include "../shared/crash_report.h"   // RelayMsg — must be last so it follows all other includes
 
@@ -1856,6 +1859,123 @@ static void send_mount_outage() {
     uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_MOUNT_OUTAGE, buf, sizeof(buf));
     broadcast_to_all(raw, n);
     _ws.binaryAll(raw, (size_t)n);
+}
+
+// ---------------------------------------------------------------------------
+// What arrives over the wire, and who is connected (CMD_HUB_NET)
+// ---------------------------------------------------------------------------
+// From 16:42:15 on 2026-10-12 this loop ran at a third of its speed and
+// everything arriving over the wire ran late, through a reflash, while the
+// hub's own traffic out was fine.  The W5500 hands every frame it accepts to
+// this processor, and the network is the venue's.  So: count what arrives
+// (shared/net_rx_count.h), say what the link negotiated, and count the TCP
+// connections coming and going.  Each satellite holds one on 7777 for its
+// phones, and the hub's display showed neither of them up.
+static NetRx<8>     _netrx;
+static portMUX_TYPE _netrx_mux       = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t     _netrx_window_ms = 0;      // when the current window began
+static uint8_t      _tcp_opened = 0, _tcp_dropped = 0, _tcp_turned_away = 0;
+static uint8_t      _tcp_last_ip[4] = {};
+
+static inline void tcp_count(uint8_t &v) { if (v < 255) v++; }
+
+// HUB_NET_COUNT=0 builds the hub without the counter in front of its network
+// interface, every frame going straight to the stack as before (tools/build.sh).
+// The report still goes out, marked not counted, so the log says which build a
+// hub is running rather than reading as a quiet network.
+#ifndef HUB_NET_COUNT
+#define HUB_NET_COUNT 1
+#endif
+
+#if HUB_WIRED && HUB_NET_COUNT
+static netif_input_fn _netrx_next = nullptr;   // the stack's own input; every frame still goes there
+
+// The lwIP interface under ETH; null until ETH.begin() has made one.
+static struct netif *netrx_if() {
+    esp_netif_t *en = ETH.netif();
+    return en ? (struct netif *)esp_netif_get_netif_impl(en) : nullptr;
+}
+
+// Every frame the W5500 hands up passes through here on its way into the stack,
+// in the Ethernet driver's task.  Count it and pass it on; nothing else.
+static err_t netrx_input(struct pbuf *p, struct netif *inp) {
+    if (p) {
+        portENTER_CRITICAL(&_netrx_mux);
+        _netrx.note((const uint8_t *)p->payload, p->len, p->tot_len);
+        portEXIT_CRITICAL(&_netrx_mux);
+    }
+    err_t e = _netrx_next(p, inp);
+    if (e != ERR_OK) {
+        // The stack would not take it - its queue was full - so it is gone, and
+        // the caller frees it.  For a TCP segment that is a resend a second or
+        // more later: the lateness this was built to explain.
+        portENTER_CRITICAL(&_netrx_mux);
+        _netrx.refused_one();
+        portEXIT_CRITICAL(&_netrx_mux);
+    }
+    return e;
+}
+
+// Put the counter in front of the Ethernet interface.  Called once a second:
+// the interface is created after ETH.begin() returns, and if it is ever rebuilt
+// the new one comes with the stack's own input back in place.
+static void netrx_hook() {
+    struct netif *n = netrx_if();
+    if (!n || !n->input) return;
+    portENTER_CRITICAL(&_netrx_mux);
+    _netrx.set_own(n->hwaddr);              // what "to the hub" means
+    portEXIT_CRITICAL(&_netrx_mux);
+    if (n->input == netrx_input) return;
+    _netrx_next = n->input;
+    __sync_synchronize();   // the driver task must not reach ours before it knows where to pass on
+    n->input = netrx_input;
+    Serial.println("[NET] counting what arrives over the wire");
+}
+#endif
+
+// With every loop report.  It carries the window's TCP connections too, so
+// those counts restart here as well.
+static void send_net_report() {
+    uint32_t now = millis();
+    portENTER_CRITICAL(&_netrx_mux);
+    NetRxWindow w = _netrx.take();
+    portEXIT_CRITICAL(&_netrx_mux);
+    uint32_t span = now - _netrx_window_ms;
+    _netrx_window_ms = now;
+
+    uint8_t link = 0;
+#if HUB_WIRED
+    if (ETH.linkUp()) {
+        link = HUB_NET_LINK_UP;
+        if (ETH.fullDuplex()) link |= HUB_NET_LINK_FULL;
+        uint16_t mbit = ETH.linkSpeed();
+        if (mbit == 100)     link |= HUB_NET_LINK_100;
+        else if (mbit == 10) link |= HUB_NET_LINK_10;
+    }
+#if HUB_NET_COUNT
+    // Said from the interface itself, not from a flag set when the hook went
+    // in: a rebuilt interface would leave such a flag claiming counts that were
+    // never taken.
+    struct netif *nif = netrx_if();
+    if (nif && nif->input == netrx_input) link |= HUB_NET_LINK_COUNTED;
+#endif
+#endif
+    NetTcpStats t = {};
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (_slots[i].active && _slots[i].client.connected()) t.now++;
+    size_t ws = _ws.count();
+    t.ws      = (uint8_t)(ws > 255 ? 255 : ws);
+    t.opened  = _tcp_opened;
+    t.dropped = _tcp_dropped;
+    t.refused = _tcp_turned_away;
+    memcpy(t.last_ip, _tcp_last_ip, 4);
+    _tcp_opened = _tcp_dropped = _tcp_turned_away = 0;
+
+    uint8_t buf[HUB_NET_PAYLOAD_LEN];
+    hub_net_encode(buf, w, span, link, t);
+    uint8_t raw[PKT_BUF_SIZE + 4];
+    uint16_t n = build_packet(raw, 0xFE, ++_pair_seq, CMD_HUB_NET, buf, sizeof(buf));
+    broadcast_to_all(raw, n);
 }
 
 // Called every loop.  Cheap: five compares.
@@ -4432,6 +4552,13 @@ void loop() {
     // like a satellite that is switched off, so it is worth a line in the log.
 #if HUB_WIRED
     eth_report_once_if_down(now, 8000);
+#if HUB_NET_COUNT
+    static uint32_t _netrx_hook_ms = 0;
+    if (now - _netrx_hook_ms >= 1000UL) {
+        _netrx_hook_ms = now;
+        netrx_hook();
+    }
+#endif
 #endif
 
     // Deferred restart after a rename (see the /hubname POST handler).  A full
@@ -4512,16 +4639,25 @@ void loop() {
     WiFiClient incoming = _tcp_server.accept();
     if (incoming) {
         bool placed = false;
+        IPAddress from = incoming.remoteIP();
         for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (!_slots[i].active || !_slots[i].client.connected()) {
+            bool ended = _slots[i].active && !_slots[i].client.connected();
+            if (!_slots[i].active || ended) {
+                if (ended) tcp_count(_tcp_dropped);   // gone before the TCP section noticed
                 _slots[i].client = incoming;
                 pkt_parser_init(&_slots[i].parser);
                 _slots[i].active = true; placed = true;
+                tcp_count(_tcp_opened);
+                for (int k = 0; k < 4; k++) _tcp_last_ip[k] = from[k];
                 Serial.printf("TCP client %d connected\n", i + 1);
                 break;
             }
         }
-        if (!placed) { incoming.stop(); Serial.println("Max TCP clients reached"); }
+        if (!placed) {
+            incoming.stop();
+            tcp_count(_tcp_turned_away);
+            Serial.println("Max TCP clients reached");
+        }
 
         // Rate-limited, because this is a RIG-WIDE burst on a per-client event:
         // an ESP-NOW peer teardown plus a 182-byte state dump for every mount,
@@ -4716,6 +4852,7 @@ void loop() {
         if (!_slots[i].active) continue;
         if (!_slots[i].client.connected()) {
             _slots[i].client.stop(); _slots[i].active = false;
+            tcp_count(_tcp_dropped);
             Serial.printf("TCP client %d disconnected\n", i + 1);
             continue;
         }
@@ -5067,6 +5204,7 @@ void loop() {
     if (millis() - _loop_report_ms >= LOOP_REPORT_MS) {
         _loop_report_ms = millis();
         send_loop_report();
+        send_net_report();
     }
     #undef MARK
 }

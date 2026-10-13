@@ -168,6 +168,7 @@ class Cmd(IntEnum):
     NAME_SET           = 0xAC   # client→hub: {cam, slot | 0xFF, len, UTF-8} repeated
     NAMES              = 0xAD   # hub→clients: one camera's names, the camera's own first
     NAMES_REV          = 0xAE   # hub→clients, 8B: rev u32 BE + named count + the hub's limits
+    HUB_NET            = 0xAF   # hub→clients, 72B: what reached it over the wire, its TCP clients
 
 
 # CMD_HEALTH node_type values (payload byte [0])
@@ -1868,6 +1869,29 @@ MOUNT_ROUTE_PAYLOAD_LEN   = 5    # one byte per cam
 MOUNT_OUTAGE_PER_MOUNT    = 12
 MOUNT_OUTAGE_PAYLOAD_LEN  = NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT
 MOUNT_OUTAGE_FLAG_NOW     = 0x01
+
+# CMD_HUB_NET — what reached the hub through its network port in one window,
+# and its TCP connections.  Layout in shared/protocol.h.
+HUB_NET_TOP_OFF           = 36
+HUB_NET_TOP_LEN           = 18
+HUB_NET_PAYLOAD_LEN       = 72
+HUB_NET_LINK_UP           = 0x80
+HUB_NET_LINK_FULL         = 0x40
+HUB_NET_LINK_COUNTED      = 0x20
+HUB_NET_LINK_100          = 0x02
+HUB_NET_LINK_10           = 0x01
+HUB_NET_TO_HUB            = 0
+HUB_NET_TO_ALL            = 1
+HUB_NET_TO_GROUP          = 2
+HUB_NET_TO_OTHER          = 3
+HUB_NET_P_NONE            = 0
+HUB_NET_P_ARP             = 1
+HUB_NET_P_UDP4            = 2
+HUB_NET_P_TCP4            = 3
+HUB_NET_P_IP4             = 4
+HUB_NET_P_UDP6            = 5
+HUB_NET_P_IP6             = 6
+HUB_NET_P_OTHER           = 7
 SAT_NAME_LEN              = 13   # 12 characters + NUL, as in the AP SSID
 SAT_SLOTS                 = 6
 SAT_NAMES_PAYLOAD_LEN     = SAT_SLOTS * SAT_NAME_LEN
@@ -2273,6 +2297,58 @@ def decode_mount_outage(payload: bytes) -> dict[int, dict]:
             "max_s":   int.from_bytes(e[8:10], "big"),
             "now":     now_down,
         }
+    return out
+
+
+def decode_hub_net(payload: bytes) -> dict:
+    """CMD_HUB_NET → the counts, the link, the TCP connections, and up to two
+    senders (busiest first; a slot with no frames is left out).
+
+    Every frame the hub's W5500 accepts crosses SPI to the processor that runs
+    the rig.  These say how many arrived and from whom, so a hub that slows down
+    while its own traffic is unchanged can be told apart from one the network
+    around it has started to load.
+    """
+    if len(payload) < HUB_NET_PAYLOAD_LEN:
+        raise ParseError(f"HUB_NET payload too short: {len(payload)}")
+
+    def u(a: int, b: int) -> int:
+        return int.from_bytes(payload[a:b], "big")
+
+    def ip(b: bytes) -> str:
+        return ".".join(str(x) for x in b) if any(b) else ""
+
+    out = {
+        "window_ms": u(0, 4),
+        "to_hub":    u(4, 8),
+        "broadcast": u(8, 12),
+        "multicast": u(12, 16),
+        "not_hub":   u(16, 20),
+        "bytes":     u(20, 24),
+        "refused":   u(24, 26),
+        "link":      payload[26],
+        "tcp_now":     payload[27],
+        "ws_now":      payload[28],
+        "tcp_opened":  payload[29],
+        "tcp_dropped": payload[30],
+        "tcp_refused": payload[31],
+        "tcp_last_ip": ip(payload[32:36]),
+        "top": [],
+    }
+    for k in range(2):
+        e = payload[HUB_NET_TOP_OFF + k * HUB_NET_TOP_LEN:
+                    HUB_NET_TOP_OFF + (k + 1) * HUB_NET_TOP_LEN]
+        frames = int.from_bytes(e[14:18], "big")
+        if not frames:
+            continue
+        out["top"].append({
+            "mac":    ":".join(f"{b:02x}" for b in e[0:6]),
+            "ip":     ip(e[6:10]),
+            "to":     e[10],
+            "proto":  e[11],
+            "port":   int.from_bytes(e[12:14], "big"),
+            "frames": frames,
+        })
     return out
 
 

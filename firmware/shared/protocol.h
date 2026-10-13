@@ -142,6 +142,60 @@
 #define MOUNT_OUTAGE_PAYLOAD_LEN    (NUM_MOUNTS * MOUNT_OUTAGE_PER_MOUNT)
 #define MOUNT_OUTAGE_FLAG_NOW       0x01
 
+// CMD_HUB_NET: what arrived through the hub's network port in one window, and
+// the TCP connections it holds.  Big-endian.
+//
+// From 16:42:15 on 2026-10-12 the hub ran its loop at a third of the speed it
+// had held for two weeks, and everything arriving over the wire came late — the
+// PC's commands, both satellites' reports — while everything it sent left on
+// time.  Its W5500 passes every frame it accepts across SPI to the processor
+// that runs the rig, and nothing counted them, so nothing could say whether the
+// venue's network had started sending the hub more.  Counted in
+// shared/net_rx_count.h.
+//   [0..3]   window_ms    u32  how long the counts below cover
+//   [4..7]   to_hub       u32  frames addressed to the hub
+//   [8..11]  broadcast    u32  frames to every device on the segment
+//   [12..15] multicast    u32  frames to a group address
+//   [16..19] not_hub      u32  frames for another device (0 while the W5500 filters)
+//   [20..23] bytes        u32  all of those frames, in bytes
+//   [24..25] refused      u16  frames the hub's network stack turned away (busy)
+//   [26]     link         HUB_NET_LINK_ bits; 0 = no wire up (the XIAO has none).
+//                         Without HUB_NET_LINK_COUNTED the counts are not counts:
+//                         nothing sat in front of the interface to take them.
+//   [27]     tcp_now      TCP clients now: the PC app and each satellite's web link
+//   [28]     ws_now       web-app pages connected straight to the hub now
+//   [29]     tcp_opened   connections accepted in the window      (stops at 255)
+//   [30]     tcp_dropped  connections that ended in the window    (stops at 255)
+//   [31]     tcp_refused  connections turned away, every slot full (stops at 255)
+//   [32..35] tcp_last_ip  where the last accepted connection came from; 0 = none yet
+//   [36..53] the busiest sender in the window, HUB_NET_TOP_LEN bytes:
+//              [0..5] MAC  [6..9] IPv4 (0 = none seen)  [10] HUB_NET_TO_ of its
+//              last frame  [11] HUB_NET_P_ of its last frame  [12..13] port:
+//              the UDP/TCP destination port, the IPv4 protocol number (P_IP4),
+//              the IPv6 next header (P_IP6), the ARP operation (P_ARP), or the
+//              ethertype (P_OTHER)  [14..17] frames u32 (0 = no such sender)
+//   [54..71] the next busiest, the same layout
+#define HUB_NET_TOP_OFF       36
+#define HUB_NET_TOP_LEN       18
+#define HUB_NET_PAYLOAD_LEN   72
+#define HUB_NET_LINK_UP       0x80
+#define HUB_NET_LINK_FULL     0x40   // full duplex; clear on an up link = half duplex
+#define HUB_NET_LINK_COUNTED  0x20   // the counter was in front of the interface
+#define HUB_NET_LINK_100      0x02
+#define HUB_NET_LINK_10       0x01
+#define HUB_NET_TO_HUB        0
+#define HUB_NET_TO_ALL        1      // broadcast
+#define HUB_NET_TO_GROUP      2      // multicast
+#define HUB_NET_TO_OTHER      3      // another device's unicast
+#define HUB_NET_P_NONE        0
+#define HUB_NET_P_ARP         1
+#define HUB_NET_P_UDP4        2
+#define HUB_NET_P_TCP4        3
+#define HUB_NET_P_IP4         4
+#define HUB_NET_P_UDP6        5
+#define HUB_NET_P_IP6         6
+#define HUB_NET_P_OTHER       7
+
 // Camera and position names, held by the hub so every PC app and phone shows
 // the same ones (CMD_NAMES_GET / NAME_SET / NAMES / NAMES_REV).
 //
@@ -782,6 +836,10 @@ typedef enum : uint8_t {
     // CMD_NAMES — a full WebSocket queue drops frames rather than disconnect —
     // sees the number move and asks again.
     CMD_NAMES_REV         = 0xAE,
+    // hub → clients, HUB_NET_PAYLOAD_LEN, with every loop report (30 s): what
+    // reached the hub through its network port and who sent the most of it,
+    // and the TCP connections it holds.  Layout with the HUB_NET_ constants.
+    CMD_HUB_NET           = 0xAF,
 
 
                                    //   0        = direct, on the hub's own ESP-NOW radio

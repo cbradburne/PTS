@@ -207,6 +207,11 @@ props_for() {
     # health line says which a mount is running: "paced ..." or nothing.
     #   ESPNOW_TX_PACED=0 tools/build.sh flash amoled
     [ -n "${ESPNOW_TX_PACED:-}" ] && _f="$_f -DESPNOW_TX_PACED=${ESPNOW_TX_PACED}"
+    # HUB_NET_COUNT=0 builds the hub without the counter in front of its network
+    # interface (shared/net_rx_count.h): every frame goes straight to the stack,
+    # as before.  Default 1.  The log's HUB NET line says "nothing counted".
+    #   HUB_NET_COUNT=0 tools/build.sh flash hubeth
+    [ -n "${HUB_NET_COUNT:-}" ] && _f="$_f -DHUB_NET_COUNT=${HUB_NET_COUNT}"
 
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""

@@ -42,7 +42,13 @@ from .protocol import (PacketReader, Packet, Cmd, decode_health, bridge_reinits,
                        ESPNOW_TX_QUEUE_CEILING,
                        SAT_DOWNLINK_PAYLOAD_LEN, SAT_DOWNLINK_MIN_LEN,
                        MOUNT_OUTAGE_PAYLOAD_LEN,
-                       decode_mount_outage, EspnowRejectCode, HEALTH_PACE_OFF)
+                       decode_mount_outage, EspnowRejectCode, HEALTH_PACE_OFF,
+                       decode_sat_ips, decode_hub_net, HUB_NET_PAYLOAD_LEN,
+                       HUB_NET_LINK_UP, HUB_NET_LINK_FULL, HUB_NET_LINK_COUNTED,
+                       HUB_NET_LINK_100, HUB_NET_LINK_10, HUB_NET_TO_HUB,
+                       HUB_NET_TO_ALL, HUB_NET_TO_GROUP, HUB_NET_P_ARP,
+                       HUB_NET_P_UDP4, HUB_NET_P_TCP4, HUB_NET_P_IP4,
+                       HUB_NET_P_UDP6, HUB_NET_P_IP6, HUB_NET_P_OTHER)
 from .reboot_check import NodeReport, rebooted
 from .startup_quiet import StartupQuiet, start_up_reason, START_UP_S
 
@@ -165,6 +171,12 @@ class _TcpTransport:
     def __init__(self, sock: socket.socket):
         self._sock = sock
         self._alive = True
+        # This PC's own address on the hub's network, so the hub's report of
+        # who is sending it traffic can name this machine.
+        try:
+            self.local_ip: str | None = sock.getsockname()[0]
+        except OSError:
+            self.local_ip = None
 
     def read(self, n: int) -> bytes:
         try:
@@ -641,6 +653,7 @@ class Bridge:
         self._note_mount_route(pkt)
         self._note_sat_downlink(pkt)
         self._note_mount_outage(pkt)
+        self._note_hub_net(pkt)
         self._note_node_health(pkt)
         for cb in self._callbacks:
             try:
@@ -738,6 +751,158 @@ class Bridge:
             elif was_down:
                 line += "  — BACK"
             (log.warning if down_now else log.info)(line)
+
+    # CMD_HUB_NET.  Traffic the hub did not ask for (broadcast, multicast,
+    # another device's) above this many frames a second makes the line a
+    # warning.  Set well above an ordinary network's background of ARP, mDNS and
+    # SSDP, tens a second; the first logs will put a number on this one's.
+    HUB_NET_BUSY_PER_S = 500
+    _sat_names: dict[int, str] = {}
+    _sat_ips: dict[int, str] = {}
+    _hub_net_clients_last: tuple | None = None
+    _hub_net_counted: bool | None = None
+
+    _NET_PORTS = {53: "DNS", 67: "DHCP", 68: "DHCP", 80: "HTTP", 123: "NTP",
+                  137: "NetBIOS", 138: "NetBIOS", 319: "PTP", 320: "PTP",
+                  1900: "SSDP", 3702: "WS-Discovery", 5353: "mDNS",
+                  5355: "LLMNR", 5568: "sACN", 6454: "Art-Net",
+                  7777: "the hub's client port", 7778: "the satellite link",
+                  9700: "the hub's OSC port"}
+    _NET_IP_PROTOS = {1: "ICMP", 2: "IGMP", 89: "OSPF", 103: "PIM", 112: "VRRP"}
+    _NET_IP6_NEXT = {0: "hop-by-hop options, usually MLD", 58: "ICMPv6"}
+    _NET_ETHERTYPES = {0x88CC: "LLDP", 0x88F7: "PTP", 0x22F0: "AVTP",
+                       0x8899: "Realtek RRCP", 0x9000: "loopback test"}
+
+    def _net_who(self, ip: str) -> str:
+        """An address, with the name the rig knows it by when it knows one."""
+        if not ip:
+            return ""
+        if ip == getattr(getattr(self, "_transport", None), "local_ip", None):
+            return f"{ip} (this PC)"
+        for slot, sip in self._sat_ips.items():
+            if sip == ip:
+                return f"{ip} ({self._sat_names.get(slot) or f'SAT {slot}'} satellite)"
+        return ip
+
+    @classmethod
+    def _net_what(cls, s: dict) -> str:
+        """A sender's last frame in words: who it went to, and what it carried."""
+        to = {HUB_NET_TO_HUB: "to the hub", HUB_NET_TO_ALL: "broadcast",
+              HUB_NET_TO_GROUP: "multicast"}.get(s["to"], "to another device")
+        p, port = s["proto"], s["port"]
+
+        def named(text: str, table: dict, key: int) -> str:
+            return f"{text} ({table[key]})" if key in table else text
+
+        if p == HUB_NET_P_ARP:
+            what = {1: "ARP request", 2: "ARP reply"}.get(port, f"ARP operation {port}")
+        elif p in (HUB_NET_P_UDP4, HUB_NET_P_UDP6):
+            what = named(f"UDP {port}", cls._NET_PORTS, port)
+        elif p == HUB_NET_P_TCP4:
+            what = named(f"TCP {port}", cls._NET_PORTS, port)
+        elif p == HUB_NET_P_IP4:
+            what = named(f"IPv4 protocol {port}", cls._NET_IP_PROTOS, port)
+        elif p == HUB_NET_P_IP6:
+            what = named(f"IPv6 next header {port}", cls._NET_IP6_NEXT, port)
+        elif p == HUB_NET_P_OTHER:
+            what = named(f"ethertype 0x{port:04X}", cls._NET_ETHERTYPES, port)
+        else:
+            what = ""
+        return f"{to} {what}".strip()
+
+    @staticmethod
+    def _net_rate(count: int, window_ms: int) -> str:
+        if not count:
+            return "0"
+        r = count * 1000.0 / max(1, window_ms)
+        return f"{r:.1f}" if r < 10 else f"{r:.0f}"
+
+    def _note_hub_net(self, pkt: Packet) -> None:
+        """What reached the hub over its network port, and its TCP connections.
+
+        From 16:42:15 on 2026-10-12 the concert hub ran its loop at a third of
+        its speed and everything arriving over the wire came late, through a
+        reflash.  Its W5500 passes every frame it accepts to the processor that
+        runs the rig, and nothing counted them.  This does, every 30 s, so a
+        busier network can be told from a busier hub, and it names the busiest
+        sender by MAC and address: what the network's owners can look up.
+
+        The connections line is said when something changes, not every report.
+        """
+        if pkt.cmd != Cmd.HUB_NET or len(pkt.payload) < HUB_NET_PAYLOAD_LEN:
+            return
+        try:
+            n = decode_hub_net(pkt.payload)
+        except ParseError as e:
+            log.warning("HUB NET payload rejected: %s", e)
+            return
+        win = n["window_ms"]
+        link = n["link"]
+        if not link & HUB_NET_LINK_UP:
+            wire = "no wired link"
+        else:
+            speed = ("100 Mbit" if link & HUB_NET_LINK_100 else
+                     "10 Mbit" if link & HUB_NET_LINK_10 else "unknown speed")
+            wire = f"link {speed} {'full' if link & HUB_NET_LINK_FULL else 'HALF'} duplex"
+
+        if not link & HUB_NET_LINK_COUNTED:
+            # Not counts at all: nothing sat in front of the interface to take
+            # them.  Said once rather than every 30 s, and never as zeros, which
+            # would read as a quiet network.
+            if self._hub_net_counted is not False:
+                self._hub_net_counted = False
+                log.info("HUB NET: nothing counted — %s",
+                         wire if not link & HUB_NET_LINK_UP else
+                         "the counter is not in front of the hub's network port "
+                         "(built with HUB_NET_COUNT=0, or not hooked in yet) | " + wire)
+        else:
+            self._hub_net_counted = True
+
+            def rate(count: int) -> str:
+                return self._net_rate(count, win)
+
+            total = n["to_hub"] + n["broadcast"] + n["multicast"] + n["not_hub"]
+            unasked = n["broadcast"] + n["multicast"] + n["not_hub"]
+            mbit = n["bytes"] * 8 / (max(1, win) * 1000.0)
+            line = (f"HUB NET: {rate(total)} frames/s arriving, {mbit:.2f} Mbit/s — "
+                    f"{rate(n['to_hub'])} to the hub, {rate(n['broadcast'])} broadcast, "
+                    f"{rate(n['multicast'])} multicast, {rate(n['not_hub'])} for other devices")
+            tops = []
+            for s in n["top"]:
+                who = self._net_who(s["ip"])
+                ident = f"{who} [{s['mac']}]" if who else s["mac"]
+                tops.append(f"{ident} {rate(s['frames'])}/s {self._net_what(s)}")
+            if tops:
+                line += " | busiest: " + tops[0]
+            if len(tops) > 1:
+                line += "; next: " + tops[1]
+            line += " | " + wire
+            if n["refused"]:
+                line += (f" | {n['refused']} frames TURNED AWAY by the hub's network "
+                         f"stack, too busy to take them: each is a resend a second "
+                         f"or more later")
+            busy = unasked * 1000.0 / max(1, win) >= self.HUB_NET_BUSY_PER_S
+            (log.warning if (busy or n["refused"]) else log.info)(line)
+
+        # The connections, when they change or any came or went.
+        key = (n["tcp_now"], n["ws_now"])
+        moved = n["tcp_opened"] or n["tcp_dropped"] or n["tcp_refused"]
+        if not moved and key == self._hub_net_clients_last:
+            return
+        self._hub_net_clients_last = key
+
+        def upto(v: int) -> str:
+            return f"{v}+" if v >= 255 else str(v)
+
+        cl = (f"HUB CLIENTS: {n['tcp_now']} TCP connected (the PC app and each "
+              f"satellite's web link), {n['ws_now']} web-app page(s)")
+        if moved:
+            cl += (f" | last {round(win / 1000)} s: {upto(n['tcp_opened'])} opened, "
+                   f"{upto(n['tcp_dropped'])} dropped, "
+                   f"{upto(n['tcp_refused'])} turned away (every slot full)")
+        if n["tcp_last_ip"]:
+            cl += f" | the last one opened came from {self._net_who(n['tcp_last_ip'])}"
+        (log.warning if n["tcp_refused"] else log.info)(cl)
 
     def _note_sat_downlink(self, pkt: Packet) -> None:
         """What the relay was asked to do, against what its radio took.
@@ -971,6 +1136,7 @@ class Bridge:
             return
         try:
             self._sat_names = decode_sat_names(pkt.payload)
+            self._sat_ips = decode_sat_ips(pkt.payload)
         except Exception as e:
             log.warning("SAT_NAMES decode failed in bridge: %s", e)
 
