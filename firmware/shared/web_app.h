@@ -1491,8 +1491,14 @@ function setPreset(which, val, sendToMount) {
         p[0] = grp; p[1] = val;
         wsSend(buildPkt(selCam, CMD_SET_ACTIVE_PRESET, p));
     } else {
-        // STATUS arrived — now update visuals.  A slider-less mount renders its
-        // slider dial at preset 0 (dormant), like a disconnected axis.
+        // Show it: a STATUS arrived, or the camera, view or presence changed.
+        // A dial shows a speed only while the mount is connected; otherwise it
+        // is off (preset 0, dormant).  It used to start at a lit 2 before
+        // anything had been heard, which reads as a mount that is up and
+        // working (the operator, 2026-10-14).  Jogs keep the last speed: only
+        // the dials go off.  A slider-less mount's slider dial is off too,
+        // like a disconnected axis.
+        if (!camSt[selCam].connected) val = 0;
         if (which === 'sz' && !camHasSlider(selCam)) val = 0;
         // Landscape arc indicators
         if (which === 'pt' && arcPT) arcPT.update(val);
@@ -1509,6 +1515,18 @@ function setPreset(which, val, sendToMount) {
         if (which === 'pt' && extPosDialPT) extPosDialPT.update(val);
         if (which === 'sz' && extPosDialSZ) extPosDialSZ.update(val);
     }
+}
+
+// The selected mount's speeds onto every dial: off unless it is connected.
+function showSelPresets() {
+    const cs = camSt[selCam];
+    setPreset('pt', cs.activePtPreset, false);
+    setPreset('sz', cs.activeSlPreset, false);
+}
+
+// A dial that is off takes no taps: there is no mount to set, or no slider.
+function presetDialLive(which) {
+    return camSt[selCam].connected && (which !== 'sz' || camHasSlider(selCam));
 }
 
 function mkJog(id, pan, tilt, slider, zoom) {
@@ -1995,6 +2013,7 @@ function _onOnePkt(buf, off) {
         cs.prevFlags  = cs.flags;
         cs.state      = v.getUint8(0);
         cs.flags      = v.getUint8(1);
+        const wasConnected = cs.connected;
         cs.connected  = true;
         _stTime[mountId] = Date.now();
 
@@ -2039,6 +2058,9 @@ function _onOnePkt(buf, off) {
         } else {
             cs.targetSlot = 0xFF;
         }
+        // Heard again after silence: its dials come back on, even from a
+        // STATUS too short to carry its speeds.
+        if (!wasConnected && mountId === selCam) showSelPresets();
 
         // If a look-at calibration move just finished, treat it as slider-arrived.
         // The Teensy does not reliably send CP_WAIT_SET_B (sub=4), so we detect
@@ -2262,10 +2284,10 @@ setInterval(() => {
         askNames(Array.from(_namesWant));
 }, 1000);
 
-// Disconnect detection — no STATUS for 3 s
-setInterval(() => {
+// Disconnect detection — no STATUS for MOUNT_PRESENCE_TIMEOUT_MS
+function checkPresence() {
     const now = Date.now();
-    let changed = false;
+    let changed = false, selChanged = false;
     for (let i = 1; i <= NUM_MOUNTS; i++) {
         const was = camSt[i].connected;
         camSt[i].connected = !!_stTime[i] &&
@@ -2281,11 +2303,14 @@ setInterval(() => {
                 camSt[i].zmThresh   = null;
             }
             changed = true;
+            if (i === selCam) selChanged = true;
         }
     }
     if (changed) refreshCamBtns();
+    if (selChanged) showSelPresets();   // its dials go off, or come back on
     if (changed && _extActive) refreshExtAll();
-}, 500);
+}
+setInterval(checkPresence, 500);
 
 // ============================================================
 //  Cam buttons  (built once, shared between views)
@@ -2324,9 +2349,7 @@ function makeCamBtns(containerId) {
             document.documentElement.style.setProperty('--cam-bg', CAM_BG[i]);
             refreshCamBtns();
             refreshPosGrid();
-            const cs = camSt[i];
-            setPreset('pt', cs.activePtPreset, false);
-            setPreset('sz', cs.activeSlPreset, false);
+            showSelPresets();
             if (arcPT) arcPT.setColor(col);
             if (arcSZ) arcSZ.setColor(col);
             if (_extActive && _extPage === 'positions') refreshExtPositions();
@@ -2608,7 +2631,7 @@ class SpeedDial {
         this.cv     = document.getElementById(canvasId);
         this.ctx    = this.cv.getContext('2d');
         this.which  = which;   // 'pt' or 'sz'
-        this.preset = 2;
+        this.preset = 0;       // off until a connected mount reports its speed
         // Crisp rendering on high-DPI screens
         const dpr = window.devicePixelRatio || 1;
         const css = 90;
@@ -2620,14 +2643,14 @@ class SpeedDial {
         this.ctx.scale(dpr, dpr);
         // Tap / click cycles the preset for this group
         this.cv.addEventListener('click', () => {
-            if (this.which === 'sz' && !camHasSlider(selCam)) return;  // dormant
+            if (!presetDialLive(this.which)) return;   // off
             setPreset(this.which, (this.preset % 4) + 1, true);
         });
         this.draw();
     }
 
     update(n) {
-        this.preset = Math.max(0, Math.min(4, n));   // 0 = dormant (e.g. slider-less mount)
+        this.preset = Math.max(0, Math.min(4, n));   // 0 = off: no mount, or no slider
         this.draw();
     }
 
@@ -2642,7 +2665,7 @@ class SpeedDial {
         const dr = sz * 0.028;  // dot radius
         const n  = this.preset;
         const N  = 5;           // 5 dots → 4 segments → 4 speed levels
-        const dormant = (n <= 0);                    // slider-less / disabled axis
+        const dormant = (n <= 0);                    // off: no mount, or no slider
         const lit = dormant ? '#3a3a3a' : '#00aeef';
 
         const startA = (120 * Math.PI) / 180;   // 8-o'clock
@@ -2681,7 +2704,7 @@ class SpeedDial {
             c.fill();
         }
 
-        // Centre number — a dash when dormant (mount has no slider)
+        // Centre number — a dash when off
         c.fillStyle      = dormant ? '#555' : lit;
         c.font           = `bold ${Math.round(sz * 0.34)}px system-ui,sans-serif`;
         c.textAlign      = 'center';
@@ -2701,14 +2724,16 @@ class ArcPreset {
         this.ctx    = this.cv.getContext('2d');
         this.which  = which;
         this.mirror = mirror;
-        this.preset = 2;
+        this.preset = 0;       // off until a connected mount reports its speed
         this.color  = CAM_ACCENT[1];
         this._dpr   = window.devicePixelRatio || 1;
         this._w = 0; this._h = 0;
         this._R = 0; this._cx = 0; this._cy = 0;
         // Tap cycles the preset (same as portrait SpeedDial)
-        this.cv.addEventListener('click', () =>
-            setPreset(this.which, (this.preset % 4) + 1, true));
+        this.cv.addEventListener('click', () => {
+            if (!presetDialLive(this.which)) return;   // off
+            setPreset(this.which, (this.preset % 4) + 1, true);
+        });
     }
 
     resize(w) {
@@ -2741,7 +2766,7 @@ class ArcPreset {
         this.draw();
     }
 
-    update(n) { this.preset = Math.max(1, Math.min(4, n)); this.draw(); }
+    update(n) { this.preset = Math.max(0, Math.min(4, n)); this.draw(); }   // 0 = off
     setColor(hex) { this.color = hex; this.draw(); }
 
     draw() {
@@ -2791,7 +2816,8 @@ class ArcPreset {
         for (let i = 0; i < N; i++) {
             // not-mirrored: dot i lit when i <= n   (leftmost dot always lit at preset≥1)
             // mirrored:     dot i lit when i >= N-1-n (rightmost dot always lit)
-            const lit = this.mirror ? (i >= N - 1 - n) : (i <= n);
+            // Off (n = 0) lights nothing, not even that end dot.
+            const lit = n > 0 && (this.mirror ? (i >= N - 1 - n) : (i <= n));
             c.beginPath();
             c.arc(pts[i].x, pts[i].y, DOT_R, 0, Math.PI * 2);
             c.fillStyle = lit ? col : dim;
@@ -3337,9 +3363,7 @@ function setGcView(on) {
         document.getElementById('gc-view').classList.add('show');
         refreshCamBtns();
         refreshPosGrid();
-        const cs = camSt[selCam];
-        setPreset('pt', cs.activePtPreset, false);
-        setPreset('sz', cs.activeSlPreset, false);
+        showSelPresets();
         setWsSt(!!(ws && ws.readyState === WebSocket.OPEN));
     } else {
         closeMove();                     // its controls belong to this screen
@@ -4944,8 +4968,7 @@ window.addEventListener('DOMContentLoaded', () => {
     dialSZ = new SpeedDial('dial-sz', 'sz');
     gcDialPT = new SpeedDial('gc-dial-pt', 'pt');
     gcDialSZ = new SpeedDial('gc-dial-sz', 'sz');
-    setPreset('pt', 2, false);
-    setPreset('sz', 2, false);
+    showSelPresets();   // off: nothing has been heard yet
 
     function _anyActive() {
         return (hslZoom && hslZoom.active) ||
