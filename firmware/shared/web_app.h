@@ -385,6 +385,38 @@ canvas.hsl-c{display:block;touch-action:none;}
 /* Joystick section */
 .ext-pos-joy-wrap{display:flex;flex-direction:column;align-items:center;
   justify-content:center;padding:6px 8px;flex-shrink:0;}
+/* GC on: a game controller does the moving (an iPad in a GameSir G8+, say), so
+   the faders and the stick go, and the strip shrinks to what is left.  The
+   speed dials go to its ends, in a little from the edges; the cameras sit above
+   CLEAR / RUN / SET between them, along the bottom, with a clear gap between
+   the two rows; the positions take the rest of the height.  First tried with
+   the dials at the very edges, a 10 px gap and the positions taking all the
+   height: "stretched a bit too far" (2026-10-14), so the gap now gives some of
+   it back.  Seven columns put three buttons in the middle of one row under the
+   cameras: spacer, CLEAR, RUN, SET, spacer.
+   --gc-edge is the space under CLEAR / RUN / SET, lifted well clear of the
+   bottom edge and the home indicator (they sit right where it is), and the same
+   space again above the camera buttons, down from the positions: the operator
+   asked for the two to match.  The strip's top padding is that less the 7 px
+   already between them: its 1 px border and the camera bar's 6 px padding
+   (the positions' own bottom padding is taken out here). */
+#btn-ext-gc.on{background:var(--blue);border-color:var(--blue-lit);color:#fff;}
+#ext-view.gc{--gc-edge:max(32px,calc(env(safe-area-inset-bottom) + 16px));}
+#ext-view.gc .ext-pos-sliders,
+#ext-view.gc .ext-pos-joy-wrap{display:none;}
+#ext-view.gc .ext-pos-grid-area{padding-bottom:0;}
+#ext-view.gc .ext-pos-ctrl-strip{height:auto;
+  padding:calc(var(--gc-edge) - 7px) clamp(32px,6vw,96px) var(--gc-edge);}
+#ext-view.gc .ext-pos-middle{display:grid;flex:1;min-width:0;padding:0;border-right:none;
+  grid-template-columns:auto 1fr auto auto auto 1fr auto;
+  align-items:center;gap:clamp(32px,7vh,56px) 16px;}
+#ext-view.gc .ext-pos-ctrls{display:contents;}
+#ext-view.gc #ext-pos-cam-bar{grid-column:2/7;grid-row:1;min-width:0;}
+#ext-view.gc #ext-pos-dial-sz-wrap{grid-column:1;grid-row:1/3;}
+#ext-view.gc #ext-pos-clear-btn{grid-column:3;grid-row:2;}
+#ext-view.gc #ext-pos-run-btn{grid-column:4;grid-row:2;}
+#ext-view.gc #ext-pos-set-btn{grid-column:5;grid-row:2;}
+#ext-view.gc #ext-pos-dial-pt-wrap{grid-column:7;grid-row:1/3;}
 .ext-pcell.ext-pos-sel{border-color:var(--green-lit);box-shadow:0 0 0 2px var(--green-lit);color:var(--text);}
 
 /* --- Config page --- */
@@ -927,6 +959,7 @@ canvas.hsl-c{display:block;touch-action:none;}
   <!-- Header: back button | nav tabs | ws-dot + e-stop -->
   <div class="ext-header">
     <button class="view-toggle-btn" id="btn-ext-to-mobile">&#9664; Mobile</button>
+    <button class="view-toggle-btn" id="btn-ext-gc">&#127918; GC</button>
     <nav class="ext-nav">
       <button class="ext-tab active" data-page="positions">Home</button>
       <button class="ext-tab" data-page="camera">Camera</button>
@@ -3316,6 +3349,31 @@ function setGcView(on) {
     }
 }
 
+// GC on the Extended view: a game controller does the moving, so the Home
+// page drops its faders and stick (layout in the #ext-view.gc rules).  The pad
+// itself is read in every view; this is only what the screen shows.
+// Remembered per device, like the view itself.
+const _EXT_GC_KEY = 'cc_ext_gc';
+let _extGc = false;
+function _loadExtGcPref() {
+    try { return localStorage.getItem(_EXT_GC_KEY) === '1'; } catch(e) { return false; }
+}
+function setExtGc(on) {
+    _extGc = on;
+    try { localStorage.setItem(_EXT_GC_KEY, on ? '1' : '0'); } catch(e) {}
+    document.getElementById('ext-view').classList.toggle('gc', on);
+    document.getElementById('btn-ext-gc').classList.toggle('on', on);
+    if (on) {
+        // A stick or fader mid-drag as it is hidden would hold its capture and
+        // keep the mount moving: drop them, and stop whatever they started.
+        [extPosJoy, extPosHslZoom, extPosHslSlider]
+            .forEach(w => w && w.cancel && w.cancel());
+        _stopJogLoop();
+    } else {
+        requestAnimationFrame(sizeExtPosControls);   // sized while hidden: never
+    }
+}
+
 function setExtView(on) {
     _extActive = on;
     _saveExtPref(on);
@@ -5058,6 +5116,9 @@ window.addEventListener('DOMContentLoaded', () => {
     // ---- Extended view: button wiring ----
     document.getElementById('btn-ext-to-mobile').addEventListener('click',
         () => setExtView(false));
+    document.getElementById('btn-ext-gc').addEventListener('click',
+        () => setExtGc(!_extGc));
+    setExtGc(_loadExtGcPref());
     document.getElementById('btn-to-ext-p').addEventListener('click',
         () => setExtView(true));
     document.getElementById('btn-to-ext-l').addEventListener('click',
