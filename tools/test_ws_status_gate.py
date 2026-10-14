@@ -18,7 +18,9 @@ throttled, had both.
      one per window, and the last word always arrives;
   2. the hub: STATUS through the gate, held when it cannot go, released every
      loop, the jog hush intact;
-  3. the satellite: the same gate, released every loop.
+  3. the satellite: the same gate, released every loop;
+  4. the mount: the store's own STATUS already says it is at the slot, so
+     there is no red to correct (from the Teensy flash after 2026-10-14).
 
 Run directly, or via tools/run_tests.sh.
 """
@@ -201,5 +203,18 @@ assert re.search(r"if \(_ws_gate\.due\(i, t, false, sb, &sn\) && _ws\.count\(\)\
 assert re.search(r"drain_hub_to_ws\(\);\s*ws_release_held\(\);", SAT), \
     "the satellite must release held STATUS every loop"
 print("   the same gate, released every loop")
+
+# ---- 4. the mount ---------------------------------------------------------------------
+print("\n4. the mount:")
+TEENSY = (REPO / "firmware/teensy41_mount/teensy41_mount.ino").read_text()
+store = TEENSY[TEENSY.find("case CMD_STORE_POS: {"):TEENSY.find("case CMD_GOTO_SLOT: {")]
+assert store, "CMD_STORE_POS's handler is gone"
+i_occ, i_at, i_send = (store.find("_slot_occupied |= (1u << slot);"),
+                       store.find("update_slot_at_mask();"), store.find("send_status();"))
+assert -1 not in (i_occ, i_at, i_send) and i_occ < i_at < i_send, \
+    "the store must mark the slot, then work out what the mount is at, then report:\n" \
+    "    reported first, its STATUS says 'stored, not here' and a red border waits\n" \
+    "    for the next STATUS to turn green"
+print("   the store's STATUS already says the mount is at the slot")
 
 print("\nALL CHECKS PASSED")

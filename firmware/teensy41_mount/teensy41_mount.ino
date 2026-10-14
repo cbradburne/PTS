@@ -1300,6 +1300,13 @@ static void dispatch(const ParsedPacket &pkt) {
             if (_cfg.slider_invert) _slot_pos[slot][AXIS_SLIDER] = -_slot_pos[slot][AXIS_SLIDER];
             if (_cfg.lanc_zoom)     _slot_pos[slot][AXIS_ZOOM]   =  0;  // not repeatable
             _slot_occupied |= (1u << slot);
+            // The mount is AT the slot it has just stored, so say so in the
+            // same STATUS.  loop() recomputes the at-position bits only after
+            // this returns, so without this the store reported "stored, not
+            // here" (a red border) and the green came one STATUS later — 100 ms
+            // on the PC, and on the web app, until ad4b3fb, a full 5 s refresh
+            // (2026-10-14: an iPad SET stayed red for 5 s).
+            update_slot_at_mask();
             // Immediately report updated bitmasks so PC grid reflects the new slot
             send_status();
             break;
