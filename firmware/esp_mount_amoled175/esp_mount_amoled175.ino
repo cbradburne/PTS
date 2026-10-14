@@ -43,6 +43,7 @@
 #include "../shared/protocol.h"
 #include "../shared/link_run.h"     // a run of unanswered sends, for MOUNT_EVENT_LINK_RUN
 #include "../shared/clock_age.h"    // ages against stamps another task writes
+#include "../shared/base_silence.h" // silence counts only while the radio listens
 #include "../shared/tx_pacer.h"     // one ESP-NOW send in flight at a time
 #include <new>                      // placement new: the pacer lives in PSRAM
 #include "../shared/pos_run.h"      // cycling stored positions — the mount's own run
@@ -3134,6 +3135,12 @@ static void setup_exit() {
 //
 // Still not a standing rescan: this only applies WHILE the base is silent.  A
 // mount with a working base never scans at all.
+//
+// Start to start, and a scan is not short: 8.8 s on cam1 with its camera
+// linked, 8.2 s of it off the channel (2026-10-14), not the one to three
+// seconds noted below.  Between scans the base also gets BASE_SILENT_MS of
+// listening, so the real gap is the longer of the two — see
+// shared/base_silence.h for the lock-out this period alone produced.
 #define REACQ_PERIOD_MS  10000UL
 // WHEN A MOUNT CHOOSES ITS BASE: once, at boot, and then not again.
 //
@@ -3248,6 +3255,7 @@ static void hub_forget(const uint8_t *mac) {
 }
 
 static uint32_t _reacq_last_ms = 0;
+static uint32_t _reacq_back_ms = 0;          // the last scan gave the radio back
 static bool     _reacq_boot_done   = false;  // the one-time boot pick has run
 static bool     _reacq_by_rescan   = false;  // ...and it was re-armed by the hub
 
@@ -3289,8 +3297,12 @@ static void hub_reacquire_poll() {
         // -1 ms, which unsigned is 49 days.  That was every blackout.  So the
         // age is taken with clock_silent(); the record keeps the raw, signed
         // difference, which shows if anything like it is ever seen again.
+        //
+        // And only silence the radio was here for counts: time away on a scan
+        // is not the base's.  Counting it locked cam1 out of a working hub —
+        // see shared/base_silence.h.
         uint32_t heard  = _last_hub_rx_ms;
-        bool     silent = clock_silent(nowm, heard, REACQ_SILENT_MS);
+        bool     silent = base_silent(nowm, heard, _reacq_back_ms, REACQ_SILENT_MS);
         // A scan takes the radio off-channel for a second or two.  When the base
         // has already gone quiet that costs nothing — we are not hearing it
         // anyway — but a scan must never happen mid-move: on a camera rig those
@@ -3337,6 +3349,7 @@ static void hub_reacquire_poll() {
     int n = WiFi.scanComplete();
     if (n == WIFI_SCAN_RUNNING) return;
     _reacq_scanning = false;
+    _reacq_back_ms  = nowm;    // listening from here: the channel is set below
     // Marked done on COMPLETION, not when the scan started, so a scan cut short
     // by SETUP or a config reload is retried rather than silently skipped —
     // which would leave the mount on whatever base NVS last remembered without

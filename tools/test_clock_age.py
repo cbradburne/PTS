@@ -76,7 +76,8 @@ heard = re.findall(r"[^\n]*-\s*heard\b[^\n]*", code)
 assert [l.strip() for l in heard] == ["(int32_t)(nowm - heard));"], heard
 print("   the base-silence check's own copy is aged only in the signed record  OK")
 SITES = {
-    "the base-silence check (the scans)":     "bool     silent = clock_silent(nowm, heard, REACQ_SILENT_MS);",
+    # base_silent() takes both its ages with clock_silent — test_base_silence.py
+    "the base-silence check (the scans)":     "bool     silent = base_silent(nowm, heard, _reacq_back_ms, REACQ_SILENT_MS);",
     "the run dead-man":                       "if (_run_active && clock_silent(millis(), _last_hub_rx_ms, RUN_DEADMAN_MS))",
     "the position-run dead-man":              "if (_prun.active && clock_silent(millis(), _last_hub_rx_ms, RUN_DEADMAN_MS))",
     "the watchdog (E-STOP to the Teensy)":    "if (!_watchdog_fired && clock_silent(millis(), _last_hub_rx_ms, WATCHDOG_MS))",
