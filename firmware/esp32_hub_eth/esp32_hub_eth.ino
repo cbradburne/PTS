@@ -129,6 +129,7 @@
 //#define ETH_GATEWAY    "192.169.1.1"
 
 #include "../shared/net_rx_count.h"   // what arrives over the wire, for CMD_HUB_NET
+#include "../shared/ws_status_gate.h"  // STATUS to the web app: rate-limited, never lost
 #if HUB_WIRED
 #include "../shared/board_eth.h"   // W5500 pins and bring-up — the wired board only
 #include <esp_netif_net_stack.h>   // esp_netif_get_netif_impl(): the lwIP interface under ETH
@@ -1139,10 +1140,13 @@ static void pair_forget(uint8_t cam) {
 //
 // Fix: suppress ALL WS STATUS during active jogging (last jog < 200 ms ago).
 // When idle, limit to 5 Hz per mount — well within what the phone UI needs.
-static uint32_t _ws_status_ms[NUM_MOUNTS] = {};
+// A STATUS that cannot go is HELD, not dropped, and goes when its window ends
+// (shared/ws_status_gate.h): the mount now sends one only on a change.
 static uint32_t _ws_last_jog_ms           = 0;
 #define WS_STATUS_INTERVAL_MS  200   // 5 Hz idle rate
 #define WS_JOG_SUPPRESS_MS     200   // suppress STATUS for 200 ms after last jog
+#define WS_STATUS_MAX          64    // a STATUS packet is ~20 bytes
+static WsStatusGate<NUM_MOUNTS, WS_STATUS_MAX> _ws_gate(WS_STATUS_INTERVAL_MS);
 
 // ---------------------------------------------------------------------------
 // TCP / WebSocket / Serial
@@ -5114,14 +5118,17 @@ void loop() {
                     // Suppress STATUS to WS while jogging (radio shared with ESP-NOW)
                     // and rate-limit to 5 Hz when idle.  This prevents TCP ACK
                     // starvation that previously caused lwIP to close the connection.
+                    // What cannot go now is held and goes when its window ends —
+                    // see the release after this loop.
                     if (pkt.cmd == CMD_STATUS) {
                         uint32_t t = millis();
-                        if (t - _ws_last_jog_ms < WS_JOG_SUPPRESS_MS) {
-                            ws_send = false;   // radio busy with ESP-NOW jog traffic
-                        } else if (t - _ws_status_ms[msg.src_idx] < WS_STATUS_INTERVAL_MS) {
-                            ws_send = false;   // idle rate limit
-                        } else {
-                            _ws_status_ms[msg.src_idx] = t;
+                        bool hush = clock_age_ms(t, _ws_last_jog_ms) < WS_JOG_SUPPRESS_MS;
+                        if (!_ws_gate.admit(msg.src_idx, t, hush)) {
+                            uint8_t  sb[PKT_BUF_SIZE + 4];
+                            uint16_t sn = build_packet(sb, pkt.mount_id, pkt.seq, pkt.cmd,
+                                                       pkt.payload, pkt.payload_len);
+                            if (_ws_gate.hold(msg.src_idx, sb, sn))
+                                ws_send = false;   // held: it goes when the window ends
                         }
                     }
                     // Reset parser to catch any additional packets in this message.
@@ -5196,6 +5203,17 @@ void loop() {
     // ---- WebSocket housekeeping (every loop — required by mathieucarbou fork) ----
     _ws.cleanupClients();
 
+    // ---- A STATUS the gate held back goes the moment its window ends ----
+    // The mount sends one only when something changes, so the next may be 5 s
+    // away: an iPad SET showed red, not green, for exactly that long.
+    {
+        uint32_t t = millis();
+        bool hush = clock_age_ms(t, _ws_last_jog_ms) < WS_JOG_SUPPRESS_MS;
+        uint8_t  sb[WS_STATUS_MAX];
+        uint16_t sn;
+        for (int i = 0; i < NUM_MOUNTS; i++)
+            if (_ws_gate.due(i, t, hush, sb, &sn)) _ws.binaryAll(sb, (size_t)sn);
+    }
 
     MARK(SEC_RELAY);
     uint32_t _pass = micros() - _pass_t0;

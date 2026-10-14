@@ -86,6 +86,7 @@
 #include "../shared/board_eth.h"
 #include "../shared/sat_link.h"
 #include "../shared/web_app.h"   // the page itself — shared, never copied
+#include "../shared/ws_status_gate.h"  // STATUS to the phones: rate-limited, never lost
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -386,8 +387,13 @@ static void drain_ws_to_hub() {
 // STATUS is the firehose and the only thing throttled.  Everything else -
 // acks, state reports, subject lists, pairing, hub telemetry - passes straight
 // through, because none of it repeats at 10 Hz per mount.
+//
+// A STATUS that cannot go is HELD, not dropped, and goes when its window ends
+// (shared/ws_status_gate.h, the hub's gate too): the mount now sends one only
+// on a change, so a dropped one stayed wrong for the 5 s until its refresh.
 #define WS_STATUS_INTERVAL_MS  200          // 5 Hz, same as the hub
-static uint32_t _ws_status_ms[NUM_MOUNTS] = {};
+#define WS_STATUS_MAX          64           // a STATUS packet is ~20 bytes
+static WsStatusGate<NUM_MOUNTS, WS_STATUS_MAX> _ws_gate(WS_STATUS_INTERVAL_MS);
 
 // ---- WebSocket diagnostics -------------------------------------------------
 // Phones were connecting and vanishing inside a second, and the two obvious
@@ -478,17 +484,25 @@ static void ws_cli_close(uint32_t id) {
     DIAG_PRINTF("[WEB] client %u disconnected\n", id);
 }
 
-// True if this frame should reach the phones now.
+// True if this frame should reach the phones now.  A STATUS that may not is
+// held by the gate, and ws_release_held() sends it when its window ends.
 static bool ws_should_send(const uint8_t *f, uint16_t len) {
     if (len < 7) return false;
     uint8_t mid = f[3];
     uint8_t cmd = f[6];
     if (cmd != CMD_STATUS) return true;                 // not the firehose
     if (mid < 1 || mid > NUM_MOUNTS) return true;
+    if (_ws_gate.admit(mid - 1, millis(), false)) return true;
+    return !_ws_gate.hold(mid - 1, f, len);             // cannot hold it: send, never lose
+}
+
+// Every loop: a held STATUS goes the moment its window ends.
+static void ws_release_held() {
+    uint8_t  sb[WS_STATUS_MAX];
+    uint16_t sn;
     uint32_t t = millis();
-    if (t - _ws_status_ms[mid - 1] < WS_STATUS_INTERVAL_MS) return false;
-    _ws_status_ms[mid - 1] = t;
-    return true;
+    for (unsigned i = 0; i < NUM_MOUNTS; i++)
+        if (_ws_gate.due(i, t, false, sb, &sn) && _ws.count()) ws_queue(sb, sn);
 }
 
 // hub -> phones.  The hub writes a byte stream, so packet boundaries are
@@ -1786,6 +1800,7 @@ void loop() {
     drain_ws_to_hub();
     SMARK(SSEC_WS_UP);
     if (_client_link.connected()) drain_hub_to_ws();
+    ws_release_held();
     SMARK(SSEC_WS_DN);
 
     // Flush a partial batch once it has waited long enough.  Without this, the
