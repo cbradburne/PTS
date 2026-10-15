@@ -5115,6 +5115,12 @@ void loop() {
                         _calib_prompt_ms[msg.src_idx] = millis();
                         ws_force = true;   // one-shot — must reach WS even if STATUS is rate-limited
                     }
+                    // Set Ref's answer, and any refusal: one-shot, and the only
+                    // way the web app can say why a press did nothing.  A look-at
+                    // calibration refused for want of a reference looked like a
+                    // dead button (2026-10-15).  Satellites pass these on already.
+                    if (pkt.cmd == CMD_REF_CONFIRMED || pkt.cmd == CMD_NACK)
+                        ws_force = true;
                     // Suppress STATUS to WS while jogging (radio shared with ESP-NOW)
                     // and rate-limit to 5 Hz when idle.  This prevents TCP ACK
                     // starvation that previously caused lwIP to close the connection.

@@ -1068,6 +1068,7 @@ const CMD_ADD_SUBJECT_SET_A  = 0x21;  // no payload — record point A
 const CMD_ADD_SUBJECT_SET_B  = 0x22;  // no payload — record point B + solve
 const CMD_ADD_SUBJECT_ABORT  = 0x23;  // no payload — cancel calibration
 const CMD_SET_REF            = 0x25;  // 1B: subject_id — set pan/tilt session reference
+const SET_REF_MANUAL         = 0xFF;  // CMD_SET_REF subject_id: here is 0° / 0°
 const CMD_START_LOOK_AT_MOVE = 0x27;  // 3B: subject_id, direction(0=left/1=right), speed_preset
 const CMD_SWITCH_SUBJECT     = 0x28;  // 1B: subject_id
 const CMD_START_RUN          = 0x2A;  // no payload: the MOUNT cycles its stored positions
@@ -1077,7 +1078,10 @@ const STATUS_RUN_POSITIONS   = 0x01;  // cycling stored positions
 const STATUS_RUN_LOOK_AT     = 0x02;  // ping-ponging a look-at subject
 const CMD_LOOK_AT_STATUS     = 0x91;  // 14B: slider_mm(4f)+pan_deg(4f)+tilt_deg(4f)+subj_id(1)+flags(1)
 const CMD_STATUS             = 0x80;
+const CMD_NACK               = 0x83;  // 3B: refused seq(2) + reason(1)
+const NACK_NO_REF            = 0x06;  // reason: no session reference — Set Ref 0/0 first
 const CMD_CONFIG_REPORT      = 0x86;  // 77B: ori(1)+speeds(72)+stall(2)+tilt(2)
+const CMD_REF_CONFIRMED      = 0x92;  // 8B: the reference the mount now holds
 const CMD_CALIB_PROMPT       = 0x93;  // 1B sub-state
 const CMD_LA_MOVE_DIR        = 0x94;  // hub-injected: direction(1) — 0=min/◀, 1=max/▶, 0xFF=stopped
 // STATUS target_slot: 8/9 mean the look-at arrows, and ONLY in look-at mode —
@@ -1680,9 +1684,13 @@ function mkSetStallThreshold(id, axis, threshold) {
     return buildPkt(id, CMD_SET_STALL_THRESHOLD, p);
 }
 
-// CMD_SET_REF: set current pan/tilt as session reference for subject_id
+// CMD_SET_REF: SET_REF_MANUAL makes the current pan/tilt 0° / 0°; a subject
+// 0-7 works the reference out from that stored subject instead.  The sentinel
+// must not be masked: masked to 0-7 it named subject 7, and this button sent
+// subject 0, so Set Ref 0/0 never set anything from here (2026-10-15).
 function mkSetRef(id, subjId) {
-    const p = new Uint8Array(1); p[0] = subjId & 0x07;
+    const p = new Uint8Array(1);
+    p[0] = (subjId === SET_REF_MANUAL) ? SET_REF_MANUAL : (subjId & 0x07);
     return buildPkt(id, CMD_SET_REF, p);
 }
 
@@ -2107,6 +2115,18 @@ function _onOnePkt(buf, off) {
         if (mountId === selCam) refreshPosGrid();
         if (_extActive) refreshExtAll();
     }
+
+    // The mount's answer to Set Ref.  Nothing on screen moves when a reference
+    // is set, so say so.
+    if (cmd === CMD_REF_CONFIRMED && plen >= 8 && mountId >= 1 && mountId <= NUM_MOUNTS)
+        toast(camName(mountId) + ': reference set');
+
+    // A refusal.  NO_REF is the one with something to do about it: a look-at
+    // calibration or move needs Set Ref 0/0 after every reboot or flash, and
+    // refused in silence it looked like a button that did nothing (2026-10-15).
+    if (cmd === CMD_NACK && plen >= 3 && mountId >= 1 && mountId <= NUM_MOUNTS
+            && buf[off + 9] === NACK_NO_REF)
+        toast(camName(mountId) + ': Set Ref 0/0 first — a reboot or flash clears it');
 
     if (cmd === CMD_LOOK_AT_STATUS && plen >= 13 && mountId >= 1 && mountId <= NUM_MOUNTS) {
         // payload[12] = active subject_id (0-7, or 0xFF = none/deselected)
@@ -3724,7 +3744,7 @@ function buildExtConfig() {
         const refBtn = document.createElement('button');
         refBtn.id = 'ext-cfg-ref-'+i; refBtn.textContent = '◎ Set Ref 0/0';
         refBtn.className = 'ext-cfg-act refbtn';
-        refBtn.addEventListener('click', () => { if (camSt[i].connected) { selCam = i; wsSend(mkSetRef(i, 0)); } });
+        refBtn.addEventListener('click', () => { if (camSt[i].connected) { selCam = i; wsSend(mkSetRef(i, SET_REF_MANUAL)); } });
         actRow.appendChild(refBtn);
         card.appendChild(actRow);
 

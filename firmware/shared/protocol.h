@@ -529,6 +529,12 @@ static_assert(MOUNT_EVENT_NOMEM_PAYLOAD_LEN_V2 ==
 // Wire layout per subject record: valid(1) + name(16) + x_mm(4f) + y_mm(4f) + z_mm(4f) = 29 bytes
 #define SUBJECT_RECORD_LEN      29
 #define SUBJECT_LIST_PAYLOAD_LEN  (MAX_SUBJECTS * SUBJECT_RECORD_LEN)   // 232
+// CMD_SET_REF's subject_id when it names no subject: "here is 0° / 0°", the
+// manual reference behind every Set Ref 0/0 button.  0-7 instead work the
+// reference out from that stored subject, assuming the camera is aimed at it,
+// and refuse a subject that is not stored.  The web app sent 0 here from RC2
+// until 2026-10-15, so its Set Ref 0/0 never set anything.
+#define SET_REF_MANUAL          0xFF
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -584,7 +590,7 @@ typedef enum : uint8_t {
     CMD_ADD_SUBJECT_SET_B  = 0x22,  // record point B at slider max (no payload)
     CMD_ADD_SUBJECT_ABORT  = 0x23,  // cancel calibration in progress (no payload)
     CMD_DELETE_SUBJECT     = 0x24,  // delete subject: subject_id(1)
-    CMD_SET_REF            = 0x25,  // set pan/tilt session reference: subject_id(1)
+    CMD_SET_REF            = 0x25,  // set pan/tilt session reference: subject_id(1) or SET_REF_MANUAL
     CMD_SET_SLIDER_MOVE    = 0x26,  // store slider move: slot(1)+start_mm(4f)+end_mm(4f)+preset(1) = 10B
     CMD_START_LOOK_AT_MOVE = 0x27,  // start tracking: subject_id(1)+direction(1)+speed_preset(1) = 3B
     CMD_SWITCH_SUBJECT     = 0x28,  // switch tracking target mid-move: subject_id(1)
