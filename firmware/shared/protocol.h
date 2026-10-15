@@ -610,6 +610,14 @@ typedef enum : uint8_t {
     // safety stop on its way out, so it ended runs nobody meant to end.
     // Consumed by the bridge; never reaches the Teensy.
     CMD_STOP_RUN           = 0x2B,
+    // ◀ / ▶ with no subject: run the slider to that end of the rail and aim at
+    // nothing — pan/tilt stay with whoever has them (nobody, the joystick, CV
+    // tracking).  CMD_SWITCH_SUBJECT on the way takes the aim over from wherever
+    // the camera points.  direction(1: 0 = ◀ min, 1 = ▶ max) + speed_preset(1).
+    // A command of its own rather than a "no subject" id in START_LOOK_AT_MOVE:
+    // a Teensy from before it reads any subject byte as 0-7 and would aim at
+    // that stored subject; this it refuses as unknown.
+    CMD_START_SLIDE        = 0x2C,
 
     // Mount -> PC
     CMD_STATUS           = 0x80,

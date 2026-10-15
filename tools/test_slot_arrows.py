@@ -1,5 +1,8 @@
 """Slots 9 and 10 recall, and only recall, when look-at is off.
 
+(In look-at mode they are ◀/▶: a look-at move with a subject, a slide without
+one — tools/test_look_at_slide.py.  Neither is ever a jog.)
+
 Those two slots are the SAME QPushButton as the look-at ◀/▶ arrows. Qt fires
 `pressed` on mouse-down and `released` + `clicked` on mouse-up, so one press ran
 the arrow handler and the recall handler both.
@@ -58,19 +61,29 @@ m = re.search(r"if not self\._has_slider\[mount_id\] or slot not in \((\d+), (\d
 assert m, "the arrow slot guard changed shape"
 print(f"   slots {int(m.group(1))+1} and {int(m.group(2))+1} are also the ◀/▶ arrows  OK")
 
-# ---- 2. no raw-jog fallback when look-at is off -----------------------------
-print("\n2. arrow press with no look-at subject:")
+# ---- 2. no raw-jog fallback, and no arrow at all when look-at is off ---------
+print("\n2. arrow press:")
 body = code_only(SRC[SRC.index("def _on_slider_jog_start"):SRC.index("def _on_slider_jog_stop")])
 assert "1000 * direction" not in body, \
     "the full-deflection slider jog fallback is back — slot 9/10 will jog on recall"
 assert "send_jog" not in body, \
-    "_on_slider_jog_start sends a jog again; it must only start look-at moves"
+    "_on_slider_jog_start sends a jog again; it must only start moves to a rail end"
 print("   sends no jog at all                                OK")
 
-# It must still DO its job when look-at IS engaged.
+# With look-at off the press must not reach the arrow handler at all: since
+# 2026-10-15 a press with no subject starts a slide, so "no subject" can no
+# longer stand for "look-at is off".  The grid decides, from what it shows.
+press = code_only(GRID[GRID.index("def _make_arrow_press"):GRID.index("def _make_arrow_release")])
+assert "if not self._look_at_mode[mount_id]:" in press and \
+       press.index("if not self._look_at_mode[mount_id]:") < press.index("slider_jog_started.emit"), \
+    "slot 9/10 presses reach the arrow handler with look-at off — a recall would also slide"
+print("   with look-at off, slots 9/10 only recall           OK")
+
+# In look-at mode: a subject → a look-at move; none → a slide.
 assert "send_start_look_at_move" in body, "the look-at move was removed too"
-assert re.search(r"if subj < 0:", body), "the look-at guard is gone"
-print("   still starts a look-at move when a subject is set  OK")
+assert re.search(r"if subj < 0:", body) and "send_start_slide" in body, \
+    "with no subject the arrows do not slide"
+print("   a subject → look-at move; none → a slide            OK")
 
 # ---- 3. the release handler stops sending a pointless packet ----------------
 stop = code_only(SRC[SRC.index("def _on_slider_jog_stop"):])

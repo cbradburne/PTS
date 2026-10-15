@@ -11,7 +11,7 @@ CommandDispatcher — translates joystick input into mount commands.
 from __future__ import annotations
 
 import logging
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .joystick import JoystickHandler, circ_to_sq
 from comms.mount_manager import MountManager
@@ -30,6 +30,10 @@ class CommandDispatcher(QObject):
     active_mount_id: which mount the joystick currently drives (1-5).
     active_speed_preset: 1-4, controls the velocity scaling sent to the mount.
     """
+
+    # The stick moved pan/tilt on a mount CV is tracking: the operator is taking
+    # the head.  The main window stops the tracker (mount_id).
+    pan_tilt_taken = pyqtSignal(int)
 
     def __init__(self, joystick: JoystickHandler,
                  mount_manager: MountManager, parent=None):
@@ -130,6 +134,16 @@ class CommandDispatcher(QObject):
 
         pt = self._pt_presets.get(self._active, 2)
         sz = self._sz_presets.get(self._active, 2)
+
+        if self._active in self._cv_tracking_mounts and (pan != 0 or tilt != 0):
+            # The stick moving pan/tilt ends CV tracking: the operator is taking
+            # the head (the operator, 2026-10-15: "use the joystick and the
+            # tracking stop").  It was simply ignored until tracking was stopped
+            # by hand.  The tracker's parting zero jog goes first — stop_tracking
+            # is synchronous — and this tick's jog follows on the normal path.
+            # During a slide neither touches the slider: the move owns the rail.
+            self.pan_tilt_taken.emit(self._active)
+            self._cv_tracking_mounts.discard(self._active)
 
         if self._active in self._cv_tracking_mounts:
             # CV tracking owns pan/tilt — only forward slider/zoom so the joystick

@@ -191,9 +191,13 @@ print("   anything else still does a plain relative move    OK")
 assert "LOOK_AT_MAX_DEG_S" in rel, \
     "the nudge asks for a different pan/tilt speed limit than every other look-at move"
 starts = len(re.findall(r"mount\.startLookAtMove\(", INO))
-assert starts == 2, \
-    f"{starts} call sites for startLookAtMove — expected the rail-end command and " \
-    "the nudge"
+assert starts == 3, \
+    f"{starts} call sites for startLookAtMove — expected the rail-end command, " \
+    "the slide (◀/▶ with no subject) and the nudge"
+slide = INO[INO.index("case CMD_START_SLIDE: {"):]
+slide = slide[:slide.index("\n        }\n")]
+assert "mount.startLookAtMove(cur_log, dest_log, preset," in slide and \
+       "LOOK_AT_MAX_DEG_S" in slide, "the slide does not start through the same entry point"
 print("   same entry point and speed cap as a rail-end move  OK")
 
 # Tapping the same button twice must not restart the move. startLookAtMove()

@@ -44,7 +44,7 @@ from .protocol import (
     SubjectRecord, LookAtStatusPayload, RefConfirmedPayload, CalibPrompt,
     pkt_get_subjects, pkt_add_subject_start, pkt_add_subject_set_a,
     pkt_add_subject_set_b, pkt_add_subject_abort, pkt_delete_subject,
-    pkt_set_ref, pkt_set_slider_move, pkt_start_look_at_move,
+    pkt_set_ref, pkt_set_slider_move, pkt_start_look_at_move, pkt_start_slide,
     pkt_switch_subject, pkt_start_run, pkt_stop_run,
     MAX_SUBJECTS,
     # pairing management (hub mount-table view / set / clear)
@@ -1352,6 +1352,12 @@ class MountManager(QObject):
         """
         self._send(pkt_start_look_at_move(mount_id, subject_id, direction,
                                           speed_preset, repeat))
+
+    def send_start_slide(self, mount_id: int, direction: int,
+                         speed_preset: int = 2) -> None:
+        """◀/▶ with no subject: run the slider to the min (direction=0) or max
+        (direction=1) end and leave pan/tilt alone — see pkt_start_slide."""
+        self._send(pkt_start_slide(mount_id, direction, speed_preset))
 
     def send_start_run(self, mount_id: int) -> None:
         """Have the MOUNT cycle its stored positions (STATUS byte [10] says it is).

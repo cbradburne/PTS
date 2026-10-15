@@ -49,10 +49,26 @@ print(f"   {n} change-driven sends remain                      OK")
 
 # The two that matter most: a manual pan/tilt deselects, and that must reach
 # every client at once or the UI keeps claiming a subject is tracked.
-desel = INO.count("mount.clearLaSubject();\n                send_look_at_status();")
-assert desel == 2, \
-    f"expected both manual-deselect paths to report, found {desel}"
-print("   both manual-deselect paths report immediately      OK")
+def case(cmd):
+    c = INO[INO.index(f"case {cmd}: {{"):]
+    return c[:c.index("\n        }\n")]
+jog, rel = case("CMD_JOG"), case("CMD_MOVE_REL")
+assert "mount.clearLaSubject();\n                send_look_at_status();" in rel, \
+    "a pan/tilt nudge drops the subject without telling the clients"
+# The jog reports only when IT dropped a subject — by moving pan/tilt, or by
+# being CV's (a mask-0x03 jog takes the head even at zero).  Under CV tracking a
+# look-at mount takes 20 pan/tilt jogs a second, and reporting each one put a
+# forced WebSocket push to every browser back at 20 Hz for a value that had not
+# changed — the same stream section 1 says was removed.
+assert "uint8_t subj_before = mount.getLaSubjectId();" in jog, \
+    "the jog does not note the subject before jogging drops it"
+assert jog.index("uint8_t subj_before = mount.getLaSubjectId();") < jog.index("mount.jog"), \
+    "the subject is noted after the jog has already dropped it: nothing would report"
+assert "if (subj_before != 0xFF && mount.getLaSubjectId() == 0xFF)\n                send_look_at_status();" \
+    in jog, "a jog does not report the subject it dropped, or reports every jog"
+assert jog.count("send_look_at_status();") == 1, "the jog reports from more than one place"
+print("   both manual-deselect paths report immediately,")
+print("   the jog only when it really dropped a subject      OK")
 
 # And the end of a move still reports, including the end-flag persistence.
 end = INO[INO.index("// Send once when the look-at sequence ends entirely"):]

@@ -392,6 +392,8 @@ public:
     // Start a look-at move: slider travels from slider_start_steps to
     // slider_end_steps at sl_preset speed; pan/tilt continuously aim at the
     // current subject.  Returns false if ref not set or limits not found.
+    // With no subject set it is a SLIDE: the rail runs, pan/tilt are left to
+    // whoever has them, and no reference is needed until a subject is chosen.
     bool startLookAtMove(int32_t slider_start_steps, int32_t slider_end_steps,
                          uint8_t sl_preset, float max_pt_deg_s);
 
@@ -668,6 +670,9 @@ private:
     // the slider by hand and there is no commanded destination to arrive at.
     void     _updateLookAt(bool check_slider_arrival = true);
     void     _updatePreAim();                             // v2: wait for pre-aim to settle, then start slider
+    // What a slide (a look-at move with no subject) stops before it starts:
+    // everything emergencyStop() would, except axes being jogged — see the .cpp.
+    void     _stopForSlide();
     void     _driveTowardTarget(int axis, int32_t target, float max_steps_s); // v2: P-follower for one axis
     void     _setFlag(uint8_t flag)   { _flags |= flag; }
     void     _clearFlag(uint8_t flag) { _flags &= ~flag; }

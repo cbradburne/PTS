@@ -112,8 +112,13 @@ starts = CPP.count("if (_jog_dir[i] == 0) _goto_axis_released[i] = false;")
 assert starts == 2, f"expected moveTo and retargetTo to re-claim axes, found {starts}"
 print("   moveTo and retargetTo re-claim un-jogged axes      OK")
 stops = CPP.count("for (int i = 0; i < 4; i++) _goto_axis_released[i] = false;")
-assert stops == 2, f"expected stopAll and emergencyStop to clear, found {stops}"
-print("   stopAll and emergencyStop clear every axis         OK")
+assert stops == 3, \
+    f"expected stopAll, emergencyStop and _stopForSlide to clear, found {stops}"
+slide = CPP[CPP.index("void MountMotion::_stopForSlide("):]
+slide = slide[:slide.index("\n}")]
+assert "for (int i = 0; i < 4; i++) _goto_axis_released[i] = false;" in slide, \
+    "a slide cancels a goto without clearing its released axes"
+print("   stopAll, emergencyStop and _stopForSlide clear     OK")
 
 # ---- 6. the failure, simulated ----------------------------------------------
 # The essential loop: an axis under rotateAsync only stops if the P-loop gets to

@@ -2459,6 +2459,12 @@ static void handle_hub_packet(const ParsedPacket &pkt) {
             run_stop("single leg requested");   // says so, if one was going
         }
     }
+    // ◀ / ▶ with no subject: the operator moving the rail by hand, which ends
+    // any run as a single leg does.  Not consumed — the Teensy runs the slide.
+    if (pkt.cmd == CMD_START_SLIDE) {
+        prun_stop("a slide was started");
+        run_stop("a slide was started");
+    }
     // Anything that means "the operator has taken over" ends a run.  A jog is
     // a person moving the rig by hand; continuing underneath them would be the
     // mount arguing with the operator.  But only a jog that MOVES something

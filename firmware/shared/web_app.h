@@ -1073,6 +1073,7 @@ const CMD_START_LOOK_AT_MOVE = 0x27;  // 3B: subject_id, direction(0=left/1=righ
 const CMD_SWITCH_SUBJECT     = 0x28;  // 1B: subject_id
 const CMD_START_RUN          = 0x2A;  // no payload: the MOUNT cycles its stored positions
 const CMD_STOP_RUN           = 0x2B;  // no payload: the mount ends its run, either kind
+const CMD_START_SLIDE        = 0x2C;  // 2B: direction(1) + speed_preset(1) — ◀/▶ with no subject
 const STATUS_RUN_BYTE        = 10;    // STATUS byte the mount's bridge appends: its runs
 const STATUS_RUN_POSITIONS   = 0x01;  // cycling stored positions
 const STATUS_RUN_LOOK_AT     = 0x02;  // ping-ponging a look-at subject
@@ -1559,6 +1560,26 @@ function mkSwitchSubject(id, subjId) {
     const p = new Uint8Array(1);
     p[0] = subjId & 0x07;
     return buildPkt(id, CMD_SWITCH_SUBJECT, p);
+}
+
+// ◀/▶ with no subject: the slider runs to that end and pan/tilt are left
+// alone; choosing a subject on the way takes the aim over.
+function mkStartSlide(id, direction, speedPreset) {
+    const p = new Uint8Array(2);
+    p[0] = direction ? 1 : 0;   // 0 = go left/min, 1 = go right/max
+    p[1] = speedPreset;
+    return buildPkt(id, CMD_START_SLIDE, p);
+}
+
+// The look-at arrows, from either view.  With a subject, a look-at move to that
+// end, tracking it.  Without one, a slide (the operator, 2026-10-15: "<> should
+// work without a subject selected").  This used to send subject 0 when none was
+// chosen — aiming at subject 1 if it was stored, refused if not.
+function laArrow(cam, dir) {
+    const cs  = camSt[cam];
+    const pre = cs.activeSlPreset || 2;
+    wsSend(cs.activeLaSubject >= 0 ? mkStartLookAtMove(cam, cs.activeLaSubject, dir, pre)
+                                   : mkStartSlide(cam, dir, pre));
 }
 
 function mkStartLookAtMove(id, subjId, direction, speedPreset, repeat) {
@@ -2509,10 +2530,8 @@ function onPosClick(slot) {
     if (camIsLookAt(selCam)) {
         if (!cs.connected) return;
         if (slot >= 8) {
-            // Arrow buttons — start look-at move to slider limit
-            const subj = cs.activeLaSubject >= 0 ? cs.activeLaSubject : 0;
-            const dir  = (slot === 8) ? 0 : 1;   // 0=left/min, 1=right/max
-            wsSend(mkStartLookAtMove(selCam, subj, dir, cs.activeSlPreset || 2));
+            // Arrow buttons — a look-at move or a slide to that end
+            laArrow(selCam, (slot === 8) ? 0 : 1);   // 0=left/min, 1=right/max
         } else {
             if (uiMode === 'set') {
                 if (!cs.connected) { alert('Camera not connected'); return; }
@@ -3503,10 +3522,8 @@ function buildExtPositionsTable() {
                     return;
                 }
                 if (camIsLookAt(i) && s >= 8) {
-                    // LA nav arrows — start look-at slider move to limit
-                    const subj = cs2.activeLaSubject >= 0 ? cs2.activeLaSubject : 0;
-                    const dir  = (s === 8) ? 0 : 1;   // 0=left/min, 1=right/max
-                    wsSend(mkStartLookAtMove(i, subj, dir, cs2.activeSlPreset || 2));
+                    // LA nav arrows — a look-at move or a slide to that end
+                    laArrow(i, (s === 8) ? 0 : 1);   // 0=left/min, 1=right/max
                     return;
                 }
                 // LA SET mode: pick slot to kick off AddSubjectStart

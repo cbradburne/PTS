@@ -2316,11 +2316,24 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
 
 bool MountMotion::startLookAtMove(int32_t slider_start_steps, int32_t slider_end_steps,
                                    uint8_t sl_preset, float max_pt_deg_s) {
-    if (!_ref_set)               return false;
+    // No subject: a SLIDE.  The rail runs to its end and pan/tilt are left to
+    // whoever has them — nobody, the joystick, or CV tracking.  _updateLookAt()
+    // has always run a move whose subject was dropped as exactly this; now one
+    // can also start that way (◀ / ▶ with no subject, CMD_START_SLIDE).
+    // Choosing a subject on the way picks the aim up from wherever the camera
+    // points (setLookAtSubject's reacquire), and only then is a reference
+    // needed — there is nothing to aim before it.
+    bool aiming = (_la_subject_id != 0xFF);
+    if (aiming && !_ref_set)       return false;
     if (!_limits_set[AXIS_SLIDER]) return false;
+    // A slide never cuts a homing short.  (A look-at move always has, through
+    // emergencyStop(), and still does — unchanged.)
+    if (!aiming && _state == STATE_FINDING_LIMITS) return false;
 
-    // Stop anything currently running
-    emergencyStop();
+    // Stop anything currently running.  A slide leaves jogged axes alone: they
+    // may be CV tracking's, and stopping them would jolt a live shot.
+    if (aiming) emergencyStop();
+    else        _stopForSlide();
 
     sl_preset = constrain(sl_preset, 1, 4);
 
@@ -2344,7 +2357,8 @@ bool MountMotion::startLookAtMove(int32_t slider_start_steps, int32_t slider_end
     // start driving there BEFORE the slider moves.  This eliminates the visible
     // jerk at look-at start caused by any position error left over from
     // calibration (e.g. camera at SET_B tilt != look-at formula tilt).
-    {
+    // Not for a slide: there is no subject to aim at, and pan/tilt are not ours.
+    if (aiming) {
         int32_t sl_phys_now = _stepper[AXIS_SLIDER]->getPosition();
         float cx_now = (float)sl_phys_now * _slider_mm_per_step;
         if (_slider_invert) cx_now = -cx_now;
@@ -2489,17 +2503,54 @@ bool MountMotion::aimAtSubject(uint8_t pt_preset) {
 void MountMotion::stopLookAtMove() {
     if (_state != STATE_LOOK_AT_MOVE && _state != STATE_LOOK_AT_PRE_AIM) return;
     _la_sl_arrived_ms = 0;   // or the next move inherits this one's clock
+    // An axis being jogged belongs to the jog — CV tracking or the joystick —
+    // not to this move, so the move ending does not stop it.  This stopped all
+    // four: under CV tracking that cut pan/tilt off at every rail end until the
+    // next jog restarted them, a stutter in a live shot.  Left running, the
+    // mount carries on as a jog, under the jog's own dead-man (_updateJog).
+    bool jogging = false;
     noInterrupts();
     for (int i = 0; i < 4; i++) {
+        if (_jog_dir[i] != 0) { jogging = true; continue; }
         _stepper[i]->stopAsync();
-        _jog_dir[i] = 0;   // clear any zoom (or other) jog that ran during the move
     }
     interrupts();
-    _jogging      = false;
+    _jogging      = jogging;
     _la_pt_dir[0] = 0;
     _la_pt_dir[1] = 0;
     _clearFlag(FLAG_LOOK_AT_ACTIVE);
-    _state = STATE_IDLE;
+    _state = jogging ? STATE_JOGGING : STATE_IDLE;
+}
+
+// ---------------------------------------------------------------------------
+// _stopForSlide()  — what a slide stops before it starts
+// ---------------------------------------------------------------------------
+// emergencyStop() takes every axis, which is right for a look-at move: it is
+// about to aim pan and tilt itself.  A slide aims at nothing, and pan/tilt may
+// be under CV tracking or the joystick — cutting them off mid-turn would jolt a
+// live shot until the next jog restarted them.  So an axis being jogged keeps
+// going; everything else stops exactly as emergencyStop() stops it.  The slider
+// always stops: the slide is about to give it a target.
+
+void MountMotion::_stopForSlide() {
+    noInterrupts();
+    for (int i = 0; i < 4; i++) {
+        if (i != AXIS_SLIDER && _jog_dir[i] != 0) continue;   // the jog's, not ours
+        _stepper[i]->emergencyStop();
+        _jog_dir[i]     = 0;
+        _jog_preset[i]  = 0;
+        _pending_dir[i] = 0;
+        _jog_vel[i]     = 0;
+    }
+    for (int i = 0; i < 4; i++) _goto_dir[i] = 0;
+    interrupts();
+    _jogging         = (_jog_dir[AXIS_PAN]  != 0 || _jog_dir[AXIS_TILT] != 0 ||
+                        _jog_dir[AXIS_ZOOM] != 0);
+    _has_goto_target = false;
+    for (int i = 0; i < 4; i++) _goto_axis_released[i] = false;
+    _la_pt_dir[0]    = 0;
+    _la_pt_dir[1]    = 0;
+    _state           = STATE_IDLE;   // startLookAtMove() sets the move's state next
 }
 
 // ---------------------------------------------------------------------------

@@ -291,6 +291,7 @@ class MainWindow(QMainWindow):
         self._joy     = joystick
 
         self._dispatcher   = CommandDispatcher(joystick, mount_manager, self)
+        self._dispatcher.pan_tilt_taken.connect(self._on_pan_tilt_taken)
         # Camera and position names are the hub's, shared by every device.
         # This window shows cameras 1-5; the names are keyed by camera number,
         # so a window showing another set would pass it here.
@@ -1367,52 +1368,50 @@ class MainWindow(QMainWindow):
             cv.stop_tracking()
         self._stop_track_btn.setVisible(False)
 
+    def _on_pan_tilt_taken(self, mount_id: int) -> None:
+        """The joystick moved pan/tilt on the mount CV is tracking: the operator
+        has the head now, so tracking stops — as pressing a subject stops it."""
+        cv = getattr(self, "_cv_window", None)
+        if cv and cv.tracking_mount_id == mount_id:
+            cv.stop_tracking()
+
     # ------------------------------------------------------------------
     # Slider arrow jog (PositionGrid signals)
     # ------------------------------------------------------------------
 
     @pyqtSlot(int, int)
     def _on_slider_jog_start(self, mount_id: int, direction: int) -> None:
-        """Arrow button pressed.  Starts a look-at move toward that slider limit
-        IF a look-at subject is active; otherwise does nothing, because slots 9
-        and 10 are the same buttons as these arrows and must recall and only
-        recall when look-at is off."""
+        """◀/▶ pressed — the grid sends this only in look-at mode, where those
+        buttons are arrows and nothing else.  With a subject, a look-at move to
+        that end, tracking it.  Without one, a slide: the slider runs to that
+        end and pan/tilt stay with whoever has them — nobody, the joystick, or
+        CV tracking."""
         # Arrow state comes from the mount's target_slot in _on_status()
         # back to all clients (including this one), so all devices stay in sync.
         # No local optimistic update needed — the round-trip is <10 ms over loopback.
 
-        subj = self._active_la_subject.get(mount_id, -1)
-        if subj < 0:
-            # Look-at is not engaged, so these are ordinary recall slots and
-            # nothing else.  There used to be a raw-jog fallback here, and it
-            # made slots 9 and 10 do TWO things on one press.
-            #
-            # They are the same QPushButton as the slot buttons: pressed fires
-            # this handler, released+clicked fires the recall.  So every recall
-            # of slot 9 or 10 on a slider mount also sent a full-deflection
-            # slider jog — vel = 1000 * direction, because a button has no
-            # analogue value to send.  On the rig (2026-08-19) the slider set
-            # off at full speed for as long as the button was held, then the
-            # recall dragged it back: 0.5 -> 4.4 -> 0.5 mm inside one press,
-            # with no joystick anywhere near it.
-            #
-            # Worse than the movement, it left the mount in a different state
-            # each time the recall landed — jogging or not, depending on how
-            # long the button was held — and the firmware picks moveTo() or
-            # retargetTo() on exactly that state.  Two presses of the same slot
-            # could take different code paths and behave differently, which is
-            # what made the zoom fault look impossible.
-            return
         # direction: -1 = left = min limit (0), +1 = right = max limit (1)
         la_dir = 0 if direction < 0 else 1
         preset = self._grid.get_sl_preset(mount_id)
+        subj = self._active_la_subject.get(mount_id, -1)
+        if subj < 0:
+            # No subject: a slide (the operator, 2026-10-15: "<> should work
+            # without a subject selected").  A commanded move to the end of the
+            # rail — never a jog.  A raw slider-jog fallback lived here until
+            # 2026-08-19 and fired on every recall of slots 9 and 10, which are
+            # the same QPushButtons: the slider set off at full speed for as
+            # long as the button was held (0.5 -> 4.4 -> 0.5 mm inside one
+            # press), and left the mount in a different state each time.  The
+            # grid no longer sends this press outside look-at mode at all.
+            self._mm.send_start_slide(mount_id, la_dir, preset)
+            return
         self._mm.send_start_look_at_move(mount_id, subj, la_dir, preset)
 
     @pyqtSlot(int)
     def _on_slider_jog_stop(self, mount_id: int) -> None:
-        """Arrow button released.  Nothing to stop: look-at moves run to their
-        natural end rather than being held like a jog, and with look-at off the
-        press started nothing in the first place."""
+        """Arrow button released.  Nothing to stop: look-at moves and slides run
+        to their natural end rather than being held like a jog, and with look-at
+        off the press started nothing in the first place."""
         subj = self._active_la_subject.get(mount_id, -1)
         if subj < 0:
             # Nothing was started, so there is nothing to stop.  This used to
@@ -1446,6 +1445,15 @@ class MainWindow(QMainWindow):
                 self._active_la_subject[mount_id] = -1
             else:
                 self._active_la_subject[mount_id] = slot
+                # The subject takes the head from CV tracking (the operator,
+                # 2026-10-15).  Both steering pan/tilt would fight — every CV
+                # jog drops the subject on the mount again — so tracking stops
+                # first.  Its parting zero jog cannot drop the subject either
+                # way round (a centred pan/tilt leaves a held subject alone),
+                # and a slide under way carries on, now aimed at the subject.
+                cv = getattr(self, "_cv_window", None)
+                if cv and cv.tracking_mount_id == mount_id:
+                    cv.stop_tracking()
                 # Always send CMD_SWITCH_SUBJECT — the firmware handles both
                 # states, so there is no need to gate on look_at_active (which
                 # can be up to 100 ms stale).  Mid-move it retargets pan/tilt on

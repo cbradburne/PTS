@@ -118,6 +118,7 @@ class Cmd(IntEnum):
     GET_SUBJECTS       = 0x29   # request full subject list (no payload)
     START_RUN          = 0x2A   # cycle the stored positions — the MOUNT runs it (no payload)
     STOP_RUN           = 0x2B   # end the mount's run, either kind (no payload)
+    START_SLIDE        = 0x2C   # ◀/▶ with no subject: direction(1) + speed_preset(1)
 
     # Mount → PC
     STATUS            = 0x80
@@ -1810,6 +1811,19 @@ def pkt_start_look_at_move(mount_id: int, subject_id: int,
     payload = bytes([subject_id & 0x07, direction & 0x01,
                      max(1, min(4, speed_preset)), 1 if repeat else 0])
     return build_packet(mount_id, Cmd.START_LOOK_AT_MOVE, payload)
+
+
+def pkt_start_slide(mount_id: int, direction: int, speed_preset: int = 2) -> bytes:
+    """2 bytes: direction(1) + speed_preset(1) — ◀/▶ with no subject.
+
+    The slider runs to that end of the rail and pan/tilt stay with whoever has
+    them (nobody, the joystick, CV tracking).  A subject switched to on the way
+    takes the aim over and the rest of the slide is tracked.  A command of its
+    own, not a "no subject" id in START_LOOK_AT_MOVE: a Teensy from before it
+    reads any subject byte as 0-7 and would aim at that subject; this one it
+    refuses as unknown."""
+    payload = bytes([direction & 0x01, max(1, min(4, speed_preset))])
+    return build_packet(mount_id, Cmd.START_SLIDE, payload)
 
 
 def pkt_switch_subject(mount_id: int, subject_id: int) -> bytes:

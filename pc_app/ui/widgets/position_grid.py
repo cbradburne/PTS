@@ -878,6 +878,13 @@ class PositionGrid(QWidget):
         def handler():
             if not self._has_slider[mount_id] or slot not in (8, 9):
                 return
+            # ◀/▶ exist only in look-at mode.  Anywhere else this same button
+            # is slot 9 or 10, its click recalls, and nothing else may happen:
+            # with look-at off a press used to reach the arrow handler too,
+            # which then had to guess look-at was off from there being no
+            # subject — and a press now starts a slide even without one.
+            if not self._look_at_mode[mount_id]:
+                return
             direction = -1 if slot == 8 else +1
             self.slider_jog_started.emit(mount_id, direction)
         return handler

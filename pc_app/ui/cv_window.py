@@ -883,6 +883,11 @@ class CVWindow(QWidget):
         if self._video.busy:                 # the first picture: the wait is over
             self._video.set_busy(None)
             self._first_frame_timer.stop()
+        # Hidden while tracking carries on: nobody to show it to.  The emit is
+        # the display — scaling and painting on the same thread as the tracking
+        # tick — so this is time the tracking gets back, not just tidiness.
+        if not self.isVisible():
+            return
         self._video.set_frame(frame)
 
     def _on_no_first_frame(self) -> None:
@@ -962,5 +967,17 @@ class CVWindow(QWidget):
             self.move(max(mg.x(), x), self.y())
 
     def closeEvent(self, event) -> None:
+        # Closed while tracking: hide instead, and keep tracking.  The operator
+        # needs the main window to work the other cameras, and the picture is
+        # not needed for that (the operator, 2026-10-15) — the main page's
+        # Stop Tracking ends it, and the CV button brings this window back as
+        # it was, feed still running, so tracking can be picked up again with
+        # one click.  Closed while NOT tracking, it closes as it always did.
+        # Only the operator's close: if the main window has gone, so does this.
+        main = self.parentWidget()
+        if self.is_tracking and main is not None and main.isVisible():
+            event.ignore()
+            self.hide()
+            return
         self._stop_feed()
         super().closeEvent(event)

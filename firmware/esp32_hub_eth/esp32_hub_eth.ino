@@ -2354,6 +2354,16 @@ static bool demo_consume_cmd(uint8_t mount_id, uint8_t cmd,
                 intercept_la_move_dir((uint8_t)(i + 1), payload[1]);
             }
             break;
+        case CMD_START_SLIDE:                    // ◀ / ▶ with no subject
+            // payload: direction (0=min/◀, 1=max/▶), speed_preset
+            if (plen >= 2 && d.look_at) {
+                d.subject   = 0xFF;                // a slide aims at nothing
+                d.state     = STATE_LOOK_AT_MOVE;
+                d.at_max    = (payload[0] == 1);
+                d.arrive_ms = millis() + DEMO_TRAVEL_MS;
+                intercept_la_move_dir((uint8_t)(i + 1), payload[0]);
+            }
+            break;
         case CMD_E_STOP:
             d.state = STATE_IDLE; d.target = 0xFF;   // stops mid-travel, parked nowhere
             break;
@@ -2473,6 +2483,10 @@ static void forward_to_mounts(const ParsedPacket &pkt) {
     // Intercept START_LOOK_AT_MOVE — notify all clients of the direction.
     if (pkt.cmd == CMD_START_LOOK_AT_MOVE && pkt.payload_len >= 2) {
         intercept_la_move_dir(pkt.mount_id, pkt.payload[1]);
+    }
+    // A slide is the same arrow with no subject; its direction is byte 0.
+    if (pkt.cmd == CMD_START_SLIDE && pkt.payload_len >= 1) {
+        intercept_la_move_dir(pkt.mount_id, pkt.payload[0]);
     }
 }
 

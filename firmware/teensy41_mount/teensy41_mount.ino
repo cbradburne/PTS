@@ -930,6 +930,27 @@ static void update_calib() {
 }
 
 // ---------------------------------------------------------------------------
+// The rail end a look-at arrow heads for
+// ---------------------------------------------------------------------------
+// direction 0 = ◀ (left / min), 1 = ▶ (right / max), as every client sends it.
+// Limits are stored in physical steps; startLookAtMove() expects logical.
+//
+// When slider_invert is set the physical rail is flipped: physical min (0/home)
+// is at the RIGHT end and physical max at the LEFT — so with inversion the
+// physical limit an arrow means swaps.  One copy, shared by
+// CMD_START_LOOK_AT_MOVE and CMD_START_SLIDE, so the two can never disagree
+// about which way is left.
+static void arrow_dest(uint8_t direction, int32_t *cur_phys, int32_t *phys_dest,
+                       int32_t *cur_log, int32_t *dest_log) {
+    *cur_phys = mount.getPosition(AXIS_SLIDER);
+    bool go_to_phys_max = (_cfg.slider_invert) ? (direction == 0) : (direction == 1);
+    *phys_dest = go_to_phys_max ? mount.getMaxLimit(AXIS_SLIDER)
+                                : mount.getMinLimit(AXIS_SLIDER);
+    *cur_log   = _cfg.slider_invert ? -*cur_phys  : *cur_phys;
+    *dest_log  = _cfg.slider_invert ? -*phys_dest : *phys_dest;
+}
+
+// ---------------------------------------------------------------------------
 // Command dispatch
 // ---------------------------------------------------------------------------
 
@@ -955,9 +976,19 @@ static void dispatch(const ParsedPacket &pkt) {
             // Optional axis mask (byte 10): bit0=pan, bit1=tilt, bit2=slider, bit3=zoom.
             // 0x0F (default) = all axes.  0x03 = pan+tilt only (CV-tracking mode).
             uint8_t axis_mask = (len >= 11) ? p[10] : 0x0F;
+            // Before the jog: during a look-at move it drops the subject itself,
+            // and the status below must know whether there was one to drop.
+            uint8_t subj_before = mount.getLaSubjectId();
 
             if (axis_mask == 0x03) {
                 // CV-tracking mode: only drive pan/tilt; slider may be running moveSliderTo()
+                // Every CV jog means CV has the head — a zero one too, which is
+                // the person standing inside the hold box.  A subject still held
+                // went on aiming at its 3D point until the person first moved;
+                // choosing a person now hands pan/tilt over at once, and a slide
+                // under way carries on (the operator, 2026-10-15).
+                if (_cfg.look_at_mode && mount.getLaSubjectId() != 0xFF)
+                    mount.clearLaSubject();
                 mount.jogPanTilt(pan, tilt, pt_preset);
             } else if (axis_mask == 0x0C) {
                 // CV-tracking mode: only drive slider/zoom; pan/tilt under CV control
@@ -1002,10 +1033,15 @@ static void dispatch(const ParsedPacket &pkt) {
             // end on its own.  jogPanTilt() does the clearing, but the status
             // has to go out from here or every client keeps its green border on
             // a subject the camera is no longer pointing at.
+            // Only when this jog let a subject go — by moving pan/tilt, or by
+            // being CV's (above).  It went out on every pan/tilt jog: under CV
+            // tracking in look-at mode that is 20 a second, each forced out to
+            // every web page — the stream loop() says was removed.
             if (_cfg.look_at_mode && (pan != 0 || tilt != 0)) {
                 mount.clearLaSubject();
-                send_look_at_status();
             }
+            if (subj_before != 0xFF && mount.getLaSubjectId() == 0xFF)
+                send_look_at_status();
             break;
         }
 
@@ -1888,19 +1924,10 @@ static void dispatch(const ParsedPacket &pkt) {
                 break;
             }
 
-            // Compute logical start (current) and logical end (far or near limit).
-            // Limits are stored in physical steps; startLookAtMove() expects logical.
-            //
-            // When slider_invert=true the physical rail is flipped: physical min (0/home)
-            // is at the RIGHT end and physical max is at the LEFT end.  The PC sends
-            // direction=0 meaning "go left" and direction=1 meaning "go right" — so
-            // with inversion we must swap which physical limit we target.
-            int32_t cur_phys  = mount.getPosition(AXIS_SLIDER);
-            bool go_to_phys_max = (_cfg.slider_invert) ? (direction == 0) : (direction == 1);
-            int32_t phys_dest   = go_to_phys_max ? mount.getMaxLimit(AXIS_SLIDER)
-                                                  : mount.getMinLimit(AXIS_SLIDER);
-            int32_t cur_log   = _cfg.slider_invert ? -cur_phys  : cur_phys;
-            int32_t dest_log  = _cfg.slider_invert ? -phys_dest : phys_dest;
+            // Logical start (current) and end (the limit that arrow means,
+            // inversion included) — see arrow_dest().
+            int32_t cur_phys, phys_dest, cur_log, dest_log;
+            arrow_dest(direction, &cur_phys, &phys_dest, &cur_log, &dest_log);
 
             const SubjectRecord &r = _subjects[subj_id];
             mount.setLookAtSubject(r.x, r.y, r.z, subj_id);
@@ -1944,12 +1971,92 @@ static void dispatch(const ParsedPacket &pkt) {
         }
 
         // ------------------------------------------------------------------
+        // CMD_START_SLIDE — ◀ / ▶ with no subject (the operator, 2026-10-15:
+        // "<> should work without a subject selected").  The slider runs to
+        // that end of the rail and pan/tilt stay with whoever has them —
+        // nobody, the joystick, or CV tracking.  CMD_SWITCH_SUBJECT on the way
+        // takes the aim over from wherever the camera points, and the rail
+        // carries on: the rest of the slide is tracked.
+        //   payload: direction(1: 0 = ◀, 1 = ▶) + speed_preset(1)
+        // ------------------------------------------------------------------
+        case CMD_START_SLIDE: {
+            if (len < 2) break;
+            uint8_t direction = p[0] ? 1 : 0;
+            uint8_t preset    = constrain(p[1], 1, 4);
+
+            // Look-at mode only: the arrows exist only there, and 8/9 in
+            // _target_slot mean the arrows only there — on any other mount
+            // they are position slots 9 and 10.  A slide never cuts a homing
+            // short; startLookAtMove() would refuse it anyway.
+            bool homing = (mount.getState() == STATE_FINDING_LIMITS);
+            if (!_cfg.look_at_mode || !mount.hasLimits(AXIS_SLIDER) || homing) {
+                uint8_t nack_buf[PKT_BUF_SIZE];
+                uint16_t nack_len = build_nack(nack_buf, THIS_MOUNT_ID, ++_tx_seq,
+                                               pkt.seq,
+                                               homing ? NACK_BUSY : NACK_INVALID_PARAM);
+                ESP_SERIAL.write(nack_buf, nack_len);
+                break;
+            }
+
+            // Aim at nothing.  A subject still held is let go, and with it
+            // any pan/tilt the tracker was driving; every client hears it.
+            if (mount.getLaSubjectId() != 0xFF) {
+                mount.clearLaSubject();
+                send_look_at_status();
+            }
+
+            int32_t cur_phys, phys_dest, cur_log, dest_log;
+            arrow_dest(direction, &cur_phys, &phys_dest, &cur_log, &dest_log);
+
+            bool started;
+            if (mount.getState() == STATE_LOOK_AT_MOVE) {
+                // Already on the move: give the rail its new end instead of
+                // starting again.  startLookAtMove() stops the slider dead
+                // before restarting it — a visible jerk on a live shot, as
+                // CMD_MOVE_REL found.  Retargeting turns it round on its ramp.
+                mount.moveSliderTo(dest_log, preset);
+                started = true;
+            } else {
+                started = mount.startLookAtMove(cur_log, dest_log, preset,
+                                                LOOK_AT_MAX_DEG_S);
+            }
+            if (!started) {
+                uint8_t nack_buf[PKT_BUF_SIZE];
+                uint16_t nack_len = build_nack(nack_buf, THIS_MOUNT_ID, ++_tx_seq,
+                                               pkt.seq, NACK_BUSY);
+                ESP_SERIAL.write(nack_buf, nack_len);
+                break;
+            }
+            _la_last_direction = (int8_t)direction;
+            _target_slot = direction ? TARGET_SLOT_LA_MAX : TARGET_SLOT_LA_MIN;
+            Serial.printf("[Slide] %s  preset=%d  cur_phys=%ld  phys_dest=%ld\n",
+                          direction ? "RIGHT" : "LEFT", (int)preset,
+                          (long)cur_phys, (long)phys_dest);
+            break;
+        }
+
+        // ------------------------------------------------------------------
         // CMD_SWITCH_SUBJECT — change tracking target (mid-move or static aim)
         // ------------------------------------------------------------------
         case CMD_SWITCH_SUBJECT: {
             if (len < 1) break;
             uint8_t subj_id = p[0] & 0x07;
             if (!_subjects[subj_id].valid) break;
+            // Aiming needs the session reference: without one the angles are
+            // measured from a zero that means nothing, and pan/tilt drive off
+            // somewhere arbitrary.  A slide runs without a reference, so a
+            // subject chosen mid-slide must be refused here rather than aimed.
+            // (Parked, it set the subject and then aimed nowhere, in silence.)
+            // The status goes back out so a client that already showed the
+            // subject as chosen puts it back.
+            if (!mount.isRefSet()) {
+                uint8_t nack_buf[PKT_BUF_SIZE];
+                uint16_t nack_len = build_nack(nack_buf, THIS_MOUNT_ID, ++_tx_seq,
+                                               pkt.seq, NACK_NO_REF);
+                ESP_SERIAL.write(nack_buf, nack_len);
+                send_look_at_status();
+                break;
+            }
             const SubjectRecord &r = _subjects[subj_id];
             mount.setLookAtSubject(r.x, r.y, r.z, subj_id);
             if (mount.getState() == STATE_LOOK_AT_MOVE ||
