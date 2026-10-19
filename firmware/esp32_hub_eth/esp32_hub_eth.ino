@@ -4710,6 +4710,29 @@ void loop() {
     {
         WiFiClient in = _sat_server.accept();
         if (in) {
+            // A satellite keeps ONE relay link, so a new one from an address
+            // that already has a link means the old link is dead: the satellite
+            // restarted, or its cable was out.  Nothing else tells the hub — no
+            // FIN came, and the hub sends down a satellite link only for mounts
+            // routed through it.  On 2026-10-19 the Foyer's dead link (cam5 goes
+            // through it) drew a reset within a minute; the Basement's, with
+            // nothing routed, stayed open for almost two hours.  Polled on every
+            // pass like a live one, it cost ~45 us of each (the loop went 2,340
+            // -> 2,610/s the moment it closed), and it held a slot: restart a
+            // satellite often enough inside two hours and the satellite itself
+            // is turned away.  No send_sat_names() here: the new link's hello
+            // sends the list a moment later, with the satellite in it.
+            uint32_t from = (uint32_t)in.remoteIP();
+            for (int i = 0; i < MAX_SATELLITES; i++) {
+                if (!_sat[i].active || _sat[i].ip != from) continue;
+                Serial.printf("[SAT] satellite %d (%s) reconnected — closing its old link\n",
+                              i + 1, in.remoteIP().toString().c_str());
+                _sat[i].client.stop();
+                _sat[i].active = false;
+                _sat[i].name[0] = '\0';
+                sat_release_mounts(i);
+                _sat[i].ip = 0;
+            }
             bool placed = false;
             for (int i = 0; i < MAX_SATELLITES; i++) {
                 if (_sat[i].active && _sat[i].client.connected()) continue;
