@@ -335,6 +335,9 @@ static void on_ws_event(AsyncWebSocket *, AsyncWebSocketClient *client,
 // than that if it has to resolve the name, which is why hub_connect() caches
 // the address.
 static void client_link_service(uint32_t now) {
+    // connected() cannot see a hub that rebooted under this link: unless a
+    // phone sends, nothing goes out on it to draw the reset.  uplink_service()
+    // closes it for that.
     if (_client_link.connected()) return;
     // Whatever this costs is a blocking call, not a stall — the same accounting
     // the uplink connect already does.  Without it the client link's connect was
@@ -1607,6 +1610,19 @@ static void uplink_service(uint32_t now) {
         Serial.printf("[UPLINK] connected to %s:%d (connect blocked %lu ms)\n",
                       _hub_host, HUB_PORT, (unsigned long)took);
         uplink_send_hello();
+        // The hub that just took this link may be a new one — flashed,
+        // restarted, power-cycled — and the client link was made to the old
+        // one.  Nothing tells the client link so.  It only reads unless a
+        // phone sends, and a rebooting hub sends no reset, so connected() stays
+        // true and client_link_service() never retries.  The rig showed it for
+        // weeks as one TCP client on the hub where three belonged, and a phone
+        // on a satellite saw every camera grey until someone tapped, the tap
+        // lost on the dead link.  This link does find out — it carries the
+        // mounts' traffic and our health — so its reconnect closes the other,
+        // and client_link_service(), later in this same pass, opens a fresh
+        // one.  If only this link had dropped, the cost is reopening a healthy
+        // client link: one connect on the LAN.
+        if (_client_link.connected()) _client_link.stop();
     } else {
         _uplink_next_try_ms = now + _uplink_backoff_ms;
         if (_uplink_backoff_ms < UPLINK_BACKOFF_MAX_MS) _uplink_backoff_ms *= 2;
