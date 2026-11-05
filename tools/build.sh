@@ -72,6 +72,11 @@ out_for() {
     if [ -n "${BLE_VERBOSE:-}" ] && [ "$1" = "amoled" ]; then
         echo "$OUT/$1-dbg"; return
     fi
+    # The USB probe build of the display is a test: its own directory, so the
+    # binary that ships is never one rebuilt over it.
+    if [ -n "${USB_PAD_PROBE:-}" ] && [ "$1" = "display" ]; then
+        echo "$OUT/$1-usbprobe"; return
+    fi
     echo "$OUT/$1"
 }
 
@@ -86,6 +91,7 @@ sketch_for() {
         sat)     echo "$REPO/firmware/esp32_satellite" ;;
         hubeth)  echo "$REPO/firmware/esp32_hub_eth" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
+        usbprobe) echo "$REPO/firmware/usb_pad_probe" ;;
         *)       echo "" ;;
     esac
 }
@@ -116,6 +122,9 @@ fqbn_for() {
         sat)     echo "$FQBN_SAT" ;;
         hubeth)  echo "$FQBN_HUBETH" ;;
         teensy)  echo "$FQBN_TEENSY" ;;
+        # The USB controller test, on its own: the display's board, so the same
+        # settings.  See shared/usb_pad_probe.h.
+        usbprobe) echo "$FQBN_DISPLAY" ;;
     esac
 }
 
@@ -212,6 +221,13 @@ props_for() {
     # as before.  Default 1.  The log's HUB NET line says "nothing counted".
     #   HUB_NET_COUNT=0 tools/build.sh flash hubeth
     [ -n "${HUB_NET_COUNT:-}" ] && _f="$_f -DHUB_NET_COUNT=${HUB_NET_COUNT}"
+    # USB_PAD_PROBE=1 builds the display with the USB controller test running
+    # beside the screen (shared/usb_pad_probe.h), into .build/display-usbprobe.
+    # A test, never the build that ships:
+    #   USB_PAD_PROBE=1 tools/build.sh flash display <port>
+    case "$1" in
+        display) [ -n "${USB_PAD_PROBE:-}" ] && _f="$_f -DUSB_PAD_PROBE=${USB_PAD_PROBE}" ;;
+    esac
 
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""

@@ -59,7 +59,7 @@ if "%TARGET%"=="" (
     echo usage: tools\build.bat ^<target^>
     echo        tools\build.bat flash ^<target^> ^<port^>
     echo.
-    echo targets: hub hubeth display amoled sat teensy
+    echo targets: hub hubeth display amoled sat teensy usbprobe
     goto :fail
 )
 
@@ -173,5 +173,12 @@ if /i "%~1"=="teensy" (
     set "FQBN=teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
     set "SKETCH=firmware\teensy41_mount"
     set "SKETCHNAME=teensy41_mount.ino"
+)
+REM The USB controller test on the 7" display's board, on its own.  The build
+REM that runs it beside the screen needs USB_PAD_PROBE=1, so build.sh only.
+if /i "%~1"=="usbprobe" (
+    set "FQBN=esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
+    set "SKETCH=firmware\usb_pad_probe"
+    set "SKETCHNAME=usb_pad_probe.ino"
 )
 exit /b 0

@@ -21,6 +21,18 @@
 #include "../shared/disp_uart.h"
 #include "../shared/protocol.h"
 
+// USB_PAD_PROBE=1 builds a TEST: the screen and hub link as normal, plus a USB
+// host on the "USB" Type-C reading whatever controller is plugged in, printed
+// on UART0 (the "USB to UART" port) with the internal RAM left over.  Never the
+// build that ships.  See shared/usb_pad_probe.h.
+//   USB_PAD_PROBE=1 tools/build.sh flash display <port>
+#ifndef USB_PAD_PROBE
+#define USB_PAD_PROBE 0
+#endif
+#if USB_PAD_PROBE
+#include "../shared/usb_pad_probe.h"
+#endif
+
 // ---- UART to hub ------------------------------------------------------------
 // Adjust these pins if they conflict with anything on your specific revision
 // of the Waveshare board.  GPIO12 and GPIO13 are not used by the LCD or touch.
@@ -60,6 +72,13 @@ void setup() {
     // Ask the hub for the paired-mount table (the hub also pushes it at its
     // own boot, but the display may power up later than the hub).
     disp_send_raw(DISP_MSG_GET_MOUNT_TABLE, nullptr, 0);
+
+#if USB_PAD_PROBE
+    // After the UI, so its first RAM line already counts the screen's share.
+    Serial0.setTxBufferSize(4096);
+    Serial0.begin(115200);
+    usb_pad_probe_begin(Serial0);
+#endif
 }
 
 void loop() {
