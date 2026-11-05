@@ -22,6 +22,11 @@
 // it has the auto-reset circuit, so no buttons.  Switch 15 on "USB to UART".
 //
 // What it prints:
+//   - before any USB conversation: where the chip's USB pins are routed, what
+//     the host port sees on them (attached or not, D+ and D- high or low), and
+//     each device as it begins to identify itself.  A powered controller pulls
+//     D+ up the moment it is plugged in, so these tell power and wiring apart
+//     from the conversation that follows.
 //   - each device as it is plugged in: VID:PID, names, every interface and
 //     endpoint, and each HID report descriptor (the map of a generic pad's bytes)
 //   - its input, as changes.  For the first two seconds of each report type it
@@ -40,6 +45,13 @@
 #include <stdarg.h>
 #include <esp_heap_caps.h>
 #include "usb/usb_host.h"
+#include "soc/rtc_cntl_reg.h"
+// usb_reg.h addresses the USB-OTG block from a base this core's headers no
+// longer define; it is USB_DWC in esp32s3.peripherals.ld.
+#ifndef SOC_DPORT_USB_BASE
+#define SOC_DPORT_USB_BASE 0x60080000
+#endif
+#include "soc/usb_reg.h"
 
 #define UPP_MAX_DEVS     4
 #define UPP_MAX_STREAMS  4      // interrupt IN endpoints followed per device
@@ -113,6 +125,9 @@ static usb_host_client_handle_t  _upp_client = nullptr;
 static UppDev                   *_upp_devs = nullptr;
 static uint8_t                   _upp_next_n = 1;
 static size_t                    _upp_ram_before = 0;
+static volatile uint8_t          _upp_started = 0;     // devices that began enumerating
+static volatile uint16_t         _upp_started_vid, _upp_started_pid;
+static uint32_t                  _upp_port_shown = 0xFFFFFFFF;
 
 // ---- printing --------------------------------------------------------------------
 // Into a buffer on this task's stack: Print::printf mallocs for long lines, and
@@ -569,6 +584,56 @@ static void upp_client_cb(const usb_host_client_event_msg_t *msg, void *) {
     else if (msg->event == USB_HOST_CLIENT_EVENT_DEV_GONE) upp_detach(msg->dev_gone.dev_hdl);
 }
 
+// ---- before any USB conversation -------------------------------------------------------
+// A controller with power pulls D+ up the moment it is plugged in, and the host
+// port's own register shows that before a single packet is exchanged.  So these
+// say whether anything reached the chip at all — power and wiring — apart from
+// whether the USB conversation that follows works.
+
+// The chip has one set of USB pins and two USB blocks; the host only sees the
+// pins if they are routed to it, not to the built-in serial port.
+static void upp_routing() {
+    uint32_t r = REG_READ(RTC_CNTL_USB_CONF_REG);
+    bool host = (r & RTC_CNTL_SW_HW_USB_PHY_SEL) && (r & RTC_CNTL_SW_USB_PHY_SEL);
+    upp_printf("[USB] the chip's USB pins go to %s (usb_conf %08x)\n",
+               host ? "the USB host, as they must"
+                    : "its built-in USB serial port: the host cannot see anything plugged in",
+               (unsigned)r);
+}
+
+// The host port, printed when it changes.  While the port is enabled the data
+// lines carry traffic, so their levels are left out of the comparison.
+static void upp_port(uint32_t now) {
+    static uint32_t last_ms = 0;
+    if (now - last_ms < 500) return;
+    last_ms = now;
+    uint32_t h = REG_READ(USB_HPRT_REG);
+    uint32_t key = h & (USB_PRTCONNSTS | USB_PRTENA | USB_PRTPWR | (USB_PRTSPD << USB_PRTSPD_S));
+    if (!(h & USB_PRTENA)) key |= h & (USB_PRTLNSTS << USB_PRTLNSTS_S);
+    if (key == _upp_port_shown) return;
+    _upp_port_shown = key;
+    unsigned lines = (h >> USB_PRTLNSTS_S) & USB_PRTLNSTS;
+    unsigned speed = (h >> USB_PRTSPD_S) & USB_PRTSPD;
+    if (h & USB_PRTENA)
+        upp_printf("[USB] port: in use at %s speed\n", speed == 1 ? "full" : speed == 2 ? "low" : "high");
+    else
+        upp_printf("[USB] port: %s, D+ %s, D- %s%s\n",
+                   (h & USB_PRTCONNSTS) ? "something attached" : "nothing attached",
+                   (lines & 1) ? "high" : "low", (lines & 2) ? "high" : "low",
+                   (h & USB_PRTPWR) ? "" : " (the host has not switched the port on)");
+}
+
+// Called by the USB library as a new device begins to enumerate, with its device
+// descriptor read — before anything this probe sees.  On the library's task, so
+// it only notes it; the client task prints.
+static bool upp_enum_filter(const usb_device_desc_t *dd, uint8_t *bConfigurationValue) {
+    _upp_started_vid = dd->idVendor;
+    _upp_started_pid = dd->idProduct;
+    _upp_started = (uint8_t)(_upp_started + 1);
+    *bConfigurationValue = 1;
+    return true;
+}
+
 // ---- tasks ---------------------------------------------------------------------------
 static void upp_lib_task(void *) {
     for (;;) {
@@ -581,18 +646,17 @@ static void upp_lib_task(void *) {
 // from the RGB panel's: the panel refills its bounce buffer from an interrupt on
 // the core that made it, and a late refill slips the picture.
 static void upp_client_task(void *) {
-    upp_printf("\n[USB] USB controller probe.  Plug a controller into the display's \"USB\" port.\n"
-               "[USB] This is the \"USB to UART\" port: power the display through it.\n");
     if (!_upp_devs) {
         upp_printf("[USB] no memory for the probe's own tables\n");
         vTaskDelete(nullptr);
     }
-    _upp_ram_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    upp_ram("before the USB host");
 
     usb_host_config_t cfg = {};
     cfg.skip_phy_setup = false;
     cfg.intr_flags = ESP_INTR_FLAG_LEVEL1;
+#if CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+    cfg.enum_filter_cb = upp_enum_filter;
+#endif
     esp_err_t e = usb_host_install(&cfg);
     if (e != ESP_OK) {
         upp_printf("[USB] the USB host would not start: %s\n", esp_err_to_name(e));
@@ -612,13 +676,28 @@ static void upp_client_task(void *) {
     }
     size_t now_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     upp_ram("with the USB host running");
-    upp_printf("[USB] the USB host took %d KB of internal RAM, its two tasks' stacks included\n",
+    upp_printf("[USB] the USB host took %d KB of internal RAM, this probe's two tasks' stacks included\n",
                (int)((int)_upp_ram_before - (int)now_free) / 1024);
+    upp_routing();
+
+    // A device that finished enumerating before this client registered sends
+    // no NEW_DEV, so pick up whatever is already there.
+    uint8_t addrs[UPP_MAX_DEVS];
+    int n_addrs = 0;
+    if (usb_host_device_addr_list_fill(UPP_MAX_DEVS, addrs, &n_addrs) == ESP_OK)
+        for (int i = 0; i < n_addrs; i++) upp_attach(addrs[i]);
 
     uint32_t ram_ms = millis();
+    uint8_t started_shown = 0;
     for (;;) {
         usb_host_client_handle_events(_upp_client, pdMS_TO_TICKS(20));
         uint32_t now = millis();
+        upp_port(now);
+        if (_upp_started != started_shown) {
+            started_shown = _upp_started;
+            upp_printf("[USB] a device began to start up: %04x:%04x (reading its configuration)\n",
+                       _upp_started_vid, _upp_started_pid);
+        }
         for (int i = 0; i < UPP_MAX_DEVS; i++) {
             UppDev &d = _upp_devs[i];
             if (!d.used) continue;
@@ -646,6 +725,11 @@ static void upp_client_task(void *) {
 
 static void usb_pad_probe_begin(Print &out) {
     _upp_out = &out;
+    upp_printf("\n[USB] USB controller probe.  Plug a controller into the display's \"USB\" port.\n"
+               "[USB] This is the \"USB to UART\" port: power the display through it.\n");
+    // Before this probe's own task exists, so its stack counts in the cost.
+    _upp_ram_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    upp_ram("before the USB host");
     _upp_devs = (UppDev *)heap_caps_calloc(UPP_MAX_DEVS, sizeof(UppDev), MALLOC_CAP_SPIRAM);
     if (!_upp_devs) _upp_devs = (UppDev *)calloc(UPP_MAX_DEVS, sizeof(UppDev));
     xTaskCreatePinnedToCore(upp_client_task, "usb_probe", 6144, nullptr, 5, nullptr, 0);
