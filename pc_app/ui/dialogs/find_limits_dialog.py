@@ -26,7 +26,7 @@ from PyQt6.QtCore import QTimer, pyqtSlot
 from PyQt6.QtGui import QFont
 
 from comms.mount_manager import MountManager
-from comms.protocol import Axis
+from comms.protocol import Axis, LIMIT_LEG_NOT_RUN, LIMIT_LEG_STALL, LIMIT_LEG_CAP
 from ui.widgets.slider_travel_anim import SliderTravelAnim
 
 # The firmware has its own timeout; this only stops the UI sitting on
@@ -103,6 +103,21 @@ class FindLimitsDialog(QDialog):
         self._result.setStyleSheet("color:#4CAF50;")
         vl.addWidget(self._result)
 
+        # What the mount measured on each leg, so a StallGuard threshold can be
+        # tuned from here: it used to need a USB cable to the Teensy inside the
+        # mount.  Empty for firmware that does not send the readings.
+        self._readings = QLabel("")
+        self._readings.setWordWrap(True)
+        self._readings.setStyleSheet("font-size:11px; color:#B0BEC5;")
+        self._readings.setToolTip(
+            "SG is the driver's load reading. It falls as the load rises, and\n"
+            "the driver calls a stall when it drops to the trip point.\n\n"
+            "Lowest: the lowest reading while moving, leaving out the last\n"
+            "0.15 s (the approach to the end).\n"
+            "Last: the final reading. On a run that pushed into its end\n"
+            "without stopping, that is the reading at the end.")
+        vl.addWidget(self._readings)
+
         vl.addWidget(_h_rule())
 
         row = QHBoxLayout()
@@ -170,6 +185,7 @@ class FindLimitsDialog(QDialog):
             f"Searching for {_AXIS_NAME.get(self._axis, 'axis').lower()} limits…")
         self._status.setStyleSheet("font-size:12px; color:#B0BEC5;")
         self._result.setText("")
+        self._readings.setText("")
         self._anim.start(forward=True)
         self._apply_state()
         self._mm.send_find_limits(self._mount_id, self._axis, self._threshold)
@@ -199,11 +215,79 @@ class FindLimitsDialog(QDialog):
 
         self._timeout.stop()
         self._running = False
+        if min_steps == 0 and max_steps == 0:
+            # No end found.  A leg ran out of travel (the zoom gives up after
+            # a fixed number of motor turns) or time without a stall, so the
+            # mount stopped and cleared this axis's limits.  0/0 is what every
+            # client already reads as "no limits"; a found range never has its
+            # home end at 0.  It used to read "Done. Travel: 0 steps".
+            self._anim.park(at_far_end=False)
+            self._status.setText("Stopped — no end stop found.")
+            self._status.setStyleSheet("font-size:12px; color:#EF5350;")
+            self._result.setStyleSheet("color:#FFB74D;")
+            self._result.setText(
+                f"The threshold ({self._threshold}) never tripped, so the mount "
+                f"stopped and cleared the {_AXIS_NAME.get(self._axis, 'axis').lower()} "
+                "limits. If it ran into its end and kept going, raise the "
+                "threshold and try again.")
+            self._readings.setText(self._describe_readings())
+            self._apply_state()
+            return
         self._anim.park(at_far_end=True)
         self._status.setText("Done.")
         self._status.setStyleSheet("font-size:12px; color:#B0BEC5;")
+        self._result.setStyleSheet("color:#4CAF50;")
         self._result.setText(self._describe(min_steps, max_steps))
+        self._readings.setText(self._describe_readings())
         self._apply_state()
+
+    def _describe_readings(self) -> str:
+        """The StallGuard readings the mount sent with this result, one line a
+        leg and then what to do with them.
+
+        Read from the mount's state, where MountManager puts them before it
+        signals — the same route the end margin takes below.  Empty when the
+        firmware sends none.
+        """
+        try:
+            rep = getattr(self._mm.state(self._mount_id), "last_limit_find", None)
+        except Exception:
+            rep = None
+        if rep is None:
+            return ""
+        lines, hint = [], ""
+        for name, leg in zip(("Home end", "Far end"), rep.legs):
+            if leg.outcome == LIMIT_LEG_NOT_RUN:
+                continue
+            dist = self._distance(leg.travelled, rep.usteps_per_turn)
+            if leg.outcome == LIMIT_LEG_STALL:
+                low = ("too soon for a reading" if leg.sg_lowest is None
+                       else f"lowest SG while moving {leg.sg_lowest}")
+                lines.append(f"{name}: stalled after {dist} — {low}, "
+                             f"trips at {leg.trip}.")
+                continue
+            why = "its travel limit" if leg.outcome == LIMIT_LEG_CAP else "timed out"
+            low  = "-" if leg.sg_lowest is None else leg.sg_lowest
+            last = "-" if leg.sg_last is None else leg.sg_last
+            lines.append(f"{name}: no stall in {dist} ({why}) — lowest SG {low}, "
+                         f"last {last}, trips at {leg.trip}.")
+            if leg.sg_last is not None and not hint:
+                hint = (f"If it was pushing against its end, SG read about "
+                        f"{leg.sg_last} there: raise the threshold until the trip "
+                        f"point is above that.")
+        if not hint:
+            hint = ("If an end stopped short, lower it: the trip point has to "
+                    "stay below the lowest reading while moving.")
+        lines.append(f"Threshold {rep.threshold}. {hint}")
+        return "\n".join(lines)
+
+    def _distance(self, steps: int, per_turn: int) -> str:
+        """How far a leg went: millimetres on the rail, motor turns on the zoom
+        — the unit someone watching the axis can check."""
+        if self._axis == Axis.SLIDER:
+            from ui.widgets.nudge_overlay import NudgeOverlay
+            return f"{steps / NudgeOverlay.SLIDER_STEPS_PER_MM:.0f} mm"
+        return f"{steps / (per_turn or 1):.2f} turns"
 
     def _describe(self, min_steps: int, max_steps: int) -> str:
         """The result line, in the units the axis is actually measured in.

@@ -36,6 +36,7 @@ from .protocol import (
     pkt_cam_focus, pkt_cam_iris, pkt_cam_auto_iris, pkt_cam_zoom_norm,
     pkt_cam_zoom_speed, pkt_cam_shutter_speed, pkt_cam_transport, pkt_cam_tally, pkt_cam_tally_front, pkt_cam_tally_rear,
     describe_cam_param, TRANSPORT_RECORD, TRANSPORT_PREVIEW, CAM_MEASUREMENTS,
+    LIMIT_LEG_NOT_RUN, LIMIT_LEG_STALL, LIMIT_LEG_CAP, LIMIT_LEG_TIMEOUT,
     pkt_cam_shutter_angle, pkt_cam_nd, pkt_cam_auto_wb, pkt_cam_restore_auto_wb,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
@@ -154,6 +155,40 @@ def _human_s(s: float) -> str:
     if s < 3600:
         return f"{int(s // 60)} min {int(s % 60):02d} s"
     return f"{int(s // 3600)} h {int(s % 3600 // 60):02d} min"
+
+
+_LEG_OUTCOME = {
+    LIMIT_LEG_STALL:   "stalled",
+    LIMIT_LEG_CAP:     "no stall, travel cap reached,",
+    LIMIT_LEG_TIMEOUT: "no stall, timed out,",
+}
+
+
+def describe_limit_find(mount_id: int, lf: LimitsFoundPayload) -> str:
+    """One comms.log line for a limit find that carried its readings:
+
+    LIMIT FIND cam1 zoom: threshold 80 — home end stalled after 1.42 turns
+    (lowest SG 61, last 58, trips at 32); far end no stall, travel cap
+    reached, after 6.00 turns (lowest SG -, last 40, trips at 32) — no end
+    found, limits cleared
+    """
+    rep = lf.report
+    per_turn = rep.usteps_per_turn or 1
+    sg = lambda v: "-" if v is None else str(v)
+    parts = []
+    for name, leg in zip(("home end", "far end"), rep.legs):
+        if leg.outcome == LIMIT_LEG_NOT_RUN:
+            continue
+        parts.append(f"{name} {_LEG_OUTCOME.get(leg.outcome, f'(outcome {leg.outcome})')} "
+                     f"after {leg.travelled / per_turn:.2f} turns (lowest SG "
+                     f"{sg(leg.sg_lowest)}, last {sg(leg.sg_last)}, trips at {leg.trip})")
+    if (lf.min_steps, lf.max_steps) == (0, 0):
+        result = "no end found, limits cleared"
+    else:
+        result = f"limits {lf.min_steps} to {lf.max_steps}"
+    axis = "slider" if lf.axis == Axis.SLIDER else "zoom"
+    return (f"LIMIT FIND cam{mount_id} {axis}: threshold {rep.threshold} — "
+            + ("; ".join(parts) or "no leg ran") + f" — {result}")
 
 
 def _cmd_name(cmd) -> str:
@@ -522,6 +557,9 @@ class MountState_:
     slider_max:  Optional[int] = None
     zoom_min:    Optional[int] = None
     zoom_max:    Optional[int] = None
+    # What the last find or home measured (protocol.LimitFindReport), for the
+    # Find Limits dialog; None until one reports, or from older firmware.
+    last_limit_find: Optional[object] = None
 
     # The runs the MOUNT has going (STATUS byte [10], STATUS_RUN_*), or None
     # for bridge firmware that predates mount-owned position runs — in which
@@ -1734,6 +1772,14 @@ class MountManager(QObject):
                 elif lf.axis == Axis.ZOOM:
                     st.zoom_min = lf.min_steps
                     st.zoom_max = lf.max_steps
+                # The readings go in before the signal, so a slot that reads
+                # them sees this find's and not the last one's.  And into the
+                # log: a tuning session is otherwise only on the operator's
+                # screen, and "what did the zoom read at its end on Tuesday"
+                # is the question a log check gets asked.
+                st.last_limit_find = lf.report
+                if lf.report is not None:
+                    log.info(describe_limit_find(mid, lf))
                 self.limits_found.emit(mid, int(lf.axis), lf.min_steps, lf.max_steps)
             except Exception as e:
                 log.warning(f"Bad LIMITS_FOUND from mount {mid}: {e}")

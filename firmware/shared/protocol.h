@@ -1705,6 +1705,70 @@ static inline uint16_t build_limits_found(uint8_t *buf, uint8_t mount_id,
     return build_packet(buf, mount_id, seq, CMD_LIMITS_FOUND, payload, 9);
 }
 
+// ── CMD_LIMITS_FOUND with the find's readings ────────────────────────────────
+// Since 2026-11-09 a limit find appends what it measured to the 9 bytes above,
+// so the PC's Find Limits dialog can show it.  Tuning StallGuard used to need a
+// USB cable to the Teensy inside the mount.  Every client reads the first 9
+// bytes exactly as before (the hub hands only those to the 7" display), and a
+// 9-byte message is a mount on older firmware: no readings.
+//
+//   [0..8]    axis, min, max — as build_limits_found()
+//   [9]       the threshold the find used (the box's number, 0-255)
+//   [10..11]  microsteps per motor turn on this axis
+//   [12..22]  the home-end leg, then [23..33] the far-end leg, each:
+//     +0      outcome, LIMIT_LEG_*
+//     +1..4   steps travelled on the leg
+//     +5..6   lowest SG_RESULT sampled while moving, leaving out the last
+//             150 ms before the leg ended (see sg_readout.h); 0xFFFF = none
+//     +7..8   last SG_RESULT sampled while moving; 0xFFFF = none
+//     +9..10  trip point: the chip calls a stall at SG_RESULT <= this
+#define LIMIT_LEG_NOT_RUN        0    // the find ended before this leg
+#define LIMIT_LEG_STALL          1    // stopped by a stall: the end, or a stiff spot
+#define LIMIT_LEG_CAP            2    // went its whole travel cap with no stall
+#define LIMIT_LEG_TIMEOUT        3    // ran out of time with no stall
+#define LIMIT_SG_NONE            0xFFFF
+#define LIMITS_FOUND_LEN         9
+#define LIMIT_LEG_REPORT_LEN     11
+#define LIMITS_FOUND_REPORT_LEN  34
+static_assert(LIMITS_FOUND_REPORT_LEN == LIMITS_FOUND_LEN + 3 + 2 * LIMIT_LEG_REPORT_LEN,
+              "the readings are the 9 bytes, threshold + turn size, and two legs");
+
+typedef struct {
+    uint8_t  outcome;      // LIMIT_LEG_*
+    uint32_t travelled;    // steps
+    uint16_t sg_lowest;
+    uint16_t sg_last;
+    uint16_t trip;
+} LimitLegReport;
+
+typedef struct {
+    uint8_t        threshold;
+    uint16_t       usteps_per_turn;
+    LimitLegReport leg[2];  // [0] the home end (found first), [1] the far end
+} LimitFindReport;
+
+static inline uint16_t build_limits_found_report(uint8_t *buf, uint8_t mount_id,
+                                                 uint16_t seq, Axis axis,
+                                                 int32_t min_s, int32_t max_s,
+                                                 const LimitFindReport *r) {
+    uint8_t p[LIMITS_FOUND_REPORT_LEN];
+    p[0] = (uint8_t)axis;
+    write_be32(p + 1, (uint32_t)min_s);
+    write_be32(p + 5, (uint32_t)max_s);
+    p[9] = r->threshold;
+    write_be16(p + 10, r->usteps_per_turn);
+    for (int i = 0; i < 2; i++) {
+        uint8_t *q = p + 12 + i * LIMIT_LEG_REPORT_LEN;
+        q[0] = r->leg[i].outcome;
+        write_be32(q + 1, r->leg[i].travelled);
+        write_be16(q + 5, r->leg[i].sg_lowest);
+        write_be16(q + 7, r->leg[i].sg_last);
+        write_be16(q + 9, r->leg[i].trip);
+    }
+    return build_packet(buf, mount_id, seq, CMD_LIMITS_FOUND, p,
+                        LIMITS_FOUND_REPORT_LEN);
+}
+
 static inline uint16_t build_pong(uint8_t *buf, uint8_t mount_id,
                                    uint16_t seq, uint32_t timestamp_ms) {
     uint8_t payload[4];

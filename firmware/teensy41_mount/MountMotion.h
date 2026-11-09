@@ -25,6 +25,13 @@
 #include <teensystep4.h>
 #include <TMCStepper.h>
 #include "protocol.h"
+// Same two paths as protocol.h's shim: the Teensy builds from a copied sketch
+// folder, where only the dereferenced `shared` symlink is there to be found.
+#if __has_include("../shared/sg_readout.h")
+  #include "../shared/sg_readout.h"
+#else
+  #include "shared/sg_readout.h"
+#endif
 
 // ---------------------------------------------------------------------------
 // Default StallGuard thresholds — also used in EepromConfig initialisation
@@ -337,6 +344,15 @@ public:
     int32_t getMinLimit(Axis axis) const;
     int32_t getMaxLimit(Axis axis) const;
 
+    // True once the last find or home ended WITHOUT a stall (it reached its
+    // travel cap or timed out), so it found no end and cleared that axis's
+    // limits.  Read by the callbacks, which report it as limits 0/0.
+    bool limitFindFailed() const { return _lf_failed; }
+
+    // What the last find or home measured, leg by leg — sent with its
+    // LIMITS_FOUND so the PC's Find Limits dialog can show it.
+    const LimitFindReport &limitFindReport() const { return _lf_report; }
+
     // -----------------------------------------------------------------------
     // Configuration
     // -----------------------------------------------------------------------
@@ -360,7 +376,12 @@ public:
     // TMC2209 run current (mA) — call after begin()
     void setRunCurrent(Axis axis, uint16_t current_ma);
 
-    // StallGuard threshold for limit finding (0-255, higher = less sensitive)
+    // StallGuard threshold for limit finding (0-255, higher = MORE sensitive).
+    // The TMC2209 calls a stall when SG_RESULT <= 2 x SGTHRS, and SG_RESULT
+    // falls as the load rises — so a higher number trips at a lighter load.
+    // This said "higher = less sensitive" (true of the TMC2130's SGT, not of
+    // this chip), and the PC app's label said the same, so anyone tuning by
+    // the label moved the wrong way every time.
     void setStallThreshold(Axis axis, uint8_t threshold);
 
     // -----------------------------------------------------------------------
@@ -522,6 +543,15 @@ private:
     uint32_t        _lf_start_ms;
     int32_t         _lf_min_found;
     bool            _homing_only;   // true → stop after BACKING_OFF_MIN (findHome)
+    bool            _lf_failed = false;   // the last find ended with no stall
+    // The tuning readout.  The SGTHRS value actually in the chip for this leg
+    // (after the zoom's divisor and the rail's slope), the step count the leg
+    // started from, the SG_RESULT samples taken while it moved, and the whole
+    // find's report as the PC will be sent it.
+    uint8_t         _lf_sgthrs     = 0;
+    int32_t         _lf_leg_start  = 0;
+    SgReadout       _lf_sg         = {};
+    LimitFindReport _lf_report     = {};
 
     // StallGuard interrupt — set by ISR on RISING edge of DIAG pin
     static volatile bool _stall_isr_fired;
@@ -665,6 +695,19 @@ private:
     // first leg lives here — the two used to keep their own copies and drifted.
     void     _beginLimitSeek(Axis axis, LimitsFoundCb cb, bool homing_only);
     void     _updateLimitFind();
+    // Where a limit-find leg is sent: as far as its travel cap allows, or
+    // effectively unbounded on an axis without one.
+    int32_t  _limitSeekTarget(Axis axis, bool phys_positive) const;
+    // The start of a leg: remember where it began and forget the last leg's
+    // SG_RESULT samples.
+    void     _startLegReadout(Axis axis);
+    // When a leg ends: its entry in the report (leg 0 = the home end, 1 = the
+    // far end) and one line on USB serial.
+    void     _reportLeg(int leg, bool stalled, bool timed_out);
+    // A find that ended with no stall: report it and clear the axis's limits.
+    void     _abandonLimitFind();
+    // Normal running again after a find, however it ended.
+    void     _restoreDriverAfterFind(Axis axis);
     // v2: 50 Hz look-at controller.  check_slider_arrival=false tracks the
     // subject WITHOUT the end-of-move test, for when the operator is driving
     // the slider by hand and there is no commanded destination to arrive at.

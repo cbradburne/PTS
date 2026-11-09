@@ -87,4 +87,41 @@ print(f"   under 30 mm — better than the 42 mm it replaced      OK")
 # fail the check above rather than passing quietly.
 print(f"   speed and accel eased together, not accel alone      OK")
 
+# ---- 5. the zoom, which has its own numbers --------------------------------
+# It found its limits at 15 RPM — under the floor step 2 holds the slider to,
+# and nothing held the zoom to anything.  On 2026-11-09 it "either stops too
+# soon or hits the end of travel and keeps going": no threshold separated a
+# stiff spot on the lens ring from the stop.  Doubling the speed doubles the
+# distance covered while blind unless the settle comes down with it, so both
+# are checked, in motor turns.
+HDR = (REPO / "firmware/teensy41_mount/MountMotion.h").read_text()
+m = re.search(r"#define\s+MICROSTEPS_ZOOM\s+(\d+)", HDR)
+assert m, "MICROSTEPS_ZOOM not found"
+z_per_turn = int(m.group(1)) * 200
+
+z_speed  = const("LIMIT_FIND_SPEED_ZOOM")
+z_accel  = const("LIMIT_FIND_ACCEL_ZOOM")
+z_settle = const("LIMIT_STALL_SETTLE_ZOOM_MS")
+z_rpm    = z_speed / z_per_turn * 60
+z_ramp_s = z_speed / z_accel
+z_blind  = z_settle / 1000.0
+
+print(f"\n3. the zoom's limit find:")
+print(f"   {z_speed} steps/s = {z_rpm:.0f} RPM   ramp {z_ramp_s * 1000:.0f} ms   settle {z_settle} ms")
+assert z_rpm >= 25.0, \
+    f"the zoom finds its limits at {z_rpm:.0f} RPM — too close to the ~20 RPM below\n" \
+    f"    which SG_RESULT cannot tell a stiff ring from its end stop"
+print(f"   {z_rpm:.0f} RPM — clear of the ~20 RPM StallGuard floor    OK")
+
+assert z_blind > z_ramp_s and "static_assert(LIMIT_STALL_SETTLE_ZOOM_MS" in CPP, \
+    "the zoom's settle does not outlast its ramp, or is no longer asserted in C++"
+print(f"   settle outlasts the ramp, and asserted in C++         OK")
+
+z_blind_turns = (0.5 * z_accel * z_ramp_s ** 2
+                 + (z_blind - z_ramp_s) * z_speed) / z_per_turn
+assert z_blind_turns <= 0.15, \
+    f"{z_blind_turns:.2f} of a motor turn before a stall can be seen; 1600 steps/s\n" \
+    f"    with a 600 ms settle managed 0.15. A faster find needs a shorter settle."
+print(f"   blind for {z_blind_turns:.2f} of a turn — no more than before      OK")
+
 print("\nALL CHECKS PASSED")

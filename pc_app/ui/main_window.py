@@ -1230,6 +1230,21 @@ class MainWindow(QMainWindow):
     def _on_limits_found(self, mount_id: int, axis: int,
                          min_steps: int, max_steps: int) -> None:
         mc = self._config.mount(mount_id)
+        name = 'Slider' if axis == int(Axis.SLIDER) else 'Zoom'
+        if min_steps == 0 and max_steps == 0:
+            # The find (or a home) found no end stop: it ran out of travel or
+            # time without a stall, and the mount cleared the axis's limits.
+            # 0/0 is "no limits" everywhere, so record them as unknown rather
+            # than as a range from 0 to 0.
+            if axis == int(Axis.SLIDER):
+                mc.slider_min = mc.slider_max = None
+            elif axis == int(Axis.ZOOM):
+                mc.zoom_min = mc.zoom_max = None
+            save_config(self._config)
+            self._status_label.setText(
+                f"Cam {mount_id} {name}: no end stop found — limits cleared. "
+                "If it ran into its end, raise the StallGuard threshold.")
+            return
         if axis == int(Axis.SLIDER):
             mc.slider_min = min_steps
             mc.slider_max = max_steps

@@ -201,6 +201,16 @@ SCALAR_MAP = {
     "HUB_NET_P_UDP6":                ("HUB_NET_P_UDP6", True),
     "HUB_NET_P_IP6":                 ("HUB_NET_P_IP6", True),
     "HUB_NET_P_OTHER":               ("HUB_NET_P_OTHER", True),
+    # A limit find's readings, appended to LIMITS_FOUND: the Teensy writes the
+    # layout, the PC's Find Limits dialog reads it.
+    "LIMITS_FOUND_LEN":              ("LIMITS_FOUND_LEN", True),
+    "LIMIT_LEG_REPORT_LEN":          ("LIMIT_LEG_REPORT_LEN", True),
+    "LIMITS_FOUND_REPORT_LEN":       ("LIMITS_FOUND_REPORT_LEN", True),
+    "LIMIT_LEG_NOT_RUN":             ("LIMIT_LEG_NOT_RUN", True),
+    "LIMIT_LEG_STALL":               ("LIMIT_LEG_STALL", True),
+    "LIMIT_LEG_CAP":                 ("LIMIT_LEG_CAP", True),
+    "LIMIT_LEG_TIMEOUT":             ("LIMIT_LEG_TIMEOUT", True),
+    "LIMIT_SG_NONE":                 ("LIMIT_SG_NONE", True),
     # The mount's runs, in the byte its bridge appends to STATUS.
     "STATUS_RUN_BYTE":               ("STATUS_RUN_BYTE", True),
     "STATUS_RUN_POSITIONS":          ("STATUS_RUN_POSITIONS", True),
@@ -390,6 +400,13 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
                                     (pyproto.MOUNT_WEV_STA_DISCONNECTED, 113, 0x00061200),
                                     (pyproto.MOUNT_WEV_OTHER, 140, 0x00061300),
                                     (pyproto.MOUNT_WEV_SCAN_DONE, 102, 0x00062000)))),
+        "limits_found_report": (2, 0x2122, Cmd.LIMITS_FOUND,
+                                struct.pack(">Bii", 3, -9200, -400)
+                                + struct.pack(">BH", 105, 6400)
+                                + struct.pack(">BIHHH", pyproto.LIMIT_LEG_STALL,
+                                              0x00012345, 61, 0x0102, 42)
+                                + struct.pack(">BIHHH", pyproto.LIMIT_LEG_CAP,
+                                              38400, pyproto.LIMIT_SG_NONE, 40, 42)),
     }
 
 
@@ -584,6 +601,25 @@ def check_golden(pyproto):
                     26, [(1, 102, 0x00A1D100)])):
             fail("the radio tail after a C-built stall event was misread")
         ok("stall event v2 radio tail verified on C bytes")
+
+        # A limit find's readings: the C-built message decodes to every field,
+        # the 0xFFFF "no sample" arrives as None, and the same first 9 bytes on
+        # their own (older firmware) decode with no readings at all.
+        lp = c_pkts["limits_found_report"][7:-2]
+        if len(lp) != pyproto.LIMITS_FOUND_REPORT_LEN:
+            fail("the C-built LIMITS_FOUND with readings is not the length Python expects")
+        lf = pyproto.decode_limits_found(lp)
+        rp = lf.report
+        legs = [] if rp is None else [(g.outcome, g.travelled, g.sg_lowest, g.sg_last, g.trip)
+                                      for g in rp.legs]
+        if ((int(lf.axis), lf.min_steps, lf.max_steps) != (3, -9200, -400) or rp is None
+                or (rp.threshold, rp.usteps_per_turn) != (105, 6400)
+                or legs != [(pyproto.LIMIT_LEG_STALL, 0x00012345, 61, 0x0102, 42),
+                            (pyproto.LIMIT_LEG_CAP, 38400, None, 40, 42)]):
+            fail("decode_limits_found() misread the C-built readings")
+        if pyproto.decode_limits_found(lp[:pyproto.LIMITS_FOUND_LEN]).report is not None:
+            fail("decode_limits_found() invented readings for a 9-byte message")
+        ok("limit-find readings verified on C bytes")
 
         # ── parse: Python builds / mangles packets, C must agree ────────────
         AxisGroup = pyproto.AxisGroup

@@ -21,7 +21,11 @@
  * Wiring per driver:  TX ─ 1kΩ ─ PDN_UART ← RX
  *
  * DIAG pin — hardware StallGuard output (push-pull):
- *   TMC2209 drives DIAG HIGH when SG_RESULT < SGTHRS × 2 (stall) in SpreadCycle mode.
+ *   TMC2209 drives DIAG HIGH when SG_RESULT <= SGTHRS × 2 (stall).  That is
+ *   StallGuard4, which works in StealthChop — the mode limit finding runs in;
+ *   this used to say SpreadCycle, where the TMC2209 has no stall detection.
+ *   SG_RESULT FALLS as the load rises, so a HIGHER SGTHRS trips at a LIGHTER
+ *   load: a higher threshold is MORE sensitive.
  *   LOW during normal operation, HIGH on stall.
  *
  * Microstep settings (configured over UART by TMCStepper — MS1/MS2 set address only):
@@ -94,7 +98,7 @@ static constexpr uint16_t DEFAULT_CURRENT_MA[4] = { 1300, 1300, 3000, 1300 };
 // comfortably above the ~20 RPM StallGuard needs for a usable SG_RESULT.
 // It was 6000 (37.5 mm/s, 56 RPM).  Easing it is what lets the acceleration
 // come down without lengthening the settle guard — see LIMIT_FIND_ACCEL.
-static constexpr uint32_t LIMIT_FIND_SPEED       = 4000;   // steps/s — both axes (32 µstep)
+static constexpr uint32_t LIMIT_FIND_SPEED       = 4000;   // steps/s — slider (the zoom's is below)
 // 3200 steps/s² = 20 mm/s² at 160 steps/mm.
 //
 // This was 150000 (938 mm/s²) and the slider buzzed without moving — a torque
@@ -185,11 +189,50 @@ static constexpr uint32_t LIMIT_FIND_TIMEOUT_MS  = 2000000;
 // because it looks like a working home that stops in the wrong place.
 static constexpr uint32_t LIMIT_STALL_SETTLE_MS  = 1600;
 
-// Zoom now uses 32 µsteps (same as slider) — no separate speed/accel needed.
-// These are kept as aliases so the axis-specific code paths still compile.
-static constexpr uint32_t LIMIT_FIND_SPEED_ZOOM      = 1600;
+// The zoom's own limit find.  The comment that stood here called these aliases
+// of the slider's numbers, which they never were.
+//
+// SPEED — 3200 steps/s at 32 µsteps is half a motor turn a second, 30 RPM.  It
+// was 1600, 15 RPM: below the ~20 RPM this file gives as StallGuard's floor
+// (see LIMIT_FIND_SPEED, which the slider runs at 38).  Down there SG_RESULT
+// has so little room between a ring that is turning and one that has hit its
+// stop that no single threshold separates them — and "it either stops too
+// soon or hits the end of travel and keeps going" (2026-11-09) is what that
+// looks like from outside.  The threshold that worked at 1600 will not be
+// right at 3200: SG_RESULT scales with speed, so re-tune after this flash.
+//
+// SETTLE — halved as the speed doubled, 600 -> 300 ms, so the travel during
+// which a stall cannot be seen does not grow: about 0.13 of a motor turn now,
+// against 0.15 before.  The same trade the slider is held to;
+// test_limit_find_ramp.py checks both.  300 ms is still over four times the
+// 64 ms ramp.
+static constexpr uint32_t LIMIT_FIND_SPEED_ZOOM      = 3200;
 static constexpr uint32_t LIMIT_FIND_ACCEL_ZOOM      = 50000;
-static constexpr uint32_t LIMIT_STALL_SETTLE_ZOOM_MS = 600;
+static constexpr uint32_t LIMIT_STALL_SETTLE_ZOOM_MS = 300;
+
+// The furthest one leg of a limit find may travel without seeing a stall, in
+// motor turns (0 = no cap).  Past it the find stops and reports that it found
+// no end, instead of grinding on.
+//
+// The zoom's only backstop was LIMIT_FIND_TIMEOUT_MS — 33 minutes — so a
+// threshold that missed the lens's stop left the motor pushing against it
+// until somebody pressed Stop.  Six turns is generous for a lens ring: a
+// 90-degree ring through a 5:1 gear, for example, is about a turn and a
+// quarter.  A lens that genuinely needs more fails the find with a message
+// saying so, which is better than recording an end that is not there.
+//
+// The slider keeps no cap.  Its travel is the rail, and its stall detection
+// has never been the problem this answers.
+static constexpr float LIMIT_FIND_MAX_TURNS[4] = { 0.0f, 0.0f, 0.0f, 6.0f };
+
+// Microsteps in one motor turn, for the axes that find limits (both 1.8°).
+static inline float lfUStepsPerTurn(Axis axis) {
+    return MICROSTEPS[(int)axis] * (360.0f / MOTOR_DEG_PER_STEP_SZ);
+}
+
+// The readout's "no sample" goes on the wire as it is.
+static_assert(SG_READOUT_NONE == LIMIT_SG_NONE,
+              "sg_readout.h and protocol.h must agree on what 'no sample' is");
 
 // The settle guard must outlast the acceleration ramp, on BOTH axes.  That was
 // written in a comment and held by hand, and a comment does not fail the build:
@@ -212,19 +255,23 @@ static_assert(LIMIT_STALL_SETTLE_ZOOM_MS * (uint64_t)LIMIT_FIND_ACCEL_ZOOM
 // LIMIT_FIND_CURRENT_SCALE
 //   Fraction of DEFAULT_CURRENT_MA used during limit finding.
 //   Lower current → lighter apparent load → higher SG_RESULT during travel →
-//   wider useful SGTHRS range.  Zoom runs at 1800 mA full; reducing to 30 %
-//   (540 mA) brings SG_RESULT into a range where multiple SGTHRS values work.
+//   wider useful SGTHRS range.  The zoom finds at 90 % of its 1300 mA run
+//   current, 1170 mA.  (This said 1800 mA cut to 30 %, 540 mA — neither number
+//   was what ran.)
 static constexpr float LIMIT_FIND_CURRENT_SCALE[4] = { 0.75f, 0.75f, 0.75f, 0.9f };
 
 // SGTHRS_DIVISOR
 //   Divides the user-facing threshold (0-255) before writing to the SGTHRS
 //   register, remapping the full UI range to the axis's effective chip range.
+//   The chip calls a stall when SG_RESULT <= 2 x SGTHRS, so a HIGHER number is
+//   MORE sensitive.
 //
 //   Slider: SG_RESULT spans 0-500+ during motion → chip range 0-255 usable → divisor 1.
-//   Zoom:   at 540 mA the useful chip range is roughly 1-10, so divisor 25 maps:
-//             user   25 → chip  1   (minimum — least sensitive)
-//             user  128 → chip  5   (mid-range starting point)
-//             user  250 → chip 10   (maximum — most sensitive, false-stall risk)
+//   Zoom:   divisor 5, and _applyStallThreshold() rounds, so the threshold
+//           only changes in steps of 5 — 78 to 82 all give the chip 16:
+//             user   80 → chip 16 → stall at SG <=  32   (the default)
+//             user  250 → chip 50 → stall at SG <= 100   (most sensitive)
+//           This used to describe a divisor of 25 at 540 mA; neither was true.
 //   Tune SGTHRS_DIVISOR[3] if the effective chip range turns out wider or narrower.
 static constexpr uint8_t SGTHRS_DIVISOR[4] = { 1, 1, 1, 5 };
 
@@ -1301,8 +1348,12 @@ void MountMotion::emergencyStop() {
     for (int i = 0; i < 4; i++) _goto_axis_released[i] = false;
     _la_pt_dir[0]    = 0;
     _la_pt_dir[1]    = 0;
+    // A find cancelled part-way (the app's Stop sends this) used to detach the
+    // interrupt and nothing else, leaving the axis on its reduced find current
+    // until the next find FINISHED — 75 % on the slider, whose tilted rail is
+    // why it was given its full current in the first place.
     if (_lf_state != LimitFindState::IDLE) {
-        detachInterrupt(digitalPinToInterrupt(PIN_DIAG[(int)_lf_axis]));
+        _restoreDriverAfterFind(_lf_axis);
     }
     _lf_state     = LimitFindState::IDLE;
     _homing_only  = false;
@@ -1361,7 +1412,19 @@ void MountMotion::_beginLimitSeek(Axis axis, LimitsFoundCb cb, bool homing_only)
     _lf_state    = LimitFindState::MOVING_TO_MIN;
     _lf_start_ms = millis();
     _homing_only = homing_only;
+    _lf_failed   = false;
     _state       = STATE_FINDING_LIMITS;
+
+    // A fresh report for the PC: the threshold this find runs with, the size
+    // of a motor turn so it can show distances in turns, and neither leg run.
+    _lf_report = LimitFindReport{};
+    _lf_report.threshold       = _stall_threshold[(int)axis];
+    _lf_report.usteps_per_turn = (uint16_t)lfUStepsPerTurn(axis);
+    for (LimitLegReport &leg : _lf_report.leg) {
+        leg.outcome   = LIMIT_LEG_NOT_RUN;
+        leg.sg_lowest = LIMIT_SG_NONE;
+        leg.sg_last   = LIMIT_SG_NONE;
+    }
 
     // Stay in StealthChop (do NOT force SpreadCycle) — working examples show StallGuard
     // functions correctly via TCOOLTHRS even in StealthChop mode on BTT TMC2209 boards.
@@ -1388,7 +1451,8 @@ void MountMotion::_beginLimitSeek(Axis axis, LimitsFoundCb cb, bool homing_only)
     // so that position is zeroed at the same point and limits remain valid.
     {
         bool go_positive = (axis == AXIS_ZOOM && _zoom_invert);
-        _stepper[(int)axis]->setTargetAbs(go_positive ? 10000000L : -10000000L);
+        _startLegReadout(axis);
+        _stepper[(int)axis]->setTargetAbs(_limitSeekTarget(axis, go_positive));
     }
 
     // ── Diagnostic: read back chip registers to confirm writes took effect ──
@@ -1410,6 +1474,22 @@ void MountMotion::_beginLimitSeek(Axis axis, LimitsFoundCb cb, bool homing_only)
                   digitalRead(PIN_DIAG[(int)axis]) == HIGH ? "HIGH(stall)" : "LOW(ok)");
     Serial.printf("[LimitFind] SG_RESULT at standstill = %u\n",
                   _tmc[(int)axis]->SG_RESULT());
+    // What the tuning is judged against, in the chip's own terms: the box's
+    // number has been divided (zoom) and slope-adjusted (slider) by now.
+    {
+        int idx = (int)axis;
+        uint32_t spd = (axis == AXIS_ZOOM) ? LIMIT_FIND_SPEED_ZOOM : LIMIT_FIND_SPEED;
+        Serial.printf("[LimitFind] threshold %u -> stall when SG <= %u (higher threshold = "
+                      "more sensitive) | %lu steps/s = %.0f RPM | %.0f mA",
+                      (unsigned)_stall_threshold[idx], (unsigned)_lf_sgthrs * 2,
+                      (unsigned long)spd, spd * 60.0f / lfUStepsPerTurn(axis),
+                      DEFAULT_CURRENT_MA[idx] * LIMIT_FIND_CURRENT_SCALE[idx]);
+        if (LIMIT_FIND_MAX_TURNS[idx] > 0.0f)
+            Serial.printf(" | gives up after %.0f turns without a stall\n",
+                          LIMIT_FIND_MAX_TURNS[idx]);
+        else
+            Serial.println();
+    }
     Serial.println("[LimitFind] Moving to min...");
 
     _stepper[(int)axis]->moveAsync();
@@ -1544,7 +1624,9 @@ void MountMotion::_applyStallThreshold(Axis axis, bool phys_positive) {
                       (unsigned)constrain((int)(thr + 0.5f), 1, 255));
     }
 
-    _tmc[idx]->SGTHRS((uint8_t)constrain((int)(thr + 0.5f), 1, 255));
+    // Kept for the readout: the value in the chip, not the one in the box.
+    _lf_sgthrs = (uint8_t)constrain((int)(thr + 0.5f), 1, 255);
+    _tmc[idx]->SGTHRS(_lf_sgthrs);
 }
 
 void MountMotion::_updateLimitFind() {
@@ -1557,20 +1639,42 @@ void MountMotion::_updateLimitFind() {
     bool stall_settled = (elapsed > settle_ms);  // ignore DIAG during accel ramp
 
     // ── Diagnostic: print DIAG + SG_RESULT every 250 ms ──────────────────
+    // "trips at SG<=" is the CHIP's trip point: the threshold after the zoom's
+    // divisor and the rail's slope.  This printed the threshold doubled, which
+    // for the zoom was five times the real trip point — 160 for the default 80
+    // where the chip trips at 32 — so a reading of SG=60 looked well inside a
+    // stall when the chip saw nothing wrong at all.
+    //
+    // SG_RESULT itself is read every SG_READOUT_SAMPLE_MS (50 ms) for the leg's
+    // readings, and this line prints the latest.  A read is a UART round trip
+    // with two fixed 2 ms waits in TMCStepper, about 5 ms; this block already
+    // spent about 10 ms on two of them every 250 ms, so sampling faster makes
+    // that wait more frequent, never longer — and only while a find runs.
+    static uint32_t _lf_last_sample = 0;
+    static uint16_t _lf_sg_now      = 0;
+    if (millis() - _lf_last_sample >= SG_READOUT_SAMPLE_MS) {
+        _lf_last_sample = millis();
+        _lf_sg_now = _tmc[idx]->SG_RESULT();
+        bool moving_leg = (_lf_state == LimitFindState::MOVING_TO_MIN ||
+                           _lf_state == LimitFindState::MOVING_TO_MAX);
+        // Settled samples only: before that the reading means nothing.
+        if (moving_leg && stall_settled) sg_readout_add(&_lf_sg, _lf_sg_now);
+    }
+
     static uint32_t _lf_last_print = 0;
     if (millis() - _lf_last_print > 250) {
         _lf_last_print = millis();
         int      pin_raw  = digitalRead(PIN_DIAG[idx]);
         bool     isr_flag = _stall_isr_fired;
-        uint16_t sg       = _tmc[idx]->SG_RESULT();
-        uint16_t thr      = (uint16_t)_stall_threshold[idx] * 2;
+        uint16_t sg       = _lf_sg_now;
+        uint16_t trip     = (uint16_t)_lf_sgthrs * 2;
         uint32_t drv      = _tmc[idx]->DRV_STATUS();
         bool stst         = (drv >> 31) & 1;
         int32_t  pos      = _stepper[idx]->getPosition();
-        Serial.printf("[LimitFind] t=%lums  settled=%d  pin=%d  isr=%d  SG=%u  thr=%u  stst=%d  pos=%ld\n",
+        Serial.printf("[LimitFind] t=%lums  settled=%d  pin=%d  isr=%d  SG=%u  trips at SG<=%u  stst=%d  pos=%ld\n",
                       elapsed, (int)stall_settled,
                       pin_raw, (int)isr_flag,
-                      sg, thr, (int)stst, pos);
+                      sg, trip, (int)stst, pos);
     }
 
     // A STALL IS THE END OF TRAVEL, so the axis must stop dead on one.
@@ -1600,12 +1704,22 @@ void MountMotion::_updateLimitFind() {
     // and slamming it to a halt for no reason would be worse than the ramp.
     // So the two are separated rather than sharing one stop.
     bool stalled = !timed_out && stall_settled && _checkStall(ax);
+    // A moving leg that ends WITHOUT a stall has found no end.  Either it used
+    // up its travel cap — the cap is the move's own target, so the motor has
+    // stopped there — or it timed out.  Both used to be taken as the end being
+    // found; see _abandonLimitFind().  Only the two moving legs act on this.
+    bool gave_up = !stalled && (timed_out || !_stepper[idx]->isMoving);
 
     switch (_lf_state) {
         case LimitFindState::MOVING_TO_MIN: {
-            if (timed_out || stalled) {
+            if (stalled || gave_up) {
                 if (stalled) _stepper[idx]->emergencyStop();
                 else         _stepper[idx]->stopAsync();
+                _reportLeg(0, stalled, timed_out);
+            }
+            if (gave_up) {
+                _abandonLimitFind();
+            } else if (stalled) {
                 //_lf_min_found = _stepper[idx]->getPosition();
                 _stepper[idx]->setPosition(0);
                 _lf_min_found = 0;
@@ -1626,9 +1740,7 @@ void MountMotion::_updateLimitFind() {
             if (!_stepper[idx]->isMoving) {
                 if (_homing_only) {
                     // findHome() — we have zeroed and backed off, we're done.
-                    detachInterrupt(digitalPinToInterrupt(PIN_DIAG[idx]));
-                    _tmc[idx]->TCOOLTHRS(0);
-                    _tmc[idx]->rms_current(DEFAULT_CURRENT_MA[idx]);
+                    _restoreDriverAfterFind(ax);
                     _lf_state    = LimitFindState::IDLE;
                     _homing_only = false;
                     _state       = STATE_IDLE;
@@ -1656,7 +1768,8 @@ void MountMotion::_updateLimitFind() {
                         // on a tilted rail means the other side of the gravity
                         // load.  Re-apply the threshold for the new direction.
                         _applyStallThreshold(ax, go_max_positive);
-                        _stepper[idx]->setTargetAbs(go_max_positive ? 10000000L : -10000000L);
+                        _startLegReadout(ax);
+                        _stepper[idx]->setTargetAbs(_limitSeekTarget(ax, go_max_positive));
                     }
                     _stepper[idx]->moveAsync();
                     _lf_state    = LimitFindState::MOVING_TO_MAX;
@@ -1667,17 +1780,20 @@ void MountMotion::_updateLimitFind() {
         }
 
         case LimitFindState::MOVING_TO_MAX: {
-            if (timed_out || stalled) {
+            if (stalled || gave_up) {
                 if (stalled) _stepper[idx]->emergencyStop();
                 else         _stepper[idx]->stopAsync();
+                _reportLeg(1, stalled, timed_out);
+            }
+            if (gave_up) {
+                _abandonLimitFind();
+            } else if (stalled) {
                 // Read at a standstill now, so this is the stall point itself
                 // rather than a position the carriage is still moving past.
                 int32_t max_found = _stepper[idx]->getPosition();
 
                 // Restore normal operation — full current, disable StallGuard
-                detachInterrupt(digitalPinToInterrupt(PIN_DIAG[idx]));
-                _tmc[idx]->TCOOLTHRS(0);
-                _tmc[idx]->rms_current(DEFAULT_CURRENT_MA[idx]);
+                _restoreDriverAfterFind(ax);
 
                 // Position was zeroed at the min/home stall (position 0 = home).
                 // For normal axes the usable range goes from 0 upward (positive).
@@ -1727,6 +1843,103 @@ void MountMotion::_updateLimitFind() {
         default:
             break;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Limit-find legs: where each is sent, its readout, and how a find ends
+// ---------------------------------------------------------------------------
+
+// As far as the axis's travel cap allows, measured from where the leg starts.
+// An axis with no cap keeps the old target, ten million steps away.
+int32_t MountMotion::_limitSeekTarget(Axis axis, bool phys_positive) const {
+    int idx = (int)axis;
+    if (LIMIT_FIND_MAX_TURNS[idx] <= 0.0f)
+        return phys_positive ? 10000000L : -10000000L;
+    int32_t reach = (int32_t)(LIMIT_FIND_MAX_TURNS[idx] * lfUStepsPerTurn(axis));
+    int32_t from  = _stepper[idx]->getPosition();
+    return phys_positive ? from + reach : from - reach;
+}
+
+void MountMotion::_startLegReadout(Axis axis) {
+    _lf_leg_start = _stepper[(int)axis]->getPosition();
+    sg_readout_reset(&_lf_sg);
+}
+
+// When a leg ends: its entry in the report the PC is sent, and one line on USB
+// serial.  The 250 ms lines are the detail; this is the verdict.  The distance
+// tells "stopped too soon" from a real end (a stall half-way along the ring's
+// throw is a stiff spot, not the stop); the SG figures say which way to move
+// the threshold and roughly how far.
+void MountMotion::_reportLeg(int leg, bool stalled, bool timed_out) {
+    int      idx       = (int)_lf_axis;
+    uint16_t trip      = (uint16_t)_lf_sgthrs * 2;
+    uint32_t travelled = (uint32_t)abs(_stepper[idx]->getPosition() - _lf_leg_start);
+    float    turns     = (float)travelled / lfUStepsPerTurn(_lf_axis);
+
+    LimitLegReport &r = _lf_report.leg[leg];
+    r.outcome   = stalled ? LIMIT_LEG_STALL : timed_out ? LIMIT_LEG_TIMEOUT : LIMIT_LEG_CAP;
+    r.travelled = travelled;
+    r.sg_lowest = _lf_sg.lowest;    // SG_READOUT_NONE and LIMIT_SG_NONE are one value
+    r.sg_last   = _lf_sg.last;
+    r.trip      = trip;
+
+    const char *end = leg == 0 ? "min" : "max";
+    char lo[8], last[8];
+    if (_lf_sg.lowest == SG_READOUT_NONE) strcpy(lo, "-");
+    else snprintf(lo, sizeof lo, "%u", (unsigned)_lf_sg.lowest);
+    if (_lf_sg.last == SG_READOUT_NONE)   strcpy(last, "-");
+    else snprintf(last, sizeof last, "%u", (unsigned)_lf_sg.last);
+
+    if (stalled) {
+        Serial.printf("[LimitFind] %s end: STALL after %.2f motor turns. Lowest SG while "
+                      "moving (leaving out the last %u ms): %s; it trips at SG<=%u. "
+                      "Stopping short of the end? Lower the threshold.\n",
+                      end, turns, (unsigned)(SG_READOUT_TAIL * SG_READOUT_SAMPLE_MS),
+                      lo, (unsigned)trip);
+        return;
+    }
+    Serial.printf("[LimitFind] %s end NOT FOUND: %s after %.2f motor turns with no stall. "
+                  "Stopped, and this axis's limits are cleared. SG lowest %s, last %s; it "
+                  "trips at SG<=%u. If it was pushing against its end, raise the threshold "
+                  "until the trip point is above what SG read there.\n",
+                  end, timed_out ? "timed out" : "travel cap reached", turns,
+                  lo, last, (unsigned)trip);
+}
+
+// A find that ended without a stall found no end, and now says so.
+//
+// It used to carry on as if it had: a timeout zeroed home wherever the axis
+// happened to be and recorded the far end the same way.  Harmless while the
+// only backstop was a 33-minute timeout nobody reached; wrong once a travel
+// cap makes "no stall" the ordinary way a too-insensitive threshold ends.
+//
+// The axis's limits are CLEARED, not kept.  A leg that ran out of travel may
+// have spent it pushing against a stop it never noticed, and every step lost
+// there moved the step count away from the lens, so limits measured against
+// the old count are now out by an amount nobody knows.  No limits is honest;
+// wrong ones drive the axis into its stop.  The callback hears 0/0, which
+// every client already reads as "no limits".
+void MountMotion::_abandonLimitFind() {
+    Axis ax  = _lf_axis;
+    int  idx = (int)ax;
+    _restoreDriverAfterFind(ax);
+    _limits_set[idx] = false;
+    _min_limit[idx]  = 0;
+    _max_limit[idx]  = 0;
+    _lf_failed   = true;
+    _lf_state    = LimitFindState::IDLE;
+    _homing_only = false;
+    _state       = STATE_IDLE;
+    if (_lf_cb) _lf_cb(ax, 0, 0);
+}
+
+// Normal running again after a find, however it ended: the DIAG interrupt
+// off, StallGuard's velocity window shut, and the full run current back.
+void MountMotion::_restoreDriverAfterFind(Axis axis) {
+    int idx = (int)axis;
+    detachInterrupt(digitalPinToInterrupt(PIN_DIAG[idx]));
+    _tmc[idx]->TCOOLTHRS(0);
+    _tmc[idx]->rms_current(DEFAULT_CURRENT_MA[idx]);
 }
 
 // ---------------------------------------------------------------------------

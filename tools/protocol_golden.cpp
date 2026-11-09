@@ -296,6 +296,27 @@ static int do_emit() {
         emit_pkt("mount_event_nomem_v2", buf, n);
     }
 
+    // o: LIMITS_FOUND with the find's readings — an inverted zoom (negative
+    //    range), a home end that stalled and a far end that used up its travel
+    //    cap with no lowest sample, so the 0xFFFF "none" crosses the wire too.
+    {
+        LimitFindReport r = {};
+        r.threshold       = 105;
+        r.usteps_per_turn = 6400;
+        r.leg[0].outcome   = LIMIT_LEG_STALL;
+        r.leg[0].travelled = 0x00012345;
+        r.leg[0].sg_lowest = 61;
+        r.leg[0].sg_last   = 0x0102;
+        r.leg[0].trip      = 42;
+        r.leg[1].outcome   = LIMIT_LEG_CAP;
+        r.leg[1].travelled = 38400;
+        r.leg[1].sg_lowest = LIMIT_SG_NONE;
+        r.leg[1].sg_last   = 40;
+        r.leg[1].trip      = 42;
+        n = build_limits_found_report(buf, 2, 0x2122, AXIS_ZOOM, -9200, -400, &r);
+        emit_pkt("limits_found_report", buf, n);
+    }
+
     return 0;
 }
 

@@ -708,11 +708,31 @@ static void update_slot_at_mask() {
 // Home-complete callback  (called by findHome() when homing finishes)
 // ---------------------------------------------------------------------------
 
+// A find's result, with what it measured on each leg (see LimitFindReport in
+// protocol.h) for the PC's Find Limits dialog.  Clients that predate the
+// readings read the first 9 bytes and never see the rest.
+static void send_limits_found(Axis axis, int32_t min_steps, int32_t max_steps) {
+    uint8_t buf[PKT_BUF_SIZE + 4];
+    uint16_t len = build_limits_found_report(buf, THIS_MOUNT_ID, ++_tx_seq, axis,
+                                             min_steps, max_steps,
+                                             &mount.limitFindReport());
+    ESP_SERIAL.write(buf, len);
+}
+
+// Tell every client this axis has no limits: LIMITS_FOUND 0/0, which they
+// already read as "unknown".  A real result never looks like this: the home
+// end of a found range is inset from its stall, so it is never 0.  The
+// readings still go with it — a failed find is when they matter most.
+static void send_limits_gone(Axis axis) {
+    send_limits_found(axis, 0, 0);
+}
+
 static void on_home_complete(Axis axis, int32_t min_steps, int32_t max_steps) {
     int idx = (int)axis;
 
     // MountMotion may have cleared broken limits (min >= max from a stale
-    // findLimits run).  Sync EEPROM so the cleared state survives a reboot.
+    // findLimits run), or the home itself failed and took them with it.
+    // Sync EEPROM so the cleared state survives a reboot.
     if (!mount.hasLimits(axis)) {
         _cfg.limits_set[idx] = false;
         _cfg.min_limit[idx]  = 0;
@@ -720,6 +740,12 @@ static void on_home_complete(Axis axis, int32_t min_steps, int32_t max_steps) {
         save_full_config();
         save_limits();   // keep dedicated limits block in sync
     }
+
+    // A home that found no stop (MountMotion::_abandonLimitFind) says so the
+    // only way the PC can hear: the limits are gone.  HOME_COMPLETE still
+    // follows, because the 7" display disables its Find Home buttons until it
+    // arrives — it will read "homed" there, as it has no way to show a failure.
+    if (mount.limitFindFailed()) send_limits_gone(axis);
 
     // Notify PC — 1-byte payload: axis
     uint8_t ax = (uint8_t)axis;
@@ -731,6 +757,20 @@ static void on_home_complete(Axis axis, int32_t min_steps, int32_t max_steps) {
 // ---------------------------------------------------------------------------
 
 static void on_limits_found(Axis axis, int32_t min_steps, int32_t max_steps) {
+    // A find that ended with no stall (its travel cap, or the timeout) found
+    // no end, and MountMotion has cleared the axis's limits.  Forget them here
+    // too — storing this as a result would save limits_set with 0/0 — and say
+    // so.  See MountMotion::_abandonLimitFind().
+    if (mount.limitFindFailed()) {
+        _cfg.limits_set[(int)axis] = false;
+        _cfg.min_limit[(int)axis]  = 0;
+        _cfg.max_limit[(int)axis]  = 0;
+        save_full_config();
+        save_limits();
+        send_limits_gone(axis);
+        return;
+    }
+
     // EEPROM always stores (0, +travel) regardless of inversion.
     // For inverted zoom the motor frame has (min=-travel, max=0); normalise.
     int32_t eeprom_max = (axis == AXIS_ZOOM && _cfg.zoom_invert)
@@ -755,10 +795,7 @@ static void on_limits_found(Axis axis, int32_t min_steps, int32_t max_steps) {
     save_limits();   // also write to dedicated limits block — survives future magic changes
 
     // Notify PC
-    uint8_t buf[PKT_BUF_SIZE + 4];
-    uint16_t len = build_limits_found(buf, THIS_MOUNT_ID, ++_tx_seq,
-                                      axis, min_steps, max_steps);
-    ESP_SERIAL.write(buf, len);
+    send_limits_found(axis, min_steps, max_steps);
 }
 
 // ---------------------------------------------------------------------------

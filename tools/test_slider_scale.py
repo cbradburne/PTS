@@ -132,8 +132,10 @@ assert "NudgeOverlay.SLIDER_STEPS_PER_MM" in handler, \
     "readout\n    and the control can then disagree about what a millimetre is"
 assert "mm of travel" in handler, "the usable travel is not reported"
 
-# Zoom is a lens ring; millimetres would be a fiction.
-zoom_branch = handler[handler.index("Axis.ZOOM"):]
+# Zoom is a lens ring; millimetres would be a fiction.  Anchored on the branch
+# that stores a FOUND range: since 2026-11-09 the handler opens with a branch
+# for a find that found no end (limits 0/0), which names the zoom axis first.
+zoom_branch = handler[handler.index("mc.zoom_min = min_steps"):]
 assert "steps" in zoom_branch.split("save_config")[0], \
     "zoom limits are being reported in millimetres, which they are not"
 print("   slider in mm with its travel, zoom in steps       OK")

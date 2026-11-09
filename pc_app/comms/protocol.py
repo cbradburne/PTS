@@ -69,6 +69,19 @@ STATE_REPORT_LIMITS_LEN  = 22
 SAVE_SPEEDS_PAYLOAD_LEN  = 72    # (4 PT + 4 SL + 1 ZM) × 8 bytes
 NUM_SLOTS = 10
 
+# CMD_LIMITS_FOUND's readings, appended to its 9 bytes since 2026-11-09: what
+# the find measured on each leg, for the Find Limits dialog.  Layout in
+# shared/protocol.h; check_protocol.py holds these equal to it and decodes a
+# C-built message.  A 9-byte LIMITS_FOUND is older firmware, with none.
+LIMITS_FOUND_LEN         = 9
+LIMIT_LEG_REPORT_LEN     = 11
+LIMITS_FOUND_REPORT_LEN  = 34
+LIMIT_LEG_NOT_RUN        = 0     # the find ended before this leg
+LIMIT_LEG_STALL          = 1     # stopped by a stall: the end, or a stiff spot
+LIMIT_LEG_CAP            = 2     # went its whole travel cap with no stall
+LIMIT_LEG_TIMEOUT        = 3     # ran out of time with no stall
+LIMIT_SG_NONE            = 0xFFFF
+
 # v2 look-at subject constants
 MAX_SUBJECTS           = 8
 MAX_SLIDER_MOVES       = 8
@@ -636,10 +649,28 @@ class StateReportPayload:
 
 
 @dataclass
+class LimitLegReport:
+    """One leg of a limit find, as the mount measured it."""
+    outcome:   int            # LIMIT_LEG_*
+    travelled: int            # steps
+    sg_lowest: Optional[int]  # lowest SG_RESULT while moving, last 150 ms left out
+    sg_last:   Optional[int]  # last SG_RESULT while moving
+    trip:      int            # the driver calls a stall at SG_RESULT <= this
+
+
+@dataclass
+class LimitFindReport:
+    threshold:       int      # the box's number the find ran with
+    usteps_per_turn: int
+    legs:            list     # [home end, far end], LimitLegReport each
+
+
+@dataclass
 class LimitsFoundPayload:
     axis: Axis
     min_steps: int
     max_steps: int
+    report: Optional[LimitFindReport] = None   # None from firmware before the readings
 
 
 @dataclass
@@ -833,8 +864,23 @@ def decode_config_report(payload: bytes) -> ConfigReportPayload:
 
 
 def decode_limits_found(payload: bytes) -> LimitsFoundPayload:
-    axis_raw, min_steps, max_steps = struct.unpack(">Bii", payload[:9])
-    return LimitsFoundPayload(axis=Axis(axis_raw), min_steps=min_steps, max_steps=max_steps)
+    axis_raw, min_steps, max_steps = struct.unpack(">Bii", payload[:LIMITS_FOUND_LEN])
+    report = None
+    if len(payload) >= LIMITS_FOUND_REPORT_LEN:
+        threshold, per_turn = struct.unpack(">BH", payload[9:12])
+        legs = []
+        for i in range(2):
+            off = 12 + i * LIMIT_LEG_REPORT_LEN
+            outcome, travelled, lowest, last, trip = struct.unpack(
+                ">BIHHH", payload[off:off + LIMIT_LEG_REPORT_LEN])
+            legs.append(LimitLegReport(
+                outcome=outcome, travelled=travelled,
+                sg_lowest=None if lowest == LIMIT_SG_NONE else lowest,
+                sg_last=None if last == LIMIT_SG_NONE else last,
+                trip=trip))
+        report = LimitFindReport(threshold=threshold, usteps_per_turn=per_turn, legs=legs)
+    return LimitsFoundPayload(axis=Axis(axis_raw), min_steps=min_steps,
+                              max_steps=max_steps, report=report)
 
 
 def decode_home_complete(payload: bytes) -> Axis:

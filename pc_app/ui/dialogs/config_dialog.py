@@ -904,11 +904,29 @@ class ConfigDialog(QWidget):
         lanc_zoom_cb.toggled.connect(lambda on: zm_box.setVisible(not on))
         zm_box.setVisible(not mc.lanc_zoom)
 
-        # StallGuard thresholds
-        sg_box  = QGroupBox("StallGuard Thresholds (0=sensitive, 255=coarse)")
+        # StallGuard thresholds.
+        #
+        # HIGHER IS MORE SENSITIVE.  The TMC2209 calls a stall when its load
+        # reading, SG_RESULT, falls to twice the threshold or below, and that
+        # reading falls as the load rises — so a bigger number trips at a
+        # lighter load.  The title said "0=sensitive, 255=coarse" (true of the
+        # TMC2130's SGT, not of this chip), so tuning by it moved the wrong way
+        # every time: "stops too soon" → raise it → stops sooner still.  The
+        # number goes to the mount unchanged; the zoom divides it by 5 there.
+        sg_box  = QGroupBox("StallGuard Thresholds (higher = more sensitive)")
         sg_form = QFormLayout(sg_box)
         sg_slider = QSpinBox(); sg_slider.setRange(0, 255); sg_slider.setValue(mc.stall_threshold_slider)
         sg_zoom   = QSpinBox(); sg_zoom.setRange(0, 255);   sg_zoom.setValue(mc.stall_threshold_zoom)
+        _sg_tip = ("How hard the axis must push before the driver calls it a stall.\n"
+                   "HIGHER = MORE sensitive: it stops at a lighter load.\n\n"
+                   "Stops before the end → lower it.\n"
+                   "Runs into the end and keeps going → raise it.")
+        sg_slider.setToolTip(_sg_tip)
+        # The find divides the zoom's number by 5 and ROUNDS it (MountMotion's
+        # _applyStallThreshold), so 78-82 all give the chip 16.
+        sg_zoom.setToolTip(_sg_tip + "\n\nZoom only changes in steps of 5: it is "
+                                     "divided by 5 and rounded,\nso 78 to 82 all "
+                                     "act the same.")
         sg_form.addRow("Slider:", sg_slider)
         sg_form.addRow("Zoom:",   sg_zoom)
         layout.addWidget(sg_box)
