@@ -37,6 +37,7 @@ from .protocol import (
     pkt_cam_zoom_speed, pkt_cam_shutter_speed, pkt_cam_transport, pkt_cam_tally, pkt_cam_tally_front, pkt_cam_tally_rear,
     describe_cam_param, TRANSPORT_RECORD, TRANSPORT_PREVIEW, CAM_MEASUREMENTS,
     LIMIT_LEG_NOT_RUN, LIMIT_LEG_STALL, LIMIT_LEG_CAP, LIMIT_LEG_TIMEOUT,
+    decode_subject_miss, SUBJECT_MISS_APPLIED, SUBJECT_MISS_TOO_BIG,
     pkt_cam_shutter_angle, pkt_cam_nd, pkt_cam_auto_wb, pkt_cam_restore_auto_wb,
     MOUNT_BROADCAST, NUM_MOUNTS, NUM_SLOTS,
     # v2 — look-at tracking
@@ -189,6 +190,27 @@ def describe_limit_find(mount_id: int, lf: LimitsFoundPayload) -> str:
     axis = "slider" if lf.axis == Axis.SLIDER else "zoom"
     return (f"LIMIT FIND cam{mount_id} {axis}: threshold {rep.threshold} — "
             + ("; ".join(parts) or "no leg ran") + f" — {result}")
+
+
+def describe_subject_miss(mount_id: int, m) -> str:
+    """One comms.log line for how far a subject's two sightings missed the
+    point solved from them — the gap the mount now puts back into the aim so
+    the camera points exactly where Set A and Set B were pressed:
+
+    SUBJECT MISS cam5 slot 7: the sightings missed the solved point by pan
+    +0.12° tilt -0.45° at A, pan -0.10° tilt +0.41° at B — put back, so A and
+    B aim exactly as set
+    """
+    if m.flags & SUBJECT_MISS_APPLIED:
+        verdict = "put back, so A and B aim exactly as set"
+    elif m.flags & SUBJECT_MISS_TOO_BIG:
+        verdict = ("TOO BIG to be aiming error, NOT put back — check the reference, "
+                   "and that both sightings were on the same subject")
+    else:
+        verdict = "subject beside the rail, NOT put back"
+    return (f"SUBJECT MISS cam{mount_id} slot {m.slot}: the sightings missed the "
+            f"solved point by pan {m.pan_a:+.2f}° tilt {m.tilt_a:+.2f}° at A, "
+            f"pan {m.pan_b:+.2f}° tilt {m.tilt_b:+.2f}° at B — {verdict}")
 
 
 def _cmd_name(cmd) -> str:
@@ -1883,6 +1905,9 @@ class MountManager(QObject):
                 # what the 2026-08-19 attempt left behind.
                 log.info("CALIB PROMPT cam%d: %s", mid,
                          getattr(prompt, "name", None) or f"value {int(prompt)}")
+                miss = decode_subject_miss(pkt.payload)
+                if miss is not None:
+                    log.info(describe_subject_miss(mid, miss))
                 self.calib_prompt_received.emit(mid, int(prompt))
             except Exception as e:
                 log.warning(f"Bad CALIB_PROMPT from mount {mid}: {e}")

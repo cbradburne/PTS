@@ -908,6 +908,8 @@ void MountMotion::clearLaSubject() {
     _la_blend_ms    = 0;
     _la_blend_brake = 0.0f;
     _la_blend_accel = 0.0f;
+    _la_fix            = SubjectAimFix();   // nothing to aim at, nothing to correct
+    _la_blend_from_fix = SubjectAimFix();
     if (!had_subject) return;
 
     if (_state == STATE_LOOK_AT_MOVE || _state == STATE_LOOK_AT_PRE_AIM) {
@@ -2316,11 +2318,37 @@ void MountMotion::_pointFromAim(float wx, float wy, float pan_deg, float tilt_de
     *sz =      h * cosf(pan_r);
 }
 
-void MountMotion::_laAimNow(float wx, float wy,
+// A subject's sighting miss at one rail position: A's at and before A, B's at
+// and beyond B, faded in between.  A and B pressed in the same place leave no
+// span to fade across, so they share their average.
+void MountMotion::aimFixAt(const SubjectAimFix &f, float cx_mm,
+                           float *dpan_deg, float *dtilt_deg) {
+    float span = f.xb_mm - f.xa_mm;
+    float u    = (fabsf(span) < 1.0f) ? 0.5f
+                                      : constrain((cx_mm - f.xa_mm) / span, 0.0f, 1.0f);
+    *dpan_deg  = f.pan_a  + (f.pan_b  - f.pan_a)  * u;
+    *dtilt_deg = f.tilt_a + (f.tilt_b - f.tilt_a) * u;
+}
+
+void MountMotion::_subjectAim(float cx, float *pan_deg, float *tilt_deg) const {
+    float wx, wy;
+    _railWorldPos(cx, &wx, &wy);
+    _aimFrom(_la_subject_x, _la_subject_y, _la_subject_z, wx, wy, pan_deg, tilt_deg);
+    float fp, ft;
+    aimFixAt(_la_fix, cx, &fp, &ft);
+    *pan_deg  += fp;
+    *tilt_deg += ft;
+}
+
+void MountMotion::_laAimNow(float cx, float wx, float wy,
                             float *pan_deg, float *tilt_deg) const {
     float pan_b, tilt_b;
     _aimFrom(_la_subject_x, _la_subject_y, _la_subject_z, wx, wy,
              &pan_b, &tilt_b);
+    float fp, ft;
+    aimFixAt(_la_fix, cx, &fp, &ft);           // so A and B aim as they were set
+    pan_b  += fp;
+    tilt_b += ft;
 
     float e = _laBlendPhase();
     if (e >= 1.0f) {                              // no blend, or it has finished
@@ -2331,6 +2359,11 @@ void MountMotion::_laAimNow(float wx, float wy,
     float pan_a, tilt_a;
     _aimFrom(_la_blend_from[0], _la_blend_from[1], _la_blend_from[2], wx, wy,
              &pan_a, &tilt_a);
+    // The side the blend leaves from keeps ITS miss too, or the first tick of
+    // a switch would step the aim by it — the very jump the blend is for.
+    aimFixAt(_la_blend_from_fix, cx, &fp, &ft);
+    pan_a  += fp;
+    tilt_a += ft;
 
     // Shortest way round.  dz is positive for anything in front of the rail so
     // both angles land in (-90, 90) and this never fires in practice, but a
@@ -2348,12 +2381,17 @@ void MountMotion::_laAimNow(float wx, float wy,
 // new switch while a switch is running.  Reconstructed from the blended ANGLE
 // at the blended range, so the next blend begins exactly where the camera is
 // pointing rather than somewhere along the old chord.
-void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
+void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz,
+                                SubjectAimFix *fix) const {
     float e = _laBlendPhase();
     if (e >= 1.0f) {
         *sx = _la_subject_x;  *sy = _la_subject_y;  *sz = _la_subject_z;
+        if (fix) *fix = _la_fix;          // the subject's own miss goes with it
         return;
     }
+    // Rebuilt from where the camera aims NOW, misses included — so the point
+    // carries none of its own.
+    if (fix) *fix = SubjectAimFix();
 
     int32_t sl_phys = _stepper[AXIS_SLIDER]->getPosition();
     float   cx      = (float)sl_phys * _slider_mm_per_step;
@@ -2362,7 +2400,7 @@ void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
     _railWorldPos(cx, &wx, &wy);
 
     float pan_deg, tilt_deg;
-    _laAimNow(wx, wy, &pan_deg, &tilt_deg);
+    _laAimNow(cx, wx, wy, &pan_deg, &tilt_deg);
 
     // Horizontal range, blended the same way, so a switch-during-switch does
     // not jump the subject nearer or further as well as sideways.
@@ -2374,7 +2412,8 @@ void MountMotion::_laSubjectNow(float *sx, float *sy, float *sz) const {
     _pointFromAim(wx, wy, pan_deg, tilt_deg, h, sx, sy, sz);
 }
 
-void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id) {
+void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id,
+                                   const SubjectAimFix &fix) {
     // Switching subject while already tracking one: ease the target across
     // instead of stepping it.  Start from where we are aiming NOW, which may
     // itself be part-way through an earlier blend, so a switch during a switch
@@ -2395,8 +2434,9 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     bool reacquiring = (tracking_now && _la_subject_id == 0xFF && _ref_set);
 
     float from_x = 0.f, from_y = 0.f, from_z = 0.f;
+    SubjectAimFix from_fix;              // none, unless leaving a subject that has one
     if (switching) {
-        _laSubjectNow(&from_x, &from_y, &from_z);
+        _laSubjectNow(&from_x, &from_y, &from_z, &from_fix);
     } else if (reacquiring) {
         int32_t sl_phys = _stepper[AXIS_SLIDER]->getPosition();
         float   cx      = (float)sl_phys * _slider_mm_per_step;
@@ -2428,6 +2468,7 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     _la_subject_y  = sy;
     _la_subject_z  = sz;
     _la_subject_id = subject_id;
+    _la_fix        = fix;
 
     if (!switching) {
         _la_blend_ms    = 0;         // first selection — aim straight at it
@@ -2450,15 +2491,21 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     _railWorldPos(cx, &wx, &wy);
 
     // Same helper the tracker uses, so the travel this duration is computed
-    // from cannot drift away from the angles actually flown.
-    float pan_a, tilt_a, pan_b, tilt_b;
+    // from cannot drift away from the angles actually flown — sighting misses
+    // included, on both sides, exactly as _laAimNow() will fly them.
+    float pan_a, tilt_a, pan_b, tilt_b, fp, ft;
     _aimFrom(from_x, from_y, from_z, wx, wy, &pan_a, &tilt_a);
+    aimFixAt(from_fix, cx, &fp, &ft);
+    pan_a += fp;  tilt_a += ft;
     _aimFrom(sx,     sy,     sz,     wx, wy, &pan_b, &tilt_b);
+    aimFixAt(fix, cx, &fp, &ft);
+    pan_b += fp;  tilt_b += ft;
     float travel = fmaxf(fabsf(pan_b - pan_a), fabsf(tilt_b - tilt_a));
 
-    float ms = travel * LOOK_AT_BLEND_MS_PER_DEG;
+    // As long as the pan/tilt dial's speed and acceleration need — see
+    // _switchMs().  The floor keeps a nudge from being a twitch.
+    float ms = _switchMs(travel);
     if (ms < (float)LOOK_AT_BLEND_MIN_MS) ms = (float)LOOK_AT_BLEND_MIN_MS;
-    if (ms > (float)LOOK_AT_BLEND_MAX_MS) ms = (float)LOOK_AT_BLEND_MAX_MS;
 
     // The ceiling sets a FLOOR on how long the turn takes.
     //
@@ -2484,6 +2531,7 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     _la_blend_from[0] = from_x;
     _la_blend_from[1] = from_y;
     _la_blend_from[2] = from_z;
+    _la_blend_from_fix = from_fix;
     _la_blend_start_ms = millis();
     _la_blend_ms       = (uint32_t)ms;
 
@@ -2506,6 +2554,11 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     // short, which is why this cannot be a fixed number.
     _la_blend_accel = LOOK_AT_ACCEL_HEADROOM * 6.0f * travel
                     / ((ms / 1000.0f) * (ms / 1000.0f));
+    // But never below what tracking needs.  At a slow dial the curve asks for
+    // almost nothing — 0.4 deg/s^2 for 15 degrees at 1 deg/s — and this limit
+    // outlives the blend, so left alone it would hold the camera to it for the
+    // rest of the move.  See LOOK_AT_TRACK_ACCEL_MIN.
+    if (_la_blend_accel < LOOK_AT_TRACK_ACCEL_MIN) _la_blend_accel = LOOK_AT_TRACK_ACCEL_MIN;
 
     // Hold the gentle slew cap for the whole blend AND the settling after it.
     // The cap comes off in a step, so it has to come off when the camera is
@@ -2513,11 +2566,37 @@ void MountMotion::setLookAtSubject(float sx, float sy, float sz, uint8_t subject
     // which is where a fixed grace put it and why the ease OUT kicked.
     _la_slew_until_ms = millis() + _la_blend_ms + LOOK_AT_SLEW_SETTLE_MS;
 
-    Serial.printf("[LA] subject switch: %.1f deg over %lums, peak %.1f deg/s, "
-                  "cap %.2f (was %.2f), held %lums\n",
-                  travel, (unsigned long)_la_blend_ms, peak_dps,
-                  _la_blend_brake, 0.15f,
+    Serial.printf("[LA] subject switch at dial %u (%lu deg/s, %lu deg/s^2): "
+                  "%.1f deg over %lums, peak %.1f deg/s, cap %.2f, held %lums\n",
+                  (unsigned)_la_pt_preset,
+                  (unsigned long)_pt_presets[_la_pt_preset].max_speed,
+                  (unsigned long)_pt_presets[_la_pt_preset].acceleration,
+                  travel, (unsigned long)_la_blend_ms, peak_dps, _la_blend_brake,
                   (unsigned long)(_la_blend_ms + LOOK_AT_SLEW_SETTLE_MS));
+}
+
+// How long a switch of `travel` degrees takes at the pan/tilt dial.
+//
+// A smoothstep across D degrees in T seconds peaks at 1.5·D/T deg/s, and its
+// acceleration peaks at 6·D/T² deg/s².  So T is the longer of what keeps the
+// first within the dial's speed and the second within its acceleration — the
+// two numbers a parked switch (aimAtSubject → moveTo) has always run at.  At
+// the default presets a 15 degree switch takes 2.4 s at 4, 3.0 s at 3, 4.5 s
+// at 2 and 22 s at 1, where the fixed law took 0.8 s at every one of them.
+//
+// A dial with no usable speed in it falls back on that fixed law, ceiling and
+// all, rather than dividing by zero.
+float MountMotion::_switchMs(float travel) const {
+    const SpeedPreset &dial = _pt_presets[_la_pt_preset];
+    float v = (float)dial.max_speed;       // deg/s
+    float a = (float)dial.acceleration;    // deg/s^2
+    if (v <= 0.0f || a <= 0.0f) {
+        float ms = travel * LOOK_AT_BLEND_MS_PER_DEG;
+        return (ms > (float)LOOK_AT_BLEND_MAX_MS) ? (float)LOOK_AT_BLEND_MAX_MS : ms;
+    }
+    float t_speed = 1.5f * travel / v;
+    float t_accel = sqrtf(6.0f * travel / a);
+    return 1000.0f * fmaxf(t_speed, t_accel);
 }
 
 // ---------------------------------------------------------------------------
@@ -2576,11 +2655,11 @@ bool MountMotion::startLookAtMove(int32_t slider_start_steps, int32_t slider_end
         float cx_now = (float)sl_phys_now * _slider_mm_per_step;
         if (_slider_invert) cx_now = -cx_now;
 
-        float wx_now, wy_now;
-        _railWorldPos(cx_now, &wx_now, &wy_now);
+        // The subject's aim from here, sighting miss included: started from
+        // where Set A or Set B was pressed, this IS that shot, so the camera
+        // is already on it and the swing below does not happen at all.
         float pan_deg_now, tilt_deg_now;
-        _aimFrom(_la_subject_x, _la_subject_y, _la_subject_z, wx_now, wy_now,
-                 &pan_deg_now, &tilt_deg_now);
+        _subjectAim(cx_now, &pan_deg_now, &tilt_deg_now);
 
         int32_t pan_tgt  = (int32_t)((pan_deg_now  - _pan_ref_deg)  / _pan_deg_per_step);
         int32_t tilt_tgt = (int32_t)((tilt_deg_now - _tilt_ref_deg) / _tilt_deg_per_step);
@@ -2600,17 +2679,37 @@ bool MountMotion::startLookAtMove(int32_t slider_start_steps, int32_t slider_end
             // Already close enough — skip pre-aim and start slider immediately
             Serial.printf("[LookAt] PRE-AIM skipped (already on target)\n");
         } else {
-            // Drive pan/tilt to the correct start position at full look-at speed
-            // (no BRAKE_FACTOR cap here — we want a crisp, fast snap to position).
-            float pan_spd_s  = _la_max_steps_s[0];
-            float tilt_spd_s = _la_max_steps_s[1];
+            // Swing pan/tilt to the start at the pan/tilt DIAL's speed and
+            // acceleration.  This was a "crisp, fast snap" at the axis's full
+            // look-at speed, 47 deg/s with three times that in acceleration —
+            // on a live camera, the same complaint as a subject switch, and
+            // the same answer (2026-11-18): the dial the operator set.
+            //
+            // Synced like a parked aim (moveTo): the axis with further to go
+            // at the dial's speed runs at it, the other is scaled down in speed
+            // AND acceleration by the same ratio, so both profiles are one
+            // shape in time and land together instead of drawing an L.
+            const SpeedPreset &dial = _pt_presets[_la_pt_preset];
+            float v_deg = fmaxf(1.0f, (float)dial.max_speed);
+            float a_deg = fmaxf(1.0f, (float)dial.acceleration);
+            float pan_v  = fminf(v_deg / _pan_deg_per_step,  _la_max_steps_s[0]);
+            float tilt_v = fminf(v_deg / _tilt_deg_per_step, _la_max_steps_s[1]);
+            float pan_a  = a_deg / _pan_deg_per_step;
+            float tilt_a = a_deg / _tilt_deg_per_step;
+            float t_pan  = (float)labs(pan_err)  / pan_v;
+            float t_tilt = (float)labs(tilt_err) / tilt_v;
+            float t_move = fmaxf(t_pan, t_tilt);
+            float k_pan  = (t_move > 0.0f) ? t_pan  / t_move : 1.0f;
+            float k_tilt = (t_move > 0.0f) ? t_tilt / t_move : 1.0f;
+            Serial.printf("[LookAt] PRE-AIM at dial %u: %.0f deg/s, %.0f deg/s^2\n",
+                          (unsigned)_la_pt_preset, v_deg, a_deg);
             noInterrupts();
-            _stepper[AXIS_PAN ]->setMaxSpeed((uint32_t)pan_spd_s);
-            _stepper[AXIS_PAN ]->setAcceleration((uint32_t)(pan_spd_s  * 3.0f));
+            _stepper[AXIS_PAN ]->setMaxSpeed((int32_t)fmaxf(1.0f, pan_v * k_pan));
+            _stepper[AXIS_PAN ]->setAcceleration((uint32_t)fmaxf(1.0f, pan_a * k_pan));
             _stepper[AXIS_PAN ]->setTargetAbs(pan_tgt);
             _stepper[AXIS_PAN ]->moveAsync();
-            _stepper[AXIS_TILT]->setMaxSpeed((uint32_t)tilt_spd_s);
-            _stepper[AXIS_TILT]->setAcceleration((uint32_t)(tilt_spd_s * 3.0f));
+            _stepper[AXIS_TILT]->setMaxSpeed((int32_t)fmaxf(1.0f, tilt_v * k_tilt));
+            _stepper[AXIS_TILT]->setAcceleration((uint32_t)fmaxf(1.0f, tilt_a * k_tilt));
             _stepper[AXIS_TILT]->setTargetAbs(tilt_tgt);
             _stepper[AXIS_TILT]->moveAsync();
             interrupts();
@@ -2657,12 +2756,12 @@ bool MountMotion::aimAtSubject(uint8_t pt_preset) {
     float cx = (float)sl_phys * _slider_mm_per_step;
     if (_slider_invert) cx = -cx;
 
-    // Vector from camera to subject, both on the real (possibly climbing) rail
+    // Vector from camera to subject, both on the real (possibly climbing) rail,
+    // with the subject's sighting miss put back — the same aim tracking flies.
     float wx, wy;
     _railWorldPos(cx, &wx, &wy);
     float pan_deg, tilt_deg;
-    _aimFrom(_la_subject_x, _la_subject_y, _la_subject_z, wx, wy,
-             &pan_deg, &tilt_deg);
+    _subjectAim(cx, &pan_deg, &tilt_deg);
 
     // Convert to LOGICAL step targets.
     // moveTo() calls _applyOrientationPos() on PAN, TILT, and SLIDER internally,
@@ -2851,7 +2950,7 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
     //    point — see _laAimNow().  Both endpoints are re-derived at the rail
     //    position just computed, so the rail is still tracked throughout.
     float pan_deg, tilt_deg;
-    _laAimNow(wx, wy, &pan_deg, &tilt_deg);
+    _laAimNow(cx, wx, wy, &pan_deg, &tilt_deg);
 
     // 4. Convert world-frame angles to target step counts via session reference
     int32_t pan_target  = (int32_t)((pan_deg  - _pan_ref_deg)  / _pan_deg_per_step);
@@ -2870,7 +2969,7 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
         float pan_err  = (float)(pan_target  - pan_pos);
         float tilt_err = (float)(tilt_target - tilt_pos);
         float sx_now, sy_now, sz_now;
-        _laSubjectNow(&sx_now, &sy_now, &sz_now);
+        _laSubjectNow(&sx_now, &sy_now, &sz_now, nullptr);
         Serial.printf("[LA] sl_phys=%ld  cx=%.1fmm  subj=(%.1f,%.1f,%.1f)\n",
                       (long)sl_phys, cx,
                       sx_now, sy_now, sz_now);
@@ -2971,8 +3070,21 @@ void MountMotion::_updateLookAt(bool check_slider_arrival) {
                                (pan_err <= aim_tol && tilt_err <= aim_tol);
 
             if (_la_sl_arrived_ms == 0) _la_sl_arrived_ms = now;
+            // The wait is counted from whichever came LAST, the rail arriving
+            // or the switch's own end.  It used to start on the rail alone and
+            // be sized to outlast the longest switch there was, 6.8 s; with the
+            // dial timing a switch, a slow one can run for half a minute, and a
+            // clock started on the rail would cut it off part-way through —
+            // the camera left between two people that this wait exists to
+            // prevent.  Waiting for the blend itself costs nothing: it ends at
+            // a time known in advance.
+            uint32_t clock_from = _la_sl_arrived_ms;
+            if (_la_blend_ms != 0) {
+                uint32_t blend_end = _la_blend_start_ms + _la_blend_ms;
+                if ((int32_t)(blend_end - clock_from) > 0) clock_from = blend_end;
+            }
             bool waited_long_enough =
-                (now - _la_sl_arrived_ms) >= LOOK_AT_AIM_FINISH_MAX_MS;
+                (int32_t)(now - clock_from) >= (int32_t)LOOK_AT_AIM_FINISH_MAX_MS;
 
             if ((!blending && aim_there) || waited_long_enough) {
                 Serial.printf("[LA] Slider arrived at phys=%ld (dest=%ld err=%ld); "
@@ -3126,18 +3238,26 @@ void MountMotion::_driveTowardTarget(int axis, int32_t target, float max_steps_s
     // camera has arrived and the cap does not bind, so the handover is invisible
     // whichever way it goes — and it does go both ways: a very small turn blends
     // slowly enough that its cap is BELOW the fixed one, and then this ramps up.
+    //
+    // And it is never below the cap ordinary tracking runs at.  The dial times
+    // the SWITCH; the rail still moves underneath it, and the camera has to
+    // keep up with that too.  A cap sized for a slow dial's peak alone — 6.5
+    // deg/s at 5 deg/s — would let tracking fall behind for the whole of a
+    // switch that can now last half a minute.  The setpoint is smooth, so the
+    // extra room is only ever used to follow it, never to rush ahead of it.
     if (_la_blend_ms != 0 && _la_blend_brake > 0.0f) {
+        float blend_brake  = fmaxf(_la_blend_brake, LOOK_AT_BRAKE_FACTOR);
         uint32_t now_ms    = millis();
         uint32_t blend_end = _la_blend_start_ms + _la_blend_ms;
         if ((int32_t)(now_ms - blend_end) < 0) {
-            effective_brake = _la_blend_brake;                  // still blending
+            effective_brake = blend_brake;                      // still blending
         } else {
             uint32_t since = now_ms - blend_end;
             if (since < LOOK_AT_SLEW_SETTLE_MS) {
                 float u = (float)since / (float)LOOK_AT_SLEW_SETTLE_MS;
                 float e = u * u * (3.0f - 2.0f * u);            // smoothstep
-                effective_brake = _la_blend_brake
-                                + (fixed_brake - _la_blend_brake) * e;
+                effective_brake = blend_brake
+                                + (fixed_brake - blend_brake) * e;
             }
         }
     }

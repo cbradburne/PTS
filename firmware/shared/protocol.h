@@ -1851,6 +1851,52 @@ static inline uint16_t build_calib_prompt(uint8_t *buf, uint8_t mount_id,
     return build_packet(buf, mount_id, seq, CMD_CALIB_PROMPT, &b, 1);
 }
 
+// ── CALIB_SOLVED, with how far the two sightings missed ─────────────────────
+// Since 2026-11-18 the SOLVED prompt carries, after its state byte, how far the
+// subject's two calibration sightings missed the point solved from them.  Two
+// sightlines aimed by hand almost never cross, so the solved point lies on
+// neither; the Teensy now puts the miss back into the aim (SubjectAimFix), so
+// the camera points exactly where Set A and Set B were pressed.  This says how
+// big that was, in the PC's log, where the Teensy's serial port is not.
+// Every client reads byte 0 as before; a 1-byte SOLVED is older firmware.
+//   [0]      CALIB_SOLVED
+//   [1..8]   pan at A, tilt at A, pan at B, tilt at B — observed minus solved,
+//            int16 hundredths of a degree
+//   [9]      the subject's slot
+//   [10]     SUBJECT_MISS_* flags
+#define SUBJECT_MISS_PAYLOAD_LEN   11
+#define SUBJECT_MISS_APPLIED       0x01   // put back: A and B aim exactly as set
+#define SUBJECT_MISS_TOO_BIG       0x02   // bigger than aiming error: NOT put back
+#define SUBJECT_MISS_BESIDE_RAIL   0x04   // subject beside the rail: NOT put back
+
+static inline int16_t subject_miss_centideg(float deg) {
+    float c = deg * 100.0f;
+    if (c >  32767.0f) c =  32767.0f;
+    if (c < -32767.0f) c = -32767.0f;
+    return (int16_t)(c >= 0.0f ? c + 0.5f : c - 0.5f);
+}
+
+static inline void encode_subject_miss(uint8_t *p, float pan_a, float tilt_a,
+                                       float pan_b, float tilt_b,
+                                       uint8_t slot, uint8_t flags) {
+    p[0] = (uint8_t)CALIB_SOLVED;
+    write_be16(p + 1, (uint16_t)subject_miss_centideg(pan_a));
+    write_be16(p + 3, (uint16_t)subject_miss_centideg(tilt_a));
+    write_be16(p + 5, (uint16_t)subject_miss_centideg(pan_b));
+    write_be16(p + 7, (uint16_t)subject_miss_centideg(tilt_b));
+    p[9]  = slot;
+    p[10] = flags;
+}
+
+static inline uint16_t build_calib_solved_miss(uint8_t *buf, uint8_t mount_id,
+                                               uint16_t seq, float pan_a, float tilt_a,
+                                               float pan_b, float tilt_b,
+                                               uint8_t slot, uint8_t flags) {
+    uint8_t p[SUBJECT_MISS_PAYLOAD_LEN];
+    encode_subject_miss(p, pan_a, tilt_a, pan_b, tilt_b, slot, flags);
+    return build_packet(buf, mount_id, seq, CMD_CALIB_PROMPT, p, SUBJECT_MISS_PAYLOAD_LEN);
+}
+
 // CMD_SUBJECT_LIST  (232 bytes)
 // subjects[] must be an array of MAX_SUBJECTS entries; use valid=false for empty slots.
 // The caller fills the buffer: valid(1) + name[16] + x_mm(4f) + y_mm(4f) + z_mm(4f) per record.

@@ -181,6 +181,11 @@ static uint16_t _slot_occupied = 0;
 
 // Look-at subjects (RAM only — volatile, cleared on power cycle)
 static SubjectRecord _subjects[MAX_SUBJECTS];
+// How far each subject's two sightings missed its solved point (SubjectAimFix
+// in MountMotion.h).  Beside _subjects rather than in it: SubjectRecord is the
+// wire format of CMD_SUBJECT_LIST, byte for byte, and this never leaves the
+// mount.  RAM only, like the subjects themselves.
+static SubjectAimFix _subject_fix[MAX_SUBJECTS];
 
 // Slider move records (RAM only — volatile, set fresh each session)
 static SliderMoveRecord _slider_moves[MAX_SLIDER_MOVES];
@@ -1443,6 +1448,8 @@ static void dispatch(const ParsedPacket &pkt) {
             if (preset < 1 || preset > 4) break;
             if (grp == GROUP_PAN_TILT)         _active_pt_preset = preset;
             else if (grp == GROUP_SLIDER_ZOOM) _active_sl_preset = preset;
+            // The look-at switch and start swing run at this dial too.
+            mount.setActivePtPreset(_active_pt_preset);
             break;
         }
 
@@ -1490,6 +1497,7 @@ static void dispatch(const ParsedPacket &pkt) {
             uint8_t id = p[0] & 0x07;
             memset(&_subjects[id], 0, sizeof(SubjectRecord));
             _subjects[id].valid = false;
+            _subject_fix[id] = SubjectAimFix();
             _slot_occupied &= ~(1u << id);
             send_subject_list();
             send_status();
@@ -1830,16 +1838,73 @@ static void dispatch(const ParsedPacket &pkt) {
                           (int)_calib_subject_id, sx, sy, sz,
                           mount.getPanRefDeg(), mount.getTiltRefDeg());
 
-            // Notify all clients
-            uint8_t bsolved = (uint8_t)CALIB_SOLVED;
-            send_packet(CMD_CALIB_PROMPT, &bsolved, 1);
+            // ── How far the sightings missed it, put back into the aim ────
+            //
+            // The solved point is the midpoint of the two sightlines' closest
+            // approach, and two sightlines aimed by hand almost never cross —
+            // so it lies on neither.  Aimed at from where Set B was just
+            // pressed, it pointed the camera somewhere else, and starting a
+            // look-at move from there swung it off the shot the operator had
+            // just set (2026-11-18: "they are absolute values that I created").
+            //
+            // The miss is measured in the frame tracking uses — steps against
+            // the session reference — whatever frame the solve itself ran in,
+            // because it is tracking that has to land on A and B.  An auto-
+            // reference solve (above) therefore shows up here as a large miss
+            // and is refused rather than baked in.
+            float miss_pan_A  = (float)_calib_pan_steps_A  * dps_p + ref_p
+                              - look_at_pan_deg(_calib_xa_mm, sx, sz);
+            float miss_tilt_A = (float)_calib_tilt_steps_A * dps_t + ref_t
+                              - look_at_tilt_deg(_calib_xa_mm, sx, sy, sz);
+            float miss_pan_B  = (float)_calib_pan_steps_B  * dps_p + ref_p
+                              - look_at_pan_deg(_calib_xb_mm, sx, sz);
+            float miss_tilt_B = (float)_calib_tilt_steps_B * dps_t + ref_t
+                              - look_at_tilt_deg(_calib_xb_mm, sx, sy, sz);
+            while (miss_pan_A >  180.0f) miss_pan_A -= 360.0f;
+            while (miss_pan_A < -180.0f) miss_pan_A += 360.0f;
+            while (miss_pan_B >  180.0f) miss_pan_B -= 360.0f;
+            while (miss_pan_B < -180.0f) miss_pan_B += 360.0f;
+            float worst_miss = fmaxf(fmaxf(fabsf(miss_pan_A), fabsf(miss_tilt_A)),
+                                     fmaxf(fabsf(miss_pan_B), fabsf(miss_tilt_B)));
+
+            uint8_t miss_flags;
+            SubjectAimFix fix;            // none, unless it is put back below
+            if (sz_clamped) {
+                // Beside the rail the solved angles swing wildly with position;
+                // a miss measured there says nothing about anywhere else.
+                miss_flags = SUBJECT_MISS_BESIDE_RAIL;
+            } else if (worst_miss > SUBJECT_AIM_FIX_MAX_DEG) {
+                miss_flags = SUBJECT_MISS_TOO_BIG;
+            } else {
+                miss_flags  = SUBJECT_MISS_APPLIED;
+                fix.xa_mm   = _calib_xa_mm;
+                fix.xb_mm   = _calib_xb_mm;
+                fix.pan_a   = miss_pan_A;
+                fix.tilt_a  = miss_tilt_A;
+                fix.pan_b   = miss_pan_B;
+                fix.tilt_b  = miss_tilt_B;
+            }
+            _subject_fix[_calib_subject_id] = fix;
+            Serial.printf("[Calib] sightings missed the solved point by pan %+.2f° tilt %+.2f° "
+                          "at A, pan %+.2f° tilt %+.2f° at B — %s\n",
+                          miss_pan_A, miss_tilt_A, miss_pan_B, miss_tilt_B,
+                          (miss_flags & SUBJECT_MISS_APPLIED) ? "put back: A and B aim as set"
+                          : (miss_flags & SUBJECT_MISS_TOO_BIG) ? "TOO BIG to be aiming error, NOT put back"
+                          : "subject beside the rail, NOT put back");
+
+            // Notify all clients — SOLVED, and how far the sightings missed.
+            uint8_t solved[SUBJECT_MISS_PAYLOAD_LEN];
+            encode_subject_miss(solved, miss_pan_A, miss_tilt_A, miss_pan_B, miss_tilt_B,
+                                _calib_subject_id, miss_flags);
+            send_packet(CMD_CALIB_PROMPT, solved, SUBJECT_MISS_PAYLOAD_LEN);
             send_subject_list();
             send_status();
 
             // Auto-select the newly stored subject so all UIs (web app, hub
             // display, PC app) immediately show a green border without the
             // operator having to press the button again.
-            mount.setLookAtSubject(sx, sy, sz, _calib_subject_id);
+            mount.setLookAtSubject(sx, sy, sz, _calib_subject_id,
+                                   _subject_fix[_calib_subject_id]);
             send_look_at_status();
             break;
         }
@@ -1887,6 +1952,12 @@ static void dispatch(const ParsedPacket &pkt) {
                 float cx        = mount.getSliderMm();
                 float exp_pan   = look_at_pan_deg(cx, r.x, r.z);
                 float exp_tilt  = look_at_tilt_deg(cx, r.x, r.y, r.z);
+                // Its sighting miss too, or the reference would be set against
+                // a slightly different aim from the one tracking then flies.
+                float fix_pan, fix_tilt;
+                MountMotion::aimFixAt(_subject_fix[subj_id], cx, &fix_pan, &fix_tilt);
+                exp_pan  += fix_pan;
+                exp_tilt += fix_tilt;
 
                 // Map: current_steps * deg_per_step + ref = expected_angle
                 // Convert physical step counts to logical (user-facing) space by
@@ -1967,7 +2038,7 @@ static void dispatch(const ParsedPacket &pkt) {
             arrow_dest(direction, &cur_phys, &phys_dest, &cur_log, &dest_log);
 
             const SubjectRecord &r = _subjects[subj_id];
-            mount.setLookAtSubject(r.x, r.y, r.z, subj_id);
+            mount.setLookAtSubject(r.x, r.y, r.z, subj_id, _subject_fix[subj_id]);
 
             Serial.printf("[LookAt] CMD  subject=%d '%s'  dir=%s  invert=%d\n",
                           (int)subj_id, r.name, direction ? "RIGHT" : "LEFT",
@@ -2095,7 +2166,7 @@ static void dispatch(const ParsedPacket &pkt) {
                 break;
             }
             const SubjectRecord &r = _subjects[subj_id];
-            mount.setLookAtSubject(r.x, r.y, r.z, subj_id);
+            mount.setLookAtSubject(r.x, r.y, r.z, subj_id, _subject_fix[subj_id]);
             if (mount.getState() == STATE_LOOK_AT_MOVE ||
                 mount.getState() == STATE_LOOK_AT_PRE_AIM) {
                 // Already in look-at sequence — new subject will be picked up
@@ -2148,6 +2219,10 @@ void setup() {
     mount.printDriverDiagnostics();   // read back TMC2209 registers immediately after config
 
     eeprom_load();
+
+    // The pan/tilt dial the look-at switch and start swing run at, from the
+    // one this sketch keeps — not left to two defaults happening to agree.
+    mount.setActivePtPreset(_active_pt_preset);
 
     // _subjects[] is a separate volatile RAM array (not in EepromConfig) so it
     // starts zeroed automatically — no explicit clear needed here.

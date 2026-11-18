@@ -93,12 +93,21 @@ setter = setter[:setter.index("\n}\n")]
 assert "LOOK_AT_BLEND_FILL" in setter, \
     "the blend no longer sizes itself against the ceiling; a big turn will be\n" \
     "    clipped back into a rectangle"
-fit = setter.index("fit_ms")
-clamp = setter.index("LOOK_AT_BLEND_MAX_MS")
-assert clamp < fit, \
-    "the fit runs BEFORE the MAX_MS clamp, so the clamp overrides it again and\n" \
-    "    nothing changes for exactly the turns that need it"
-print("   the fit is applied after the MAX_MS clamp                OK")
+# The duration comes from the pan/tilt dial since 2026-11-18 (_switchMs), and
+# the MAX_MS clamp only survives inside it, as the fallback for a dial with no
+# usable speed.  Either way the fit must have the LAST word, or a clamp — or a
+# fast dial — puts a peak above the ceiling back.
+code = re.sub(r"//[^\n]*", "", setter)
+fit = code.index("fit_ms")
+assert code.index("float ms = _switchMs(travel);") < fit, \
+    "the fit runs BEFORE the duration is chosen, so the duration overrides it\n" \
+    "    again and nothing changes for exactly the turns that need it"
+sw = CPP[CPP.index("float MountMotion::_switchMs("):]
+sw = re.sub(r"//[^\n]*", "", sw[:sw.index("\n}\n")])
+assert "LOOK_AT_BLEND_MAX_MS" in sw, "the fallback has lost its clamp"
+assert "LOOK_AT_BLEND_MAX_MS" not in code, \
+    "the setter clamps the dial's duration — a slow dial would be sped back up"
+print("   the fit is applied after the duration, dial or fallback  OK")
 
 FILL = define("LOOK_AT_BLEND_FILL")
 assert 0.0 < FILL < 1.0, "the fill fraction leaves no headroom under the ceiling"
@@ -140,5 +149,24 @@ cross = next(d for d in range(5, 180) if blend_ms(d) > min(max(d*PER, LO), HI) +
 assert 1.5 * cross / (HI / 1000) > CEILING * FILL, \
     "turns just below the crossover still ask for more than the axis can give"
 print(f"   longer only above {cross}°, which is where clipping began  OK")
+print("   (4 and 5 are the fixed law, kept as the dial's fallback)")
+
+# ---- 6. and at the dial ------------------------------------------------------
+# Whatever the dial asks, the fit keeps the peak under the ceiling: a dial set
+# faster than the axis can turn gets the axis's best, not a clipped rectangle.
+print("\n6. at the pan/tilt dial:")
+import math
+presets = [(float(v), float(a)) for v, a in re.findall(
+    r"\{\s*(\d+)\s*,\s*(\d+)\s*\}",
+    re.search(r"DEFAULT_PT_PRESETS\[5\]\s*=\s*\{(.*?)\};", CPP, re.S).group(1))][1:]
+for v, a in presets + [(200.0, 200.0)]:          # and a dial faster than the axis
+    for deg in (1, 5, 20, 60, 120, 180):
+        ms = max(max(1000.0 * max(1.5 * deg / v, math.sqrt(6.0 * deg / a)), LO),
+                 1.5 * deg * 1000.0 / (CEILING * FILL))
+        peak = 1.5 * deg / (ms / 1000)
+        assert peak <= CEILING * FILL + 0.01, \
+            f"{v:.0f} deg/s dial, {deg}°: asks {peak:.1f} of a {CEILING:.1f} axis"
+        assert peak <= v + 1e-6, f"{v:.0f} deg/s dial, {deg}°: faster than the dial"
+print("   no dial, not even one faster than the axis, over-asks    OK")
 
 print("\nALL CHECKS PASSED")

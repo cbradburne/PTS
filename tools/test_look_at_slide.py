@@ -78,7 +78,7 @@ assert "if (!aiming && _state == STATE_FINDING_LIMITS) return false;" in start, 
     "a slide can cut a homing short"
 assert "if (aiming) emergencyStop();\n    else        _stopForSlide();" in start, \
     "a slide stops axes CV or the joystick is driving (emergencyStop takes all four)"
-before(start, "if (aiming) {", "_aimFrom(_la_subject_x", "a slide pre-aims at a subject it does not have")
+before(start, "if (aiming) {", "_subjectAim(cx_now", "a slide pre-aims at a subject it does not have")
 before(start, "_stopForSlide();", "_state = STATE_LOOK_AT_MOVE;", "the slide's state is set before its stop")
 print("   a slide needs no subject or reference, spares homing, and does not")
 print("   stop what CV or the joystick is driving                          OK")

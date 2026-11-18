@@ -54,7 +54,7 @@ def body(name, end="\n}\n"):
 # ---- 1. the tracker asks for an angle, not a point -------------------------
 print("1. what the tracking loop does:")
 upd = code_only(body("// 2. Where the camera has to point"))
-assert "_laAimNow(wx, wy, &pan_deg, &tilt_deg)" in upd, \
+assert "_laAimNow(cx, wx, wy, &pan_deg, &tilt_deg)" in upd, \
     "the tracker no longer blends in angle"
 assert "atan2f" not in upd, \
     "the tracker takes atan2 of something again — if that something is a\n" \
@@ -153,7 +153,7 @@ print("   angle lerp peaks at exactly the designed rate          OK")
 # the current AIM, not from somewhere along the abandoned chord.
 print("\n5. starting a switch during a switch:")
 now = code_only(body("void MountMotion::_laSubjectNow("))
-assert "_laAimNow(wx, wy, &pan_deg, &tilt_deg)" in now, \
+assert "_laAimNow(cx, wx, wy, &pan_deg, &tilt_deg)" in now, \
     "the point handed to the next blend is not derived from the current aim"
 # The projection itself now lives in _pointFromAim(), shared with the
 # re-acquisition path. Check the property — that the aim is turned back into a

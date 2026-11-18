@@ -111,9 +111,40 @@ constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
 //
 // Duration scales with how far the camera has to turn — a small correction
 // should not take as long as a sweep across the room.
+//
+// HOW FAST is the pan/tilt dial's, since 2026-11-18.  The blend runs long
+// enough that its peak is the dial's speed and its peak acceleration the
+// dial's acceleration (see MountMotion::_switchMs) — the same two numbers a
+// switch with the slider parked has always obeyed.  The fixed 55 ms per
+// degree gave every switch the same 18 deg/s average and 27 deg/s peak
+// whatever the dial said, and at the Foyer event that evening it was "too
+// fast to use on a live camera".  The per-degree law and its 2.2 s ceiling now
+// only serve a dial with no usable speed in it; a ceiling on the dial's own
+// timing would quietly speed up exactly the switches it was asked to slow.
 #define LOOK_AT_BLEND_MS_PER_DEG   55.0f
 #define LOOK_AT_BLEND_MIN_MS        300
 #define LOOK_AT_BLEND_MAX_MS       2200
+
+// What TRACKING keeps while a switch runs.  The dial times the switch — the
+// turn from one subject to the next — and nothing else.  The rail moving still
+// swings the aim at whatever rate the geometry demands, on top of the switch,
+// and a cap or an acceleration limit sized for a slow dial alone would starve
+// that: the camera would fall behind both subjects for the whole switch.  So
+// during a switch the speed cap never drops below the one ordinary tracking
+// has (LOOK_AT_BRAKE_FACTOR, in _driveTowardTarget), and the acceleration
+// limit never below this.
+//
+// Why 100: the controller will only move as fast as it could stop within its
+// error, so with acceleration A it trails anything faster than A/10 deg/s by
+// more than its own P-loop does (the P-loop's gain is 20/s).  At 100 that is
+// 10 deg/s — a subject half a metre from the rail passing at 80 mm/s; one 3 m
+// out turns the camera at under 2.  Modelled closed-loop in
+// tools/test_look_at_dial.py: 20 left the camera trailing a slow switch on a
+// fast slide by 1.9 degrees, 100 brings it down to the P-loop's own 0.44.
+// Kept below what big fast switches' curves ask for, so their soft arrival
+// (test_look_at_accel_bound.py) is untouched.  The setpoint is smooth, so
+// neither floor lets the switch itself run faster than it asks.
+#define LOOK_AT_TRACK_ACCEL_MIN   100.0f   // deg/s^2
 
 // ---------------------------------------------------------------------------
 // What the axis can ACTUALLY do
@@ -245,6 +276,36 @@ struct SpeedPreset {
 // ---------------------------------------------------------------------------
 
 using LimitsFoundCb = void (*)(Axis axis, int32_t min_steps, int32_t max_steps);
+
+// How far a subject's two calibration sightings missed the point solved from
+// them, so the aim can put the miss back.
+//
+// The solver stores the midpoint of the two sightlines' closest approach, and
+// two sightlines aimed by hand almost never cross exactly — a fraction of a
+// degree of tilt is enough.  So the solved point lies on NEITHER, and aiming at
+// it from where Set A or Set B was pressed moved the camera off the shot the
+// operator had just set: "the look-at move shouldn't suddenly move the
+// pan-tilt when the pan-tilt is actually at the set position I just stored...
+// they are absolute values that I created" (2026-11-18).
+//
+// The aim at a rail position is the solved point's, plus this miss faded along
+// the rail from A's to B's, held flat beyond either end.  At A and at B it is
+// therefore exactly what was set; between them the point does the tracking and
+// the fade only removes what the two observations disagreed by.
+struct SubjectAimFix {
+    float xa_mm  = 0.0f;   // along the rail where Set A was pressed
+    float xb_mm  = 0.0f;   //  and Set B
+    float pan_a  = 0.0f;   // observed minus solved, degrees, at A
+    float tilt_a = 0.0f;
+    float pan_b  = 0.0f;   //  and at B
+    float tilt_b = 0.0f;
+};
+
+// The biggest miss put back.  Two careful sightings of one subject disagree by
+// a fraction of a degree; several degrees is not aiming error but a wrong
+// reference or two different targets, and baking that into the aim would hide
+// it.  Beyond this the miss is reported and NOT applied.
+#define SUBJECT_AIM_FIX_MAX_DEG   3.0f
 using MoveCompleteCb = void (*)();
 
 // ---------------------------------------------------------------------------
@@ -406,9 +467,23 @@ public:
     // v2 — Look-at tracking
     // -----------------------------------------------------------------------
 
-    // Set the 3D world coordinates of the subject to track (mm).
+    // Set the 3D world coordinates of the subject to track (mm), and how far
+    // its calibration sightings missed them (see SubjectAimFix).
     // Safe to call mid-move to switch subject smoothly.
-    void setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id = 0xFF);
+    void setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id = 0xFF,
+                          const SubjectAimFix &fix = SubjectAimFix());
+
+    // The pan/tilt speed dial (preset 1-4).  A subject switch during a look-at
+    // move, and the swing to the subject before one starts, run at its speed
+    // and acceleration — the same as a switch with the slider parked, which
+    // always has (aimAtSubject).  Mirrored from the .ino's _active_pt_preset.
+    void setActivePtPreset(uint8_t preset) { _la_pt_preset = constrain(preset, 1, 4); }
+
+    // The miss a subject's sightings leave at one rail position: SubjectAimFix
+    // faded from A to B, held flat outside them.  The .ino needs it for a Set
+    // Ref against a subject, which must agree with what tracking aims at.
+    static void aimFixAt(const SubjectAimFix &fix, float cx_mm,
+                         float *dpan_deg, float *dtilt_deg);
 
     // Start a look-at move: slider travels from slider_start_steps to
     // slider_end_steps at sl_preset speed; pan/tilt continuously aim at the
@@ -607,9 +682,23 @@ private:
     // with headroom.  0 = no switch running, so the fixed geometry governs.
     float           _la_blend_accel    = 0.0f;
 
+    // The subject's sighting miss, and the one belonging to the point the
+    // running blend started from (none when that was where the camera already
+    // pointed — mid-blend, or after the joystick).
+    SubjectAimFix   _la_fix;
+    SubjectAimFix   _la_blend_from_fix;
+
+    // The pan/tilt dial, mirrored from the .ino (setActivePtPreset).
+    uint8_t         _la_pt_preset = 2;
+
+    // How long a switch of this many degrees takes at the dial: as long as
+    // its speed AND its acceleration need.  See setLookAtSubject().
+    float    _switchMs(float travel_deg) const;
+
     // The subject position to aim at RIGHT NOW — the blend evaluated at this
-    // instant, or the subject itself when no blend is running.
-    void     _laSubjectNow(float *sx, float *sy, float *sz) const;
+    // instant, or the subject itself when no blend is running — and the miss
+    // that goes with it.
+    void     _laSubjectNow(float *sx, float *sy, float *sz, SubjectAimFix *fix) const;
 
     // Pan/tilt needed to look at one point from one rail position.
     void     _aimFrom(float sx, float sy, float sz, float wx, float wy,
@@ -617,9 +706,13 @@ private:
 
     // Where to POINT right now — the blend evaluated in angle rather than in
     // position.  Both endpoints are re-derived at the rail position passed in,
-    // so the rail is still tracked through a switch.
-    void     _laAimNow(float wx, float wy,
+    // so the rail is still tracked through a switch.  cx is the same position
+    // along the rail, which the sighting misses are faded by.
+    void     _laAimNow(float cx, float wx, float wy,
                        float *pan_deg, float *tilt_deg) const;
+
+    // The current subject's aim from one rail position, its miss included.
+    void     _subjectAim(float cx, float *pan_deg, float *tilt_deg) const;
 
     // Smoothstep progress through the running blend, 0..1 (1 = finished).
     float    _laBlendPhase() const;

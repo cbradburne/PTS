@@ -76,23 +76,30 @@ assert "TIMED OUT" in CPP, \
     "a timed-out finish is indistinguishable in the log from a clean one"
 
 TIMEOUT = define("LOOK_AT_AIM_FINISH_MAX_MS")
-PER, LO, HI = (define("LOOK_AT_BLEND_MS_PER_DEG"),
-               define("LOOK_AT_BLEND_MIN_MS"), define("LOOK_AT_BLEND_MAX_MS"))
-FILL, SETTLE = define("LOOK_AT_BLEND_FILL"), define("LOOK_AT_SLEW_SETTLE_MS")
-VMAX = define("AXIS_MAX_STEPS_S")
-CEIL = VMAX * (0.9 / (256 * (270 / 36)))
+SETTLE  = define("LOOK_AT_SLEW_SETTLE_MS")
+VMAX    = define("AXIS_MAX_STEPS_S")
 
-longest = max(max(min(max(d * PER, LO), HI), 1.5 * d * 1000.0 / (CEIL * FILL))
-              for d in range(1, 181))
-# Real margin, not a hair's breadth: the clock starts on SLIDER arrival, so the
-# worst case is a switch beginning the instant before it, leaving the entire
-# blend still to run.
-assert TIMEOUT > (longest + SETTLE) * 1.3, \
-    f"the {TIMEOUT:.0f} ms timeout is shorter than the longest blend " \
-    f"({longest:.0f} ms) plus its settle ({SETTLE:.0f} ms) — it would cut off a\n" \
-    "    turn that was progressing perfectly well"
-print(f"   {TIMEOUT:.0f} ms, against a worst-case turn of "
-      f"{longest:.0f}+{SETTLE:.0f} ms      OK")
+# The clock starts at whichever came LAST: the rail arriving, or the switch's
+# own end.  It used to start on the rail alone and be sized to outlast the
+# longest switch the fixed law could produce, 6.8 s.  Since 2026-11-18 the dial
+# times switches, and a slow one runs for half a minute — a rail-only clock of
+# any sensible length would cut it off part-way, leaving the camera pointing
+# between two people, which is the whole thing this wait prevents.
+code = re.sub(r"//[^\n]*", "", upd)
+assert "uint32_t clock_from = _la_sl_arrived_ms;" in code, \
+    "the wait is no longer measured from the rail's arrival at all"
+assert "uint32_t blend_end = _la_blend_start_ms + _la_blend_ms;" in code and \
+       "if ((int32_t)(blend_end - clock_from) > 0) clock_from = blend_end;" in code, \
+    "the wait starts on the rail alone — a slow switch is cut off part-way"
+assert "(int32_t)(now - clock_from) >= (int32_t)LOOK_AT_AIM_FINISH_MAX_MS" in code, \
+    "the wait is not measured from that clock, or not wrap-safely"
+# After the blend the aim only has to settle, so that is what needs the margin.
+assert TIMEOUT > SETTLE * 1.3, \
+    f"the {TIMEOUT:.0f} ms wait does not outlast the {SETTLE:.0f} ms settle"
+slow = 1000.0 * 1.5 * 15 / 1.0          # 15 degrees at the slowest default dial
+print(f"   {TIMEOUT:.0f} ms counted from the switch's end, not the rail's arrival:")
+print(f"   a {slow / 1000:.1f} s switch at dial 1 finishes, where the old clock "
+      f"cut it at {TIMEOUT / 1000:.0f} s   OK")
 
 # ---- 3. the clock is per-move, not per-boot --------------------------------
 # A timestamp that survives a move makes the NEXT one time out instantly.

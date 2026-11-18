@@ -317,6 +317,12 @@ static int do_emit() {
         emit_pkt("limits_found_report", buf, n);
     }
 
+    // p: SOLVED with how far the sightings missed — negative and positive
+    //    hundredths, a value that rounds (0.125 -> 13), and the flags.
+    n = build_calib_solved_miss(buf, 5, 0x3132, 0.125f, -0.45f, -1.5f, 2.99f,
+                                7, SUBJECT_MISS_APPLIED);
+    emit_pkt("calib_solved_miss", buf, n);
+
     return 0;
 }
 

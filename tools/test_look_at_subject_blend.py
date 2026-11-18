@@ -61,7 +61,7 @@ print("   settles exactly on the new subject                 OK")
 print("\n2. what the controller follows:")
 la = CPP[CPP.index("void MountMotion::_updateLookAt("):]
 la = la[:la.index("\n}\n")]
-assert "_laAimNow(wx, wy, &pan_deg, &tilt_deg);" in la, \
+assert "_laAimNow(cx, wx, wy, &pan_deg, &tilt_deg);" in la, \
     "the tracking loop does not use the blended angles, so the blend does nothing"
 assert "atan2f" not in la, \
     "the tracking loop computes an angle of its own again; if that is from a\n" \
@@ -89,7 +89,7 @@ print("   only when already tracking a DIFFERENT subject     OK")
 # A switch during a switch must continue from where the aim actually is.
 # Written as an if/else since re-acquisition joined it, so match the call
 # rather than the one-line form it used to have.
-assert "_laSubjectNow(&from_x, &from_y, &from_z);" in setter and \
+assert "_laSubjectNow(&from_x, &from_y, &from_z, &from_fix);" in setter and \
        "if (switching) {" in setter, \
     "a switch mid-blend restarts from the old subject — the aim would snap back"
 # _laSubjectNow now reconstructs that point from the live AIM rather than from
@@ -118,19 +118,35 @@ print("   deselecting cancels it                             OK")
 # actually deliver. That rule and its numbers are checked in
 # test_look_at_speed_ceiling.py; this section is only about the per-degree
 # scaling below that point, so it stops at turns the clamp still governs.
+#
+# Since 2026-11-18 the per-degree rate is the pan/tilt DIAL's: _switchMs()
+# makes the blend long enough that its peak is the dial's speed and its peak
+# acceleration the dial's acceleration.  Still longer for a bigger turn — it is
+# that scaling this section holds — and still floored, so a nudge is not a
+# twitch.  The old fixed rate survives only as the fallback for a dial with no
+# usable speed in it.  test_look_at_dial.py holds the dial law itself.
 print("\n4. duration:")
-assert "travel * LOOK_AT_BLEND_MS_PER_DEG" in setter, \
-    "the duration no longer scales with how far the camera must turn"
-assert "LOOK_AT_BLEND_MIN_MS" in setter and "LOOK_AT_BLEND_MAX_MS" in setter, \
-    "the duration is unclamped"
+assert "float ms = _switchMs(travel);" in setter, \
+    "the duration no longer comes from the pan/tilt dial"
+assert "if (ms < (float)LOOK_AT_BLEND_MIN_MS) ms = (float)LOOK_AT_BLEND_MIN_MS;" in setter, \
+    "the duration has no floor — a nudge between two people becomes a twitch"
+sw = CPP[CPP.index("float MountMotion::_switchMs("):]
+sw = sw[:sw.index("\n}\n")]
+assert "travel * LOOK_AT_BLEND_MS_PER_DEG" in sw, \
+    "a dial with no usable speed has lost its fallback"
 per_deg = float(re.search(r"#define LOOK_AT_BLEND_MS_PER_DEG\s+([\d.]+)f", HDR).group(1))
 lo = int(re.search(r"#define LOOK_AT_BLEND_MIN_MS\s+(\d+)", HDR).group(1))
-hi = int(re.search(r"#define LOOK_AT_BLEND_MAX_MS\s+(\d+)", HDR).group(1))
-assert lo < hi, "the duration clamp is inverted"
-for deg in (2, 10, 30, 40, 55):
-    ms = min(max(deg * per_deg, lo), hi)
-    print(f"   {deg:>3}° turn -> {ms:>6.0f} ms")
-print("   scales with the turn, clamped both ends            OK")
+presets = [(float(v), float(a)) for v, a in re.findall(
+    r"\{\s*(\d+)\s*,\s*(\d+)\s*\}",
+    re.search(r"DEFAULT_PT_PRESETS\[5\]\s*=\s*\{(.*?)\};", CPP, re.S).group(1))][1:]
+assert len(presets) == 4, "the default pan/tilt presets are not where this test looks"
+for n, (v, a) in enumerate(presets, 1):
+    row = [max(1000.0 * max(1.5 * d / v, math.sqrt(6.0 * d / a)), lo) for d in (2, 10, 30, 55)]
+    assert all(x < y for x, y in zip(row, row[1:])), \
+        f"at dial {n} a bigger turn does not take longer"
+    print(f"   dial {n} ({v:.0f} deg/s): " + "  ".join(
+        f"{d}°={ms / 1000:.1f}s" for d, ms in zip((2, 10, 30, 55), row)))
+print("   scales with the turn at every dial, floored         OK")
 
 # ---- 5. what the motion actually looks like ---------------------------------
 # The controller is a P-loop on the error to the setpoint. Feed it a step and

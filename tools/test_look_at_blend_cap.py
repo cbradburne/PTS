@@ -73,8 +73,14 @@ SLOW = float(re.search(r"LOOK_AT_SLEW_BRAKE_FACTOR\s*=\s*([\d.]+)f", drive).grou
 print("1. which cap applies:")
 assert "if (_la_blend_ms != 0 && _la_blend_brake > 0.0f) {" in drive, \
     "the fixed slew cap still governs during a blend — the curve gets flattened"
-assert "effective_brake = _la_blend_brake;                  // still blending" in drive, \
+assert "effective_brake = blend_brake;                      // still blending" in drive, \
     "the blend's cap is not used while the blend runs"
+# Never below ordinary tracking's own cap (2026-11-18): the dial times the
+# SWITCH, and the rail still moves underneath it.  A cap sized for a slow
+# dial's peak alone would let tracking fall behind for the whole switch.
+assert "float blend_brake  = fmaxf(_la_blend_brake, LOOK_AT_BRAKE_FACTOR);" in drive, \
+    "a slow switch's cap can starve tracking — the camera falls behind the rail"
+FAST = float(re.search(r"LOOK_AT_BRAKE_FACTOR\s*=\s*([\d.]+)f", drive).group(1))
 assert "in_slew ? LOOK_AT_SLEW_BRAKE_FACTOR : LOOK_AT_BRAKE_FACTOR" in drive, \
     "the fixed caps are gone entirely — a step input has nothing limiting it"
 print("   blend running -> the blend's cap                   OK")
@@ -118,22 +124,40 @@ FILL = define("LOOK_AT_BLEND_FILL")
 
 
 def blend_ms(d):
-    """The duration the firmware actually picks, including the fit under the
-    ceiling. Without the fit this loop checks a rule the code stopped using."""
+    """The FALLBACK law's duration (a dial with no usable speed), including the
+    fit under the ceiling. Without the fit this loop checks a rule the code
+    stopped using."""
     return max(min(max(d * PER_DEG, LO), HI),
                1.5 * d * 1000.0 / (MAX_DPS * FILL))
 
 
-for d in (5, 10, 25.6, 40, 60, 90, 120):
-    m = blend_ms(d)
-    p = 1.5 * d / (m / 1000)
-    c = min((p * HEAD) / MAX_DPS, 1.0) * MAX_DPS
-    assert c >= p, f"{d}\u00b0: cap {c:.1f} below peak {p:.1f}"
-    assert p <= MAX_DPS, \
-        f"{d}\u00b0 asks {p:.1f} deg/s of an axis that tops out at {MAX_DPS:.1f};\n" \
-        "    the curve is clipped, not slowed, and comes back as a rectangle"
-    print(f"   {d:>5}\u00b0 -> blend {m:>4.0f} ms, peak {p:>5.1f} deg/s, cap {c:>5.1f}")
-print("   the cap is never below the curve                   OK")
+import math
+PRESETS = [(float(v), float(a)) for v, a in re.findall(
+    r"\{\s*(\d+)\s*,\s*(\d+)\s*\}",
+    re.search(r"DEFAULT_PT_PRESETS\[5\]\s*=\s*\{(.*?)\};", CPP, re.S).group(1))][1:]
+
+
+def dial_ms(d, v, a):
+    """What the firmware picks at a dial since 2026-11-18: _switchMs, floored,
+    then fitted under the ceiling exactly as the fallback is."""
+    return max(max(1000.0 * max(1.5 * d / v, math.sqrt(6.0 * d / a)), LO),
+               1.5 * d * 1000.0 / (MAX_DPS * FILL))
+
+
+laws = [("fixed", blend_ms)] + [(f"dial {n}", (lambda d, v=v, a=a: dial_ms(d, v, a)))
+                                for n, (v, a) in enumerate(PRESETS, 1)]
+for name, law in laws:
+    for d in (5, 10, 25.6, 40, 60, 90, 120):
+        m = law(d)
+        p = 1.5 * d / (m / 1000)
+        c = max(min((p * HEAD) / MAX_DPS, 1.0), FAST) * MAX_DPS     # with the floor
+        assert c >= p, f"{name}, {d}\u00b0: cap {c:.1f} below peak {p:.1f}"
+        assert p <= MAX_DPS, \
+            f"{name}, {d}\u00b0 asks {p:.1f} deg/s of an axis that tops out at {MAX_DPS:.1f};\n" \
+            "    the curve is clipped, not slowed, and comes back as a rectangle"
+    m = law(25.6)
+    print(f"   {name:<7}: 25.6\u00b0 -> blend {m:>5.0f} ms, peak {1.5 * 25.6 / (m / 1000):>5.1f} deg/s")
+print("   the cap is never below the curve, at any dial      OK")
 print("   and no turn asks for more than the axis can give   OK")
 
 # Past the MAX_MS ceiling a bigger turn now takes LONGER. It used to get
@@ -185,13 +209,23 @@ assert step_after < 2.0, \
 assert step_after < step_before / 10, "the handover is barely gentler than the cliff"
 print("   no cliff left in the allowed speed                  OK")
 
-# It must work in BOTH directions: a very small turn blends slowly enough that
-# its cap sits BELOW the fixed one, and the ramp then goes up.
-tiny = min((1.5 * 1.0 / (LO/1000.0) * HEAD) / MAX_DPS, 1.0)
-assert tiny < SLOW, "a 1 degree turn no longer caps below the fixed slew value"
-up = [cap_at(t, tiny, SLOW, SETTLE) for t in (0, int(SETTLE//2), int(SETTLE))]
-assert up[0] < up[1] < up[2], "the ramp does not rise when the blend cap is lower"
-print("   ramps up as readily as down                         OK")
+# A small or slow switch's own cap would sit BELOW the fixed slew value — 1.5
+# deg/s for a 1 degree turn — and that once ramped UP afterwards.  Since the
+# dial times switches (2026-11-18) it would also starve tracking for as long as
+# the switch lasts, so it is floored at the tracking cap: the hand-back now
+# comes DOWN from there, on the same smoothstep, and no slower dial can drop
+# the cap under what following the rail needs.
+tiny_raw = min((1.5 * 1.0 / (LO/1000.0) * HEAD) / MAX_DPS, 1.0)
+tiny = max(tiny_raw, FAST)
+assert tiny_raw < SLOW < FAST == tiny, \
+    "a 1 degree turn's cap is not floored at the tracking cap"
+down = [cap_at(t, tiny, SLOW, SETTLE) for t in (0, int(SETTLE//2), int(SETTLE))]
+assert down[0] > down[1] > down[2], "the floored cap does not hand back smoothly"
+worst = max(abs(cap_at(t + TICK, tiny, SLOW, SETTLE) - cap_at(t, tiny, SLOW, SETTLE)) * MAX_DPS
+            for t in range(0, int(SETTLE), TICK))
+assert worst < 2.0, f"the floored hand-back still moves {worst:.1f} deg/s in a tick"
+print(f"   a slow switch holds the tracking cap ({FAST * MAX_DPS:.1f} deg/s) "
+      f"and hands back gently  OK")
 
 # ---- 5. it is cleared with the blend ---------------------------------------
 print("\n5. when no blend is running:")

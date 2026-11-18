@@ -130,11 +130,12 @@ def duration_s(d):
     return max(min(max(d * PER, LO), HI), 1.5 * d * 1000.0 / (CEIL * FILL)) / 1000.0
 
 
+TRACK_MIN = define("LOOK_AT_TRACK_ACCEL_MIN")    # the floor tracking keeps (2026-11-18)
 rows = []
 for d in (5, 10, 25, 40, 72, 90, 120):
     t = duration_s(d)
     need = 6 * d / (t * t)
-    used = min(GEOM, need * HEAD)
+    used = min(GEOM, max(need * HEAD, TRACK_MIN))
     peak = 1.5 * d / t
     rows.append((d, need, used, peak * peak / (2 * used), peak / used * 1000))
     print(f"   {d:5.0f}° curve wants {need:5.0f}, uses {used:5.0f} deg/s^2 -> "
@@ -159,5 +160,36 @@ assert big[4] > 300, \
     f"a 90° switch still decelerates in {big[4]:.0f} ms; the whole point is that\n" \
     "    the arrival stops happening inside a control tick or two"
 print(f"   90° decelerates over {big[4]:.0f} ms, was 17            OK")
+print("   (the rows above are the fixed law, kept as the fallback for a dial")
+print("    with no usable speed in it)")
+
+# ---- 5. at the pan/tilt dial (2026-11-18) ----------------------------------
+# A slow dial makes the curve ask for almost nothing — 0.4 deg/s^2 for 15
+# degrees at 1 deg/s — and this limit outlives the blend.  Left at the curve's
+# own figure it would hold tracking to it for the rest of the move, so it is
+# floored at what tracking needs.  The curve is still never clipped.
+print("\n5. at the pan/tilt dial:")
+assert "if (_la_blend_accel < LOOK_AT_TRACK_ACCEL_MIN) _la_blend_accel = LOOK_AT_TRACK_ACCEL_MIN;" \
+    in setter, "a slow dial's acceleration limit can starve tracking"
+assert setter.index("_la_blend_accel = LOOK_AT_ACCEL_HEADROOM") \
+    < setter.index("if (_la_blend_accel < LOOK_AT_TRACK_ACCEL_MIN)"), \
+    "the floor is applied before the curve's figure overwrites it"
+assert TRACK_MIN < GEOM, "the floor is above the unbounded geometry — it would do nothing"
+import math
+PRESETS = [(float(v), float(a)) for v, a in re.findall(
+    r"\{\s*(\d+)\s*,\s*(\d+)\s*\}",
+    re.search(r"DEFAULT_PT_PRESETS\[5\]\s*=\s*\{(.*?)\};", CPP, re.S).group(1))][1:]
+for n, (v, a) in enumerate(PRESETS, 1):
+    for d in (1, 5, 15, 40, 90):
+        t = max(1.5 * d / v, math.sqrt(6.0 * d / a), LO / 1000.0,
+                1.5 * d / (CEIL * FILL))
+        need = 6 * d / (t * t)
+        used = min(GEOM, max(need * HEAD, TRACK_MIN))
+        assert used >= need, f"dial {n}, {d}°: clipped ({used:.1f} < {need:.1f})"
+        assert used >= TRACK_MIN, f"dial {n}, {d}°: below what tracking needs"
+        assert need <= a + 1e-6, \
+            f"dial {n}, {d}°: the curve asks {need:.1f} deg/s^2 of a {a:.0f} dial"
+    print(f"   dial {n}: never clipped, never under {TRACK_MIN:.0f} deg/s^2, "
+          f"curve within the dial's {a:.0f}")
 
 print("\nALL CHECKS PASSED")

@@ -82,6 +82,13 @@ LIMIT_LEG_CAP            = 2     # went its whole travel cap with no stall
 LIMIT_LEG_TIMEOUT        = 3     # ran out of time with no stall
 LIMIT_SG_NONE            = 0xFFFF
 
+# CALIB_SOLVED's tail since 2026-11-18: how far the subject's two sightings
+# missed its solved point, which the Teensy now puts back into the aim.
+SUBJECT_MISS_PAYLOAD_LEN = 11
+SUBJECT_MISS_APPLIED     = 0x01   # put back: A and B aim exactly as set
+SUBJECT_MISS_TOO_BIG     = 0x02   # bigger than aiming error: NOT put back
+SUBJECT_MISS_BESIDE_RAIL = 0x04   # subject beside the rail: NOT put back
+
 # v2 look-at subject constants
 MAX_SUBJECTS           = 8
 MAX_SLIDER_MOVES       = 8
@@ -1798,6 +1805,30 @@ def decode_calib_prompt(payload: bytes) -> CalibPrompt:
     if len(payload) < 1:
         raise ParseError("CALIB_PROMPT payload empty")
     return CalibPrompt(payload[0])
+
+
+@dataclass
+class SubjectMiss:
+    """How far a subject's two calibration sightings missed the point solved
+    from them, carried by CALIB_SOLVED since 2026-11-18 (shared/protocol.h).
+    Degrees, observed minus solved."""
+    pan_a:  float
+    tilt_a: float
+    pan_b:  float
+    tilt_b: float
+    slot:   int
+    flags:  int    # SUBJECT_MISS_*
+
+
+def decode_subject_miss(payload: bytes) -> Optional[SubjectMiss]:
+    """The miss on a SOLVED prompt, or None — any other prompt, or a 1-byte
+    SOLVED from firmware before it was sent."""
+    if len(payload) < SUBJECT_MISS_PAYLOAD_LEN or payload[0] != CalibPrompt.SOLVED:
+        return None
+    pa, ta, pb, tb = struct.unpack(">hhhh", payload[1:9])
+    return SubjectMiss(pan_a=pa / 100.0, tilt_a=ta / 100.0,
+                       pan_b=pb / 100.0, tilt_b=tb / 100.0,
+                       slot=payload[9], flags=payload[10])
 
 
 # ---------------------------------------------------------------------------

@@ -211,6 +211,12 @@ SCALAR_MAP = {
     "LIMIT_LEG_CAP":                 ("LIMIT_LEG_CAP", True),
     "LIMIT_LEG_TIMEOUT":             ("LIMIT_LEG_TIMEOUT", True),
     "LIMIT_SG_NONE":                 ("LIMIT_SG_NONE", True),
+    # A subject's sighting miss, on the SOLVED prompt: the Teensy writes it, the
+    # PC logs it.
+    "SUBJECT_MISS_PAYLOAD_LEN":      ("SUBJECT_MISS_PAYLOAD_LEN", True),
+    "SUBJECT_MISS_APPLIED":          ("SUBJECT_MISS_APPLIED", True),
+    "SUBJECT_MISS_TOO_BIG":          ("SUBJECT_MISS_TOO_BIG", True),
+    "SUBJECT_MISS_BESIDE_RAIL":      ("SUBJECT_MISS_BESIDE_RAIL", True),
     # The mount's runs, in the byte its bridge appends to STATUS.
     "STATUS_RUN_BYTE":               ("STATUS_RUN_BYTE", True),
     "STATUS_RUN_POSITIONS":          ("STATUS_RUN_POSITIONS", True),
@@ -407,6 +413,10 @@ def golden_cases(pyproto) -> dict[str, tuple[int, int, int, bytes]]:
                                               0x00012345, 61, 0x0102, 42)
                                 + struct.pack(">BIHHH", pyproto.LIMIT_LEG_CAP,
                                               38400, pyproto.LIMIT_SG_NONE, 40, 42)),
+        "calib_solved_miss": (5, 0x3132, Cmd.CALIB_PROMPT,
+                              struct.pack(">Bhhhh", int(pyproto.CalibPrompt.SOLVED),
+                                          13, -45, -150, 299)
+                              + bytes([7, pyproto.SUBJECT_MISS_APPLIED])),
     }
 
 
@@ -620,6 +630,21 @@ def check_golden(pyproto):
         if pyproto.decode_limits_found(lp[:pyproto.LIMITS_FOUND_LEN]).report is not None:
             fail("decode_limits_found() invented readings for a 9-byte message")
         ok("limit-find readings verified on C bytes")
+
+        # A subject's sighting miss on SOLVED: hundredths of a degree, rounded
+        # to nearest by the C side, read back as degrees; the prompt itself
+        # still decodes as SOLVED; and a 1-byte SOLVED carries no miss.
+        sp = c_pkts["calib_solved_miss"][7:-2]
+        if len(sp) != pyproto.SUBJECT_MISS_PAYLOAD_LEN:
+            fail("the C-built SOLVED with a miss is not the length Python expects")
+        sm = pyproto.decode_subject_miss(sp)
+        if (sm is None or pyproto.decode_calib_prompt(sp) != pyproto.CalibPrompt.SOLVED
+                or (sm.pan_a, sm.tilt_a, sm.pan_b, sm.tilt_b, sm.slot, sm.flags)
+                != (0.13, -0.45, -1.5, 2.99, 7, pyproto.SUBJECT_MISS_APPLIED)):
+            fail("decode_subject_miss() misread the C-built miss")
+        if pyproto.decode_subject_miss(sp[:1]) is not None:
+            fail("decode_subject_miss() invented a miss for a 1-byte SOLVED")
+        ok("subject sighting miss verified on C bytes")
 
         # ── parse: Python builds / mangles packets, C must agree ────────────
         AxisGroup = pyproto.AxisGroup
