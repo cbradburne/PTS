@@ -236,6 +236,12 @@ static const uint32_t CAM_BTN_TEXT[5] = { 0xA5D6A7, 0x90CAF9, 0xD4B800, 0x80CBC4
 static lv_obj_t *_scr_positions       = nullptr;
 static lv_obj_t *_pos_slot_btn[5][10] = {};
 
+// The focus crosshair after each row's tenth position, where the PC app has
+// it: one autofocus on that row's camera.  See pos_focus_refresh().
+static lv_obj_t *_pos_focus[5]         = {};   // the cell — the finger's target
+static lv_obj_t *_pos_focus_part[5][5] = {};   // [0] the ring, [1..4] the ticks
+static bool      _pos_focus_sent[5]    = {};   // green for a moment after a tap
+
 // ============================================================
 //  Detail screen state
 // ============================================================
@@ -718,8 +724,58 @@ static void build_top_bar(lv_obj_t *screen, int active_tab) {
 // update can refresh just the camera that changed: the full sweep touches all 50
 // buttons (~350 LVGL style calls) and re-renders the whole screen, which is far
 // too heavy to run on every incoming STATUS.
+// The crosshair's colours are the PC app's FocusButton's: red when the row's
+// camera can take an autofocus, grey and untappable when it cannot, and green
+// for as long as the PC app flashes it after a tap — which says the command
+// LEFT and nothing more: the Blackmagic protocol has no answer.
+#define C_FOCUS_READY   0xF44336
+#define C_FOCUS_SENT    0x4CAF50
+#define C_FOCUS_OFF     0x555555
+#define FOCUS_FLASH_MS  400
+
+static void pos_focus_refresh(int i) {
+    if (i < 0 || i >= 5 || !_pos_focus[i]) return;
+    bool ready = _cam[i].connected && _cam[i].cam_linked;
+    lv_color_t c = lv_color_hex(!ready ? C_FOCUS_OFF : _pos_focus_sent[i] ? C_FOCUS_SENT : C_FOCUS_READY);
+    lv_obj_set_style_arc_color(_pos_focus_part[i][0], c, LV_PART_MAIN);
+    for (int k = 1; k < 5; k++) lv_obj_set_style_bg_color(_pos_focus_part[i][k], c, 0);
+}
+
+static void pos_focus_flash_end(lv_timer_t *t) {
+    int i = (int)(intptr_t)lv_timer_get_user_data(t);
+    _pos_focus_sent[i] = false;
+    pos_focus_refresh(i);     // a no-op if the screen has gone meanwhile
+}
+
+// One instantaneous autofocus on camera i (0-4) — the crosshair's, and the
+// detail screen's FOCUS.  False when there is no camera to take it.
+//
+// The twelve bytes ARE the Blackmagic command and nothing between here and the
+// camera reinterprets them — CMD_CAM_CONTROL is a verbatim pipe, which is the
+// whole reason a display can drive a camera at all without knowing anything
+// about cameras.  Same sequence the PC app and the hub's OSC handler send; see
+// the note by CMD_CAM_CONTROL in protocol.h.  If the Positions screen is up,
+// the row's crosshair flashes green for it.
+static bool cam_autofocus(int i) {
+    if (!_send_cb || i < 0 || i >= 5 || !_cam[i].connected || !_cam[i].cam_linked) return false;
+    static const uint8_t AF[12] = { 0xFF, 0x04, 0x00, 0x00,
+                                    0x00, 0x01, 0x01, 0x00,
+                                    0x00, 0x00, 0x00, 0x00 };
+    _send_cb((uint8_t)(i + 1), CMD_CAM_CONTROL, AF, sizeof(AF));
+    _pos_focus_sent[i] = true;
+    pos_focus_refresh(i);
+    lv_timer_t *t = lv_timer_create(pos_focus_flash_end, FOCUS_FLASH_MS, (void *)(intptr_t)i);
+    lv_timer_set_repeat_count(t, 1);
+    return true;
+}
+
+static void ev_pos_focus(lv_event_t *e) {
+    cam_autofocus((int)(intptr_t)lv_event_get_user_data(e));
+}
+
 static void refresh_positions_row(int i) {
     if (!_scr_positions || i < 0 || i >= 5) return;
+    pos_focus_refresh(i);
     {
         uint16_t occ = _slots[i].slot_occupied;
         uint16_t at  = _slots[i].slot_at;
@@ -956,6 +1012,9 @@ static void destroy_positions_screen() {
         for (int s = 0; s < 10; s++) _pos_slot_btn[i][s] = nullptr;
         _pos_pt_dial[i] = {};
         _pos_sl_dial[i] = {};
+        _pos_focus[i] = nullptr;
+        for (int k = 0; k < 5; k++) _pos_focus_part[i][k] = nullptr;
+        _pos_focus_sent[i] = false;
     }
 }
 
@@ -973,7 +1032,9 @@ static void build_positions_screen() {
     // Header h=50 → remaining 430px split equally: 430/5 = 86px per row, no gaps.
     //
     // Per-row layout (content area = 792px wide, after pad_all=4):
-    //   10 slot buttons: w=62, gap=4px → 656px; x=0..655
+    //   10 slot buttons and the focus crosshair, eleven cells: w=56, gap=4px
+    //   → 656px; x=0..655 — the span the ten buttons had at w=62, so the
+    //   dials stay where they were
     //   gap 8px
     //   PT arc 60×60:  x=664
     //   gap 4px
@@ -984,7 +1045,7 @@ static void build_positions_screen() {
     const int ROW_H    = (LCD_HEIGHT - 50) / 5;    // keep same height as 5-row layout
     const int ROW_Y0   = 50;
     const int ROW_GAP  = 0;
-    const int BTN_W    = 62;
+    const int BTN_W    = 56;    // 62 before the crosshair: six each make its cell
     const int BTN_GAP  = 4;
     const int BTN_H    = 60;
     const int DIAL_SL_X = 664;
@@ -1032,6 +1093,58 @@ static void build_positions_screen() {
             lv_obj_set_style_text_color(lbl, lv_color_hex(C_DIM), 0);
             lv_obj_center(lbl);
             _pos_slot_btn[i][s] = btn;
+        }
+
+        // ── The focus crosshair: the eleventh cell ──────────────────
+        // The PC app's icon — a ring, and four ticks pointing in from 12, 3,
+        // 6 and 9 o'clock to 40% of the way to the centre — drawn bare as the
+        // PC app and the web app draw it, with the whole cell to aim at.
+        {
+            lv_obj_t *cell = lv_obj_create(row);
+            lv_obj_set_size(cell, BTN_W, BTN_H);
+            lv_obj_set_pos(cell, 10 * (BTN_W + BTN_GAP), (ROW_H - 8 - BTN_H) / 2);
+            lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(cell, 0, 0);
+            lv_obj_set_style_radius(cell, 0, 0);
+            lv_obj_set_style_pad_all(cell, 0, 0);
+            lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_event_cb(cell, ev_pos_focus, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+            _pos_focus[i] = cell;
+
+            const int D  = 44, W = 4;               // ring diameter, stroke
+            const int cx = BTN_W / 2, cy = BTN_H / 2;
+            const int r  = (D - W) / 2;             // the stroke's centre line
+            const int in = r * 2 / 5;               // where a tick ends, from the centre
+            lv_obj_t *ring = lv_arc_create(cell);
+            lv_obj_set_size(ring, D, D);
+            lv_obj_set_pos(ring, cx - D / 2, cy - D / 2);
+            lv_arc_set_bg_angles(ring, 0, 360);
+            lv_obj_remove_style(ring, NULL, LV_PART_KNOB);
+            lv_obj_set_style_arc_opa(ring, LV_OPA_TRANSP, LV_PART_INDICATOR);
+            lv_obj_set_style_arc_width(ring, W, LV_PART_MAIN);
+            lv_obj_set_style_arc_rounded(ring, false, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_pad_all(ring, 0, 0);
+            lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+            _pos_focus_part[i][0] = ring;
+
+            // top, right, bottom, left: from the ring's centre line in to `in`
+            const int tx[4] = { cx - W / 2, cx + in,    cx - W / 2, cx - r     };
+            const int ty[4] = { cy - r,     cy - W / 2, cy + in,    cy - W / 2 };
+            const int tw[4] = { W,          r - in,     W,          r - in     };
+            const int th[4] = { r - in,     W,          r - in,     W          };
+            for (int k = 0; k < 4; k++) {
+                lv_obj_t *t = lv_obj_create(cell);
+                lv_obj_set_size(t, tw[k], th[k]);
+                lv_obj_set_pos(t, tx[k], ty[k]);
+                lv_obj_set_style_radius(t, W / 2, 0);
+                lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
+                lv_obj_set_style_border_width(t, 0, 0);
+                lv_obj_set_style_pad_all(t, 0, 0);
+                lv_obj_remove_flag(t, (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+                _pos_focus_part[i][k + 1] = t;
+            }
+            pos_focus_refresh(i);
         }
 
         // SL arc dial (left) — use row background so dial blends in
@@ -1841,18 +1954,10 @@ static void ev_detail_set(lv_event_t *e) {
 
 static void clear_timer_cb(lv_timer_t *) { det_cancel_clear(); }
 
-// Instantaneous autofocus.  The twelve bytes ARE the Blackmagic command and
-// nothing between here and the camera reinterprets them — CMD_CAM_CONTROL is a
-// verbatim pipe, which is the whole reason a display can drive a camera at all
-// without knowing anything about cameras.  Same sequence the PC app and the
-// hub's OSC handler send; see the note by CMD_CAM_CONTROL in protocol.h.
+// The detail screen's FOCUS: one autofocus on the camera it shows (see
+// cam_autofocus(), with the Positions screen's crosshair).
 static void ev_detail_focus(lv_event_t *) {
-    if (!_send_cb || _detail_cam >= 5) return;
-    if (!_cam[_detail_cam].cam_linked) return;   // no camera: nothing to focus
-    static const uint8_t AF[12] = { 0xFF, 0x04, 0x00, 0x00,
-                                    0x00, 0x01, 0x01, 0x00,
-                                    0x00, 0x00, 0x00, 0x00 };
-    _send_cb((uint8_t)(_detail_cam + 1), CMD_CAM_CONTROL, AF, sizeof(AF));
+    if (_detail_cam < 5) cam_autofocus(_detail_cam);
 }
 
 // Show or hide the Focus button for whichever camera the detail screen is on.
@@ -3378,6 +3483,9 @@ void hub_ui_update_cam(uint8_t mount_id,
     // Focus button belongs on screen, and it only matters for the camera whose
     // detail screen is open.
     if (_cam[i].cam_linked != was_linked && _detail_cam == i) _detail_refresh_focus();
+    // And the Positions screen's crosshair, for any row: a camera linking or
+    // dropping, or its mount coming back.
+    if (_cam[i].cam_linked != was_linked || !was_connected) pos_focus_refresh(i);
 
     bool state_changed = !was_connected || (old_state != state) || (old_flags != flags);
     // The route rides on the RSSI line, so a mount roaming to another satellite
@@ -3476,6 +3584,7 @@ void hub_ui_set_disconnected(uint8_t mount_id) {
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
 
     _cam[i].connected = false;
+    pos_focus_refresh(i);   // an offline mount's crosshair goes grey
 
     lv_obj_set_style_border_color(_tile_obj[i], lv_color_hex(C_BORDER), 0);
     lv_obj_set_style_border_width(_tile_obj[i], 1, 0);

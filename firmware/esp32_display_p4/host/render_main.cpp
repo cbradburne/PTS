@@ -131,8 +131,10 @@ static void script() {
             _fake_pad.in = PadInput();
             _pending_cam = 1; _pending_action = NavAction::OPEN_DETAIL; break;
     case 3: shot("3_detail_cam2"); _pending_action = NavAction::DETAIL_BACK; break;
-    case 4: _pending_action = NavAction::GOTO_POSITIONS; break;
-    case 5: shot("4_positions"); _pending_action = NavAction::GOTO_CONFIG; break;
+    case 4: _pending_action = NavAction::GOTO_POSITIONS;
+            _fake_pad.in.buttons = PAD_BTN_SOUTH; break;           // Cross: autofocus on CAM 2
+    case 5: _fake_pad.in.buttons = 0;
+            shot("4_positions"); _pending_action = NavAction::GOTO_CONFIG; break;
     case 6: shot("5_config"); _pending_action = NavAction::GOTO_STATUS_FROM_CONFIG; break;
     case 7: _mp_act_open = true; break;
     case 8: shot("6_mounts_panel"); _mp_act_close = true; pad_plugged(false); break;
@@ -156,8 +158,9 @@ int main(int argc, char **argv) {
     const uint8_t  states[5] = { 0, 1, 5, 0, 0 };
     const uint8_t  flags[5]  = { 0, 0, FLAG_HAS_SLIDER | FLAG_LOOK_AT_MODE, FLAG_HAS_SLIDER, 0 };
     const int8_t   rssi[5]   = { -54, -61, -67, -72, 0 };
+    const bool     linked[5] = { true, true, false, true, false };   // a Blackmagic camera paired
     for (int i = 0; i < 4; i++) {
-        hub_ui_update_cam(i + 1, states[i], flags[i], rssi[i], 0, 0);
+        hub_ui_update_cam(i + 1, states[i], flags[i], rssi[i], linked[i] ? DISP_CAM_BLE_LINKED : 0, 0);
         hub_ui_update_preset(i + 1, 1 + i % 4, flags[i] & FLAG_HAS_SLIDER ? 2 : 0);
     }
     hub_ui_update_slots(1, 0x001F, 0x0004, 0xFF, 0);

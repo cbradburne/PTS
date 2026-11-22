@@ -99,6 +99,7 @@ joystick does, with the same deadzone, smoothing and 20 Hz jogs:
 | L1 / R1          | previous / next connected camera                        |
 | D-pad up/down    | pan/tilt speed dial                                     |
 | D-pad left/right | slider/zoom speed dial                                  |
+| Cross / A        | autofocus, when the camera is linked (as the crosshair) |
 
 **Which camera it drives:**
 - On a camera's detail screen, that camera.  L1/R1 switch the screen, as the
