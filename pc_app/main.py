@@ -22,6 +22,13 @@ import logging
 import logging.handlers
 from pathlib import Path
 
+# One copy at a time, decided before anything else happens: a second copy must
+# not open comms.log, connect to the hub or read the joystick.  It brings the
+# running copy to the front and exits.  See single_instance.py.
+if __name__ == "__main__":
+    import single_instance
+    _INSTANCE = single_instance.claim_or_hand_over()
+
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")   # no stdout banner
 
 # cv2 and pygame each bundle their own libSDL2.  On macOS, the moment the
@@ -149,7 +156,26 @@ def main() -> None:
     window = MainWindow(config, bridge, mm, store, joystick)
     window.show()
 
+    # A later launch rings here, and this window comes forward instead of a
+    # second app starting (single_instance.py).
+    import single_instance
+    inst = globals().get("_INSTANCE")
+    if inst is not None:
+        log.info("PC APP one copy: %s", inst.how)
+    doorbell = single_instance.Doorbell(lambda: _bring_forward(window))  # noqa: F841 — kept alive
+
     sys.exit(app.exec())
+
+
+def _bring_forward(window) -> None:
+    """A second copy was launched and has closed: show this one instead."""
+    if window.isMinimized():
+        window.showNormal()
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    log.info("PC APP: a second copy was started and closed itself; "
+             "this window was brought to the front")
 
 if __name__ == "__main__":
     main()
