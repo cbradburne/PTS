@@ -180,13 +180,22 @@ print("   refreshed on camera switch and on link change       OK")
 
 # ---- 5. and pressing it sends the camera's own bytes -----------------------
 print("\n5. what a press sends:")
+# Since 95bdacf (2026-11-22) the press goes through cam_autofocus(), which the
+# Positions screen's focus crosshair shares, so the twelve bytes are written
+# once.  The handler must still reach it for its own camera, and nothing else;
+# every check on what is sent applies to cam_autofocus().
 ev = disp[disp.index("static void ev_detail_focus(lv_event_t *)"):]
 ev = ev[:ev.index("\n}")]
-assert "if (!_cam[_detail_cam].cam_linked) return;" in ev, \
+assert "cam_autofocus(_detail_cam);" in ev and "_send_cb" not in ev, \
+    "the FOCUS press does not go through cam_autofocus() for its own camera"
+af_fn = disp[disp.index("static bool cam_autofocus(int i)"):]
+af_fn = af_fn[:af_fn.index("\n}")]
+guard = af_fn[:af_fn.index("_send_cb((uint8_t)")]
+assert "!_cam[i].cam_linked) return false;" in guard, \
     "a press with no camera paired still sends; the button should be hidden but\n" \
     "    the handler must not depend on that being true"
-assert "CMD_CAM_CONTROL" in ev, "the press does not use the verbatim camera pipe"
-af = re.findall(r"0x([0-9A-Fa-f]{2})", ev)
+assert "CMD_CAM_CONTROL" in af_fn, "the press does not use the verbatim camera pipe"
+af = re.findall(r"0x([0-9A-Fa-f]{2})", af_fn)
 assert [x.upper() for x in af[:12]] == ["FF", "04", "00", "00",
                                         "00", "01", "01", "00",
                                         "00", "00", "00", "00"], \
@@ -198,7 +207,8 @@ print("   the same 12 bytes the other surfaces send           OK")
 # _detail_cam is unsigned; a < 0 guard would read as a check and never fire.
 assert "_detail_cam < 0" not in disp, \
     "_detail_cam is unsigned, so a < 0 test is dead code dressed as a guard"
-assert "_detail_cam >= 5" in ev, "nothing bounds the camera index"
+assert "_detail_cam < 5" in ev and "i < 0 || i >= 5" in guard, \
+    "nothing bounds the camera index"
 print("   bounded by an index test that can actually fail     OK")
 
 print("\nALL CHECKS PASSED")
