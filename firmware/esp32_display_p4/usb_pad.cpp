@@ -20,6 +20,7 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include "usb/usb_host.h"
+#include "soc/usb_dwc_struct.h"
 #include "usb_pad.h"
 
 #define PAD_REPORT_MAX   64
@@ -525,6 +526,53 @@ static void client_cb(const usb_host_client_event_msg_t *msg, void *) {
     else if (msg->event == USB_HOST_CLIENT_EVENT_DEV_GONE) detach(msg->dev_gone.dev_hdl);
 }
 
+// ---- the port itself ------------------------------------------------------------------
+// What the high-speed port's own register says, printed when it changes, as the
+// S3's USB probe did.  It is the one view below the USB conversation: whether
+// anything is attached at all, and the levels on D+ and D-.  A device with
+// power pulls one of them up the moment it is plugged in, so this tells
+// "no power to it, or not reaching the chip" from "it is there and would not
+// start up", which the library's own messages cannot.  While the port is in
+// use its data lines carry traffic, so their levels are left out then.
+static void port_watch(uint32_t now) {
+    static uint32_t last_ms = 0, shown = 0xFFFFFFFF;
+    if (now - last_ms < 250) return;
+    last_ms = now;
+    usb_dwc_hprt_reg_t h;
+    h.val = USB_DWC_HS.hprt_reg.val;
+    uint32_t key = h.prtconnsts | (h.prtena << 1) | (h.prtpwr << 2) | (h.prtovrcurract << 3) |
+                   (h.prtspd << 4) | (h.prtena ? 0 : (uint32_t)h.prtlnsts << 6);
+    if (key == shown) return;
+    shown = key;
+    if (h.prtena)
+        PAD_LOG("[PAD] port: in use at %s speed\n",
+                h.prtspd == 0 ? "high" : h.prtspd == 1 ? "full" : "low");
+    else
+        PAD_LOG("[PAD] port: %s, D+ %s, D- %s%s%s\n",
+                h.prtconnsts ? "something attached" : "nothing attached",
+                (h.prtlnsts & 1) ? "high" : "low", (h.prtlnsts & 2) ? "high" : "low",
+                h.prtpwr ? "" : " (the host has not switched the port on)",
+                h.prtovrcurract ? " (OVER-CURRENT)" : "");
+}
+
+// Called by the library as a device begins to start up, with its device
+// descriptor read and before its configuration is.  On the library's task, so
+// it only notes it; the client task prints.  A device that gets this far and
+// is never handed over failed later in its start-up, at its configuration.
+static volatile uint8_t  _enum_started = 0;
+static volatile uint16_t _enum_vid = 0, _enum_pid = 0, _enum_bcd = 0;
+static volatile uint8_t  _enum_mps0 = 0, _enum_nconf = 0;
+static bool enum_filter(const usb_device_desc_t *dd, uint8_t *bConfigurationValue) {
+    _enum_vid = dd->idVendor;
+    _enum_pid = dd->idProduct;
+    _enum_bcd = dd->bcdUSB;
+    _enum_mps0 = dd->bMaxPacketSize0;
+    _enum_nconf = dd->bNumConfigurations;
+    _enum_started = (uint8_t)(_enum_started + 1);
+    *bConfigurationValue = 1;
+    return true;
+}
+
 // ---- tasks --------------------------------------------------------------------------
 
 static void lib_task(void *) {
@@ -539,6 +587,14 @@ static void client_task(void *) {
     cfg.skip_phy_setup = false;
     cfg.intr_flags = ESP_INTR_FLAG_LEVEL1;
     cfg.peripheral_map = 0;          // the default: the high-speed port, the USB-A socket
+    // Not optional on this core.  Its USB library is built with the filter
+    // hook enabled, and with the hook left unset a device never finishes
+    // starting up: the DualSense reached "in use at high speed" and was never
+    // handed over, with no error (A/B on the first board, 2026-11-23).  The
+    // hook names configuration 1, and the same pad is read at once.
+#if CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+    cfg.enum_filter_cb = enum_filter;
+#endif
     esp_err_t e = usb_host_install(&cfg);
     if (e != ESP_OK) {
         PAD_LOG("[PAD] the USB host would not start: %s\n", esp_err_to_name(e));
@@ -565,8 +621,16 @@ static void client_task(void *) {
     if (usb_host_device_addr_list_fill(4, addrs, &n_addrs) == ESP_OK)
         for (int i = 0; i < n_addrs; i++) attach(addrs[i]);
 
+    uint8_t enum_shown = 0;
     for (;;) {
         usb_host_client_handle_events(_client, pdMS_TO_TICKS(20));
+        port_watch(millis());
+        if (_enum_started != enum_shown) {
+            enum_shown = _enum_started;
+            PAD_LOG("[PAD] a device began to start up: %04x:%04x, USB %x.%02x, control packets %u bytes, "
+                    "%u configuration(s)\n", _enum_vid, _enum_pid, _enum_bcd >> 8, _enum_bcd & 0xFF,
+                    _enum_mps0, _enum_nconf);
+        }
         PadDev &d = *_dev;
         if (!d.used) continue;
         if (d.gone || d.refused) {
