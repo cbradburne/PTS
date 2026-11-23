@@ -1,40 +1,10 @@
 @echo off
-REM build_p4.bat - compile, and optionally flash, the P4 display firmware (Windows).
-REM
-REM   firmware\esp32_display_p4\build_p4.bat                 compile
-REM   firmware\esp32_display_p4\build_p4.bat flash COM5      compile + upload
-REM
-REM Flash through the board's "UART" Type-C (the CH343P USB-serial chip).
-REM The build is for v3.x chips (the first board here is v3.2).  For a chip
-REM older than v3.00, first:   set CHIP=prev3
-REM The flasher does not check: the wrong build flashes, then restarts endlessly.
-REM The other options (DISPLAY_FLIP, TOUCH_MIRROR_XY, PAD_USB) are not passed
-REM from here - cmd mangles compiler flags; change their defaults in board_p4.h
-REM and esp32_display_p4.ino, or use build_p4.sh on the Mac.
-
-setlocal enabledelayedexpansion
-for %%i in ("%~dp0..\..") do set "REPO=%%~fi"
-set "SKETCH=%REPO%\firmware\esp32_display_p4"
-set "VARIANT=postv3"
-if /i "%CHIP%"=="prev3" set "VARIANT=prev3"
-set "FQBN=esp32:esp32:esp32p4:ChipVariant=%VARIANT%,PSRAM=enabled,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,USBMode=hwcdc,CDCOnBoot=default"
-set "OUT=%REPO%\.build\display-p4-%VARIANT%"
-
-echo -- display-p4  %FQBN%
-arduino-cli compile --fqbn %FQBN% --libraries "%REPO%\libraries" --build-path "%OUT%" --warnings default "%SKETCH%"
-if errorlevel 1 (
-    echo COMPILE FAILED
-    exit /b 1
+REM build_p4.bat - the P4 display through tools\build.bat, the way every other
+REM board is built:   tools\build.bat flash p4display COM5
+REM Kept so the command first given for it still works.  set CHIP=prev3 first
+REM for a P4 older than v3.00.
+if /i "%~1"=="flash" (
+    call "%~dp0..\..\tools\build.bat" flash p4display %2
+) else (
+    call "%~dp0..\..\tools\build.bat" p4display
 )
-if /i not "%~1"=="flash" exit /b 0
-if "%~2"=="" (
-    echo no port given.  Attached boards:
-    arduino-cli board list
-    exit /b 1
-)
-arduino-cli upload --fqbn %FQBN% --input-dir "%OUT%" -p %~2 "%SKETCH%"
-if errorlevel 1 (
-    echo UPLOAD FAILED - is a serial monitor holding %~2?
-    exit /b 1
-)
-echo Flashed.  To watch it boot:  arduino-cli monitor -p %~2 -c baudrate=115200

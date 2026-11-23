@@ -59,7 +59,7 @@ if "%TARGET%"=="" (
     echo usage: tools\build.bat ^<target^>
     echo        tools\build.bat flash ^<target^> ^<port^>
     echo.
-    echo targets: hub hubeth display amoled sat teensy usbprobe
+    echo targets: hub hubeth display amoled sat teensy usbprobe p4display
     goto :fail
 )
 
@@ -125,7 +125,7 @@ if errorlevel 1 (
 
 echo.
 echo Flashed.  To watch it boot:
-echo     arduino-cli monitor -p %PORT% -c baudrate=921600
+echo     arduino-cli monitor -p %PORT% -c baudrate=%BAUD%
 
 :done
 popd
@@ -142,6 +142,8 @@ REM ---------------------------------------------------------------------------
 set "FQBN="
 set "SKETCH="
 set "SKETCHNAME="
+REM The baud rate a board logs at, for the "watch it boot" line.
+set "BAUD=921600"
 REM The XIAO ESP32S3 builds the same hub firmware as hubeth, WiFi-only.  Its
 REM CDCOnBoot keys are the reverse of the generic S3's: "default" is ENABLED.
 if /i "%~1"=="hub" (
@@ -180,5 +182,17 @@ if /i "%~1"=="usbprobe" (
     set "FQBN=esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi"
     set "SKETCH=firmware\usb_pad_probe"
     set "SKETCHNAME=usb_pad_probe.ino"
+)
+REM The P4 hub display (Waveshare ESP32-P4-WIFI6-Touch-LCD-7B).  Built for v3.x
+REM chips, as the first board is; for a P4 older than v3.00 first
+REM   set CHIP=prev3
+REM The flasher does not check: the wrong build flashes, then restarts endlessly.
+REM Its log is on the "UART" Type-C at 115200.
+if /i "%~1"=="p4display" (
+    set "FQBN=esp32:esp32:esp32p4:ChipVariant=postv3,PSRAM=enabled,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,USBMode=hwcdc,CDCOnBoot=default"
+    if /i "%CHIP%"=="prev3" set "FQBN=esp32:esp32:esp32p4:ChipVariant=prev3,PSRAM=enabled,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,USBMode=hwcdc,CDCOnBoot=default"
+    set "SKETCH=firmware\esp32_display_p4"
+    set "SKETCHNAME=esp32_display_p4.ino"
+    set "BAUD=115200"
 )
 exit /b 0

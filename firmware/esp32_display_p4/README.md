@@ -28,13 +28,16 @@ The hub needs no change: it speaks the same UART protocol as to the S3 display.
 ## Build and flash
 
 ```bash
-firmware/esp32_display_p4/build_p4.sh flash /dev/cu.usbmodemXXXX
+tools/build.sh flash p4display
 ```
 
-On Windows: `firmware\esp32_display_p4\build_p4.bat flash COM5`.
+As every other board: the port is found by itself when the P4 is the only
+board plugged in, or named after the target (`… p4display /dev/cu.wchusbserial…`).
+On Windows: `tools\build.bat flash p4display COM5`.  (`build_p4.sh` and
+`build_p4.bat` in this folder still work: they call these.)
 
 - Flash and watch the log through the **"UART" Type-C** (CH343P), at 115200 baud.
-- The settings are pinned in the scripts: ESP32P4 Dev Module, PSRAM on, 32 MB
+- The settings are pinned in `tools/build.sh`: ESP32P4 Dev Module, PSRAM on, 32 MB
   flash, the 32 MB partition table, and **USB mode "Hardware CDC and JTAG"**.
   TinyUSB would take the USB-A port the controller needs.
 - **Chip revision.** The build is for v3.x chips (400 MHz): the first board
@@ -52,7 +55,8 @@ On Windows: `firmware\esp32_display_p4\build_p4.bat flash COM5`.
 | `TOUCH_MIRROR_XY=0` | 1       | Use this if taps land in the diagonally opposite corner (see the first power-up). |
 | `PAD_USB=0`         | 1       | Builds without the USB controller.                                   |
 
-On the Mac these are environment variables for `build_p4.sh`.  On Windows,
+On the Mac these are environment variables for `tools/build.sh`, as for the
+other boards: `DISPLAY_FLIP=0 tools/build.sh flash p4display`.  On Windows,
 change the defaults in `board_p4.h` (or the `.ino` for `PAD_USB`).
 
 ## First power-up: what the log should say
@@ -169,5 +173,5 @@ Tests the controller code:
 | `pad_reports.h` | Report layouts, per controller family (pure C++) |
 | `pad_map.h` | Sticks to jog, the PC app's law (pure C++) |
 | `esp_lcd_ek79007.c/.h`, `esp_lcd_panel_interface.h` | Espressif's panel driver and its interface header (Apache-2.0), vendored |
-| `build_p4.sh`, `build_p4.bat` | Build and flash |
+| `build_p4.sh`, `build_p4.bat` | Shortcuts to `tools/build.sh p4display` / `tools\build.bat p4display` |
 | `host/` | The Mac render harness and the controller tests |

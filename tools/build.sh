@@ -65,6 +65,18 @@ FQBN_SAT="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=defaul
 # is simply not required here.  See the note in esp32_hub_eth.ino.
 FQBN_HUBETH="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=16M,PartitionScheme=default_8MB,PSRAM=disabled"
 FQBN_TEENSY="teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
+# The P4 hub display: Waveshare ESP32-P4-WIFI6-Touch-LCD-7B, 1024 x 600, with
+# a USB-A port for a controller (firmware/esp32_display_p4).  ChipVariant is
+# the P4's silicon revision: v3.x by default — the first board here is v3.2 —
+# and CHIP=prev3 for one older than v3.00.  The flasher does not check: the
+# wrong one flashes without complaint, then restarts endlessly.  USBMode=hwcdc
+# keeps TinyUSB off the USB-A port the controller needs.
+case "${CHIP:-}" in
+    ""|v3|postv3) P4_VARIANT=postv3 ;;
+    prev3)        P4_VARIANT=prev3 ;;
+    *) echo "CHIP must be prev3 (a P4 older than v3.00), or left unset"; exit 1 ;;
+esac
+FQBN_P4DISPLAY="esp32:esp32:esp32p4:ChipVariant=$P4_VARIANT,PSRAM=enabled,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,USBMode=hwcdc,CDCOnBoot=default"
 
 # Build directory for a target.  Verbose builds get their own, because they
 # compile a different core and arduino-cli cannot reuse the cached one.
@@ -76,6 +88,10 @@ out_for() {
     # binary that ships is never one rebuilt over it.
     if [ -n "${USB_PAD_PROBE:-}" ] && [ "$1" = "display" ]; then
         echo "$OUT/$1-usbprobe"; return
+    fi
+    # The two P4 revisions are two different cores, so two directories.
+    if [ "$1" = "p4display" ] && [ "$P4_VARIANT" = "prev3" ]; then
+        echo "$OUT/$1-prev3"; return
     fi
     echo "$OUT/$1"
 }
@@ -91,6 +107,7 @@ sketch_for() {
         sat)     echo "$REPO/firmware/esp32_satellite" ;;
         hubeth)  echo "$REPO/firmware/esp32_hub_eth" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
+        p4display) echo "$REPO/firmware/esp32_display_p4" ;;
         usbprobe) echo "$REPO/firmware/usb_pad_probe" ;;
         *)       echo "" ;;
     esac
@@ -122,6 +139,7 @@ fqbn_for() {
         sat)     echo "$FQBN_SAT" ;;
         hubeth)  echo "$FQBN_HUBETH" ;;
         teensy)  echo "$FQBN_TEENSY" ;;
+        p4display) echo "$FQBN_P4DISPLAY" ;;
         # The USB controller test, on its own: the display's board, so the same
         # settings.  See shared/usb_pad_probe.h.
         usbprobe) echo "$FQBN_DISPLAY" ;;
@@ -228,6 +246,17 @@ props_for() {
     case "$1" in
         display) [ -n "${USB_PAD_PROBE:-}" ] && _f="$_f -DUSB_PAD_PROBE=${USB_PAD_PROBE}" ;;
     esac
+    # The P4 display's options (firmware/esp32_display_p4/board_p4.h):
+    #   DISPLAY_FLIP=0     the picture not turned 180° (it is, by default)
+    #   TOUCH_MIRROR_XY=0  if taps land in the diagonally opposite corner
+    #   PAD_USB=0          no USB controller
+    #   DISPLAY_FLIP=0 tools/build.sh flash p4display
+    case "$1" in
+        p4display)
+            [ -n "${DISPLAY_FLIP:-}" ]    && _f="$_f -DDISPLAY_FLIP=$DISPLAY_FLIP"
+            [ -n "${TOUCH_MIRROR_XY:-}" ] && _f="$_f -DTOUCH_MIRROR_XY=$TOUCH_MIRROR_XY"
+            [ -n "${PAD_USB:-}" ]         && _f="$_f -DPAD_USB=$PAD_USB" ;;
+    esac
 
     # Camera's Bluetooth name (substring). Default "BMPCC" matches "Colin BMPCC".
     [ -n "${CAM_NAME:-}" ] && _f="$_f -DCAM_NAME=\"$CAM_NAME\""
@@ -313,6 +342,13 @@ if [ "${1:-}" = "flash" ]; then
         usb="$(printf '%s\n' "$cands" \
                | grep -E 'usbmodem|usbserial|wchusbserial|SLAB_USBtoUART')"
         [ -n "$usb" ] && cands="$usb"
+        # A CH34x chip with WCH's own driver installed appears twice — as
+        # usbmodemX (Apple's driver) and wchusbserialX (WCH's) — and is one
+        # board: the P4 display's is.  Keep WCH's, the one that flashes at
+        # full speed.
+        for w in $(printf '%s\n' "$cands" | sed -n 's#^/dev/cu\.wchusbserial##p'); do
+            cands="$(printf '%s\n' "$cands" | grep -v "^/dev/cu\.usbmodem$w\$")"
+        done
         n="$(printf '%s\n' "$cands" | grep -c '[^[:space:]]')"
         if [ "$n" -eq 0 ]; then
             echo "no board port found — is it plugged in and not held by a serial monitor?"
@@ -333,7 +369,7 @@ if [ "${1:-}" = "flash" ]; then
         --input-dir "$(out_for "$t")" -p "$port" "$(sketch_for "$t")"
 fi
 
-targets="${*:-hub hubeth display amoled sat teensy}"
+targets="${*:-hub hubeth display p4display amoled sat teensy}"
 fails=""
 for t in $targets; do
     compile_one "$t" || fails="$fails $t"
