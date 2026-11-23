@@ -13,7 +13,9 @@
  *      at 1.28 × the pixels.
  *   3. The USB controller: the PAD button in the top bar, the controller
  *      panel, the mark on the driven camera's tile and CAM tab, and
- *      pad_timer_cb(), which reads it.
+ *      pad_timer_cb(), which reads it.  The Home screen's tiles are split in
+ *      two for it: the upper card chooses the controller's camera, the lower
+ *      card opens the camera's screen and carries the moving/idle border.
  *
  * Everything else is the S3's code unchanged.  A change to the S3 UI ports by
  * copying the changed function: diff the two files and only these three show.
@@ -673,7 +675,9 @@ static void touch_read_cb_1(lv_indev_t *, lv_indev_data_t *data) {
 static lv_obj_t *_pad_btn[3]     = {};   // PAD button per top bar: [0]=Home, [1]=Positions, [2]=Config
 static lv_obj_t *_pad_btn_lbl[3] = {};
 static lv_obj_t *_tile_pad[5]    = {};   // the controller mark on the driven camera's tile
+static lv_obj_t *_tile_top[5]    = {};   // a Home tile's upper card: tap = this camera for the controller
 static void      ev_pad_open(lv_event_t *e);
+static void      ev_tile_pad_select(lv_event_t *e);
 static void      pad_ui_refresh();
 
 // ============================================================
@@ -2147,9 +2151,41 @@ static void build_status_screen() {
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
     for (int i = 0; i < 5; i++) {
-        lv_obj_t *tile = lv_obj_create(tiles);
-        lv_obj_set_flex_grow(tile, 1);
-        lv_obj_set_height(tile, LV_PCT(100));
+        // (P4) Each tile is two cards, one above the other.
+        //   upper — the camera's name and link: a tap points the USB
+        //           controller at this camera, and its border says which
+        //           camera the controller drives (pad_ui_refresh());
+        //   lower — the dials and positions: a tap opens the camera's screen,
+        //           as the whole tile did, and it wears the moving / idle
+        //           ("action") border that was the whole tile's.
+        // _tile_obj[] is the LOWER card, so everything that colours the
+        // action border — hub_ui_update_cam(), hub_ui_set_disconnected() —
+        // lands there unchanged.  The S3's divider between the two halves is
+        // the gap between the cards now.
+        const int TILE_TOP_H  = 96;              // 10 + the 76 its labels need + 10
+        const int TILE_GAP    = 6;
+        const int TILE_LOWER  = 100;             // the S3's y for the lower block, less this
+        lv_obj_t *col = lv_obj_create(tiles);
+        lv_obj_set_flex_grow(col, 1);
+        lv_obj_set_height(col, LV_PCT(100));
+        lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(col, 0, 0);
+        lv_obj_set_style_pad_all(col, 0, 0);
+        lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *top = lv_obj_create(col);
+        lv_obj_set_size(top, LV_PCT(100), TILE_TOP_H);
+        lv_obj_set_pos(top, 0, 0);
+        card_style(top, C_CAM_BG[i]);
+        lv_obj_set_style_pad_all(top, 10, 0);
+        lv_obj_remove_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(top, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(top, ev_tile_pad_select, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+        _tile_top[i] = top;
+
+        lv_obj_t *tile = lv_obj_create(col);
+        lv_obj_set_size(tile, LV_PCT(100), (LCD_HEIGHT - 58) - TILE_TOP_H - TILE_GAP);
+        lv_obj_set_pos(tile, 0, TILE_TOP_H + TILE_GAP);
         card_style(tile, C_CAM_BG[i]);
         lv_obj_set_style_pad_all(tile, 10, 0);
         lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
@@ -2160,12 +2196,12 @@ static void build_status_screen() {
         // ── CAM N label ──────────────────────────────────────────
         char name[8];
         snprintf(name, sizeof(name), "CAM %d", i + 1);
-        lv_obj_t *name_lbl = make_label(tile, name, &lv_font_montserrat_22, C_TEXT);
+        lv_obj_t *name_lbl = make_label(top, name, &lv_font_montserrat_22, C_TEXT);
         lv_obj_set_size(name_lbl, 90, 20);
         lv_obj_set_pos(name_lbl, 0, 0);
 
         // ── Connection dot (top-right of tile) ───────────────────
-        lv_obj_t *dot = lv_obj_create(tile);
+        lv_obj_t *dot = lv_obj_create(top);
         lv_obj_set_size(dot, 10, 10);
         lv_obj_set_pos(dot, 116, 5);
         lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
@@ -2177,47 +2213,44 @@ static void build_status_screen() {
         _tile_dot[i] = dot;
 
         // ── USB controller mark (P4): the camera a controller drives ──
-        _tile_pad[i] = make_label(tile, LV_SYMBOL_USB, &lv_font_montserrat_12, C_ACCENT2);
+        _tile_pad[i] = make_label(top, LV_SYMBOL_USB, &lv_font_montserrat_12, C_ACCENT2);
         lv_obj_set_pos(_tile_pad[i], 94, 1);
         lv_obj_add_flag(_tile_pad[i], LV_OBJ_FLAG_HIDDEN);
 
         // ── Status / RSSI / State ─────────────────────────────────
-        _tile_cstat[i] = make_label(tile, "OFFLINE", &lv_font_montserrat_12, C_DIM);
+        _tile_cstat[i] = make_label(top, "OFFLINE", &lv_font_montserrat_12, C_DIM);
         lv_obj_set_pos(_tile_cstat[i], 0, 30);
 
-        _tile_rssi[i] = make_label(tile, "", &lv_font_montserrat_10, C_DIM);
+        _tile_rssi[i] = make_label(top, "", &lv_font_montserrat_10, C_DIM);
         lv_obj_set_pos(_tile_rssi[i], 0, 46);
 
-        _tile_state[i] = make_label(tile, "", &lv_font_montserrat_12, C_DIM);
+        _tile_state[i] = make_label(top, "", &lv_font_montserrat_12, C_DIM);
         lv_obj_set_size(_tile_state[i], LV_PCT(100), 14);
         lv_obj_set_pos(_tile_state[i], 0, 62);
 
-        // ── Divider 1 ────────────────────────────────────────────
-        make_hdivider(tile, 82);
-
         // ── Arc dials — SL left, PT right ────────────────────────
-        // Two 60px arcs side by side; y=126 leaves 24px gap below divider.
-        build_tile_dial(&_tile_sl_dial[i], tile,  4, 126, C_CAM_BG[i]);
-        build_tile_dial(&_tile_pt_dial[i], tile, 68, 126, C_CAM_BG[i]);
+        // (P4) In the lower card: the S3's y, less TILE_LOWER, from here down.
+        build_tile_dial(&_tile_sl_dial[i], tile,  4, 126 - TILE_LOWER, C_CAM_BG[i]);
+        build_tile_dial(&_tile_pt_dial[i], tile, 68, 126 - TILE_LOWER, C_CAM_BG[i]);
 
         // ── Dial name labels (arc bottom = 126+60=166; labels at 200) ──
         lv_obj_t *sl_lbl = make_label(tile, "SLIDER", &lv_font_montserrat_10, C_DIM);
         lv_obj_set_size(sl_lbl, 60, 14);
-        lv_obj_set_pos(sl_lbl, 4, 200);
+        lv_obj_set_pos(sl_lbl, 4, 200 - TILE_LOWER);
         lv_obj_set_style_text_align(sl_lbl, LV_TEXT_ALIGN_CENTER, 0);
 
         lv_obj_t *pt_lbl = make_label(tile, "PAN / TILT", &lv_font_montserrat_10, C_DIM);
         lv_obj_set_size(pt_lbl, 60, 14);
-        lv_obj_set_pos(pt_lbl, 68, 200);
+        lv_obj_set_pos(pt_lbl, 68, 200 - TILE_LOWER);
         lv_obj_set_style_text_align(pt_lbl, LV_TEXT_ALIGN_CENTER, 0);
 
         // ── Divider 2 ────────────────────────────────────────────
-        make_hdivider(tile, 240);
+        make_hdivider(tile, 240 - TILE_LOWER);
 
         // ── Positions label ──────────────────────────────────────
         lv_obj_t *pos_lbl = make_label(tile, "POSITIONS", &lv_font_montserrat_12, C_DIM);
         lv_obj_set_size(pos_lbl, LV_PCT(100), 14);
-        lv_obj_set_pos(pos_lbl, 0, 275);
+        lv_obj_set_pos(pos_lbl, 0, 275 - TILE_LOWER);
         lv_obj_set_style_text_align(pos_lbl, LV_TEXT_ALIGN_CENTER, 0);
 
         // ── Slot circles — 2 rows of 5, 22px dia, 26px step ─────
@@ -2226,7 +2259,7 @@ static void build_status_screen() {
             int col_s = s % 5;
             int row_s = s / 5;
             lv_coord_t sx = 1 + col_s * 26;
-            lv_coord_t sy = (row_s == 0) ? 312 : 350;
+            lv_coord_t sy = ((row_s == 0) ? 312 : 350) - TILE_LOWER;
             lv_obj_t *circle = lv_obj_create(tile);
             lv_obj_set_size(circle, 22, 22);
             lv_obj_set_pos(circle, sx, sy);
@@ -3172,6 +3205,19 @@ static void pad_ui_refresh() {
         if (live && i == cam) lv_obj_remove_flag(_tile_pad[i], LV_OBJ_FLAG_HIDDEN);
         else                  lv_obj_add_flag(_tile_pad[i], LV_OBJ_FLAG_HIDDEN);
     }
+    // A Home tile's upper card: blue round the camera the controller drives,
+    // dim grey round it while no controller is attached (or it is switched
+    // off) — the camera it WILL drive — and the plain border on the rest.
+    for (int i = 0; i < 5; i++) {
+        if (!_tile_top[i]) continue;
+        bool sel = i == cam;
+        lv_obj_set_style_border_color(_tile_top[i],
+            lv_color_hex(!sel ? C_BORDER : live ? C_ACCENT2 : C_DIM), 0);
+        lv_obj_set_style_border_width(_tile_top[i], sel ? 3 : 1, 0);
+        // LVGL lays the contents out inside the border, so the wider one gets
+        // that much less padding: the name stays put as the choice moves.
+        lv_obj_set_style_pad_all(_tile_top[i], sel ? 8 : 10, 0);
+    }
     for (int i = 0; i < 5; i++) {
         if (!_det_cam_btns[i]) continue;
         lv_obj_t *l = lv_obj_get_child(_det_cam_btns[i], 0);
@@ -3263,6 +3309,22 @@ static void pad_step_cam(int step) {
     _pad_cam = (uint8_t)next;
     pad_light();
     pad_ui_refresh();
+}
+
+// Points the controller at camera i: a tap on a Home tile's upper card.  Any
+// camera, on or off — an operator's choice, and the pad simply waits while
+// that camera is offline.  The camera it was moving stops first.
+static void pad_select_cam(uint8_t i) {
+    if (i >= 5 || i == _pad_cam) return;
+    pad_stop();
+    _pad_cam = i;
+    Serial.printf("[PAD] CAM %u chosen for the controller\n", i + 1);
+    pad_light();
+    pad_ui_refresh();
+}
+
+static void ev_tile_pad_select(lv_event_t *e) {
+    pad_select_cam((uint8_t)(uintptr_t)lv_event_get_user_data(e));
 }
 
 // A speed dial one step, as a tap on it: the dial itself moves when the

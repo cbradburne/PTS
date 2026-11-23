@@ -109,11 +109,18 @@ joystick does, with the same deadzone, smoothing and 20 Hz jogs:
 | Cross / A        | autofocus, when the camera is linked (as the crosshair) |
 
 **Which camera it drives:**
+- On the Home screen, tap the **upper part of a camera's tile** (its name and
+  link) to point the controller at it.  That card's border turns blue, or dim
+  grey while no controller is attached, showing the camera it will drive.  The
+  lower part of the tile still opens the camera's screen, and it carries the
+  moving/idle border.
 - On a camera's detail screen, that camera.  L1/R1 switch the screen, as the
   CAM tabs do.
-- Anywhere else, the camera it last drove.  It is shown three ways:
+- Anywhere else, the camera chosen last: by a tap, L1/R1 or a detail screen.
+  It is shown four ways:
   - **PAD n** in the top bar;
-  - a USB mark on that camera's tile;
+  - the blue border on the upper part of that camera's tile;
+  - a USB mark beside its name;
   - the colour of a DualSense or DualShock 4's light bar.
 
 **While it is driving:**
