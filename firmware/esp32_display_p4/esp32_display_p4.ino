@@ -15,8 +15,9 @@
  *
  * Board settings (firmware/esp32_display_p4/build_p4.sh pins them):
  *   Board         : ESP32P4 Dev Module
- *   Chip variant  : "Before v3.00" for the boards shipping now (360 MHz);
- *                   "v3.00 or newer" if the chip says it is v3 (the boot log does)
+ *   Chip variant  : "v3.00 or newer" (the first board here is v3.2, 400 MHz);
+ *                   "Before v3.00" only for an older chip.  Wrong either way
+ *                   and it flashes fine, then restarts endlessly
  *   PSRAM         : Enabled          Flash size : 32MB
  *   Partitions    : 32M Flash (4.8MB APP/22MB FATFS)
  *   USB Mode      : Hardware CDC and JTAG — NOT TinyUSB, which would take the

@@ -16,11 +16,14 @@
 #define BOARD_LCD_W  1024
 #define BOARD_LCD_H  600
 
-// Turn the picture upside down, for a display mounted the other way up.  Done
-// by the panel itself (its scan direction), so it costs nothing.  The touch
-// coordinates follow.
+// The picture turned 180°, in software as each band is drawn (see
+// board_display_draw(); the panel's own mirror does nothing over DSI); the
+// touch coordinates follow.  On by default: the panel's own scan is upside
+// down for the way this board is meant to stand — Waveshare's BSP turns it
+// 180° too, and the first board here (2026-11-23) came up upside down without
+// it.  0 for a display mounted the other way up.
 #ifndef DISPLAY_FLIP
-#define DISPLAY_FLIP 0
+#define DISPLAY_FLIP 1
 #endif
 
 // The GT911 on this board reports from the opposite corner to the panel's
@@ -38,7 +41,9 @@ bool board_display_init(board_draw_done_fn done, void *ctx);
 
 // Copies a rectangle (x2/y2 inclusive) of RGB565 pixels to the panel's frame
 // buffer, by DMA.  Returns at once; `done` fires when the copy has finished.
-void board_display_draw(int x1, int y1, int x2, int y2, const void *pixels);
+// With DISPLAY_FLIP the pixels are turned 180° in place first, so the buffer
+// is the panel's until `done`.
+void board_display_draw(int x1, int y1, int x2, int y2, void *pixels);
 
 void board_backlight(uint8_t percent);
 

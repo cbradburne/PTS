@@ -5,7 +5,9 @@ REM   firmware\esp32_display_p4\build_p4.bat                 compile
 REM   firmware\esp32_display_p4\build_p4.bat flash COM5      compile + upload
 REM
 REM Flash through the board's "UART" Type-C (the CH343P USB-serial chip).
-REM For a chip that reports v3.00 or newer, first:   set CHIP=v3
+REM The build is for v3.x chips (the first board here is v3.2).  For a chip
+REM older than v3.00, first:   set CHIP=prev3
+REM The flasher does not check: the wrong build flashes, then restarts endlessly.
 REM The other options (DISPLAY_FLIP, TOUCH_MIRROR_XY, PAD_USB) are not passed
 REM from here - cmd mangles compiler flags; change their defaults in board_p4.h
 REM and esp32_display_p4.ino, or use build_p4.sh on the Mac.
@@ -13,8 +15,8 @@ REM and esp32_display_p4.ino, or use build_p4.sh on the Mac.
 setlocal enabledelayedexpansion
 for %%i in ("%~dp0..\..") do set "REPO=%%~fi"
 set "SKETCH=%REPO%\firmware\esp32_display_p4"
-set "VARIANT=prev3"
-if /i "%CHIP%"=="v3" set "VARIANT=postv3"
+set "VARIANT=postv3"
+if /i "%CHIP%"=="prev3" set "VARIANT=prev3"
 set "FQBN=esp32:esp32:esp32p4:ChipVariant=%VARIANT%,PSRAM=enabled,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,USBMode=hwcdc,CDCOnBoot=default"
 set "OUT=%REPO%\.build\display-p4-%VARIANT%"
 

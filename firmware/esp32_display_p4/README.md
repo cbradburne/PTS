@@ -37,15 +37,18 @@ On Windows: `firmware\esp32_display_p4\build_p4.bat flash COM5`.
 - The settings are pinned in the scripts: ESP32P4 Dev Module, PSRAM on, 32 MB
   flash, the 32 MB partition table, and **USB mode "Hardware CDC and JTAG"**.
   TinyUSB would take the USB-A port the controller needs.
-- **Chip revision.** Waveshare ships pre-v3 chips (360 MHz), and that is the
-  default build.  If the boot log reports v3.00 or newer, build with `CHIP=v3`
-  (`set CHIP=v3` on Windows).
+- **Chip revision.** The build is for v3.x chips (400 MHz): the first board
+  here is v3.2.  For a chip older than v3.00 build with `CHIP=prev3`
+  (`set CHIP=prev3` on Windows).  The flasher does not check this.  The wrong
+  build flashes without complaint, then restarts endlessly
+  (`rst:0x10 (CHIP_LP_WDT_RESET)` in the log, with no message).  The flash
+  output's `Chip type: ESP32-P4 (revision vX.Y)` line says which you have.
 
 ### Options
 
 | Option              | Default | What it does                                                         |
 |---------------------|---------|----------------------------------------------------------------------|
-| `DISPLAY_FLIP=1`    | 0       | The picture upside down, for a display mounted that way. The panel does it itself; touch follows. |
+| `DISPLAY_FLIP=0`    | 1       | The picture turned 180°. On by default: the panel's own scan is upside down for the way the board stands (Waveshare's BSP turns it too). 0 for a display mounted the other way up. Done in software as each band is drawn — the panel's own mirror does nothing over DSI; touch follows. |
 | `TOUCH_MIRROR_XY=0` | 1       | Use this if taps land in the diagonally opposite corner (see the first power-up). |
 | `PAD_USB=0`         | 1       | Builds without the USB controller.                                   |
 

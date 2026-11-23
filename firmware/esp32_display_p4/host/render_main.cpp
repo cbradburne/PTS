@@ -27,7 +27,7 @@ static board_draw_done_fn _done_fn = nullptr;
 static void              *_done_ctx = nullptr;
 
 bool board_display_init(board_draw_done_fn done, void *ctx) { _done_fn = done; _done_ctx = ctx; return true; }
-void board_display_draw(int x1, int y1, int x2, int y2, const void *pixels) {
+void board_display_draw(int x1, int y1, int x2, int y2, void *pixels) {
     const uint16_t *src = (const uint16_t *)pixels;
     int w = x2 - x1 + 1;
     for (int y = y1; y <= y2; y++) memcpy(&_fb[y * BOARD_LCD_W + x1], src + (y - y1) * w, w * 2);

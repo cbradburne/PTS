@@ -7,9 +7,14 @@
 # Flash through the board's "UART" Type-C (the CH343P USB-serial chip).
 #
 # Options, as environment variables:
-#   CHIP=v3              a chip that reports v3.00 or newer (400 MHz); the
-#                        boards shipping now are earlier (360 MHz), the default
-#   DISPLAY_FLIP=1       the picture upside down, for a display mounted that way
+#   CHIP=prev3           a chip older than v3.00 (360 MHz).  The default is v3:
+#                        the first board here (2026-11-23) is v3.2.  The flasher
+#                        does NOT check — a build for the wrong revision flashes
+#                        and then restarts endlessly (CHIP_LP_WDT_RESET, no
+#                        message).  The flash output's "Chip type: ESP32-P4
+#                        (revision vX.Y)" line says which yours is.
+#   DISPLAY_FLIP=0       the picture NOT turned 180° (it is by default — the way
+#                        the board stands; 0 for one mounted the other way up)
 #   TOUCH_MIRROR_XY=0    if taps land in the diagonally opposite corner
 #   PAD_USB=0            no USB controller
 # Each combination builds in its own .build/ directory, so a test build never
@@ -20,9 +25,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 
 case "${CHIP:-}" in
-    v3|postv3) VARIANT=postv3 ;;
-    ""|prev3)  VARIANT=prev3 ;;
-    *) echo "CHIP must be v3 or left unset"; exit 2 ;;
+    ""|v3|postv3) VARIANT=postv3 ;;
+    prev3)        VARIANT=prev3 ;;
+    *) echo "CHIP must be prev3 (a chip older than v3.00), or left unset"; exit 2 ;;
 esac
 FQBN="esp32:esp32:esp32p4:ChipVariant=$VARIANT,PSRAM=enabled,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,USBMode=hwcdc,CDCOnBoot=default"
 

@@ -44,9 +44,10 @@ bool board_display_init(board_draw_done_fn done, void *ctx) {
     _done = done;
     _done_ctx = ctx;
 
-    // Backlight off until there is a picture.
+    // Backlight off until there is a picture.  Off is the pin HIGH: see
+    // board_backlight().
     ledcAttach(PIN_LCD_BACKLIGHT, 5000, 10);
-    ledcWrite(PIN_LCD_BACKLIGHT, 0);
+    ledcWrite(PIN_LCD_BACKLIGHT, 1023);
 
     static esp_ldo_channel_handle_t phy_ldo = nullptr;
     esp_ldo_channel_config_t ldo_cfg = {};
@@ -58,7 +59,17 @@ bool board_display_init(board_draw_done_fn done, void *ctx) {
     esp_lcd_dsi_bus_config_t bus_cfg = {};
     bus_cfg.bus_id = 0;
     bus_cfg.num_data_lanes = DSI_LANES;
-    bus_cfg.phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT;
+    // The DSI PHY's PLL reference, which is not the same on the two chip
+    // revisions: v3 silicon takes XTAL (or APLL/CPLL/SPLL/MPLL), earlier chips
+    // PLL_F20M (or RC_FAST/PLL_F25M), and each driver aborts on the other's.
+    // The core's own MIPI_DSI_PHY_CLK_SRC_DEFAULT is the EARLIER chips' default
+    // in both builds — which is what the first v3.2 board died on, every boot,
+    // inside esp_lcd_new_dsi_bus() (2026-11-23).
+#if CONFIG_ESP32P4_SELECTS_REV_LESS_V3
+    bus_cfg.phy_clk_src = MIPI_DSI_PHY_PLLREF_CLK_SRC_PLL_F20M;
+#else
+    bus_cfg.phy_clk_src = MIPI_DSI_PHY_PLLREF_CLK_SRC_DEFAULT;      // XTAL
+#endif
     bus_cfg.lane_bit_rate_mbps = DSI_LANE_MBPS;
     CHECK(esp_lcd_new_dsi_bus(&bus_cfg, &bus), "DSI bus");
 
@@ -85,9 +96,6 @@ bool board_display_init(board_draw_done_fn done, void *ctx) {
     CHECK(esp_lcd_new_panel_ek79007(io, &dev_cfg, &_panel), "EK79007 panel");
     CHECK(esp_lcd_panel_reset(_panel), "panel reset");
     CHECK(esp_lcd_panel_init(_panel), "panel init");
-#if DISPLAY_FLIP
-    CHECK(esp_lcd_panel_mirror(_panel, true, true), "panel flip");
-#endif
 
     esp_lcd_dpi_panel_event_callbacks_t cbs = {};
     cbs.on_color_trans_done = on_color_trans_done;
@@ -96,13 +104,34 @@ bool board_display_init(board_draw_done_fn done, void *ctx) {
     return true;
 }
 
-void board_display_draw(int x1, int y1, int x2, int y2, const void *pixels) {
+// DISPLAY_FLIP turns the picture 180° here, in software.  The panel cannot: the
+// EK79007's own mirror (MADCTL, which esp_lcd_panel_mirror() sends) is ignored
+// in DSI video mode — tried on the first board, 2026-11-23: the touch turned
+// and the picture did not.  For 180° it is cheap: a band reversed end to end
+// IS the band turned 180°, so its pixels are swapped in place and it goes to
+// the mirrored rectangle.  About a millisecond for a whole screen at 400 MHz.
+// LVGL is done with the band once it has handed it over, so it is ours to turn.
+void board_display_draw(int x1, int y1, int x2, int y2, void *pixels) {
+#if DISPLAY_FLIP
+    uint16_t *p = (uint16_t *)pixels;
+    size_t n = (size_t)(x2 - x1 + 1) * (size_t)(y2 - y1 + 1);
+    for (size_t i = 0, j = n - 1; i < j; i++, j--) {
+        uint16_t t = p[i]; p[i] = p[j]; p[j] = t;
+    }
+    int fx1 = BOARD_LCD_W - 1 - x2, fx2 = BOARD_LCD_W - 1 - x1;
+    int fy1 = BOARD_LCD_H - 1 - y2, fy2 = BOARD_LCD_H - 1 - y1;
+    x1 = fx1; x2 = fx2; y1 = fy1; y2 = fy2;
+#endif
     esp_lcd_panel_draw_bitmap(_panel, x1, y1, x2 + 1, y2 + 1, pixels);
 }
 
+// The backlight is lit by the pin going LOW: Waveshare's own driver sets
+// output_invert on this channel.  So full brightness is duty 0 and off is
+// 1023.  Driven the obvious way, "100%" held the pin high and the first board
+// (2026-11-23) booted with a perfectly good picture and no light behind it.
 void board_backlight(uint8_t percent) {
     if (percent > 100) percent = 100;
-    ledcWrite(PIN_LCD_BACKLIGHT, (1023u * percent) / 100u);
+    ledcWrite(PIN_LCD_BACKLIGHT, 1023u - (1023u * percent) / 100u);
 }
 
 // ---- touch: GT911 -------------------------------------------------------------
