@@ -15,7 +15,8 @@ Install these by copying each folder into your Arduino `libraries` directory
 | [SensorLib](https://github.com/lewisxhe/SensorsLib) | 0.4.1 | esp32_display | QMI8658 IMU + GT911 touch (TouchDrv.hpp, SensorQMI8658.hpp) |
 | [TAMC_GT911](https://github.com/TAMCTec/gt911-arduino) | 1.0.2 | esp32_display | GT911 capacitive touch fallback driver |
 | [TMCStepper](https://github.com/teemuatlut/TMCStepper) | 0.7.3 | teensy41_mount | TMC2209 stepper driver communication |
-| [TeensyStep4](https://github.com/luni64/TeensyStep4) | 0.0.3 | teensy41_mount | Non-blocking stepper motion for Teensy 4.1 |
+| [TeensyStep4](https://github.com/luni64/TeensyStep4) | 0.0.3 | teensy41_mount | Non-blocking stepper motion for Teensy 4.1.  Our copy carries fixes (timer races, 1 µs STEP pulse and DIR wait) that exist nowhere upstream, and upstream has moved on to TeensyStep 3: build the Teensy with `tools/build.sh`, which uses this copy |
+| [TeensyStep](https://github.com/luni64/TeensyStep) | 3.0.0 (tag `v3.0.0`, a472de5) | teensy41_mount_ts3 | The test build of the mount only: TeensyStep 3 under TeensyStep4's interface (`ts4_on_ts3.h`).  `src/`, the licence and the notes only; examples and manual at the link.  Not the TeensyStep 2.3.4 the Arduino IDE may have installed under the same name |
 
 ## Board Packages Required
 

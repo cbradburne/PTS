@@ -59,7 +59,7 @@ if "%TARGET%"=="" (
     echo usage: tools\build.bat ^<target^>
     echo        tools\build.bat flash ^<target^> ^<port^>
     echo.
-    echo targets: hub hubeth display amoled sat teensy usbprobe p4display
+    echo targets: hub hubeth display amoled sat teensy teensyts3 usbprobe p4display
     goto :fail
 )
 
@@ -175,6 +175,13 @@ if /i "%~1"=="teensy" (
     set "FQBN=teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
     set "SKETCH=firmware\teensy41_mount"
     set "SKETCHNAME=teensy41_mount.ino"
+)
+REM The mount on TeensyStep 3 instead of our TeensyStep4, for bench tests:
+REM firmware\teensy41_mount_ts3\README.md.
+if /i "%~1"=="teensyts3" (
+    set "FQBN=teensy:avr:teensy41:usb=serial,speed=600,opt=o2std"
+    set "SKETCH=firmware\teensy41_mount_ts3"
+    set "SKETCHNAME=teensy41_mount_ts3.ino"
 )
 REM The USB controller test on the 7" display's board, on its own.  The build
 REM that runs it beside the screen needs USB_PAD_PROBE=1, so build.sh only.

@@ -1,0 +1,25 @@
+// Placeholder for boards that have no backend (Teensy 3.0 to 3.2, LC): the library compiles and links, and every
+// move command reports noTimer.
+
+#if defined(ARDUINO) && !defined(__IMXRT1062__) && !defined(__MK64FX512__) && !defined(__MK66FX1M0__)
+
+#include "../Backend.h"
+
+namespace TeensyStep
+{
+    namespace backend
+    {
+        float maxDelay() { return 0.001f; }
+        void initMotor(const MotorPins&) {}
+        void setPin(uint8_t, bool) {}
+        errorCode open(unsigned, const ChannelSetup&) { return errorCode::noTimer; }
+        void start(unsigned) {}
+        void halt(unsigned, int32_t*) {}
+        void lock() {}
+        void unlock() {}
+        void idle() {}
+        void setInterruptPriority(uint8_t) {}
+    }
+}
+
+#endif

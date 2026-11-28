@@ -107,6 +107,9 @@ sketch_for() {
         sat)     echo "$REPO/firmware/esp32_satellite" ;;
         hubeth)  echo "$REPO/firmware/esp32_hub_eth" ;;
         teensy)  echo "$REPO/firmware/teensy41_mount" ;;
+        # The mount on TeensyStep 3 instead of our TeensyStep4, for bench
+        # tests: firmware/teensy41_mount_ts3/README.md.
+        teensyts3) echo "$REPO/firmware/teensy41_mount_ts3" ;;
         p4display) echo "$REPO/firmware/esp32_display_p4" ;;
         usbprobe) echo "$REPO/firmware/usb_pad_probe" ;;
         *)       echo "" ;;
@@ -139,6 +142,7 @@ fqbn_for() {
         sat)     echo "$FQBN_SAT" ;;
         hubeth)  echo "$FQBN_HUBETH" ;;
         teensy)  echo "$FQBN_TEENSY" ;;
+        teensyts3) echo "$FQBN_TEENSY" ;;
         p4display) echo "$FQBN_P4DISPLAY" ;;
         # The USB controller test, on its own: the display's board, so the same
         # settings.  See shared/usb_pad_probe.h.
@@ -369,7 +373,7 @@ if [ "${1:-}" = "flash" ]; then
         --input-dir "$(out_for "$t")" -p "$port" "$(sketch_for "$t")"
 fi
 
-targets="${*:-hub hubeth display p4display amoled sat teensy}"
+targets="${*:-hub hubeth display p4display amoled sat teensy teensyts3}"
 fails=""
 for t in $targets; do
     compile_one "$t" || fails="$fails $t"

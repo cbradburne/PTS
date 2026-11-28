@@ -1,0 +1,815 @@
+#pragma once
+/*
+ * MountMotion — Teensy 4.1 camera mount motion library
+ *
+ * Wraps TeensyStep4 for synchronised multi-axis moves with acceleration.
+ * Controls four TMC2209 drivers, each on a dedicated bidirectional serial port.
+ *
+ * TMC2209 UART — one per axis, full duplex (TX + RX), all drivers at address 0.
+ *   PAN    → Serial5  (TX=20, RX=21)
+ *   TILT   → Serial4  (TX=17, RX=16)
+ *   SLIDER → Serial3  (TX=14, RX=15)
+ *   ZOOM   → Serial8  (TX=35, RX=34)
+ *   MS1 = GND, MS2 = GND on every board (address 0, no multiplexing).
+ *   Wiring per driver:  TX ─ 1kΩ ─ PDN_UART ← RX
+ *
+ * StallGuard via DIAG1 pin (hardware interrupt-capable):
+ *   DIAG1 configured push-pull, goes HIGH on stall.
+ *   PAN DIAG→3,  TILT DIAG→9,  SLIDER DIAG→13,  ZOOM DIAG→33
+ *   Note: pin 13 doubles as the Teensy onboard LED; used here as input.
+ *
+ * Pin assignments are defined in MountMotion.cpp — adjust for your wiring.
+ */
+
+#include <Arduino.h>
+#include "ts4_on_ts3.h"       // (TS3) TeensyStep4's interface, on TeensyStep 3
+#include <TMCStepper.h>
+#include "protocol.h"
+// Same two paths as protocol.h's shim: the Teensy builds from a copied sketch
+// folder, where only the dereferenced `shared` symlink is there to be found.
+#if __has_include("../shared/sg_readout.h")
+  #include "../shared/sg_readout.h"
+#else
+  #include "shared/sg_readout.h"
+#endif
+
+// ---------------------------------------------------------------------------
+// Default StallGuard thresholds — also used in EepromConfig initialisation
+// Order: PAN, TILT, SLIDER, ZOOM
+// ---------------------------------------------------------------------------
+constexpr uint8_t DEFAULT_STALL_THRESHOLD[4] = { 100, 100, 80, 80 };
+
+// ---------------------------------------------------------------------------
+// v2 — Look-at constants
+// ---------------------------------------------------------------------------
+
+// Update rate for the look-at controller (ms).  50 Hz is comfortable for smooth tracking.
+#define LOOK_AT_INTERVAL_MS  20
+
+// P-gain for the look-at follower.  At this many steps of angular error the
+// motor runs at full look-at speed; below it the speed scales proportionally.
+// 5000 µsteps ≈ 1.17° (pan/tilt at 256µstep, 15:1 gear, 0.9°/step).
+#define LOOK_AT_KP_STEPS  5000.0f
+
+// How long (ms) to maintain reduced slew acceleration after a mid-move subject
+// switch.  The grace period ensures the accel stays gentle even as the error
+// shrinks below the KP threshold during the reposition.  2 s covers a ~1.5 s
+// ramp at LOOK_AT_SLEW_ACCEL_FACTOR=0.10 with margin.
+#define LOOK_AT_SLEW_DURATION_MS  2000
+
+// How long the gentle slew cap outlasts the BLEND, once one is running.
+//
+// The cap is a step, not a ramp: when the grace expires _driveTowardTarget()
+// goes from LOOK_AT_SLEW_BRAKE_FACTOR to LOOK_AT_BRAKE_FACTOR, which is a 67%
+// jump in permitted speed.  That is invisible if the camera has already settled
+// and visible as a kick if it has not.
+//
+// A fixed grace could not stay clear of it, because the blend's length depends
+// on how far the camera has to turn.  A 30 degree switch blends for ~1.6 s, the
+// setpoint arrives, the camera is still closing the P-loop's following error
+// behind it — and the fixed 2 s grace expired mid-catch-up.  The move eased in
+// beautifully and then kicked on the way out.
+//
+// So the grace now runs for the blend plus this, which needs to cover the
+// following error settling after the setpoint stops moving.
+#define LOOK_AT_SLEW_SETTLE_MS    1000
+
+// How much faster than the blend's own peak the controller may go while
+// following it.
+//
+// A smoothstep's peak rate is 1.5x its average, and the controller has to be
+// able to EXCEED that to close the following error it accumulates — pinned
+// exactly at the peak it can only ever fall further behind.  1.3 gives it room
+// without letting it lurch.
+//
+// This exists because the fixed slew cap and the blend were solving the same
+// problem independently, and the cap won.  Measured on the rig on 2026-08-24: a
+// 25.6 degree switch should have peaked at 27.3 deg/s and instead sat pinned at
+// 12.4 for two seconds — 0.15 x 90 = 13.5 — then stopped dead.  Flat speed,
+// snap to stop.  The setpoint was easing perfectly the whole time and the
+// camera never once followed it.
+//
+// The cap exists to stop a STEP input lurching.  An eased setpoint has no step
+// in it, so during a blend the blend governs and the fixed cap does not apply.
+#define LOOK_AT_BLEND_HEADROOM    1.3f
+
+// ---------------------------------------------------------------------------
+// Subject-switch blend
+// ---------------------------------------------------------------------------
+// Selecting a new subject mid-move moved the TARGET in a single step, leaving
+// the controller to chase a discontinuity.  However gently it was tuned to
+// respond, it was still reacting to a jump: full slew speed almost at once,
+// then a braking curve into the new aim.  And because pan and tilt are separate
+// P-loops with separate errors, whichever had less to travel arrived first — so
+// the move read as two axis motions rather than one arc.
+//
+// Easing the SETPOINT fixes both without touching the controller.  The subject
+// position is interpolated from the old to the new one on a smoothstep, which
+// has zero velocity at both ends, so the camera eases out of the old subject
+// and into the new one.  Both axes are derived from the same moving point, so
+// they stay coordinated for free and land together.
+//
+// Duration scales with how far the camera has to turn — a small correction
+// should not take as long as a sweep across the room.
+//
+// HOW FAST is the pan/tilt dial's, since 2026-11-18.  The blend runs long
+// enough that its peak is the dial's speed and its peak acceleration the
+// dial's acceleration (see MountMotion::_switchMs) — the same two numbers a
+// switch with the slider parked has always obeyed.  The fixed 55 ms per
+// degree gave every switch the same 18 deg/s average and 27 deg/s peak
+// whatever the dial said, and at the Foyer event that evening it was "too
+// fast to use on a live camera".  The per-degree law and its 2.2 s ceiling now
+// only serve a dial with no usable speed in it; a ceiling on the dial's own
+// timing would quietly speed up exactly the switches it was asked to slow.
+#define LOOK_AT_BLEND_MS_PER_DEG   55.0f
+#define LOOK_AT_BLEND_MIN_MS        300
+#define LOOK_AT_BLEND_MAX_MS       2200
+
+// What TRACKING keeps while a switch runs.  The dial times the switch — the
+// turn from one subject to the next — and nothing else.  The rail moving still
+// swings the aim at whatever rate the geometry demands, on top of the switch,
+// and a cap or an acceleration limit sized for a slow dial alone would starve
+// that: the camera would fall behind both subjects for the whole switch.  So
+// during a switch the speed cap never drops below the one ordinary tracking
+// has (LOOK_AT_BRAKE_FACTOR, in _driveTowardTarget), and the acceleration
+// limit never below this.
+//
+// Why 100: the controller will only move as fast as it could stop within its
+// error, so with acceleration A it trails anything faster than A/10 deg/s by
+// more than its own P-loop does (the P-loop's gain is 20/s).  At 100 that is
+// 10 deg/s — a subject half a metre from the rail passing at 80 mm/s; one 3 m
+// out turns the camera at under 2.  Modelled closed-loop in
+// tools/test_look_at_dial.py: 20 left the camera trailing a slow switch on a
+// fast slide by 1.9 degrees, 100 brings it down to the P-loop's own 0.44.
+// Kept below what big fast switches' curves ask for, so their soft arrival
+// (test_look_at_accel_bound.py) is untouched.  The setpoint is smooth, so
+// neither floor lets the switch itself run faster than it asks.
+#define LOOK_AT_TRACK_ACCEL_MIN   100.0f   // deg/s^2
+
+// ---------------------------------------------------------------------------
+// What the axis can ACTUALLY do
+// ---------------------------------------------------------------------------
+// TeensyStep4 clamps every setMaxSpeed() to vMaxMax (stepper.h):
+//
+//     vMax = constrain(speed, -vMaxMax, vMaxMax);   // vMaxMax = 100'000
+//
+// It does not fail or report; a larger request silently becomes this.  The
+// look-at controller was being told the axis could do 90 deg/s, which is
+// 192,000 steps/s — a number the library will never issue.
+//
+// Everything downstream was therefore computed against a speed that cannot
+// happen.  Measured on the rig on 2026-08-26, three switches of 72, 92 and 81
+// degrees computed speed caps of 64, 81 and 71 deg/s and every one of them
+// plateaued at 45: no cap had ever bound on a large switch, because all of
+// them sat above the real ceiling.  The motion was flat out until arrival.
+//
+// Worse, the sqrt braking curve derives its deceleration from the same
+// fiction, so the camera held the clamp until it was under a degree from
+// target and then stopped inside 15–19 ms — less than one 20 ms control tick.
+// That is the "one speed, then the next" the operator reported, and no amount
+// of cap tuning could reach it.
+// (LOOK_AT_MAX_DEG_S is defined with the drive geometry below, which is where
+// deg-per-step becomes known.)
+#define AXIS_MAX_STEPS_S          100000.0f      // TeensyStep4 vMaxMax
+
+// How much more acceleration the motor may use than the blend's own curve
+// demands.  A smoothstep's peak acceleration is 6 x travel / duration^2; the
+// controller is otherwise free to change speed thirty times faster than that,
+// which is what turns its 50 Hz output into a staircase the motor has to slam
+// through.  2.0 leaves the controller room to correct without letting it slam.
+#define LOOK_AT_ACCEL_HEADROOM      2.0f
+
+// How close the aim must be to the subject before a look-at move is allowed to
+// end, and how long it may wait for that.
+//
+// The slider reaching the end of the rail does not mean the shot has arrived.
+// Switch subject near the end of a move and the rail runs out part-way through
+// the turn; ending there left the camera pointing between two people, which on
+// a panel is a shot of nobody.
+//
+// 0.05 degrees is far inside anything visible and is comfortably reachable —
+// the controller's own deadband stops it within half a microstep.  The timeout
+// is the backstop: the clock starts when the SLIDER arrives, so in the worst
+// case a switch begins the instant before that and the whole blend is still to
+// run — 6.8 s at 180 degrees, plus its settle.  12 s leaves half again on top,
+// so it only ever fires if the aim genuinely cannot converge, and it says so in
+// the log when it does.
+#define LOOK_AT_AIM_ARRIVE_DEG      0.05f
+#define LOOK_AT_AIM_FINISH_MAX_MS  12000UL
+
+// How much of that ceiling the blend's own peak is allowed to use.  A
+// smoothstep peaks at 1.5x its average, and if that peak is at the ceiling the
+// controller has nothing left to catch up with — it saturates and the curve is
+// clipped back into the rectangle this is all meant to remove.  0.85 leaves
+// room to follow the shape rather than chase it.
+#define LOOK_AT_BLEND_FILL          0.85f
+
+// ---------------------------------------------------------------------------
+// DRIVE GEOMETRY — change these when the hardware changes, nothing else
+// ---------------------------------------------------------------------------
+// Every ratio in the firmware derives from the numbers in this block.
+//
+// They used to be written out as FINISHED ratios in two files: the slider's
+// 40 mm/rev lived in MountMotion.cpp and again inside the nominal step size
+// below, and pan/tilt's 7.5:1 the same way.  Fitting a different pulley meant
+// finding both, and missing one gave a mount that MOVES at one scale and
+// REPORTS ITS POSITION at another — a fault that looks like a mechanical
+// problem and is not.  The tooth counts were only ever in a comment.
+//
+// SLIDER — GT2 belt.  The GT2 profile is 2 mm between teeth by definition, so
+// one motor revolution advances the carriage by teeth x 2 mm.
+#define SLIDER_PULLEY_TEETH    20    // GT2 pulley on the slider motor shaft
+
+// PAN / TILT — toothed belt reductions, driven (axis) over driver (motor).
+// Both work out at 7.5:1, which is why one constant served both; they are
+// separate here because they are separate pulleys and only look alike.
+#define PAN_DRIVEN_TEETH      270
+#define PAN_DRIVER_TEETH       36
+#define TILT_DRIVEN_TEETH     120
+#define TILT_DRIVER_TEETH      16
+
+// Motors and driver settings that pair with the above.
+#define MOTOR_DEG_PER_STEP_PT  0.9f  // PAN/TILT motors: 0.9 deg/full step
+#define MOTOR_DEG_PER_STEP_SZ  1.8f  // SLIDER/ZOOM motors: 1.8 deg/full step
+#define MICROSTEPS_PAN         256
+#define MICROSTEPS_TILT        256
+#define MICROSTEPS_SLIDER       32   // lower: more torque for the heavy carriage
+#define MICROSTEPS_ZOOM         32
+#define GEAR_RATIO_ZOOM        1.0f  // direct drive
+
+// GT2 is a belt PROFILE, not a choice — 2 mm pitch is what makes it GT2.
+constexpr float GT2_BELT_PITCH_MM = 2.0f;
+
+// ---- derived: nothing below is edited by hand -----------------------------
+constexpr float SLIDER_MM_PER_REV = SLIDER_PULLEY_TEETH * GT2_BELT_PITCH_MM;
+constexpr float GEAR_RATIO_PAN    = (float)PAN_DRIVEN_TEETH  / (float)PAN_DRIVER_TEETH;
+constexpr float GEAR_RATIO_TILT   = (float)TILT_DRIVEN_TEETH / (float)TILT_DRIVER_TEETH;
+constexpr float SLIDER_FULL_STEPS_PER_REV = 360.0f / MOTOR_DEG_PER_STEP_SZ;
+
+// Nominal hardware deg/µstep values — used before the first subject calibration
+// refines them.
+constexpr float NOMINAL_PAN_DEG_PER_STEP =
+        MOTOR_DEG_PER_STEP_PT / (MICROSTEPS_PAN  * GEAR_RATIO_PAN);     // ≈ 0.000468750
+constexpr float NOMINAL_TILT_DEG_PER_STEP =
+        MOTOR_DEG_PER_STEP_PT / (MICROSTEPS_TILT * GEAR_RATIO_TILT);    // ≈ 0.000468750
+constexpr float NOMINAL_SLIDER_MM_PER_STEP =
+        SLIDER_MM_PER_REV / (MICROSTEPS_SLIDER * SLIDER_FULL_STEPS_PER_REV);  // ≈ 0.00625
+
+// The fastest the pan/tilt axes can be driven, as opposed to the fastest they
+// can be ASKED for.  See AXIS_MAX_STEPS_S above: the library clamps silently,
+// so this is the number the look-at controller must be given if any of its
+// speed arithmetic is to mean anything.
+constexpr float LOOK_AT_MAX_DEG_S =
+        AXIS_MAX_STEPS_S * NOMINAL_PAN_DEG_PER_STEP;          // ≈ 46.875 deg/s
+
+// ---------------------------------------------------------------------------
+// Speed preset (per axis group, 4 presets each)
+// ---------------------------------------------------------------------------
+
+struct SpeedPreset {
+    uint32_t max_speed;    // physical: deg/sec (PAN/TILT/ZOOM) or mm/sec (SLIDER)
+    uint32_t acceleration; // physical: deg/sec² (PAN/TILT/ZOOM) or mm/sec² (SLIDER)
+};
+
+// ---------------------------------------------------------------------------
+// Callback types
+// ---------------------------------------------------------------------------
+
+using LimitsFoundCb = void (*)(Axis axis, int32_t min_steps, int32_t max_steps);
+
+// How far a subject's two calibration sightings missed the point solved from
+// them, so the aim can put the miss back.
+//
+// The solver stores the midpoint of the two sightlines' closest approach, and
+// two sightlines aimed by hand almost never cross exactly — a fraction of a
+// degree of tilt is enough.  So the solved point lies on NEITHER, and aiming at
+// it from where Set A or Set B was pressed moved the camera off the shot the
+// operator had just set: "the look-at move shouldn't suddenly move the
+// pan-tilt when the pan-tilt is actually at the set position I just stored...
+// they are absolute values that I created" (2026-11-18).
+//
+// The aim at a rail position is the solved point's, plus this miss faded along
+// the rail from A's to B's, held flat beyond either end.  At A and at B it is
+// therefore exactly what was set; between them the point does the tracking and
+// the fade only removes what the two observations disagreed by.
+struct SubjectAimFix {
+    float xa_mm  = 0.0f;   // along the rail where Set A was pressed
+    float xb_mm  = 0.0f;   //  and Set B
+    float pan_a  = 0.0f;   // observed minus solved, degrees, at A
+    float tilt_a = 0.0f;
+    float pan_b  = 0.0f;   //  and at B
+    float tilt_b = 0.0f;
+};
+
+// The biggest miss put back.  Two careful sightings of one subject disagree by
+// a fraction of a degree; several degrees is not aiming error but a wrong
+// reference or two different targets, and baking that into the aim would hide
+// it.  Beyond this the miss is reported and NOT applied.
+#define SUBJECT_AIM_FIX_MAX_DEG   3.0f
+using MoveCompleteCb = void (*)();
+
+// ---------------------------------------------------------------------------
+// Mount status snapshot
+// ---------------------------------------------------------------------------
+
+struct MountStatusSnapshot {
+    int32_t    pos[4];
+    MountState state;
+    uint8_t    flags;       // MountFlag bitmask
+};
+
+// ---------------------------------------------------------------------------
+// MountMotion class
+// ---------------------------------------------------------------------------
+
+class MountMotion {
+public:
+    MountMotion();
+
+    // Call once in setup()
+    void begin();
+
+    // Call every loop() — drives the state machine
+    void update();
+
+    // -----------------------------------------------------------------------
+    // Motion control
+    // -----------------------------------------------------------------------
+
+    // Continuous jog.  velocities are normalised [-1000, +1000].
+    // Zero on all axes = stop jogging.
+    // pt_preset (1-4): speed preset for PAN/TILT axes.
+    // sz_preset (1-4): speed preset for SLIDER/ZOOM axes.
+    void jog(int16_t pan, int16_t tilt, int16_t slider, int16_t zoom,
+             uint8_t pt_preset = 2, uint8_t sz_preset = 2);
+
+    // Pan/tilt-only jog — drives pan and tilt exactly like jog() but leaves
+    // slider and zoom completely untouched.  Used in CV-tracking mode while
+    // a moveSliderTo() is running on the slider axis independently.
+    void jogPanTilt(int16_t pan, int16_t tilt, uint8_t pt_preset = 2);
+
+    // Slider/zoom-only jog — drives slider and zoom only, leaving pan/tilt
+    // untouched.  Used when CV tracking owns pan/tilt and the operator wants
+    // joystick control of the slider simultaneously (axis_mask = 0x0C).
+    void jogSliderZoom(int16_t slider, int16_t zoom, uint8_t sz_preset = 2);
+
+    // Move only the slider to an absolute step position using an individual
+    // moveAsync() call — does NOT use the stepper group and does NOT cancel
+    // any pan/tilt jog that is already running.
+    void moveSliderTo(int32_t target, uint8_t sl_preset = 2);
+
+    void moveTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom,
+                uint8_t pt_preset, uint8_t sl_preset = 0, bool sync = true);
+
+    // Relative move — deltas are in logical step space (same frame as moveTo).
+    // Converts current physical positions back to logical before adding deltas,
+    // so orientation inversion is not applied twice.
+    void moveRel(int32_t d_pan, int32_t d_tilt, int32_t d_slider, int32_t d_zoom,
+                 uint8_t pt_preset, uint8_t sl_preset = 0);
+
+    // Immediate halt — decelerates as fast as possible.
+    void stopAll();
+
+    // Hard stop — no deceleration.  Use for E-STOP only.
+    void emergencyStop();
+
+    // Smooth mid-move retarget — update the stepper group target without
+    // stopping first.  Safe to call while STATE_MOVING_TO_POS.
+    // If the mount is not moving the call is equivalent to moveTo().
+    void retargetTo(int32_t pan, int32_t tilt, int32_t slider, int32_t zoom,
+                    uint8_t pt_preset, uint8_t sl_preset = 0);
+
+    // -----------------------------------------------------------------------
+    // Position
+    // -----------------------------------------------------------------------
+
+    int32_t getPosition(Axis axis) const;
+
+    // Zero an axis (sets current position as 0).
+    void zeroPosition(Axis axis);
+
+    // -----------------------------------------------------------------------
+    // Limits (SLIDER and ZOOM only)
+    // -----------------------------------------------------------------------
+
+    // Set known limits (e.g. recalled from EEPROM).
+    void setLimits(Axis axis, int32_t min_steps, int32_t max_steps);
+
+    // Async limit-finding using StallGuard via DIAG1 pin.
+    // Moves axis to both ends; calls cb when complete.
+    // Only one axis can find limits at a time.
+    void findLimits(Axis axis, LimitsFoundCb cb);
+    void findHome  (Axis axis, LimitsFoundCb cb);  // move to min stop, zero, back off
+
+    bool hasLimits(Axis axis) const;
+    int32_t getMinLimit(Axis axis) const;
+    int32_t getMaxLimit(Axis axis) const;
+
+    // True once the last find or home ended WITHOUT a stall (it reached its
+    // travel cap or timed out), so it found no end and cleared that axis's
+    // limits.  Read by the callbacks, which report it as limits 0/0.
+    bool limitFindFailed() const { return _lf_failed; }
+
+    // What the last find or home measured, leg by leg — sent with its
+    // LIMITS_FOUND so the PC's Find Limits dialog can show it.
+    const LimitFindReport &limitFindReport() const { return _lf_report; }
+
+    // -----------------------------------------------------------------------
+    // Configuration
+    // -----------------------------------------------------------------------
+
+    // preset: 1-4.  For GROUP_ZOOM, preset is ignored (single preset).
+    void setSpeedPreset(AxisGroup group, uint8_t preset, SpeedPreset params);
+    SpeedPreset getSpeedPreset(AxisGroup group, uint8_t preset) const;
+
+    // Zoom has a single independent preset (separate from slider).
+    void        setZoomPreset(SpeedPreset params);
+    SpeedPreset getZoomPreset() const;
+
+    // Orientation flags
+    void setOrientation(bool pan_invert, bool tilt_invert, bool slider_invert, bool zoom_invert = false);
+
+    // Whether this mount has a physical slider axis.
+    // When false, slider commands are silently ignored.
+    void setHasSlider(bool has_slider);
+    bool getHasSlider() const { return _has_slider; }
+
+    // TMC2209 run current (mA) — call after begin()
+    void setRunCurrent(Axis axis, uint16_t current_ma);
+
+    // StallGuard threshold for limit finding (0-255, higher = MORE sensitive).
+    // The TMC2209 calls a stall when SG_RESULT <= 2 x SGTHRS, and SG_RESULT
+    // falls as the load rises — so a higher number trips at a lighter load.
+    // This said "higher = less sensitive" (true of the TMC2130's SGT, not of
+    // this chip), and the PC app's label said the same, so anyone tuning by
+    // the label moved the wrong way every time.
+    void setStallThreshold(Axis axis, uint8_t threshold);
+
+    // -----------------------------------------------------------------------
+    // Status
+    // -----------------------------------------------------------------------
+
+    MountStatusSnapshot getStatus() const;
+    MountState          getState()  const { return _state; }
+    bool                isMoving()  const;
+
+    // Live position in physical units (pan/tilt: degrees, slider: mm).
+    // Zoom has no physical unit — read raw steps from getStatus().pos[AXIS_ZOOM].
+    float               positionPhys(uint8_t axis) const;
+    // Bit per axis (0=pan 1=tilt 2=slider 3=zoom): stepper still in motion.
+    uint8_t             movingMask() const;
+
+    // Print TMC2209 register read-backs to Serial — call after begin()
+    // (Non-const: reads live registers over UART)
+    void printDriverDiagnostics();
+
+    // -----------------------------------------------------------------------
+    // v2 — Look-at tracking
+    // -----------------------------------------------------------------------
+
+    // Set the 3D world coordinates of the subject to track (mm), and how far
+    // its calibration sightings missed them (see SubjectAimFix).
+    // Safe to call mid-move to switch subject smoothly.
+    void setLookAtSubject(float sx, float sy, float sz, uint8_t subject_id = 0xFF,
+                          const SubjectAimFix &fix = SubjectAimFix());
+
+    // The pan/tilt speed dial (preset 1-4).  A subject switch during a look-at
+    // move, and the swing to the subject before one starts, run at its speed
+    // and acceleration — the same as a switch with the slider parked, which
+    // always has (aimAtSubject).  Mirrored from the .ino's _active_pt_preset.
+    void setActivePtPreset(uint8_t preset) { _la_pt_preset = constrain(preset, 1, 4); }
+
+    // The miss a subject's sightings leave at one rail position: SubjectAimFix
+    // faded from A to B, held flat outside them.  The .ino needs it for a Set
+    // Ref against a subject, which must agree with what tracking aims at.
+    static void aimFixAt(const SubjectAimFix &fix, float cx_mm,
+                         float *dpan_deg, float *dtilt_deg);
+
+    // Start a look-at move: slider travels from slider_start_steps to
+    // slider_end_steps at sl_preset speed; pan/tilt continuously aim at the
+    // current subject.  Returns false if ref not set or limits not found.
+    // With no subject set it is a SLIDE: the rail runs, pan/tilt are left to
+    // whoever has them, and no reference is needed until a subject is chosen.
+    bool startLookAtMove(int32_t slider_start_steps, int32_t slider_end_steps,
+                         uint8_t sl_preset, float max_pt_deg_s);
+
+    // Point pan/tilt at the current look-at subject from the current slider
+    // position without moving the slider.  Uses a regular moveTo() so the
+    // axes decelerate naturally when they arrive.  Returns false if ref not set.
+    bool aimAtSubject(uint8_t pt_preset = 2);
+
+    // Stop the look-at move (decelerates all axes).
+    void stopLookAtMove();
+
+    // -----------------------------------------------------------------------
+    // v2 — Calibration support
+    // -----------------------------------------------------------------------
+
+    // Set the deg/µstep scale factors (stored in EEPROM by the .ino after calibration).
+    void setDegPerStep(float pan_dps, float tilt_dps);
+    void setSliderMmPerStep(float mm_per_step);
+    // Rail inclination in degrees, signed; 0 is level.  The look-at maths in
+    // here places the camera on the rail, so it needs the same geometry the
+    // solver used — otherwise a subject solved for a climbing rail is tracked
+    // as though the rail were flat, and tilt comes out very nearly constant.
+    void setSliderTiltDeg(float deg) { _slider_tilt_deg = deg; }
+    float getSliderTiltDeg() const   { return _slider_tilt_deg; }
+
+    // How far the usable rail is held back from EACH stall, in whole mm. Set
+    // per mount rather than compiled in, because the right value is found by
+    // trying one and listening — see _updateLimitFind().
+    void     setSliderEndMarginMm(uint16_t mm) { _slider_end_margin_mm = mm; }
+    uint16_t getSliderEndMarginMm() const      { return _slider_end_margin_mm; }
+
+    // Set the session reference: maps current step count to known angles.
+    // Called every session (and after subject calibration, automatically).
+    void setLookAtRef(float pan_ref_deg, float tilt_ref_deg);
+
+    // Query reference state
+    bool  isRefSet()      const { return _ref_set; }
+
+    // Convert current step counts to world-frame angles (requires _ref_set).
+    float getPanDeg()     const;
+    float getTiltDeg()    const;
+    float getSliderMm()   const;
+
+    // Deg/step getters (for use by the .ino calibration solver)
+    float getPanDegPerStep()    const { return _pan_deg_per_step; }
+    float getTiltDegPerStep()   const { return _tilt_deg_per_step; }
+    float getSliderMmPerStep()  const { return _slider_mm_per_step; }
+
+    // Ref offset getters — world_angle = steps * dps + ref
+    // Used by the calibration solver to convert motor-frame angles to world frame.
+    float getPanRefDeg()  const { return _pan_ref_deg; }
+    float getTiltRefDeg() const { return _tilt_ref_deg; }
+
+    // Currently tracked subject ID (0xFF = none)
+    uint8_t getLaSubjectId() const { return _la_subject_id; }
+    // Dropping the subject cancels any blend with it — otherwise a half-finished
+    // ease would still be running when the next subject is chosen.
+    // Drops the subject AND stops pan/tilt if the tracker was driving them —
+    // see MountMotion.cpp. It used to be an inline that only cleared the state,
+    // which left both axes turning.
+    void    clearLaSubject();
+    // Look-at mode itself, not merely "a subject id is set".  The subject id
+    // persists across a mode change, so it cannot stand in for the mode: a
+    // subject selected before look-at was switched off would otherwise still
+    // satisfy a check that meant to ask whether look-at is on.
+    void    setLookAtMode(bool on)  { _look_at_mode = on; }
+    bool    getLookAtMode() const   { return _look_at_mode; }
+
+    // Persist slider-end state in flags after a look-at move arrives.
+    // dir 0 = min/◀, dir 1 = max/▶.  Replaces both limit flags atomically
+    // so STATUS always reflects the correct end.
+    void setLookAtEndFlag(uint8_t dir) {
+        if (dir == 0) { _setFlag(FLAG_AT_MIN_LIMIT); _clearFlag(FLAG_AT_MAX_LIMIT); }
+        else          { _setFlag(FLAG_AT_MAX_LIMIT); _clearFlag(FLAG_AT_MIN_LIMIT); }
+    }
+
+private:
+    // -----------------------------------------------------------------------
+    // Internal state machine states for limit finding
+    // -----------------------------------------------------------------------
+    enum class LimitFindState {
+        IDLE,
+        MOVING_TO_MIN,
+        BACKING_OFF_MIN,
+        MOVING_TO_MAX,
+        DONE
+    };
+
+    // -----------------------------------------------------------------------
+    // Members
+    // -----------------------------------------------------------------------
+
+    // TeensyStep4 steppers + synchronized group
+    // Pointers — allocated in begin() once pins are known
+    TS4::Stepper*     _stepper[4];
+    TS4::StepperGroup _group;
+
+    // TMC2209 drivers — one per dedicated serial port, all address 0
+    TMC2209Stepper* _tmc[4];
+
+    // State
+    MountState      _state;
+    uint8_t         _flags;
+    int32_t         _position[4];
+    bool            _pan_invert;
+    bool            _tilt_invert;
+    bool            _slider_invert;
+    bool            _zoom_invert;
+    bool            _has_slider;
+
+    // Speed presets — index 0 unused (presets are 1-4)
+    SpeedPreset     _pt_presets[5];   // pan/tilt: 4 presets
+    SpeedPreset     _sl_presets[5];   // slider:   4 presets
+    SpeedPreset     _zoom_preset;     // zoom:     single preset (independent of slider)
+
+    // Limits
+    int32_t         _min_limit[4];
+    int32_t         _max_limit[4];
+    bool            _limits_set[4];
+
+    // Limit finding
+    LimitFindState  _lf_state;
+    Axis            _lf_axis;
+    LimitsFoundCb   _lf_cb;
+    uint8_t         _stall_threshold[4];
+    uint32_t        _lf_start_ms;
+    int32_t         _lf_min_found;
+    bool            _homing_only;   // true → stop after BACKING_OFF_MIN (findHome)
+    bool            _lf_failed = false;   // the last find ended with no stall
+    // The tuning readout.  The SGTHRS value actually in the chip for this leg
+    // (after the zoom's divisor and the rail's slope), the step count the leg
+    // started from, the SG_RESULT samples taken while it moved, and the whole
+    // find's report as the PC will be sent it.
+    uint8_t         _lf_sgthrs     = 0;
+    int32_t         _lf_leg_start  = 0;
+    SgReadout       _lf_sg         = {};
+    LimitFindReport _lf_report     = {};
+
+    // StallGuard interrupt — set by ISR on RISING edge of DIAG pin
+    static volatile bool _stall_isr_fired;
+    static void _diag_isr()  { _stall_isr_fired = true; }
+
+    // Jog state
+    int16_t         _jog_vel[4];
+    int8_t          _jog_dir[4];    // -1, 0, +1 — direction currently passed to rotateAsync
+    uint8_t         _jog_preset[4]; // preset index active when rotateAsync() was last called
+    bool            _jogging;
+    uint32_t        _jog_last_ms;   // millis() of the last jog() call (watchdog)
+
+    // Smooth direction-reversal: when direction changes, the axis soft-stops
+    // first, then _updateJog() starts the new direction once isMoving is false.
+    int8_t          _pending_dir[4];        // queued new direction (0 = none)
+    uint8_t         _pending_preset[4];
+    float           _pending_spd_factor[4];
+
+    // GOTO state — velocity-controlled P-loop (rotateAsync + overrideSpeed)
+    int32_t         _goto_target[4];
+    bool            _has_goto_target;
+    int8_t          _goto_dir[4];         // current rotateAsync direction per axis (0=stopped)
+    // An axis the operator has taken over by jogging while a goto is running.
+    // _updateGoto() skips it entirely — without this it would fight the jog,
+    // because its restart branch relaunches any axis whose _goto_dir is 0 while
+    // the target error is large, which is exactly what a jog creates.
+    bool            _goto_axis_released[4] = { false, false, false, false };
+    uint32_t        _goto_max_spd_st[4];  // ceiling speed set for each axis (µsteps/s)
+    uint32_t        _goto_accel_st[4];    // acceleration for each axis (µsteps/s²)
+    float           _goto_decel_dist[4];  // effective P-controller decel window (µsteps),
+                                          // capped to move distance so short moves start fast
+
+    // ── v2 Look-at state ────────────────────────────────────────────────────
+    float           _la_subject_x;         // 3D subject coords (mm)
+    float           _la_subject_y;
+    float           _la_subject_z;
+    float           _la_max_steps_s[2];    // max speed per axis: [0]=pan, [1]=tilt (µsteps/s)
+    int8_t          _la_pt_dir[2];         // current rotateAsync direction: PAN[0], TILT[1]
+    uint32_t        _la_last_update_ms;    // timestamp of last look-at controller tick
+    uint8_t         _la_subject_id;        // currently tracked subject slot (0xFF = none)
+    bool            _look_at_mode = false;  // set by setLookAtMode() / EEPROM load
+
+    // Subject-switch blend.  _la_blend_ms == 0 means no blend is running and
+    // the subject is simply _la_subject_*.
+    float           _la_blend_from[3] = { 0.f, 0.f, 0.f };
+    uint32_t        _la_blend_start_ms = 0;
+    uint32_t        _la_blend_ms       = 0;
+    // Speed cap for the duration of a blend, as a fraction of the look-at max —
+    // derived from the blend's own peak rate so the camera can actually follow
+    // the curve.  0 when no blend is running.
+    float           _la_blend_brake    = 0.0f;
+    // Peak acceleration this switch's curve actually asks for, deg/s^2,
+    // with headroom.  0 = no switch running, so the fixed geometry governs.
+    float           _la_blend_accel    = 0.0f;
+
+    // The subject's sighting miss, and the one belonging to the point the
+    // running blend started from (none when that was where the camera already
+    // pointed — mid-blend, or after the joystick).
+    SubjectAimFix   _la_fix;
+    SubjectAimFix   _la_blend_from_fix;
+
+    // The pan/tilt dial, mirrored from the .ino (setActivePtPreset).
+    uint8_t         _la_pt_preset = 2;
+
+    // How long a switch of this many degrees takes at the dial: as long as
+    // its speed AND its acceleration need.  See setLookAtSubject().
+    float    _switchMs(float travel_deg) const;
+
+    // The subject position to aim at RIGHT NOW — the blend evaluated at this
+    // instant, or the subject itself when no blend is running — and the miss
+    // that goes with it.
+    void     _laSubjectNow(float *sx, float *sy, float *sz, SubjectAimFix *fix) const;
+
+    // Pan/tilt needed to look at one point from one rail position.
+    void     _aimFrom(float sx, float sy, float sz, float wx, float wy,
+                      float *pan_deg, float *tilt_deg) const;
+
+    // Where to POINT right now — the blend evaluated in angle rather than in
+    // position.  Both endpoints are re-derived at the rail position passed in,
+    // so the rail is still tracked through a switch.  cx is the same position
+    // along the rail, which the sighting misses are faded by.
+    void     _laAimNow(float cx, float wx, float wy,
+                       float *pan_deg, float *tilt_deg) const;
+
+    // The current subject's aim from one rail position, its miss included.
+    void     _subjectAim(float cx, float *pan_deg, float *tilt_deg) const;
+
+    // Smoothstep progress through the running blend, 0..1 (1 = finished).
+    float    _laBlendPhase() const;
+
+    // Where the head is actually pointing right now, world frame.  The inverse
+    // of the target arithmetic in _updateLookAt().
+    void     _headAimAngles(float *pan_deg, float *tilt_deg) const;
+
+    // A point that would be looked at from (wx,wy) at these angles and this
+    // horizontal range.  One copy, because two callers need it and a third
+    // hand-rolled projection is how the aim geometry drifted apart before.
+    void     _pointFromAim(float wx, float wy, float pan_deg, float tilt_deg,
+                           float h, float *sx, float *sy, float *sz) const;
+    // True while a subject-switch blend is still moving the aim.
+    bool     _laBlendActive() const;
+    // When the slider arrived, so the aim gets a bounded chance to catch up.
+    // 0 = the slider is still travelling.
+    uint32_t        _la_sl_arrived_ms = 0;
+    uint32_t        _la_slew_until_ms;     // apply slew-accel until this timestamp (mid-move switch)
+
+    // Pre-aim phase: pan/tilt settle to start position before slider moves
+    int32_t         _la_pre_aim_pan_tgt;   // target step for pre-aim
+    int32_t         _la_pre_aim_tilt_tgt;
+    int32_t         _la_stored_s_end;      // slider destination (phys steps, orientation applied)
+    uint8_t         _la_stored_sl_preset;  // slider preset to use after pre-aim
+
+    // ── v2 Angle calibration (deg/µstep, mm/µstep) ─────────────────────────
+    float           _pan_deg_per_step;     // set by setDegPerStep() / EEPROM load
+    float           _tilt_deg_per_step;
+    float           _slider_mm_per_step;   // set by setSliderMmPerStep() / EEPROM load
+    float           _slider_tilt_deg = 0.0f;  // set by setSliderTiltDeg() / EEPROM load
+    uint16_t        _slider_end_margin_mm = SLIDER_END_MARGIN_MM_DEFAULT;
+
+    // Where the camera actually is when the slider reads cx mm along the rail.
+    // On a level rail this is (cx, 0) and everything below is unchanged.
+    void _railWorldPos(float cx, float *wx, float *wy) const;
+
+    // ── v2 Session reference (RAM only — cleared on power-cycle) ───────────
+    float           _pan_ref_deg;          // pan angle (deg) at step count 0
+    float           _tilt_ref_deg;         // tilt angle (deg) at step count 0
+    bool            _ref_set;              // false until setLookAtRef() called
+
+    // Periodic TMC UART re-config — recovers from brownout-induced register loss
+    uint32_t        _tmc_refresh_ms = 0;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    void     _applyPreset(uint8_t pt_preset, uint8_t sl_preset);
+    // Sync scale per axis: the fraction of its PRESET speed this move wants.
+    //
+    // The motor's max speed is always the preset.  Synchronisation lives here
+    // and is folded into overrideSpeed()'s factor instead, so a retarget never
+    // has to touch a turning motor — it changes numbers and _updateGoto()
+    // applies them on its next tick, which is what retargetTo() always claimed
+    // to do.  Setting a new max mid-move needs rotateAsync() to take effect,
+    // and rotateAsync() takes a POSITIVE max here (direction is carried by
+    // overrideSpeed's sign), so calling it on an axis travelling negative would
+    // fling it the other way until the next tick corrected it.
+    float    _goto_spd_scale[4] = { 1.f, 1.f, 1.f, 1.f };
+    int16_t  _applyOrientation(Axis axis, int16_t velocity) const;
+    int32_t  _applyOrientationPos(Axis axis, int32_t target) const;
+    bool     _checkStall(Axis axis);
+    void     _clampToLimits(int32_t &target, Axis axis) const;
+    void     _updateJog();
+    void     _updateGoto();                                // velocity P-loop for position moves
+    // Write SGTHRS for one leg of a limit find, compensating for the rail's
+    // slope.  Direction is the PHYSICAL sense the leg travels in.
+    void     _applyStallThreshold(Axis axis, bool phys_positive);
+    // Shared setup for findLimits() and findHome().  They differ only in what
+    // happens once the min stop is reached, so everything up to launching the
+    // first leg lives here — the two used to keep their own copies and drifted.
+    void     _beginLimitSeek(Axis axis, LimitsFoundCb cb, bool homing_only);
+    void     _updateLimitFind();
+    // Where a limit-find leg is sent: as far as its travel cap allows, or
+    // effectively unbounded on an axis without one.
+    int32_t  _limitSeekTarget(Axis axis, bool phys_positive) const;
+    // The start of a leg: remember where it began and forget the last leg's
+    // SG_RESULT samples.
+    void     _startLegReadout(Axis axis);
+    // When a leg ends: its entry in the report (leg 0 = the home end, 1 = the
+    // far end) and one line on USB serial.
+    void     _reportLeg(int leg, bool stalled, bool timed_out);
+    // A find that ended with no stall: report it and clear the axis's limits.
+    void     _abandonLimitFind();
+    // Normal running again after a find, however it ended.
+    void     _restoreDriverAfterFind(Axis axis);
+    // v2: 50 Hz look-at controller.  check_slider_arrival=false tracks the
+    // subject WITHOUT the end-of-move test, for when the operator is driving
+    // the slider by hand and there is no commanded destination to arrive at.
+    void     _updateLookAt(bool check_slider_arrival = true);
+    void     _updatePreAim();                             // v2: wait for pre-aim to settle, then start slider
+    // What a slide (a look-at move with no subject) stops before it starts:
+    // everything emergencyStop() would, except axes being jogged — see the .cpp.
+    void     _stopForSlide();
+    void     _driveTowardTarget(int axis, int32_t target, float max_steps_s); // v2: P-follower for one axis
+    void     _setFlag(uint8_t flag)   { _flags |= flag; }
+    void     _clearFlag(uint8_t flag) { _flags &= ~flag; }
+};
