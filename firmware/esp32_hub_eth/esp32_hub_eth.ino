@@ -365,7 +365,8 @@ static int8_t _mount_sat[NUM_MOUNTS];
 // Display send helpers
 // ---------------------------------------------------------------------------
 
-static void disp_update_cam(uint8_t mount_id, uint8_t state, uint8_t flags, int8_t rssi) {
+static void disp_update_cam(uint8_t mount_id, uint8_t state, uint8_t flags, int8_t rssi,
+                            uint8_t run) {
     // Rides along with the status the display already gets, rather than being
     // its own message: it then needs no change-tracking of its own and cannot
     // be missed, and a camera pairing shows up within one status refresh.
@@ -377,7 +378,9 @@ static void disp_update_cam(uint8_t mount_id, uint8_t state, uint8_t flags, int8
     uint8_t sat = 0;
     if (mount_id >= 1 && mount_id <= NUM_MOUNTS && _mount_sat[mount_id - 1] >= 0)
         sat = (uint8_t)(_mount_sat[mount_id - 1] + 1);
-    uint8_t buf[6] = { mount_id, state, flags, (uint8_t)rssi, cf, sat };
+    // And the mount's run, STATUS byte [10], for the display's RUN button —
+    // the caller's DISP_RUN_UNKNOWN when the mount's STATUS has no such byte.
+    uint8_t buf[7] = { mount_id, state, flags, (uint8_t)rssi, cf, sat, run };
     disp_lock();
     disp_uart_send(Serial1, DISP_MSG_UPDATE_CAM, buf, sizeof(buf));
     disp_unlock();
@@ -2654,7 +2657,11 @@ static void process_status_for_display(const RelayMsg &msg, const ParsedPacket &
     if (pkt.payload_len >= 10)
         _mount_la_subject[msg.src_idx] = pkt.payload[9];
 
-    disp_update_cam(mount_id, state, flags, msg.rssi);
+    // Byte [10] is the mount's run, appended by its bridge after the Teensy's
+    // ten; a mount from before runs a client can see sends ten.
+    uint8_t run = (pkt.payload_len > STATUS_RUN_BYTE) ? pkt.payload[STATUS_RUN_BYTE]
+                                                      : DISP_RUN_UNKNOWN;
+    disp_update_cam(mount_id, state, flags, msg.rssi, run);
 
     if (pkt.payload_len >= 4 && state != STATE_JOGGING) {
         disp_update_preset(mount_id, pkt.payload[2], pkt.payload[3]);

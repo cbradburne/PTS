@@ -39,8 +39,13 @@ print(f"   {slots} x {nlen} = {need} bytes into {cap}                        OK"
 print("\n2. what the hub sends:")
 d = HUB[HUB.index("static void disp_update_cam("):]
 d = d[:d.index("\n}")]
-assert "uint8_t buf[6]" in d, \
-    "UPDATE_CAM is not six bytes, so the route never leaves the hub"
+# Pinned by position, as the camera flag is: the payload grew a seventh byte
+# (the mount's run) after this one, and a display from before that reads six.
+import re as _re
+_m = _re.search(r"uint8_t buf\[(\d+)\] = \{ mount_id, state, flags, \(uint8_t\)rssi, cf, sat[,}]", d)
+assert _m and int(_m.group(1)) >= 6, \
+    "UPDATE_CAM no longer carries the route as its sixth byte, so it never\n" \
+    "    leaves the hub, or a display reads something else as the route"
 assert "_mount_sat[mount_id - 1] + 1" in d, \
     "the satellite slot is not sent as slot+1, so slot 0 is indistinguishable\n" \
     "    from 'on the hub's own radio'"

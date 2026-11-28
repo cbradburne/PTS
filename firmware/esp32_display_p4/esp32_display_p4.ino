@@ -165,7 +165,10 @@ static void dispatch_msg(uint8_t type, uint8_t len, const uint8_t *d) {
             hub_ui_update_cam(d[0], d[1], d[2],
                               (len >= 4) ? (int8_t)d[3] : 0,
                               (len >= 5) ? d[4] : 0,
-                              (len >= 6) ? d[5] : 0);
+                              (len >= 6) ? d[5] : 0,
+                              // Seventh, the mount's run: a hub from before it
+                              // sends six, and RUN says so rather than guess.
+                              (len >= 7) ? d[6] : DISP_RUN_UNKNOWN);
             break;
 
         case DISP_MSG_SAT_NAMES:

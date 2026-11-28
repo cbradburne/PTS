@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include "../shared/protocol.h"
+#include "../shared/disp_uart.h"
 
 // ---- Callback for sending packets to mounts from the UI ----
 typedef void (*hub_send_fn_t)(uint8_t mount_id, CmdType cmd,
@@ -32,6 +33,7 @@ struct CamStatus {
     uint32_t last_seen_ms = 0;   // millis() of last UPDATE_CAM — staleness sweep
     bool     cam_linked   = false;  // a camera is paired and connected (DISP_CAM_*)
     uint8_t  sat          = 0;   // 0 = the hub's own radio, else satellite slot + 1
+    uint8_t  run          = DISP_RUN_UNKNOWN;  // STATUS byte [10] via the hub (STATUS_RUN_*)
 };
 
 // ---- Per-tile slot state ----
@@ -47,10 +49,12 @@ void hub_display_init(hub_send_fn_t send_cb);
 void hub_ui_tick();
 // cam_flags and sat default to 0 so a hub too old to send the fifth or sixth
 // byte simply reports "no camera" and "on the hub's own radio" rather than
-// failing to build.
+// failing to build; run defaults to DISP_RUN_UNKNOWN, the same for the
+// seventh: RUN then says the firmware is too old rather than guessing.
 void hub_ui_update_cam(uint8_t mount_id,
                        uint8_t state, uint8_t flags, int8_t rssi,
-                       uint8_t cam_flags = 0, uint8_t sat = 0);
+                       uint8_t cam_flags = 0, uint8_t sat = 0,
+                       uint8_t run = DISP_RUN_UNKNOWN);
 // Satellite names in slot order, each NUL-padded to SAT_NAME_LEN. An empty
 // slot leaves the display showing "SAT n", which is what it did before names
 // existed.

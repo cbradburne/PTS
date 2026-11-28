@@ -5,16 +5,20 @@
  * Packet format:  [0xDD][type:1][len:1][payload:len][xor_checksum:1]
  *
  * Hub → Display:
- *   DISP_MSG_UPDATE_CAM        (6 bytes: mount_id, state, flags, rssi, cam_flags,
- *                                        sat)
- *       cam_flags and sat are appended, not squeezed in: the mount status flags
- *       byte has all eight bits spoken for.  A display from before either one
- *       reads what it knows and stops, so the two boards can be flashed
+ *   DISP_MSG_UPDATE_CAM        (7 bytes: mount_id, state, flags, rssi, cam_flags,
+ *                                        sat, run)
+ *       cam_flags, sat and run are appended, not squeezed in: the mount status
+ *       flags byte has all eight bits spoken for.  A display from before any of
+ *       them reads what it knows and stops, so the two boards can be flashed
  *       independently.
  *       `sat` is 0 for a mount on the hub's own radio, or satellite slot + 1.
  *       It rides on every status rather than being its own message, so it
  *       cannot be missed and a mount that roams redraws within one refresh —
  *       the same reasoning as cam_flags.
+ *       `run` is the mount's STATUS byte [10] (STATUS_RUN_POSITIONS,
+ *       STATUS_RUN_LOOK_AT), for the display's RUN button, or DISP_RUN_UNKNOWN
+ *       from a mount whose STATUS stops before it.  A display reads a six-byte
+ *       UPDATE_CAM (a hub from before it) as DISP_RUN_UNKNOWN too.
  *   DISP_MSG_SET_DISCONNECTED  (1 byte)
  *   DISP_MSG_UPDATE_PRESET     (3 bytes)
  *   DISP_MSG_UPDATE_CLIENTS    (2 bytes)
@@ -36,6 +40,10 @@
 // the full HEALTH_FLAG_* set stays on the wire to the clients, where it is read
 // by people diagnosing a link rather than by a screen deciding on a button.
 #define DISP_CAM_BLE_LINKED        0x01   // a camera is paired and connected
+// Byte 7 of DISP_MSG_UPDATE_CAM when nothing is known about the mount's run:
+// its STATUS has no byte [10].  Never a real value — byte [10] is a bit mask
+// of STATUS_RUN_* and those are 0x01 and 0x02.
+#define DISP_RUN_UNKNOWN           0xFF
 #define DISP_MSG_SET_DISCONNECTED  0x02
 #define DISP_MSG_UPDATE_PRESET     0x03
 #define DISP_MSG_UPDATE_CLIENTS    0x04

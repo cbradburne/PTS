@@ -67,13 +67,22 @@
       <img src="../assets/img/hub-detail.svg" alt="Hub per-camera control screen"
            onerror="this.closest('figure').classList.add('missing')">
       <figcaption><strong>Per-camera control</strong> — tap a tile for zoom and slider
-      faders, a pan/tilt joystick, the two speed dials, and Set / Clear for the
-      selected slot.</figcaption>
+      faders, a pan/tilt joystick, the two speed dials, and Clear / Run / Set for
+      its positions.</figcaption>
     </figure>
 
+    <div class="note"><b>RUN, as on the phone and the PC app</b> RUN starts this
+    camera's run: it goes to each stored position in turn or, on a look-at mount,
+    runs the slider back and forth following its subject, until RUN is tapped
+    again. The mount runs it, so it carries on whatever the console does next, and
+    the button shows what the mount reports: an amber <em>&#9632; STOP</em> while a
+    run is going, whoever started it. When a run cannot start, the button says why
+    for a moment: <em>2+ POSITIONS</em>, <em>NO SUBJECT</em>, <em>OFFLINE</em>, or
+    <em>UPDATE FW</em> when the hub or the mount is too old to report runs.</div>
+
     <div class="note"><b>FOCUS appears only with a camera paired</b> On the
-    <em>CLEAR / SET</em> row of the per-camera screen and the same size as those
-    two, sitting over the zoom fader below it, a <strong>FOCUS</strong> button
+    <em>CLEAR / RUN / SET</em> row of the per-camera screen and the same size as
+    those three, sitting over the zoom fader below it, a <strong>FOCUS</strong> button
     triggers an instantaneous autofocus on that mount's Blackmagic camera. It is hidden
     entirely on a mount with no camera connected, rather than shown greyed —
     there is nothing to focus, and a dead button only invites a press and a

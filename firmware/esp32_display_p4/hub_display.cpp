@@ -24,6 +24,7 @@
 #include <Arduino.h>
 #include "hub_display.h"
 #include "../shared/disp_uart.h"
+#include "../shared/disp_run.h"
 #include <lvgl.h>
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -301,13 +302,19 @@ static bool      _pos_focus_sent[5]    = {};   // green for a moment after a tap
 #define HSL_THUMB_W      54   // thumb width
 #define HSL_THUMB_H      54   // thumb height
 
-// CLEAR, SET and FOCUS share one row on the detail screen: same size, same y.
-// Named so they line up by construction rather than by three literals that
+// CLEAR, RUN, SET and FOCUS share one row on the detail screen: same size, same
+// y.  Named so they line up by construction rather than by literals that
 // happen to agree — FOCUS was added at a different size and height and read as
 // a different kind of control because of it.
 #define DET_BTN_W       110
 #define DET_BTN_H        40
 #define DET_BTN_Y       180
+// CLEAR, RUN and SET side by side in the web app's order, RUN on the screen's
+// centre line, over the gap between the two speed dials.
+#define DET_BTN_GAP      16
+#define DET_RUN_X       (400 - DET_BTN_W / 2)
+#define DET_CLEAR_X     (DET_RUN_X - DET_BTN_GAP - DET_BTN_W)
+#define DET_SET_X       (DET_RUN_X + DET_BTN_W + DET_BTN_GAP)
 
 struct Joystick { lv_obj_t *bg; lv_obj_t *thumb; };
 struct HSlider  { lv_obj_t *bg; lv_obj_t *thumb; };
@@ -320,6 +327,9 @@ static lv_obj_t   *_det_set_btn       = nullptr;
 static lv_obj_t   *_det_set_lbl       = nullptr;
 static lv_obj_t   *_det_clear_btn     = nullptr;
 static lv_obj_t   *_det_clear_lbl     = nullptr;
+static lv_obj_t   *_det_run_btn       = nullptr;
+static lv_obj_t   *_det_run_lbl       = nullptr;
+static lv_timer_t *_run_msg_timer     = nullptr;   // a refusal showing on RUN
 static uint8_t     _detail_cam        = 0;     // 0-4
 static uint8_t     _det_sel_slot      = 0xFF;  // 0xFF = none selected
 static bool        _det_set_pending   = false;   // waiting for a slot tap after SET
@@ -344,6 +354,8 @@ static HSlider     _hsl_sl;   // left: Slider axis (horizontal drag)
 static HSlider     _hsl_zoom; // left: Zoom axis   (horizontal drag)
 static lv_obj_t   *_det_focus_btn = nullptr;   // shown only with a camera paired
 static void        _detail_refresh_focus();    // defined with the detail events
+static void        det_refresh_run();          // the same
+static void        det_run_msg_cancel();
 static Joystick    _joy_pt;   // right hand: Pan   / Tilt
 static int16_t     _jog_pan   = 0;
 static int16_t     _jog_tilt  = 0;
@@ -477,6 +489,29 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *txt,
     lv_obj_set_style_text_color(lbl, lv_color_hex(C_TEXT), 0);
     lv_obj_center(lbl);
     return btn;
+}
+
+// The detail screen's row of buttons in the web app's colours — its .ctrl-btn
+// and the states beside it — so the console and the phone read alike: grey on
+// a 1 px border at rest, filled while armed.
+struct BtnLook { uint32_t bg, border, text; uint8_t border_w; };
+static const BtnLook DET_LOOK_IDLE    = { C_SURF2,   C_BORDER,  C_TEXT,   1 };  // .ctrl-btn
+static const BtnLook DET_LOOK_ARMED   = { C_ORANGE,  C_ORANGE,  0xFFFFFF, 1 };  // .armed: SET picking
+static const BtnLook DET_LOOK_CLEAR   = { C_RED_LIT, C_RED_LIT, 0xFFFFFF, 1 };  // .clear-armed
+static const BtnLook DET_LOOK_READY   = { C_GREEN,   C_GREEN,   0xFFFFFF, 1 };  // calibration: aim, then SET
+// A camera whose run the mount reports: the web app's .cam-btn.running, which
+// reads "■ STOP" — the PC app's colours.
+static const BtnLook DET_LOOK_RUNNING = { 0x3A2A00,  0xFF9800,  0xFFF9C4, 2 };
+
+static void det_btn_look(lv_obj_t *btn, const BtnLook &k) {
+    if (!btn) return;
+    lv_obj_set_style_bg_color(btn, lv_color_hex(k.bg), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(k.bg), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, lv_color_hex(k.border), 0);
+    lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(btn, k.border_w, 0);
+    lv_obj_t *lbl = lv_obj_get_child(btn, 0);
+    if (lbl) lv_obj_set_style_text_color(lbl, lv_color_hex(k.text), 0);
 }
 
 static void make_hdivider(lv_obj_t *parent, int y) {
@@ -1269,6 +1304,7 @@ static void destroy_detail_screen() {
     _calib_slot  = 0xFF;
     det_cancel_set();
     det_cancel_clear();              // kills _clear_timer, resets _det_clear_confirm
+    det_run_msg_cancel();            // its timer would write to a deleted label
     lv_obj_delete(_scr_detail);
     _scr_detail    = nullptr;
     _det_hdr       = nullptr;
@@ -1278,6 +1314,8 @@ static void destroy_detail_screen() {
     _det_set_lbl   = nullptr;
     _det_clear_btn = nullptr;
     _det_clear_lbl = nullptr;
+    _det_run_btn   = nullptr;
+    _det_run_lbl   = nullptr;
     _det_pt_dial   = {};
     _det_sl_dial   = {};
     _hsl_sl        = {};
@@ -1517,10 +1555,7 @@ static void flush_jog() {
 
 static void det_cancel_set() {
     _det_set_pending = false;
-    if (_det_set_btn) {
-        lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ACCENT), 0);
-        lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ACCENT), LV_STATE_PRESSED);
-    }
+    det_btn_look(_det_set_btn, DET_LOOK_IDLE);
     if (_det_set_lbl) lv_label_set_text(_det_set_lbl, "SET");
 }
 
@@ -1529,16 +1564,10 @@ static void det_cancel_clear() {
     _det_clear_confirm = false;
     _det_clear_mask    = 0;
     if (_det_clear_lbl) lv_label_set_text(_det_clear_lbl, "CLEAR");
-    if (_det_clear_btn) {
-        lv_obj_set_style_bg_color(_det_clear_btn, lv_color_hex(C_SURF2), 0);
-        lv_obj_set_style_bg_color(_det_clear_btn, lv_color_hex(C_SURF2), LV_STATE_PRESSED);
-    }
+    det_btn_look(_det_clear_btn, DET_LOOK_IDLE);
     // Restore SET button from CANCEL back to its normal state
     if (_det_set_lbl) lv_label_set_text(_det_set_lbl, "SET");
-    if (_det_set_btn) {
-        lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ACCENT), 0);
-        lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ACCENT), LV_STATE_PRESSED);
-    }
+    det_btn_look(_det_set_btn, DET_LOOK_IDLE);
     refresh_detail_slots();
 }
 
@@ -1549,24 +1578,20 @@ static void det_update_calib_ui() {
     switch (_calib_state) {
         case 1:   // moving to A (rare — slider already at home when calibration starts)
             lv_label_set_text(_det_set_lbl, "MOVING...");
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), 0);
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), LV_STATE_PRESSED);
+            det_btn_look(_det_set_btn, DET_LOOK_ARMED);
             break;
         case 3:   // slider moving to B — press SET when it stops
             lv_label_set_text(_det_set_lbl, "MOVING...");
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), 0);
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), LV_STATE_PRESSED);
+            det_btn_look(_det_set_btn, DET_LOOK_ARMED);
             break;
         case 2:   // arrived at A — user aims and presses SET
         case 4:   // arrived at B — user aims and presses SET
             lv_label_set_text(_det_set_lbl, "SET");
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_GREEN), 0);
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_GREEN), LV_STATE_PRESSED);
+            det_btn_look(_det_set_btn, DET_LOOK_READY);
             break;
-        default:  // idle — restore normal blue SET button
+        default:  // idle — the normal SET button
             lv_label_set_text(_det_set_lbl, "SET");
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ACCENT), 0);
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ACCENT), LV_STATE_PRESSED);
+            det_btn_look(_det_set_btn, DET_LOOK_IDLE);
             break;
     }
 }
@@ -1793,6 +1818,8 @@ static void det_switch_cam(uint8_t idx) {
     lv_obj_set_style_bg_color(_det_pt_dial.arc,  lv_color_hex(C_CAM_BG[idx]), 0);
 
     _detail_refresh_focus();   // the new camera may not have one paired
+    det_run_msg_cancel();      // a refusal on RUN was about the last camera
+    det_refresh_run();         // and RUN shows this one's run
 
     // Highlight active camera button; reset all others.
     for (int i = 0; i < 5; i++) {
@@ -1994,8 +2021,7 @@ static void ev_detail_set(lv_event_t *e) {
             } else {
                 _det_set_pending = true;
                 if (_det_set_lbl) lv_label_set_text(_det_set_lbl, "SELECT");
-                lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), 0);
-                lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), LV_STATE_PRESSED);
+                det_btn_look(_det_set_btn, DET_LOOK_ARMED);
             }
         } else if (_calib_state == 2) {
             // Arrived at slider end A — record point A, camera will move to end B.
@@ -2021,8 +2047,7 @@ static void ev_detail_set(lv_event_t *e) {
         det_cancel_set();
     } else {
         _det_set_pending = true;
-        lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), 0);
-        lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_ORANGE), LV_STATE_PRESSED);
+        det_btn_look(_det_set_btn, DET_LOOK_ARMED);
     }
 }
 
@@ -2042,6 +2067,75 @@ static void _detail_refresh_focus() {
     else      lv_obj_add_flag(_det_focus_btn,    LV_OBJ_FLAG_HIDDEN);
 }
 
+// ── RUN — the web app's and the PC app's, run BY THE MOUNT ─────────────────
+// One tap starts this camera's run — its stored positions in turn, or on a
+// look-at mount the slider back and forth following its subject — and another
+// stops it.  What a tap does is shared/disp_run.h's decision, the web app's
+// own.  The button shows what the MOUNT reports (UPDATE_CAM's seventh byte),
+// not what was last tapped, so a run started from the PC app, a phone or the
+// mount's own screen shows here too.  A tap that cannot start one says why on
+// the button for a moment: the display has no toasts, and the eye is there.
+#define RUN_MSG_MS  1500
+
+static void det_refresh_run() {
+    if (!_det_run_btn || !_det_run_lbl || _detail_cam >= 5) return;
+    if (_run_msg_timer) return;          // a refusal is showing; its timer redraws
+    bool on = disp_run_active(_cam[_detail_cam].run);
+    det_btn_look(_det_run_btn, on ? DET_LOOK_RUNNING : DET_LOOK_IDLE);
+    lv_label_set_text(_det_run_lbl, on ? LV_SYMBOL_STOP " STOP" : "RUN");
+}
+
+static void run_msg_end(lv_timer_t *) {
+    _run_msg_timer = nullptr;            // one-shot: LVGL deletes it after this
+    det_refresh_run();
+}
+
+static void det_run_msg_cancel() {
+    if (_run_msg_timer) { lv_timer_delete(_run_msg_timer); _run_msg_timer = nullptr; }
+}
+
+static void det_run_refuse(const char *why) {
+    if (!_det_run_btn || !_det_run_lbl) return;
+    det_run_msg_cancel();
+    det_btn_look(_det_run_btn, DET_LOOK_IDLE);
+    lv_label_set_text(_det_run_lbl, why);
+    _run_msg_timer = lv_timer_create(run_msg_end, RUN_MSG_MS, nullptr);
+    lv_timer_set_repeat_count(_run_msg_timer, 1);
+}
+
+static void ev_detail_run(lv_event_t *) {
+    int i = _detail_cam;
+    if (i >= 5 || _calib_state != 0) return;   // not while a subject is being set up
+    // RUN, SET and CLEAR exclude one another, as on the web app.
+    det_cancel_set();
+    det_cancel_clear();
+    DispRunDecision d = disp_run_decide(_cam[i].connected, _cam[i].run,
+                                        cam_is_look_at(i), _slots[i].slot_occupied,
+                                        _active_la_subject[i], _cam[i].sl_preset);
+    const char *why = nullptr;
+    switch (d.act) {
+        case DispRunAct::STOP:
+            if (_send_cb) _send_cb(i + 1, CMD_STOP_RUN, nullptr, 0);
+            break;
+        case DispRunAct::START_POSITIONS:
+            if (_send_cb) _send_cb(i + 1, CMD_START_RUN, nullptr, 0);
+            break;
+        case DispRunAct::START_LOOK_AT:
+            if (_send_cb) _send_cb(i + 1, CMD_START_LOOK_AT_MOVE, d.payload,
+                                   (uint8_t)sizeof(d.payload));
+            break;
+        case DispRunAct::OFFLINE:      why = "OFFLINE";      break;
+        case DispRunAct::OLD_FIRMWARE: why = "UPDATE FW";    break;
+        case DispRunAct::TOO_FEW:      why = "2+ POSITIONS"; break;
+        case DispRunAct::NO_SUBJECT:   why = "NO SUBJECT";   break;
+    }
+    if (why) det_run_refuse(why);
+    // A start or a stop changes nothing on screen yet: the button follows the
+    // mount's report, within a status.
+    Serial.printf("[DISP] RUN on CAM %d: %s\n", i + 1,
+                  why ? why : d.act == DispRunAct::STOP ? "stop sent" : "start sent");
+}
+
 static void ev_detail_clear(lv_event_t *e) {
     if (_calib_state != 0) return;   // CLEAR is inactive during subject calibration
     if (!_det_clear_confirm) {
@@ -2049,15 +2143,11 @@ static void ev_detail_clear(lv_event_t *e) {
         _det_clear_confirm = true;
         _det_clear_mask    = 0;
         lv_label_set_text(_det_clear_lbl, "CONTINUE?");
-        lv_obj_set_style_bg_color(_det_clear_btn, lv_color_hex(C_RED), 0);
-        lv_obj_set_style_bg_color(_det_clear_btn, lv_color_hex(C_RED), LV_STATE_PRESSED);
+        det_btn_look(_det_clear_btn, DET_LOOK_CLEAR);
         det_cancel_set();   // cancel any in-progress SET mode
         // Repurpose SET button as CANCEL for clear mode
         if (_det_set_lbl) lv_label_set_text(_det_set_lbl, "CANCEL");
-        if (_det_set_btn) {
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_SURF2), 0);
-            lv_obj_set_style_bg_color(_det_set_btn, lv_color_hex(C_SURF2), LV_STATE_PRESSED);
-        }
+        det_btn_look(_det_set_btn, DET_LOOK_IDLE);
         // 8-second safety timeout in case the operator walks away
         if (_clear_timer) lv_timer_delete(_clear_timer);
         _clear_timer = lv_timer_create(clear_timer_cb, 8000, nullptr);
@@ -2705,16 +2795,24 @@ static void build_detail_screen() {
 
     // ── CLEAR + SET ───────────────────────────────────────────────
     // centred: (800 - (110+16+110)) / 2 = 282
-    // CLEAR sits left of SET, matching the web app, GC screen and PC app.
+    // CLEAR, RUN, SET: the web app's row, in its order and its colours.
     _det_clear_btn = make_button(_scr_detail, "CLEAR", C_SURF2, ev_detail_clear);
     lv_obj_set_size(_det_clear_btn, DET_BTN_W, DET_BTN_H);
-    lv_obj_set_pos(_det_clear_btn, 282, DET_BTN_Y);
+    lv_obj_set_pos(_det_clear_btn, DET_CLEAR_X, DET_BTN_Y);
     _det_clear_lbl = lv_obj_get_child(_det_clear_btn, 0);
+    det_btn_look(_det_clear_btn, DET_LOOK_IDLE);
 
-    _det_set_btn = make_button(_scr_detail, "SET", C_ACCENT, ev_detail_set);
+    _det_run_btn = make_button(_scr_detail, "RUN", C_SURF2, ev_detail_run);
+    lv_obj_set_size(_det_run_btn, DET_BTN_W, DET_BTN_H);
+    lv_obj_set_pos(_det_run_btn, DET_RUN_X, DET_BTN_Y);
+    _det_run_lbl = lv_obj_get_child(_det_run_btn, 0);
+    det_btn_look(_det_run_btn, DET_LOOK_IDLE);
+
+    _det_set_btn = make_button(_scr_detail, "SET", C_SURF2, ev_detail_set);
     lv_obj_set_size(_det_set_btn, DET_BTN_W, DET_BTN_H);
-    lv_obj_set_pos(_det_set_btn, 408, DET_BTN_Y);
+    lv_obj_set_pos(_det_set_btn, DET_SET_X, DET_BTN_Y);
     _det_set_lbl = lv_obj_get_child(_det_set_btn, 0);
+    det_btn_look(_det_set_btn, DET_LOOK_IDLE);
 
     // ── Speed dials ───────────────────────────────────────────────
     // Two 120×120 arcs centred between the joysticks (x=190-590 free).
@@ -2755,6 +2853,7 @@ static void build_detail_screen() {
     // focus, and a disabled button invites a press and a question about why
     // nothing happened.
     _det_focus_btn = make_button(_scr_detail, "FOCUS", C_SURF2, ev_detail_focus);
+    det_btn_look(_det_focus_btn, DET_LOOK_IDLE);
     lv_obj_set_size(_det_focus_btn, DET_BTN_W, DET_BTN_H);
     lv_obj_set_pos(_det_focus_btn, HSL_X + (HSL_W - DET_BTN_W) / 2, DET_BTN_Y);
     lv_obj_add_flag(_det_focus_btn, LV_OBJ_FLAG_HIDDEN);
@@ -3845,7 +3944,7 @@ void hub_ui_tick() {
 
 void hub_ui_update_cam(uint8_t mount_id,
                        uint8_t state, uint8_t flags, int8_t rssi,
-                       uint8_t cam_flags, uint8_t sat) {
+                       uint8_t cam_flags, uint8_t sat, uint8_t run) {
     if (mount_id < 1 || mount_id > 5) return;
     int i = mount_id - 1;
     if (!xSemaphoreTake(_lvgl_mux, pdMS_TO_TICKS(100))) return;
@@ -3859,6 +3958,7 @@ void hub_ui_update_cam(uint8_t mount_id,
     uint8_t old_flags       = _cam[i].flags;
     int8_t  old_rssi        = _cam[i].rssi;
     uint8_t old_sat         = _cam[i].sat;
+    uint8_t old_run         = _cam[i].run;
     bool look_at_changed    = (old_flags & FLAG_LOOK_AT_MODE) != (flags & FLAG_LOOK_AT_MODE);
 
     _cam[i].connected    = true;
@@ -3867,12 +3967,15 @@ void hub_ui_update_cam(uint8_t mount_id,
     _cam[i].rssi         = rssi;
     _cam[i].cam_linked   = (cam_flags & DISP_CAM_BLE_LINKED) != 0;
     _cam[i].sat          = sat;
+    _cam[i].run          = run;
     _cam[i].last_seen_ms = millis();   // feeds the staleness sweep in hub_ui_tick()
 
     // A camera pairing or dropping is the only thing that changes whether the
     // Focus button belongs on screen, and it only matters for the camera whose
     // detail screen is open.
     if (_cam[i].cam_linked != was_linked && _detail_cam == i) _detail_refresh_focus();
+    // RUN follows the mount's own report of its run, for the camera on screen.
+    if (_cam[i].run != old_run && _detail_cam == i) det_refresh_run();
     // And the Positions screen's crosshair, for any row: a camera linking or
     // dropping, or its mount coming back.
     if (_cam[i].cam_linked != was_linked || !was_connected) pos_focus_refresh(i);
@@ -3975,6 +4078,10 @@ void hub_ui_set_disconnected(uint8_t mount_id) {
 
     _cam[i].connected = false;
     pos_focus_refresh(i);   // an offline mount's crosshair goes grey
+    // Nothing is known of an offline mount's run: RUN reads RUN, and a tap
+    // says OFFLINE.  Its next UPDATE_CAM says what it is doing.
+    _cam[i].run = DISP_RUN_UNKNOWN;
+    if (_detail_cam == i) det_refresh_run();
 
     lv_obj_set_style_border_color(_tile_obj[i], lv_color_hex(C_BORDER), 0);
     lv_obj_set_style_border_width(_tile_obj[i], 1, 0);

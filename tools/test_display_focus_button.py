@@ -115,16 +115,22 @@ print("   built hidden                                       OK")
 # Where it sits, computed rather than described. The line above used to SAY
 # "above the zoom slider" and assert nothing of the kind, so the button could be
 # moved anywhere and this file would still have congratulated it.
-DEFS = {k: int(v) for k, v in
-        re.findall(r"#define\s+(HSL_X|HSL_W|DET_BTN_W|DET_BTN_H|DET_BTN_Y)\s+(\d+)",
-                   DISP)}
-assert len(DEFS) == 5, f"the layout constants changed shape: {sorted(DEFS)}"
+# The row's x positions are derived from one another (CLEAR / RUN / SET either
+# side of the centre line), so each is evaluated in order, C's integer division
+# and all.
+DEFS = {}
+for _name in ("HSL_X", "HSL_W", "DET_BTN_W", "DET_BTN_H", "DET_BTN_Y",
+              "DET_BTN_GAP", "DET_RUN_X", "DET_CLEAR_X", "DET_SET_X"):
+    _m = re.search(rf"^#define\s+{_name}\s+(.+?)\s*(?://.*)?$", DISP, re.M)
+    assert _m, f"the layout constant {_name} is gone"
+    DEFS[_name] = int(eval(_m.group(1).replace("/", "//"), {}, dict(DEFS)))
 
 
 def geom(name, kind):
     m = re.search(rf"lv_obj_set_{kind}\({name},\s*([^,]+),\s*([^)]+)\);", disp)
     assert m, f"no lv_obj_set_{kind} for {name}"
-    return tuple(int(eval(g.strip(), {}, DEFS)) for g in m.groups())
+    return tuple(int(eval(g.strip().replace("/", "//"), {}, dict(DEFS)))
+                 for g in m.groups())
 
 
 fw, fh = geom("_det_focus_btn", "size")
