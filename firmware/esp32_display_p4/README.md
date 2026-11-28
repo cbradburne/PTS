@@ -6,12 +6,20 @@ The hub display firmware for the **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B**
 It is a separate firmware from `firmware/esp32_display` (the S3 board, 800 × 480),
 which it leaves untouched.  If the P4 board doesn't work out, delete this folder.
 
-**Status:** compiles for both chip revisions; the screens and the controller code
-are tested on the Mac (below).  Nothing has run on the board yet.
+**Status:** running on the first board (a v3.2 chip) since 2026-11-23: the
+screens, touch, and a DualSense in the USB-A port.  Its link to the hub hasn't
+been tried yet.  The screens and the controller code are also tested on the Mac
+(below).
 
 ## Wiring to the hub
 
-Three wires, on the 12-pin header **P1** along the bottom edge:
+Five wires: three for the link, two for power.
+
+### The link
+
+Three wires, on the 12-pin header **P1** along the bottom edge (the silkscreen
+names each pin).  The two data wires cross: each board's TX goes to the
+other's RX.
 
 | P1 pin | P4         | hub                        |
 |--------|------------|----------------------------|
@@ -24,6 +32,48 @@ shared with the USB-serial chip.  Don't use IO34 or IO36 either: they are
 strapping pins.
 
 The hub needs no change: it speaks the same UART protocol as to the S3 display.
+
+### Power, from the hub
+
+The P4 can run from the hub's 5 V, with no USB cable of its own.  (From both
+boards' Waveshare schematics.)
+
+**At the hub (ESP32-S3-ETH), take VBUS, never VSYS.**  They are next to each
+other on its Pico-style header.
+- VBUS is the hub's USB-C 5 V, direct.  A PoE module's 5 V lands there too.
+- VSYS comes through D1, a 1N4148: a small-signal diode rated around 200 mA,
+  there for the hub alone.  The display would overload it.
+- To tell them apart with a meter, with the hub on USB: VBUS reads the full
+  ~5 V, VSYS a diode's drop lower.
+
+**At the P4, either:**
+1. **The "USB" Type-C (recommended),** with a power-only lead: a cut USB-C
+   cable, its VBUS wire to the hub's VBUS and its GND to GND.  Check the wires
+   with a meter, because the colours vary.  The firmware doesn't use this
+   socket.  Each of the P4's Type-C sockets has its own ideal diode, so a
+   computer can still go into the "UART" Type-C to flash it with the hub
+   connected, and the two supplies stay apart.  The board's ON/OFF switch
+   keeps working.
+2. **The 5V pin of the CAN or RS485 socket** (4-pin PH2.0, marked 5V / GND).
+   It is neater, with no USB plug.  But those pins are the board's main 5 V
+   rail (Core_5V), past its input diodes and its ON/OFF switch:
+   - the switch no longer turns the board off;
+   - **unplug this lead before plugging a computer into the P4.**  Otherwise
+     the computer's 5 V runs back up it into the hub's VBUS, and into
+     whatever powers the hub.
+
+Not the 4-pin "UART" socket: its VCC is the 3.3 V rail.  Not P1's BAT pin:
+that is the input for a lithium cell.
+
+**The supply.**  The hub, the P4 with its backlight, and the controller all
+draw through the hub's USB-C.  A computer's USB port only guarantees 0.5 A
+(USB 2) or 0.9 A (USB 3), and a DualSense alone asks for 0.5 A.
+- A 5 V 3 A USB-C charger on the hub covers it.
+- On a computer's port, test with the backlight up and the controller
+  charging, and watch for restarts.
+- On PoE, check the PoE module's current rating.
+
+20 AWG twin is plenty for the power pair.
 
 ## Build and flash
 
